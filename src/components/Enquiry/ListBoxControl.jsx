@@ -53,25 +53,31 @@ const ListBoxControl = ({
                         </option>
                     ))}
                 </select>
-                <div className="d-flex flex-column ms-1">
-                    <button
-                        type="button"
-                        className="btn btn-outline-success mb-1"
-                        style={{ width: '36px', padding: '0.25rem 0.5rem' }}
-                        onClick={onAdd}
-                        disabled={!selectedOption}
-                    >
-                        +
-                    </button>
-                    <button
-                        type="button"
-                        className="btn btn-outline-danger"
-                        style={{ width: '36px', padding: '0.25rem 0.5rem' }}
-                        onClick={onRemove}
-                    >
-                        -
-                    </button>
-                </div>
+                {(onAdd || onRemove) && (
+                    <div className="d-flex flex-column ms-1">
+                        {onAdd && (
+                            <button
+                                type="button"
+                                className="btn btn-outline-success mb-1"
+                                style={{ width: '36px', padding: '0.25rem 0.5rem' }}
+                                onClick={onAdd}
+                                disabled={!selectedOption}
+                            >
+                                +
+                            </button>
+                        )}
+                        {onRemove && (
+                            <button
+                                type="button"
+                                className="btn btn-outline-danger"
+                                style={{ width: '36px', padding: '0.25rem 0.5rem' }}
+                                onClick={onRemove}
+                            >
+                                -
+                            </button>
+                        )}
+                    </div>
+                )}
             </div>
         </div >
     );

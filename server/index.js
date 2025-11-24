@@ -2,6 +2,29 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { connectDB, sql } = require('./dbConfig');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir);
+}
+
+// Configure Multer Storage
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/');
+    },
+    filename: (req, file, cb) => {
+        // Replace slashes/backslashes with underscores to prevent directory issues
+        const safeName = file.originalname.replace(/[\/\\]/g, '_');
+        cb(null, Date.now() + '-' + safeName);
+    }
+});
+
+const upload = multer({ storage: storage });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -9,6 +32,7 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static('uploads')); // Serve uploaded files
 
 // Connect to Database
 connectDB();
@@ -430,6 +454,106 @@ app.put('/api/enquiry-items/:id', async (req, res) => {
                             Status=${Status}, CommonMailIds=${commonMails}, CCMailIds=${ccMails}
                         WHERE ItemID=${id}`;
         res.json({ message: 'Item updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+// --- Attachments API ---
+
+// Upload Attachment - using query parameter to handle slashes in Request No
+app.post('/api/attachments/upload', upload.array('files'), async (req, res) => {
+    const requestNo = req.query.requestNo;
+    console.log('Upload request for EnquiryID:', requestNo);
+
+    if (!requestNo) {
+        return res.status(400).send('Request No is required');
+    }
+
+    const files = req.files;
+
+    if (!files || files.length === 0) {
+        return res.status(400).send('No files uploaded.');
+    }
+
+    try {
+        const uploadedFiles = [];
+        for (const file of files) {
+            const filePath = file.path;
+            const fileName = file.originalname;
+
+            await sql.query`INSERT INTO EnquiryAttachments (EnquiryID, FileName, FilePath) 
+                            VALUES (${requestNo}, ${fileName}, ${filePath})`;
+
+            uploadedFiles.push({ fileName, filePath });
+        }
+
+        res.status(201).json({ message: 'Files uploaded successfully', files: uploadedFiles });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+// Get Attachments for Enquiry - using query parameter
+app.get('/api/attachments', async (req, res) => {
+    const requestNo = req.query.requestNo;
+    console.log('Get attachments for EnquiryID:', requestNo);
+
+    if (!requestNo) {
+        return res.status(400).send('Request No is required');
+    }
+
+    try {
+        const result = await sql.query`SELECT * FROM EnquiryAttachments WHERE EnquiryID = ${requestNo}`;
+        res.json(result.recordset);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+// Download Attachment (Optional, if static serving isn't enough or for security)
+app.get('/api/attachments/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await sql.query`SELECT * FROM EnquiryAttachments WHERE AttachmentID = ${id}`;
+        const attachment = result.recordset[0];
+
+        if (!attachment) {
+            return res.status(404).send('Attachment not found');
+        }
+
+        res.download(attachment.FilePath, attachment.FileName);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+// Delete Attachment
+app.delete('/api/attachments/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get file path first
+        const result = await sql.query`SELECT * FROM EnquiryAttachments WHERE AttachmentID = ${id}`;
+        const attachment = result.recordset[0];
+
+        if (!attachment) {
+            return res.status(404).send('Attachment not found');
+        }
+
+        // Delete from DB
+        await sql.query`DELETE FROM EnquiryAttachments WHERE AttachmentID = ${id}`;
+
+        // Delete from filesystem
+        const fullPath = path.resolve(attachment.FilePath);
+        if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+        }
+
+        res.json({ message: 'Attachment deleted' });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');

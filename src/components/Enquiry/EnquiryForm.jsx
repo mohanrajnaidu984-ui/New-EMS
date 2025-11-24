@@ -66,6 +66,9 @@ const EnquiryForm = () => {
 
     // Validation Errors
     const [errors, setErrors] = useState({});
+    const [attachments, setAttachments] = useState([]);
+    const [pendingFiles, setPendingFiles] = useState([]); // New state for deferred uploads
+    const [ackSEList, setAckSEList] = useState([]); // SEs selected for acknowledgement mail
 
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -107,17 +110,33 @@ const EnquiryForm = () => {
         }
     };
 
-    const handleAddCustomer = () => {
-        if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
-            setCustomerList([...customerList, formData.CustomerName]);
-            handleInputChange('CustomerName', '');
-            // Clear error if exists
-            if (errors.CustomerName) {
-                setErrors(prev => {
-                    const { CustomerName, ...rest } = prev;
-                    return rest;
-                });
+    const onAddCustomerClick = () => {
+        try {
+            // alert('onAddCustomerClick called');
+            if (formData.CustomerName) {
+                if (!customerList.includes(formData.CustomerName)) {
+                    setCustomerList([...customerList, formData.CustomerName]);
+                } else {
+                    alert('Customer already added to the list');
+                }
+
+                // alert('Clearing CustomerName');
+                handleInputChange('CustomerName', '');
+
+                // alert('Clearing ReceivedFrom');
+                handleInputChange('ReceivedFrom', '');
+
+                // Clear error if exists
+                if (errors.CustomerName) {
+                    setErrors(prev => {
+                        const { CustomerName, ...rest } = prev;
+                        return rest;
+                    });
+                }
             }
+        } catch (err) {
+            console.error('Error in onAddCustomerClick:', err);
+            alert('Error: ' + err.message);
         }
     };
 
@@ -135,6 +154,8 @@ const EnquiryForm = () => {
             }
 
             handleInputChange('ReceivedFrom', '');
+            handleInputChange('CustomerName', ''); // Sync clear customer selection
+
             // Clear error if exists
             if (errors.ReceivedFrom) {
                 setErrors(prev => {
@@ -503,7 +524,7 @@ const EnquiryForm = () => {
     }, [formData.EnquiryDate, formData.DueOn]);
 
     // --- Main Form Submit ---
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         const newErrors = {};
 
@@ -573,12 +594,53 @@ const EnquiryForm = () => {
                 }
             }
             updateEnquiry(formData.RequestNo, payload);
+
+            // Upload pending files if any
+            if (pendingFiles.length > 0) {
+                await uploadPendingFiles(formData.RequestNo);
+            }
+
             alert(`Enquiry Updated: ${formData.RequestNo}`);
         } else {
             const newRequestNo = `EYS/2025/11/${String(Date.now()).slice(-3)}`; // Simple ID gen
             addEnquiry({ ...payload, RequestNo: newRequestNo });
+
+            // Upload pending files if any BEFORE resetting form
+            if (pendingFiles.length > 0) {
+                await uploadPendingFiles(newRequestNo);
+            }
+
             alert(`Enquiry Added: ${newRequestNo}`);
             resetForm();
+        }
+    };
+
+    const uploadPendingFiles = async (requestNo) => {
+        const uploadData = new FormData();
+        pendingFiles.forEach(fileObj => {
+            uploadData.append('files', fileObj.file, fileObj.fileName);
+        });
+
+        try {
+            // Send RequestNo as query parameter
+            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}`, {
+                method: 'POST',
+                body: uploadData
+            });
+
+            if (res.ok) {
+                console.log('Pending files uploaded successfully');
+                setPendingFiles([]); // Clear pending
+                // Refresh attachments to show uploaded files
+                await fetchAttachments();
+            } else {
+                const errorText = await res.text();
+                console.error('Failed to upload pending files:', errorText);
+                alert(`Enquiry saved, but failed to upload pending files: ${errorText}`);
+            }
+        } catch (err) {
+            console.error('Error uploading pending files:', err);
+            alert(`Enquiry saved, but error uploading pending files: ${err.message}`);
         }
     };
 
@@ -589,12 +651,13 @@ const EnquiryForm = () => {
         setCustomerList([]);
         setReceivedFromList([]);
         setSeList([]);
+        setAckSEList([]); // Clear acknowledgement SE list
         setIsModifyMode(false);
         setModifyRequestNo('');
     };
 
     // --- Modify Logic ---
-    const handleLoadEnquiry = () => {
+    const handleLoadEnquiry = async () => {
         const enq = getEnquiry(modifyRequestNo);
         if (enq) {
             setFormData(enq);
@@ -605,6 +668,10 @@ const EnquiryForm = () => {
             setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
             setSeList(enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []));
             setIsModifyMode(true);
+            // Load attachments for this enquiry
+            if (enq.RequestNo) {
+                await loadAttachmentsForEnquiry(enq.RequestNo);
+            }
         } else {
             alert('Enquiry not found!');
         }
@@ -613,7 +680,7 @@ const EnquiryForm = () => {
     const handleOpenFromSearch = (reqNo) => {
         setModifyRequestNo(reqNo);
         setActiveTab('Modify');
-        setTimeout(() => {
+        setTimeout(async () => {
             const enq = getEnquiry(reqNo);
             if (enq) {
                 setFormData(enq);
@@ -624,6 +691,10 @@ const EnquiryForm = () => {
                 setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
                 setSeList(enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []));
                 setIsModifyMode(true);
+                // Load attachments for this enquiry
+                if (enq.RequestNo) {
+                    await loadAttachmentsForEnquiry(enq.RequestNo);
+                }
             }
         }, 100);
     };
@@ -655,6 +726,137 @@ const EnquiryForm = () => {
             </div>
         );
     };
+
+    // --- File Upload ---
+    // --- File Upload ---
+    const handleFileUpload = async (e) => {
+        console.log('=== handleFileUpload called ===');
+        const files = e.target.files;
+        console.log('Files selected:', files ? files.length : 0);
+        console.log('Current RequestNo:', formData.RequestNo);
+        console.log('Is Modify Mode:', isModifyMode);
+
+        if (!files || files.length === 0) {
+            console.log('No files selected, returning');
+            return;
+        }
+
+        // If no RequestNo, add to pendingFiles
+        if (!formData.RequestNo) {
+            console.log('No RequestNo, adding to pending files');
+            const newPending = [];
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const fileName = file.webkitRelativePath || file.name;
+                newPending.push({ file, fileName, isPending: true, id: Date.now() + i });
+            }
+            setPendingFiles(prev => [...prev, ...newPending]);
+            e.target.value = null; // Clear input
+            console.log('Added to pending files:', newPending.length);
+            return;
+        }
+
+        // Existing logic for immediate upload
+        console.log('Attempting immediate upload. RequestNo:', formData.RequestNo);
+
+        const uploadData = new FormData();
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            // Use webkitRelativePath if available (folder upload), otherwise use name
+            const fileName = file.webkitRelativePath || file.name;
+            uploadData.append('files', file, fileName);
+            console.log(`Added file ${i + 1}:`, fileName);
+        }
+
+        try {
+            // Send RequestNo as query parameter to avoid URL encoding issues
+            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(formData.RequestNo)}`, {
+                method: 'POST',
+                body: uploadData
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                // Optimistic update with new files
+                const newAttachments = data.files.map(f => ({ FileName: f.fileName, FilePath: f.filePath, AttachmentID: Date.now() + Math.random() }));
+                setAttachments([...attachments, ...newAttachments]);
+                alert('Files uploaded successfully');
+                // Refresh attachments
+                await fetchAttachments();
+            } else {
+                const errorText = await res.text();
+                console.error('Upload failed:', errorText);
+                alert('Failed to upload files: ' + errorText);
+            }
+        } catch (err) {
+            console.error('Upload error:', err);
+            alert('Error uploading files: ' + err.message);
+        } finally {
+            // Clear the input value to allow re-selection of the same file if needed
+            e.target.value = null;
+        }
+    };
+
+    const handleRemoveAttachment = async (attachmentId, isPending = false) => {
+        console.log('handleRemoveAttachment called:', { attachmentId, isPending });
+
+        if (isPending) {
+            // No confirmation needed for pending files (not saved yet)
+            console.log('Removing pending file, current pendingFiles:', pendingFiles);
+            setPendingFiles(prev => {
+                const filtered = prev.filter(f => f.id !== attachmentId);
+                console.log('Filtered pendingFiles:', filtered);
+                return filtered;
+            });
+            console.log('Pending file removed');
+            return;
+        }
+
+        // Confirmation only for uploaded files
+        if (!window.confirm('Are you sure you want to delete this file?')) {
+            console.log('User cancelled deletion');
+            return;
+        }
+
+        try {
+            const res = await fetch(`http://localhost:5000/api/attachments/${attachmentId}`, {
+                method: 'DELETE'
+            });
+
+            if (res.ok) {
+                setAttachments(prev => prev.filter(a => a.AttachmentID !== attachmentId));
+                alert('File deleted successfully');
+            } else {
+                alert('Failed to delete file');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Error deleting file');
+        }
+    };
+
+    const loadAttachmentsForEnquiry = async (requestNo) => {
+        try {
+            // Send RequestNo as query parameter
+            const res = await fetch(`http://localhost:5000/api/attachments?requestNo=${encodeURIComponent(requestNo)}`);
+            if (res.ok) {
+                const data = await res.json();
+                setAttachments(data);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    };
+
+    const fetchAttachments = async () => {
+        if (formData.RequestNo) {
+            await loadAttachmentsForEnquiry(formData.RequestNo);
+        }
+    };
+
+    useEffect(() => {
+        fetchAttachments();
+    }, [formData.RequestNo]);
 
     return (
         <div style={{ position: 'relative', minHeight: '100vh' }}>
@@ -799,8 +1001,6 @@ const EnquiryForm = () => {
                                             selectedOption={formData.CustomerName}
                                             onOptionChange={(val) => handleInputChange('CustomerName', val)}
                                             listBoxItems={customerList}
-                                            onAdd={handleAddCustomer}
-                                            onRemove={handleRemoveCustomer}
                                             showNew={true}
                                             showEdit={true}
                                             canEdit={!!formData.CustomerName}
@@ -934,16 +1134,62 @@ const EnquiryForm = () => {
                                                         checked={formData[chk]} onChange={(e) => handleInputChange(chk, e.target.checked)} />
                                                     <label className="form-check-label" htmlFor={chk}>
                                                         {chk === 'hardcopy' ? 'Hard Copies' :
-                                                            chk === 'dvd' ? 'CD/DVD' :
-                                                                chk === 'eqpschedule' ? 'Equipment Schedule' :
-                                                                    chk.charAt(0).toUpperCase() + chk.slice(1)}
+                                                            chk === 'drawing' ? 'Drawing' :
+                                                                chk === 'dvd' ? 'CD/DVD' :
+                                                                    chk === 'spec' ? 'Spec' : 'Equipment Schedule'}
                                                     </label>
                                                 </div>
                                             ))}
                                         </div>
+
                                         <label className="form-label">Others Specify</label>
-                                        <textarea className="form-control" rows="2"
+                                        <textarea className="form-control mb-2" rows="2"
                                             value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
+
+                                        {/* File Upload UI */}
+                                        <div className="mb-2">
+                                            <label className="form-label">Attachments</label>
+                                            <div className="d-flex gap-2 align-items-start">
+                                                <div className="flex-grow-1">
+                                                    <input
+                                                        type="file"
+                                                        className="form-control form-control-sm"
+                                                        multiple
+                                                        onChange={handleFileUpload}
+                                                        title="Select files"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="form-text" style={{ fontSize: '11px' }}>Supported: Multiple files</div>
+
+                                            {/* Combined List of Pending and Uploaded Files */}
+                                            {(attachments.length > 0 || pendingFiles.length > 0) && (
+                                                <ul className="list-group mt-2" style={{ fontSize: '12px' }}>
+                                                    {/* Pending Files */}
+                                                    {pendingFiles.map((file, idx) => (
+                                                        <li key={`pending-${idx}`} className="list-group-item d-flex justify-content-between align-items-center p-1 bg-light">
+                                                            <span className="text-truncate me-2" title={file.fileName}>
+                                                                {file.fileName} <span className="text-muted fst-italic ms-1" style={{ fontSize: '10px' }}>(Pending Save)</span>
+                                                            </span>
+                                                            <button className="btn btn-link text-danger p-0 text-decoration-none" onClick={() => handleRemoveAttachment(file.id, true)} title="Remove" style={{ minWidth: '20px', fontWeight: 'bold' }}>
+                                                                ✕
+                                                            </button>
+                                                        </li>
+                                                    ))}
+                                                    {/* Uploaded Files */}
+                                                    {attachments.map((att, idx) => (
+                                                        <li key={`uploaded-${idx}`} className="list-group-item d-flex justify-content-between align-items-center p-1">
+                                                            <a href={`http://localhost:5000/${att.FilePath}`} target="_blank" rel="noopener noreferrer" className="text-truncate me-2" title={att.FileName}>
+                                                                {att.FileName}
+                                                            </a>
+                                                            <button className="btn btn-link text-danger p-0 text-decoration-none" onClick={() => handleRemoveAttachment(att.AttachmentID, false)} title="Remove" style={{ minWidth: '20px', fontWeight: 'bold' }}>
+                                                                ✕
+                                                            </button>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 
@@ -956,7 +1202,7 @@ const EnquiryForm = () => {
                                     </div>
                                 </div>
 
-                                {/* Row 13: Checkboxes */}
+                                {/* Row 13: Checkboxes and SE Selection */}
                                 <div className="row mb-2">
                                     <div className="col-md-3">
                                         <div className="form-check" style={{ fontSize: '13px' }}>
@@ -964,7 +1210,32 @@ const EnquiryForm = () => {
                                                 checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} />
                                             <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail?</label>
                                         </div>
-                                        <div className="form-check" style={{ fontSize: '13px' }}>
+
+                                        {/* SE Selection for Acknowledgement - only show if AutoAck is checked */}
+                                        {formData.AutoAck && (
+                                            <div className="mt-2">
+                                                <label className="form-label" style={{ fontSize: '12px', marginBottom: '4px' }}>Select SE for acknowledgement:</label>
+                                                <select
+                                                    className="form-select form-select-sm"
+                                                    value={ackSEList[0] || ''}
+                                                    onChange={(e) => {
+                                                        setAckSEList(e.target.value ? [e.target.value] : []);
+                                                    }}
+                                                    style={{ fontSize: '12px', width: '100%' }}
+                                                >
+                                                    <option value="">-- Select SE --</option>
+                                                    {seList.length === 0 ? (
+                                                        <option disabled>No SEs added yet</option>
+                                                    ) : (
+                                                        seList.map((se, idx) => (
+                                                            <option key={idx} value={se}>{se}</option>
+                                                        ))
+                                                    )}
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        <div className="form-check mt-2" style={{ fontSize: '13px' }}>
                                             <input className="form-check-input" type="checkbox" id="ceoSign"
                                                 checked={formData.ceosign} onChange={(e) => handleInputChange('ceosign', e.target.checked)} />
                                             <label className="form-check-label" htmlFor="ceoSign">ED/CEO Signature required?</label>

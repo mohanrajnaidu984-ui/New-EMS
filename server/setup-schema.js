@@ -100,6 +100,14 @@ const createTables = async () => {
                 CeoSign BIT,
                 Status NVARCHAR(50) DEFAULT 'Enquiry',
                 CreatedAt DATETIME DEFAULT GETDATE()
+            )`,
+            `IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='EnquiryAttachments' AND xtype='U')
+            CREATE TABLE EnquiryAttachments (
+                AttachmentID INT IDENTITY(1,1) PRIMARY KEY,
+                EnquiryID NVARCHAR(50),
+                FileName NVARCHAR(255),
+                FilePath NVARCHAR(MAX),
+                UploadedAt DATETIME DEFAULT GETDATE()
             )`
         ];
 
