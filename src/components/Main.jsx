@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import EnquiryForm from './Enquiry/EnquiryForm';
 import SearchEnquiry from './Enquiry/SearchEnquiry';
 import Dashboard from './Dashboard/Dashboard';
+import PricingForm from './Pricing/PricingForm';
 
 const Main = () => {
     const [activeTab, setActiveTab] = useState('Dashboard');
@@ -88,10 +89,7 @@ const Main = () => {
                     <EnquiryForm requestNoToOpen={enquiryToOpen} />
                 )}
                 {activeTab === 'Pricing' && (
-                    <div className="alert alert-info">
-                        <i className="bi bi-info-circle me-2"></i>
-                        Pricing module coming soon...
-                    </div>
+                    <PricingForm />
                 )}
                 {activeTab === 'Quote' && (
                     <div className="alert alert-info">
