@@ -568,10 +568,8 @@ const EnquiryForm = () => {
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
-            // Removed alert as per user request
             return;
         }
-
 
         const payload = {
             ...formData,
@@ -579,7 +577,8 @@ const EnquiryForm = () => {
             SelectedEnquiryFor: enqForList,
             SelectedCustomers: customerList,
             SelectedReceivedFroms: receivedFromList,
-            SelectedConcernedSEs: seList
+            SelectedConcernedSEs: seList,
+            AcknowledgementSE: ackSEList[0] || ''
         };
 
         if (isModifyMode) {
@@ -688,7 +687,29 @@ const EnquiryForm = () => {
                 const enq = getEnquiry(reqNo);
                 console.log('Fetched enquiry for Modify:', enq);
                 if (enq) {
-                    setFormData(enq);
+                    // Helper to format date for input (YYYY-MM-DD)
+                    const formatDate = (d) => {
+                        if (!d) return '';
+                        try {
+                            return new Date(d).toISOString().split('T')[0];
+                        } catch (e) { return ''; }
+                    };
+
+                    // Map DB fields to Form State
+                    const mappedData = {
+                        ...enq,
+                        EnquiryDate: formatDate(enq.EnquiryDate),
+                        DueOn: formatDate(enq.DueDate), // Map DB 'DueDate' to Form 'DueOn'
+                        SiteVisitDate: formatDate(enq.SiteVisitDate),
+                        // Map Checkboxes
+                        hardcopy: !!enq.HardCopies,
+                        drawing: !!enq.Drawing,
+                        dvd: !!enq.CD_DVD,
+                        spec: !!enq.Spec,
+                        eqpschedule: !!enq.EquipmentSchedule
+                    };
+
+                    setFormData(mappedData);
                     // Parse comma-separated strings back into arrays
                     setEnqTypeList(enq.SelectedEnquiryTypes || (enq.EnquiryType ? enq.EnquiryType.split(',').filter(Boolean) : []));
                     setEnqForList(enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []));
@@ -1164,6 +1185,9 @@ const EnquiryForm = () => {
                                         <label className="form-label">Others Specify</label>
                                         <textarea className="form-control mb-2" rows="2"
                                             value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
+
+                                        {/* Acknowledgement Section */}
+
 
                                         {/* File Upload UI */}
                                         <div className="mb-2">

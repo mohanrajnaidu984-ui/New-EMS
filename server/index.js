@@ -1,10 +1,10 @@
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { connectDB, sql } = require('./dbConfig');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const nodemailer = require('nodemailer');
 
 // Configure Nodemailer Transporter
@@ -72,6 +72,7 @@ if (!fs.existsSync(uploadDir)) {
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
+const { sendAcknowledgementEmail } = require('./emailService');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -200,14 +201,22 @@ app.get('/api/enquiries', async (req, res) => {
 
 // Add Enquiry
 app.post('/api/enquiries', async (req, res) => {
+    const logFile = path.join(__dirname, 'debug.log');
+    const log = (msg) => fs.appendFileSync(logFile, `${new Date().toISOString()} - ${msg}\n`);
+
+    log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
+
     const {
         RequestNo, SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
         SelectedEnquiryTypes, SelectedEnquiryFor,
         SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
         ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
         DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-        AutoAck, ceosign, Status
+        AutoAck, ceosign, Status, AcknowledgementSE
     } = req.body;
+
+    log(`AutoAck Value: ${AutoAck}, Type: ${typeof AutoAck}`);
+    log(`SelectedCustomers: ${JSON.stringify(SelectedCustomers)}`);
 
     try {
         const request = new sql.Request();
@@ -320,6 +329,49 @@ app.post('/api/enquiries', async (req, res) => {
             // Send Email
             await sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC });
 
+            // New Email Logic
+            // New Email Logic
+            if (AutoAck) {
+                log('AutoAck is true, preparing to send acknowledgement emails...');
+                // Fetch SE Email
+                const ackSEName = req.body.AcknowledgementSE;
+                let seEmail = '';
+                if (ackSEName) {
+                    const seRes = await sql.query`SELECT Email FROM Users WHERE FullName = ${ackSEName}`;
+                    if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].Email;
+                    log(`SE Email found: ${seEmail} for ${ackSEName}`);
+                } else {
+                    log('No AcknowledgementSE provided');
+                }
+
+                // Send to each selected customer
+                if (SelectedCustomers && SelectedCustomers.length > 0) {
+                    for (const custName of SelectedCustomers) {
+                        const custRes = await sql.query`SELECT Email FROM Customers WHERE CompanyName = ${custName}`;
+                        if (custRes.recordset.length > 0) {
+                            const custEmail = custRes.recordset[0].Email;
+                            if (custEmail) {
+                                log(`Sending email to ${custName} (${custEmail}) CC: ${seEmail}`);
+                                try {
+                                    await sendAcknowledgementEmail(emailData, custEmail, seEmail, ceosign);
+                                    log(`Email sent successfully to ${custName}`);
+                                } catch (e) {
+                                    log(`Error sending email to ${custName}: ${e.message}`);
+                                }
+                            } else {
+                                log(`No email found for customer ${custName}`);
+                            }
+                        } else {
+                            log(`Customer not found in DB: ${custName}`);
+                        }
+                    }
+                } else {
+                    log('No SelectedCustomers to send email to');
+                }
+            } else {
+                log('AutoAck is false, skipping email');
+            }
+
         } catch (emailErr) {
             console.error('Failed to send email notification:', emailErr);
             // Don't fail the request if email fails, just log it
@@ -327,6 +379,8 @@ app.post('/api/enquiries', async (req, res) => {
 
         res.status(201).json({ message: 'Enquiry created' });
     } catch (err) {
+        const logFile = path.join(__dirname, 'debug.log');
+        fs.appendFileSync(logFile, `${new Date().toISOString()} - ERROR: ${err.message}\n${err.stack}\n`);
         console.error(err);
         res.status(500).send(err.message);
     }
@@ -405,6 +459,47 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 req.input('ContactName', sql.NVarChar, contact);
                 req.input('CompanyName', sql.NVarChar, company);
                 await req.query(`INSERT INTO EnquiryContacts (EnquiryID, ContactName, CompanyName) VALUES (@EnquiryID, @ContactName, @CompanyName)`);
+            }
+        }
+
+        // Send Acknowledgement Email on Update if checked
+        if (AutoAck) {
+            console.log('AutoAck is true (Update), preparing to send acknowledgement emails...');
+            const ackSEName = req.body.AcknowledgementSE;
+            let seEmail = '';
+            if (ackSEName) {
+                const seRes = await sql.query`SELECT Email FROM Users WHERE FullName = ${ackSEName}`;
+                if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].Email;
+            }
+
+            // Re-construct email data for update
+            const emailData = {
+                RequestNo: id,
+                EnquiryDate,
+                ReceivedFrom: SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(', ') : '',
+                EnquiryType: SelectedEnquiryTypes ? SelectedEnquiryTypes.join(', ') : '',
+                ProjectName,
+                ClientName,
+                ConsultantName,
+                DetailsOfEnquiry,
+                DueOn,
+                DocumentsReceived,
+                Remark
+            };
+
+            if (SelectedCustomers && SelectedCustomers.length > 0) {
+                for (const custName of SelectedCustomers) {
+                    const custRes = await sql.query`SELECT Email FROM Customers WHERE CompanyName = ${custName}`;
+                    if (custRes.recordset.length > 0) {
+                        const custEmail = custRes.recordset[0].Email;
+                        if (custEmail) {
+                            console.log(`Sending email to ${custName} (${custEmail}) CC: ${seEmail}`);
+                            await sendAcknowledgementEmail(emailData, custEmail, seEmail, ceosign);
+                        } else {
+                            console.log(`No email found for customer ${custName}`);
+                        }
+                    }
+                }
             }
         }
 
