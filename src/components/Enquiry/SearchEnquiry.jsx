@@ -30,7 +30,8 @@ const SearchEnquiry = ({ onOpen }) => {
                 (e.SelectedCustomers && e.SelectedCustomers.join(',').toLowerCase().includes(lowerText)) ||
                 e.ClientName?.toLowerCase().includes(lowerText) ||
                 e.ProjectName?.toLowerCase().includes(lowerText) ||
-                (e.SelectedConcernedSEs && e.SelectedConcernedSEs.join(',').toLowerCase().includes(lowerText))
+                (e.SelectedConcernedSEs && e.SelectedConcernedSEs.join(',').toLowerCase().includes(lowerText)) ||
+                e.CreatedBy?.toLowerCase().includes(lowerText)
             );
         }
 
@@ -69,7 +70,7 @@ const SearchEnquiry = ({ onOpen }) => {
                     <input
                         type="text"
                         className="form-control"
-                        placeholder="Request No / Customer / Client / Project / SE"
+                        placeholder="Request No / Customer / Client / Project / SE / Created By"
                         value={searchText}
                         onChange={(e) => setSearchText(e.target.value)}
                         style={{ fontSize: '13px' }}

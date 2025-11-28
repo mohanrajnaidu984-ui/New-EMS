@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useData } from '../../context/DataContext';
+import { useAuth } from '../../context/AuthContext';
 import ListBoxControl from './ListBoxControl';
 import SearchableSelectControl from './SearchableSelectControl';
 import SearchEnquiry from './SearchEnquiry';
@@ -11,6 +12,7 @@ import ParticleBackground from '../Common/ParticleBackground';
 
 const EnquiryForm = () => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster } = useData();
+    const { currentUser } = useAuth();
     const [activeTab, setActiveTab] = useState('New');
 
     // Modal States
@@ -80,6 +82,14 @@ const EnquiryForm = () => {
             });
         }
     };
+
+    // Generate RequestNo on mount for New Enquiry
+    useEffect(() => {
+        if (activeTab === 'New' && !isModifyMode) {
+            const generatedReqNo = `EYS/2025/11/${String(Date.now()).slice(-3)}`;
+            setFormData(prev => ({ ...prev, RequestNo: generatedReqNo }));
+        }
+    }, [activeTab, isModifyMode]);
 
     // --- ListBox Handlers ---
     const handleAddEnqType = () => {
@@ -246,6 +256,7 @@ const EnquiryForm = () => {
         if (custData) {
             setEditData(custData);
             setModalMode('Edit');
+            setFixedCategory('Contractor');
             setShowCustomerModal(true);
         }
     };
@@ -269,7 +280,11 @@ const EnquiryForm = () => {
         if (custData) {
             setEditData(custData);
             setModalMode('Edit');
+            setFixedCategory('Client');
             setShowCustomerModal(true);
+        } else {
+            console.error('Client not found in masters.customers:', selected);
+            alert("Client details not found in master data.");
         }
     };
 
@@ -280,7 +295,11 @@ const EnquiryForm = () => {
         if (custData) {
             setEditData(custData);
             setModalMode('Edit');
+            setFixedCategory('Consultant');
             setShowCustomerModal(true);
+        } else {
+            console.error('Consultant not found in masters.customers:', selected);
+            alert("Consultant details not found in master data.");
         }
     };
 
@@ -297,8 +316,10 @@ const EnquiryForm = () => {
 
     // --- Modal Submit Handlers ---
     const handleCustomerSubmit = async (data) => {
+        console.log('handleCustomerSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('customer', data);
+            await addMaster('customer', { ...data, RequestNo: formData.RequestNo });
+
 
             // Update specific list based on category
             if (data.Category === 'Contractor') {
@@ -324,12 +345,12 @@ const EnquiryForm = () => {
                 }));
             }
         } else {
-            if (data.CustomerID) {
-                const success = await updateMaster('customer', data.CustomerID, data);
+            if (data.ID) {
+                const success = await updateMaster('customer', data.ID, data);
                 if (success) {
                     updateMasters(prev => ({
                         ...prev,
-                        customers: prev.customers.map(c => c.CustomerID == data.CustomerID ? data : c),
+                        customers: prev.customers.map(c => c.ID == data.ID ? data : c),
                         // Update contacts if company name changed
                         contacts: prev.contacts.map(c => c.CompanyName === editData.CompanyName ? { ...c, CompanyName: data.CompanyName } : c),
                         // Update lists if name changed
@@ -369,8 +390,9 @@ const EnquiryForm = () => {
     };
 
     const handleContactSubmit = async (data) => {
+        console.log('handleContactSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('contact', data);
+            await addMaster('contact', { ...data, RequestNo: formData.RequestNo });
             updateMasters(prev => {
                 const newContacts = [...prev.contacts, data];
                 const newCustomers = prev.existingCustomers.includes(data.CompanyName)
@@ -382,12 +404,12 @@ const EnquiryForm = () => {
             const val = `${data.ContactName}|${data.CompanyName}`;
             handleInputChange('ReceivedFrom', val);
         } else {
-            if (data.ContactID) {
-                const success = await updateMaster('contact', data.ContactID, data);
+            if (data.ID) {
+                const success = await updateMaster('contact', data.ID, data);
                 if (success) {
                     updateMasters(prev => ({
                         ...prev,
-                        contacts: prev.contacts.map(c => c.ContactID == data.ContactID ? data : c)
+                        contacts: prev.contacts.map(c => c.ID == data.ID ? data : c)
                     }));
 
                     // Robust update strategy: Find the item in the list that matches the edited data
@@ -440,7 +462,7 @@ const EnquiryForm = () => {
 
     const handleUserSubmit = async (data) => {
         if (modalMode === 'Add') {
-            await addMaster('user', data);
+            await addMaster('user', { ...data, RequestNo: formData.RequestNo });
             handleInputChange('ConcernedSE', data.FullName);
             updateMasters(prev => ({
                 ...prev,
@@ -448,12 +470,12 @@ const EnquiryForm = () => {
                 concernedSEs: [...prev.concernedSEs, data.FullName]
             }));
         } else {
-            if (data.UserID) {
-                const success = await updateMaster('user', data.UserID, data);
+            if (data.ID) {
+                const success = await updateMaster('user', data.ID, data);
                 if (success) {
                     updateMasters(prev => ({
                         ...prev,
-                        users: prev.users.map(u => u.UserID == data.UserID ? data : u),
+                        users: prev.users.map(u => u.ID == data.ID ? data : u),
                         concernedSEs: prev.concernedSEs.map(name => name === editData.FullName ? data.FullName : name)
                     }));
                     if (formData.ConcernedSE === editData.FullName) {
@@ -470,7 +492,7 @@ const EnquiryForm = () => {
     const handleEnqItemSubmit = async (data) => {
         console.log('handleEnqItemSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('enquiryItem', data);
+            await addMaster('enquiryItem', { ...data, RequestNo: formData.RequestNo });
             handleInputChange('EnquiryFor', data.ItemName);
             updateMasters(prev => ({
                 ...prev,
@@ -478,13 +500,13 @@ const EnquiryForm = () => {
                 enquiryFor: [...prev.enquiryFor, data.ItemName]
             }));
         } else {
-            if (data.ItemID) {
-                console.log('Updating ItemID:', data.ItemID);
-                const success = await updateMaster('enquiryItem', data.ItemID, data);
+            if (data.ID) {
+                console.log('Updating ID:', data.ID);
+                const success = await updateMaster('enquiryItem', data.ID, data);
                 console.log('Update success:', success);
                 if (success) {
                     updateMasters(prev => {
-                        const newItems = prev.enqItems.map(item => item.ItemID == data.ItemID ? data : item);
+                        const newItems = prev.enqItems.map(item => item.ID == data.ID ? data : item);
                         console.log('Updated enqItems:', newItems);
                         return {
                             ...prev,
@@ -528,19 +550,19 @@ const EnquiryForm = () => {
         e.preventDefault();
         const newErrors = {};
 
-        // Auto-add selected items if missing from list
-        if (formData.EnquiryFor && !enqForList.includes(formData.EnquiryFor)) {
-            handleAddEnqFor();
-        }
-        if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
-            handleAddCustomer();
-        }
-        if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
-            handleAddReceivedFrom();
-        }
-        if (formData.ConcernedSE && !seList.includes(formData.ConcernedSE)) {
-            handleAddSE();
-        }
+        // Auto-add logic removed as functions are undefined and data requires full modal input
+        // if (formData.EnquiryFor && !enqForList.includes(formData.EnquiryFor)) {
+        //     handleAddEnqFor();
+        // }
+        // if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
+        //     handleAddCustomer();
+        // }
+        // if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
+        //     handleAddReceivedFrom();
+        // }
+        // if (formData.ConcernedSE && !seList.includes(formData.ConcernedSE)) {
+        //     handleAddSE();
+        // }
 
         // Validate Required Fields
         const requiredFields = {
@@ -578,7 +600,8 @@ const EnquiryForm = () => {
             SelectedCustomers: customerList,
             SelectedReceivedFroms: receivedFromList,
             SelectedConcernedSEs: seList,
-            AcknowledgementSE: ackSEList[0] || ''
+            AcknowledgementSE: ackSEList[0] || '',
+            CreatedBy: currentUser?.name || 'System'
         };
 
         if (isModifyMode) {
@@ -601,15 +624,15 @@ const EnquiryForm = () => {
 
             alert(`Enquiry Updated: ${formData.RequestNo}`);
         } else {
-            const newRequestNo = `EYS/2025/11/${String(Date.now()).slice(-3)}`; // Simple ID gen
-            addEnquiry({ ...payload, RequestNo: newRequestNo });
+            // RequestNo is already generated in useEffect
+            await addEnquiry(payload);
 
             // Upload pending files if any BEFORE resetting form
             if (pendingFiles.length > 0) {
-                await uploadPendingFiles(newRequestNo);
+                await uploadPendingFiles(formData.RequestNo);
             }
 
-            alert(`Enquiry Added: ${newRequestNo}`);
+            alert(`Enquiry Added: ${formData.RequestNo}`);
             resetForm();
         }
     };
@@ -686,6 +709,7 @@ const EnquiryForm = () => {
             try {
                 const enq = getEnquiry(reqNo);
                 console.log('Fetched enquiry for Modify:', enq);
+                console.log('Full Enquiry Object:', enq); // Added for debugging
                 if (enq) {
                     // Helper to format date for input (YYYY-MM-DD)
                     const formatDate = (d) => {
@@ -699,14 +723,16 @@ const EnquiryForm = () => {
                     const mappedData = {
                         ...enq,
                         EnquiryDate: formatDate(enq.EnquiryDate),
-                        DueOn: formatDate(enq.DueDate), // Map DB 'DueDate' to Form 'DueOn'
+                        DueOn: formatDate(enq.DueDate || enq.DueOn), // Map DB 'DueDate' or Payload 'DueOn'
                         SiteVisitDate: formatDate(enq.SiteVisitDate),
-                        // Map Checkboxes
-                        hardcopy: !!enq.HardCopies,
-                        drawing: !!enq.Drawing,
-                        dvd: !!enq.CD_DVD,
-                        spec: !!enq.Spec,
-                        eqpschedule: !!enq.EquipmentSchedule
+                        // Map Checkboxes - DB column names are Doc_... or payload keys
+                        hardcopy: enq.Doc_HardCopies !== undefined ? !!enq.Doc_HardCopies : !!enq.hardcopy,
+                        drawing: enq.Doc_Drawing !== undefined ? !!enq.Doc_Drawing : !!enq.drawing,
+                        dvd: enq.Doc_CD_DVD !== undefined ? !!enq.Doc_CD_DVD : !!enq.dvd,
+                        spec: enq.Doc_Spec !== undefined ? !!enq.Doc_Spec : !!enq.spec,
+                        eqpschedule: enq.Doc_EquipmentSchedule !== undefined ? !!enq.Doc_EquipmentSchedule : !!enq.eqpschedule,
+                        ceosign: enq.ED_CEOSignatureRequired !== undefined ? !!enq.ED_CEOSignatureRequired : !!enq.ceosign,
+                        AutoAck: enq.SendAcknowledgementMail !== undefined ? !!enq.SendAcknowledgementMail : !!enq.AutoAck
                     };
 
                     setFormData(mappedData);
@@ -715,7 +741,10 @@ const EnquiryForm = () => {
                     setEnqForList(enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []));
                     setCustomerList(enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []));
                     setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
-                    setSeList(enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []));
+                    setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
+                    const seList = enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []);
+                    setSeList(seList);
+                    setAckSEList(seList); // Also populate Ack SE list
                     setIsModifyMode(true);
                     // Load attachments for this enquiry
                     if (enq.RequestNo) {
@@ -740,7 +769,7 @@ const EnquiryForm = () => {
             <div style={{ fontSize: '12px' }}>
                 <strong>{cust.CompanyName}</strong><br />
                 {cust.Address1 && <div>{cust.Address1}</div>}
-                {cust.MailId && <div><i className="bi bi-envelope me-1"></i>{cust.MailId}</div>}
+                {cust.EmailId && <div><i className="bi bi-envelope me-1"></i>{cust.EmailId}</div>}
                 {cust.Phone1 && <div><i className="bi bi-telephone me-1"></i>{cust.Phone1}</div>}
             </div>
         );
@@ -774,8 +803,8 @@ const EnquiryForm = () => {
             return;
         }
 
-        // If no RequestNo, add to pendingFiles
-        if (!formData.RequestNo) {
+        // If not Modify Mode (New Enquiry), add to pendingFiles
+        if (!isModifyMode) {
             console.log('No RequestNo, adding to pending files');
             const newPending = [];
             for (let i = 0; i < files.length; i++) {
@@ -812,7 +841,7 @@ const EnquiryForm = () => {
             if (res.ok) {
                 const data = await res.json();
                 // Optimistic update with new files
-                const newAttachments = data.files.map(f => ({ FileName: f.fileName, FilePath: f.filePath, AttachmentID: Date.now() + Math.random() }));
+                const newAttachments = data.files.map(f => ({ FileName: f.fileName, FilePath: f.filePath, ID: Date.now() + Math.random() }));
                 setAttachments([...attachments, ...newAttachments]);
                 alert('Files uploaded successfully');
                 // Refresh attachments
@@ -862,7 +891,7 @@ const EnquiryForm = () => {
             });
 
             if (res.ok) {
-                setAttachments(prev => prev.filter(a => a.AttachmentID !== attachmentId));
+                setAttachments(prev => prev.filter(a => a.ID !== attachmentId));
                 alert('File deleted successfully');
             } else {
                 alert('Failed to delete file');
@@ -1056,7 +1085,10 @@ const EnquiryForm = () => {
                                             label={<span>Received From<span className="text-danger">*</span></span>}
                                             options={
                                                 (formData.CustomerName
-                                                    ? masters.contacts.filter(c => c.CompanyName?.trim().toLowerCase() === formData.CustomerName?.trim().toLowerCase())
+                                                    ? masters.contacts.filter(c => {
+                                                        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+                                                        return normalize(c.CompanyName) === normalize(formData.CustomerName);
+                                                    })
                                                     : []
                                                 ).map(c => `${c.ContactName}|${c.CompanyName}`)
                                             }
@@ -1258,7 +1290,7 @@ const EnquiryForm = () => {
                                                             </div>
                                                             <div className="d-flex align-items-center gap-2">
                                                                 <a
-                                                                    href={att.FilePath ? `http://localhost:5000/${att.FilePath.replace(/\\/g, '/')}` : `http://localhost:5000/api/attachments/${att.AttachmentID}`}
+                                                                    href={`http://localhost:5000/api/attachments/${att.ID}`}
                                                                     target="_blank"
                                                                     rel="noopener noreferrer"
                                                                     className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
@@ -1268,7 +1300,7 @@ const EnquiryForm = () => {
                                                                     <i className="bi bi-eye"></i>
                                                                 </a>
                                                                 <a
-                                                                    href={`http://localhost:5000/api/attachments/${att.AttachmentID}`}
+                                                                    href={`http://localhost:5000/api/attachments/${att.ID}?download=true`}
                                                                     target="_blank"
                                                                     rel="noopener noreferrer"
                                                                     className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"
@@ -1281,7 +1313,7 @@ const EnquiryForm = () => {
                                                                     type="button"
                                                                     className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
                                                                     style={{ width: '32px', height: '32px' }}
-                                                                    onClick={() => handleRemoveAttachment(att.AttachmentID, false)}
+                                                                    onClick={() => handleRemoveAttachment(att.ID, false)}
                                                                     title="Remove"
                                                                 >
                                                                     <i className="bi bi-trash"></i>

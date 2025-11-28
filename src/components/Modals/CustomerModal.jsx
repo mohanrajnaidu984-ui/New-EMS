@@ -13,7 +13,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
         FaxNo: '',
         Phone1: '',
         Phone2: '',
-        MailId: '',
+        EmailId: '',
         Website: '',
         Status: 'Active'
     };
@@ -119,7 +119,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                     <div className="col-md-6">
                         <label className="form-label">E-Mail ID</label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.MailId} onChange={(e) => handleChange('MailId', e.target.value)} />
+                            value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Website</label>

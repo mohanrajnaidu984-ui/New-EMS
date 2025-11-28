@@ -75,7 +75,13 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
             alert('Please fill required fields (Item Name)');
             return;
         }
-        onSubmit(formData);
+        // Convert arrays to comma-separated strings for the backend
+        const payload = {
+            ...formData,
+            CommonMailIds: Array.isArray(formData.CommonMailIds) ? formData.CommonMailIds.join(',') : formData.CommonMailIds,
+            CCMailIds: Array.isArray(formData.CCMailIds) ? formData.CCMailIds.join(',') : formData.CCMailIds
+        };
+        onSubmit(payload);
         onClose();
     };
 

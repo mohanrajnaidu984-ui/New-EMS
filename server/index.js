@@ -69,7 +69,15 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 // Configure Multer Storage (Memory Storage for DB)
-const storage = multer.memoryStorage();
+// Configure Multer Storage (Disk Storage)
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
 const upload = multer({ storage: storage });
 
 const { sendAcknowledgementEmail } = require('./emailService');
@@ -159,23 +167,23 @@ app.post('/api/auth/login', async (req, res) => {
 // Get All Enquiries
 app.get('/api/enquiries', async (req, res) => {
     try {
-        const result = await sql.query`SELECT * FROM Enquiries ORDER BY CreatedAt DESC`;
+        const result = await sql.query`SELECT * FROM EnquiryMaster ORDER BY CreatedAt DESC`;
 
         // Fetch related data
-        const customersResult = await sql.query`SELECT * FROM EnquiryCustomers`;
-        const contactsResult = await sql.query`SELECT * FROM EnquiryContacts`;
-        const typesResult = await sql.query`SELECT * FROM EnquiryTypes`;
-        const itemsResult = await sql.query`SELECT * FROM EnquirySelectedItems`;
-        const seResult = await sql.query`SELECT * FROM EnquiryConcernedSEs`;
+        const customersResult = await sql.query`SELECT * FROM EnquiryCustomer`;
+        const contactsResult = await sql.query`SELECT * FROM ReceivedFrom`;
+        const typesResult = await sql.query`SELECT * FROM EnquiryType`;
+        const itemsResult = await sql.query`SELECT * FROM EnquiryFor`;
+        const seResult = await sql.query`SELECT * FROM ConcernedSE`;
 
         const enquiries = result.recordset.map(enq => {
             const reqNo = enq.RequestNo;
 
-            const relatedCustomers = customersResult.recordset.filter(c => c.EnquiryID === reqNo).map(c => c.CustomerName);
-            const relatedContacts = contactsResult.recordset.filter(c => c.EnquiryID === reqNo).map(c => `${c.ContactName}|${c.CompanyName || ''}`);
-            const relatedTypes = typesResult.recordset.filter(t => t.EnquiryID === reqNo).map(t => t.TypeName);
-            const relatedItems = itemsResult.recordset.filter(i => i.EnquiryID === reqNo).map(i => i.ItemName);
-            const relatedSEs = seResult.recordset.filter(s => s.EnquiryID === reqNo).map(s => s.SEName);
+            const relatedCustomers = customersResult.recordset.filter(c => c.RequestNo === reqNo).map(c => c.CustomerName);
+            const relatedContacts = contactsResult.recordset.filter(c => c.RequestNo === reqNo).map(c => `${c.ContactName}|${c.CompanyName || ''}`);
+            const relatedTypes = typesResult.recordset.filter(t => t.RequestNo === reqNo).map(t => t.TypeName);
+            const relatedItems = itemsResult.recordset.filter(i => i.RequestNo === reqNo).map(i => i.ItemName);
+            const relatedSEs = seResult.recordset.filter(s => s.RequestNo === reqNo).map(s => s.SEName);
 
             return {
                 ...enq,
@@ -184,12 +192,14 @@ app.get('/api/enquiries', async (req, res) => {
                 SelectedCustomers: relatedCustomers,
                 SelectedReceivedFroms: relatedContacts,
                 SelectedConcernedSEs: relatedSEs,
-                // Legacy fields for backward compatibility if frontend needs them (though we should use Selected... fields)
-                EnquiryType: relatedTypes.join(','),
-                EnquiryFor: relatedItems.join(','),
-                CustomerName: relatedCustomers.join(','),
-                ReceivedFrom: relatedContacts.join(','),
-                ConcernedSE: relatedSEs.join(',')
+                // Legacy fields for backward compatibility & List View
+                EnquiryType: relatedTypes.join(', '),
+                EnquiryFor: relatedItems.join(', '),
+                CustomerName: enq.CustomerName || relatedCustomers.join(', '), // Prefer Master, fallback to transaction
+                ClientName: enq.ClientName,
+                ConsultantName: enq.ConsultantName,
+                ReceivedFrom: relatedContacts.map(c => c.split('|')[0]).join(', '),
+                ConcernedSE: relatedSEs.join(', ')
             };
         });
         res.json(enquiries);
@@ -221,37 +231,41 @@ app.post('/api/enquiries', async (req, res) => {
     try {
         const request = new sql.Request();
         request.input('RequestNo', sql.NVarChar, RequestNo);
-        request.input('SourceOfInfo', sql.NVarChar, SourceOfInfo);
+        request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo); // Mapped to SourceOfEnquiry
         request.input('EnquiryDate', sql.DateTime, EnquiryDate);
-        request.input('DueOn', sql.DateTime, DueOn);
+        request.input('DueDate', sql.DateTime, DueOn); // Mapped to DueDate
         request.input('SiteVisitDate', sql.DateTime, SiteVisitDate || null);
 
+        request.input('CustomerName', sql.NVarChar, SelectedCustomers ? SelectedCustomers.join(',') : null);
+        request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
         request.input('ProjectName', sql.NVarChar, ProjectName);
         request.input('ClientName', sql.NVarChar, ClientName);
         request.input('ConsultantName', sql.NVarChar, ConsultantName);
-        request.input('DetailsOfEnquiry', sql.NVarChar, DetailsOfEnquiry);
-        request.input('DocumentsReceived', sql.NVarChar, DocumentsReceived);
-        request.input('HardCopy', sql.Bit, hardcopy);
-        request.input('Drawing', sql.Bit, drawing);
-        request.input('DVD', sql.Bit, dvd);
-        request.input('Spec', sql.Bit, spec);
-        request.input('EqpSchedule', sql.Bit, eqpschedule);
-        request.input('Remark', sql.NVarChar, Remark);
-        request.input('AutoAck', sql.Bit, AutoAck);
-        request.input('CeoSign', sql.Bit, ceosign);
+        request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry); // Mapped to EnquiryDetails
+        // DocumentsReceived is not in new schema as a single field, it's checkboxes
+        request.input('Doc_HardCopies', sql.Bit, hardcopy);
+        request.input('Doc_Drawing', sql.Bit, drawing);
+        request.input('Doc_CD_DVD', sql.Bit, dvd);
+        request.input('Doc_Spec', sql.Bit, spec);
+        request.input('Doc_EquipmentSchedule', sql.Bit, eqpschedule);
+        request.input('Remarks', sql.NVarChar, Remark); // Mapped to Remarks
+        request.input('SendAcknowledgementMail', sql.Bit, AutoAck); // Mapped
+        request.input('ED_CEOSignatureRequired', sql.Bit, ceosign); // Mapped
         request.input('Status', sql.NVarChar, Status);
+        request.input('OthersSpecify', sql.NVarChar, DocumentsReceived); // Using OthersSpecify for DocumentsReceived text if needed, or ignore
+        request.input('CreatedBy', sql.NVarChar, req.body.CreatedBy);
 
         await request.query(`
-            INSERT INTO Enquiries (
-                RequestNo, SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
-                ProjectName, ClientName, ConsultantName,
-                DetailsOfEnquiry, DocumentsReceived, HardCopy, Drawing, DVD,
-                Spec, EqpSchedule, Remark, AutoAck, CeoSign, Status
+            INSERT INTO EnquiryMaster (
+                RequestNo, SourceOfEnquiry, EnquiryDate, DueDate, SiteVisitDate,
+                CustomerName, ReceivedFrom, ProjectName, ClientName, ConsultantName,
+                EnquiryDetails, Doc_HardCopies, Doc_Drawing, Doc_CD_DVD,
+                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, OthersSpecify, CreatedBy
             ) VALUES (
-                @RequestNo, @SourceOfInfo, @EnquiryDate, @DueOn, @SiteVisitDate,
-                @ProjectName, @ClientName, @ConsultantName,
-                @DetailsOfEnquiry, @DocumentsReceived, @HardCopy, @Drawing, @DVD,
-                @Spec, @EqpSchedule, @Remark, @AutoAck, @CeoSign, @Status
+                @RequestNo, @SourceOfEnquiry, @EnquiryDate, @DueDate, @SiteVisitDate,
+                @CustomerName, @ReceivedFrom, @ProjectName, @ClientName, @ConsultantName,
+                @EnquiryDetails, @Doc_HardCopies, @Doc_Drawing, @Doc_CD_DVD,
+                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @OthersSpecify, @CreatedBy
             )
         `);
 
@@ -259,23 +273,87 @@ app.post('/api/enquiries', async (req, res) => {
         const insertRelated = async (table, col, items) => {
             if (items && items.length > 0) {
                 for (const item of items) {
-                    await sql.query(`INSERT INTO ${table} (EnquiryID, ${col}) VALUES ('${RequestNo}', '${item}')`);
+                    await sql.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES ('${RequestNo}', '${item}')`);
                 }
             }
         };
 
-        await insertRelated('EnquiryCustomers', 'CustomerName', SelectedCustomers);
-        await insertRelated('EnquiryTypes', 'TypeName', SelectedEnquiryTypes);
-        await insertRelated('EnquirySelectedItems', 'ItemName', SelectedEnquiryFor);
-        await insertRelated('EnquiryConcernedSEs', 'SEName', SelectedConcernedSEs);
+        await insertRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers);
+        await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes);
+        await insertRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor);
+        await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs);
 
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');
-                await sql.query`INSERT INTO EnquiryContacts (EnquiryID, ContactName, CompanyName) VALUES (${RequestNo}, ${contact}, ${company})`;
+                await sql.query`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (${RequestNo}, ${contact}, ${company})`;
             }
         }
 
+
+
+        // --- Update Master Tables with RequestNo ---
+        try {
+            // 1. Source Of Enquiry
+            if (SourceOfInfo) {
+                await sql.query`UPDATE Master_SourceOfEnquiry SET RequestNo = ${RequestNo} WHERE SourceName = ${SourceOfInfo}`;
+            }
+
+            // 2. Enquiry Type
+            if (SelectedEnquiryTypes && SelectedEnquiryTypes.length > 0) {
+                for (const type of SelectedEnquiryTypes) {
+                    await sql.query`UPDATE Master_EnquiryType SET RequestNo = ${RequestNo} WHERE TypeName = ${type}`;
+                }
+            }
+
+            // 3. Enquiry For
+            if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
+                for (const item of SelectedEnquiryFor) {
+                    await sql.query`UPDATE Master_EnquiryFor SET RequestNo = ${RequestNo} WHERE ItemName = ${item}`;
+                }
+            }
+
+            // 4. Received From
+            if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                for (const item of SelectedReceivedFroms) {
+                    const [contact, company] = item.split('|');
+                    await sql.query`UPDATE Master_ReceivedFrom SET RequestNo = ${RequestNo} WHERE ContactName = ${contact} AND CompanyName = ${company}`;
+                }
+            }
+
+            // 5. Concerned SE
+            if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
+                for (const se of SelectedConcernedSEs) {
+                    await sql.query`UPDATE Master_ConcernedSE SET RequestNo = ${RequestNo} WHERE FullName = ${se}`;
+                }
+            }
+
+            // 6. Customer Name
+            if (SelectedCustomers && SelectedCustomers.length > 0) {
+                console.log('Updating Master_CustomerName for:', SelectedCustomers);
+                for (const cust of SelectedCustomers) {
+                    const result = await sql.query`UPDATE Master_CustomerName SET RequestNo = ${RequestNo} WHERE CompanyName = ${cust}`;
+                    console.log(`Updated Master_CustomerName for ${cust}. Rows affected: ${result.rowsAffected}`);
+                }
+            } else {
+                console.log('No SelectedCustomers to update in Master_CustomerName');
+            }
+
+            // 7. Client Name
+            if (ClientName) {
+                console.log('Updating Master_ClientName for:', ClientName);
+                await sql.query`UPDATE Master_ClientName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ClientName}`;
+            }
+
+            // 8. Consultant Name
+            if (ConsultantName) {
+                console.log('Updating Master_ConsultantName for:', ConsultantName);
+                await sql.query`UPDATE Master_ConsultantName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ConsultantName}`;
+            }
+
+        } catch (updateErr) {
+            console.error('Error updating Master tables with RequestNo:', updateErr);
+        }
 
         // --- Email Notification Logic ---
         try {
@@ -288,7 +366,7 @@ app.post('/api/enquiries', async (req, res) => {
             let itemCC = [];
             if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
                 const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
-                const itemsRes = await sql.query(`SELECT CommonMailIds, CCMailIds FROM MasterEnquiryItems WHERE ItemName IN (${itemsStr})`);
+                const itemsRes = await sql.query(`SELECT CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
                 itemsRes.recordset.forEach(row => {
                     if (row.CommonMailIds) itemTo.push(...row.CommonMailIds.split(',').map(e => e.trim()));
                     if (row.CCMailIds) itemCC.push(...row.CCMailIds.split(',').map(e => e.trim()));
@@ -387,6 +465,7 @@ app.post('/api/enquiries', async (req, res) => {
 });
 
 // Update Enquiry
+// Update Enquiry
 app.put('/api/enquiries/:id', async (req, res) => {
     const { id } = req.params;
     const {
@@ -401,66 +480,69 @@ app.put('/api/enquiries/:id', async (req, res) => {
     try {
         const request = new sql.Request();
         request.input('RequestNo', sql.NVarChar, id);
-        request.input('SourceOfInfo', sql.NVarChar, SourceOfInfo);
+        request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo);
         request.input('EnquiryDate', sql.DateTime, EnquiryDate);
-        request.input('DueOn', sql.DateTime, DueOn);
+        request.input('DueDate', sql.DateTime, DueOn);
         request.input('SiteVisitDate', sql.DateTime, SiteVisitDate || null);
+        request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
 
         request.input('ProjectName', sql.NVarChar, ProjectName);
         request.input('ClientName', sql.NVarChar, ClientName);
         request.input('ConsultantName', sql.NVarChar, ConsultantName);
-        request.input('DetailsOfEnquiry', sql.NVarChar, DetailsOfEnquiry);
-        request.input('DocumentsReceived', sql.NVarChar, DocumentsReceived);
-        request.input('HardCopy', sql.Bit, hardcopy);
-        request.input('Drawing', sql.Bit, drawing);
-        request.input('DVD', sql.Bit, dvd);
-        request.input('Spec', sql.Bit, spec);
-        request.input('EqpSchedule', sql.Bit, eqpschedule);
-        request.input('Remark', sql.NVarChar, Remark);
-        request.input('AutoAck', sql.Bit, AutoAck);
-        request.input('CeoSign', sql.Bit, ceosign);
+        request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry);
+        // DocumentsReceived is not in new schema as a single field, it's checkboxes
+        request.input('Doc_HardCopies', sql.Bit, hardcopy);
+        request.input('Doc_Drawing', sql.Bit, drawing);
+        request.input('Doc_CD_DVD', sql.Bit, dvd);
+        request.input('Doc_Spec', sql.Bit, spec);
+        request.input('Doc_EquipmentSchedule', sql.Bit, eqpschedule);
+        request.input('Remarks', sql.NVarChar, Remark);
+        request.input('SendAcknowledgementMail', sql.Bit, AutoAck);
+        request.input('ED_CEOSignatureRequired', sql.Bit, ceosign);
         request.input('Status', sql.NVarChar, Status);
+        request.input('OthersSpecify', sql.NVarChar, DocumentsReceived);
 
         await request.query(`
-            UPDATE Enquiries SET
-                SourceOfInfo=@SourceOfInfo, EnquiryDate=@EnquiryDate, DueOn=@DueOn, SiteVisitDate=@SiteVisitDate,
-                ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
-                DetailsOfEnquiry=@DetailsOfEnquiry, DocumentsReceived=@DocumentsReceived, HardCopy=@HardCopy, Drawing=@Drawing, DVD=@DVD,
-                Spec=@Spec, EqpSchedule=@EqpSchedule, Remark=@Remark, AutoAck=@AutoAck, CeoSign=@CeoSign, Status=@Status
+            UPDATE EnquiryMaster SET
+                SourceOfEnquiry=@SourceOfEnquiry, EnquiryDate=@EnquiryDate, DueDate=@DueDate, SiteVisitDate=@SiteVisitDate,
+                ReceivedFrom=@ReceivedFrom, ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
+                EnquiryDetails=@EnquiryDetails, Doc_HardCopies=@Doc_HardCopies, Doc_Drawing=@Doc_Drawing, Doc_CD_DVD=@Doc_CD_DVD,
+                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, OthersSpecify=@OthersSpecify
             WHERE RequestNo=@RequestNo
         `);
 
         // Helper to update related items (Delete + Insert)
-        // Helper to update related items (Delete + Insert)
         const updateRelated = async (table, col, items) => {
-            await sql.query(`DELETE FROM ${table} WHERE EnquiryID = '${id}'`);
+            await sql.query(`DELETE FROM ${table} WHERE RequestNo = '${id}'`);
             if (items && items.length > 0) {
                 for (const item of items) {
                     const req = new sql.Request();
-                    req.input('EnquiryID', sql.NVarChar, id);
+                    req.input('RequestNo', sql.NVarChar, id);
                     req.input('ItemValue', sql.NVarChar, item);
-                    await req.query(`INSERT INTO ${table} (EnquiryID, ${col}) VALUES (@EnquiryID, @ItemValue)`);
+                    await req.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@RequestNo, @ItemValue)`);
                 }
             }
         };
 
-        await updateRelated('EnquiryCustomers', 'CustomerName', SelectedCustomers);
-        await updateRelated('EnquiryTypes', 'TypeName', SelectedEnquiryTypes);
-        await updateRelated('EnquirySelectedItems', 'ItemName', SelectedEnquiryFor);
-        await updateRelated('EnquiryConcernedSEs', 'SEName', SelectedConcernedSEs);
+        await updateRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers);
+        await updateRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes);
+        await updateRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor);
+        await updateRelated('ConcernedSE', 'SEName', SelectedConcernedSEs);
 
-        // Update EnquiryContacts
-        await sql.query`DELETE FROM EnquiryContacts WHERE EnquiryID = ${id}`;
+        // ReceivedFrom has multiple columns, handle separately if needed, or just ContactName/CompanyName
+        // For now assuming simple string or split logic similar to POST
+        await sql.query(`DELETE FROM ReceivedFrom WHERE RequestNo = '${id}'`);
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');
                 const req = new sql.Request();
-                req.input('EnquiryID', sql.NVarChar, id);
+                req.input('RequestNo', sql.NVarChar, id);
                 req.input('ContactName', sql.NVarChar, contact);
                 req.input('CompanyName', sql.NVarChar, company);
-                await req.query(`INSERT INTO EnquiryContacts (EnquiryID, ContactName, CompanyName) VALUES (@EnquiryID, @ContactName, @CompanyName)`);
+                await req.query(`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (@RequestNo, @ContactName, @CompanyName)`);
             }
         }
+
 
         // Send Acknowledgement Email on Update if checked
         if (AutoAck) {
@@ -468,8 +550,8 @@ app.put('/api/enquiries/:id', async (req, res) => {
             const ackSEName = req.body.AcknowledgementSE;
             let seEmail = '';
             if (ackSEName) {
-                const seRes = await sql.query`SELECT Email FROM Users WHERE FullName = ${ackSEName}`;
-                if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].Email;
+                const seRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${ackSEName}`;
+                if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].EmailId;
             }
 
             // Re-construct email data for update
@@ -489,9 +571,15 @@ app.put('/api/enquiries/:id', async (req, res) => {
 
             if (SelectedCustomers && SelectedCustomers.length > 0) {
                 for (const custName of SelectedCustomers) {
-                    const custRes = await sql.query`SELECT Email FROM Customers WHERE CompanyName = ${custName}`;
+                    const custRes = await sql.query`
+                        SELECT EmailId FROM Master_CustomerName WHERE CompanyName = ${custName}
+                        UNION
+                        SELECT EmailId FROM Master_ClientName WHERE CompanyName = ${custName}
+                        UNION
+                        SELECT EmailId FROM Master_ConsultantName WHERE CompanyName = ${custName}
+                    `;
                     if (custRes.recordset.length > 0) {
-                        const custEmail = custRes.recordset[0].Email;
+                        const custEmail = custRes.recordset[0].EmailId;
                         if (custEmail) {
                             console.log(`Sending email to ${custName} (${custEmail}) CC: ${seEmail}`);
                             await sendAcknowledgementEmail(emailData, custEmail, seEmail, ceosign);
@@ -510,37 +598,56 @@ app.put('/api/enquiries/:id', async (req, res) => {
     }
 });
 
-// Get Masters (Simplified for demo: fetching Customers)
+// --- Master Data API Routes ---
+
+// 1. Customers (Contractors, Clients, Consultants)
 app.get('/api/customers', async (req, res) => {
     try {
-        const result = await sql.query`SELECT * FROM Customers`;
-        res.json(result.recordset);
+        const customers = await sql.query`SELECT * FROM Master_CustomerName ORDER BY ID DESC`;
+        const clients = await sql.query`SELECT * FROM Master_ClientName ORDER BY ID DESC`;
+        const consultants = await sql.query`SELECT * FROM Master_ConsultantName ORDER BY ID DESC`;
+
+        // Combine all
+        const all = [...customers.recordset, ...clients.recordset, ...consultants.recordset];
+        res.json(all);
     } catch (err) {
+        console.error(err);
         res.status(500).send('Server Error');
     }
 });
 
 app.post('/api/customers', async (req, res) => {
-    const { CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, MailId, Website, Status, Category } = req.body;
+    const { CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, Category } = req.body;
     try {
-        await sql.query`INSERT INTO Customers (CompanyName, CustomerName, Address1, Address2, Rating, CustomerType, FaxNo, Phone1, Phone2, Email, Website, Status, Category) 
-                        VALUES (${CompanyName}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${MailId}, ${Website}, ${Status}, ${Category})`;
+        if (Category === 'Client') {
+            await sql.query`INSERT INTO Master_ClientName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+        } else if (Category === 'Consultant') {
+            await sql.query`INSERT INTO Master_ConsultantName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+        } else {
+            // Default to Contractor/Customer
+            await sql.query`INSERT INTO Master_CustomerName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category || 'Contractor'}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+        }
         res.status(201).json({ message: 'Customer added' });
     } catch (err) {
-        console.error('Error adding customer:', err);
-        res.status(500).send('Server Error: ' + err.message);
+        console.error(err);
+        res.status(500).send('Server Error');
     }
 });
 
 app.put('/api/customers/:id', async (req, res) => {
     const { id } = req.params;
-    const { CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, MailId, Website, Status, Category } = req.body;
+    const { CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, Category } = req.body;
     try {
-        await sql.query`UPDATE Customers 
-                        SET CompanyName=${CompanyName}, Address1=${Address1}, Address2=${Address2}, Rating=${Rating}, 
-                            CustomerType=${Type}, FaxNo=${FaxNo}, Phone1=${Phone1}, Phone2=${Phone2}, Email=${MailId}, 
-                            Website=${Website}, Status=${Status}, Category=${Category} 
-                        WHERE CustomerID=${id}`;
+        if (Category === 'Client') {
+            await sql.query`UPDATE Master_ClientName SET CompanyName=${CompanyName}, Address1=${Address1}, Address2=${Address2}, Rating=${Rating}, Type=${Type}, FaxNo=${FaxNo}, Phone1=${Phone1}, Phone2=${Phone2}, EmailId=${EmailId}, Website=${Website}, Status=${Status} WHERE ID=${id}`;
+        } else if (Category === 'Consultant') {
+            await sql.query`UPDATE Master_ConsultantName SET CompanyName=${CompanyName}, Address1=${Address1}, Address2=${Address2}, Rating=${Rating}, Type=${Type}, FaxNo=${FaxNo}, Phone1=${Phone1}, Phone2=${Phone2}, EmailId=${EmailId}, Website=${Website}, Status=${Status} WHERE ID=${id}`;
+        } else {
+            await sql.query`UPDATE Master_CustomerName SET CompanyName=${CompanyName}, Address1=${Address1}, Address2=${Address2}, Rating=${Rating}, Type=${Type}, FaxNo=${FaxNo}, Phone1=${Phone1}, Phone2=${Phone2}, EmailId=${EmailId}, Website=${Website}, Status=${Status} WHERE ID=${id}`;
+        }
         res.json({ message: 'Customer updated' });
     } catch (err) {
         console.error(err);
@@ -548,21 +655,22 @@ app.put('/api/customers/:id', async (req, res) => {
     }
 });
 
-// --- Contacts API ---
+// 2. Contacts (Received From)
 app.get('/api/contacts', async (req, res) => {
     try {
-        const result = await sql.query`SELECT * FROM Contacts`;
+        const result = await sql.query`SELECT * FROM Master_ReceivedFrom ORDER BY ID DESC`;
         res.json(result.recordset);
     } catch (err) {
+        console.error(err);
         res.status(500).send('Server Error');
     }
 });
 
 app.post('/api/contacts', async (req, res) => {
-    const { ContactName, CompanyName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, Category } = req.body;
+    const { Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, RequestNo } = req.body;
     try {
-        await sql.query`INSERT INTO Contacts (ContactName, CompanyName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, Category) 
-                        VALUES (${ContactName}, ${CompanyName}, ${Designation}, ${CategoryOfDesignation}, ${Address1}, ${Address2}, ${FaxNo}, ${Phone}, ${Mobile1}, ${Mobile2}, ${EmailId}, ${Category})`;
+        await sql.query`INSERT INTO Master_ReceivedFrom (Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, RequestNo)
+                        VALUES (${Category}, ${CompanyName}, ${ContactName}, ${Designation}, ${CategoryOfDesignation}, ${Address1}, ${Address2}, ${FaxNo}, ${Phone}, ${Mobile1}, ${Mobile2}, ${EmailId}, ${RequestNo})`;
         res.status(201).json({ message: 'Contact added' });
     } catch (err) {
         console.error(err);
@@ -572,13 +680,9 @@ app.post('/api/contacts', async (req, res) => {
 
 app.put('/api/contacts/:id', async (req, res) => {
     const { id } = req.params;
-    const { ContactName, CompanyName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, Category } = req.body;
+    const { Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId } = req.body;
     try {
-        await sql.query`UPDATE Contacts 
-                        SET ContactName=${ContactName}, CompanyName=${CompanyName}, Designation=${Designation}, 
-                            CategoryOfDesignation=${CategoryOfDesignation}, Address1=${Address1}, Address2=${Address2}, 
-                            FaxNo=${FaxNo}, Phone=${Phone}, Mobile1=${Mobile1}, Mobile2=${Mobile2}, EmailId=${EmailId}, Category=${Category}
-                        WHERE ContactID=${id}`;
+        await sql.query`UPDATE Master_ReceivedFrom SET Category=${Category}, CompanyName=${CompanyName}, ContactName=${ContactName}, Designation=${Designation}, CategoryOfDesignation=${CategoryOfDesignation}, Address1=${Address1}, Address2=${Address2}, FaxNo=${FaxNo}, Phone=${Phone}, Mobile1=${Mobile1}, Mobile2=${Mobile2}, EmailId=${EmailId} WHERE ID=${id}`;
         res.json({ message: 'Contact updated' });
     } catch (err) {
         console.error(err);
@@ -586,22 +690,26 @@ app.put('/api/contacts/:id', async (req, res) => {
     }
 });
 
-// --- Users API ---
+// 3. Users (Concerned SE)
 app.get('/api/users', async (req, res) => {
     try {
-        const result = await sql.query`SELECT * FROM Users`;
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE ORDER BY ID DESC`;
         res.json(result.recordset);
     } catch (err) {
+        console.error(err);
         res.status(500).send('Server Error');
     }
 });
 
 app.post('/api/users', async (req, res) => {
-    const { FullName, Designation, Email, LoginPassword, Status, Department, Roles } = req.body;
+    const { FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo } = req.body;
     try {
-        const rolesStr = Array.isArray(Roles) ? Roles.join(',') : Roles;
-        await sql.query`INSERT INTO Users (FullName, Designation, Email, LoginPassword, Status, Department, Roles) 
-                        VALUES (${FullName}, ${Designation}, ${Email}, ${LoginPassword}, ${Status}, ${Department}, ${rolesStr})`;
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(LoginPassword, salt);
+
+        await sql.query`INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo)
+                        VALUES (${FullName}, ${Designation}, ${EmailId}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo})`;
         res.status(201).json({ message: 'User added' });
     } catch (err) {
         console.error(err);
@@ -611,13 +719,10 @@ app.post('/api/users', async (req, res) => {
 
 app.put('/api/users/:id', async (req, res) => {
     const { id } = req.params;
-    const { FullName, Designation, Email, LoginPassword, Status, Department, Roles } = req.body;
+    const { FullName, Designation, EmailId, Status, Department, Roles } = req.body;
     try {
-        const rolesStr = Array.isArray(Roles) ? Roles.join(',') : Roles;
-        await sql.query`UPDATE Users 
-                        SET FullName=${FullName}, Designation=${Designation}, Email=${Email}, LoginPassword=${LoginPassword}, 
-                            Status=${Status}, Department=${Department}, Roles=${rolesStr}
-                        WHERE UserID=${id}`;
+        // Note: Password update logic should be separate or handled carefully. Skipping password update here for simplicity unless provided.
+        await sql.query`UPDATE Master_ConcernedSE SET FullName=${FullName}, Designation=${Designation}, EmailId=${EmailId}, Status=${Status}, Department=${Department}, Roles=${Roles} WHERE ID=${id}`;
         res.json({ message: 'User updated' });
     } catch (err) {
         console.error(err);
@@ -625,24 +730,22 @@ app.put('/api/users/:id', async (req, res) => {
     }
 });
 
-// --- Enquiry Items API ---
+// 4. Enquiry Items (Enquiry For)
 app.get('/api/enquiry-items', async (req, res) => {
     try {
-        const result = await sql.query`SELECT * FROM MasterEnquiryItems`;
+        const result = await sql.query`SELECT * FROM Master_EnquiryFor ORDER BY ID DESC`;
         res.json(result.recordset);
     } catch (err) {
+        console.error(err);
         res.status(500).send('Server Error');
     }
 });
 
 app.post('/api/enquiry-items', async (req, res) => {
-    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds } = req.body;
+    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo } = req.body;
     try {
-        const commonMails = Array.isArray(CommonMailIds) ? CommonMailIds.join(',') : CommonMailIds;
-        const ccMails = Array.isArray(CCMailIds) ? CCMailIds.join(',') : CCMailIds;
-
-        await sql.query`INSERT INTO MasterEnquiryItems (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds) 
-                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${commonMails}, ${ccMails})`;
+        await sql.query`INSERT INTO Master_EnquiryFor (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo)
+                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${CommonMailIds}, ${CCMailIds}, ${RequestNo})`;
         res.status(201).json({ message: 'Item added' });
     } catch (err) {
         console.error(err);
@@ -654,26 +757,28 @@ app.put('/api/enquiry-items/:id', async (req, res) => {
     const { id } = req.params;
     const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds } = req.body;
     try {
-        const commonMails = Array.isArray(CommonMailIds) ? CommonMailIds.join(',') : CommonMailIds;
-        const ccMails = Array.isArray(CCMailIds) ? CCMailIds.join(',') : CCMailIds;
-
-        await sql.query`UPDATE MasterEnquiryItems 
-                        SET ItemName=${ItemName}, CompanyName=${CompanyName}, DepartmentName=${DepartmentName}, 
-                            Status=${Status}, CommonMailIds=${commonMails}, CCMailIds=${ccMails}
-                        WHERE ItemID=${id}`;
+        await sql.query`UPDATE Master_EnquiryFor SET ItemName=${ItemName}, CompanyName=${CompanyName}, DepartmentName=${DepartmentName}, Status=${Status}, CommonMailIds=${CommonMailIds}, CCMailIds=${CCMailIds} WHERE ID=${id}`;
         res.json({ message: 'Item updated' });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
     }
 });
-
 // --- Attachments API ---
 
 // Upload Attachment - Store in DB
-app.post('/api/attachments/upload', upload.array('files'), async (req, res) => {
+// Upload Attachment - Store in Disk and DB
+// Upload Attachment - Store in Disk and DB
+app.post('/api/attachments/upload', (req, res, next) => {
+    // Ensure uploads directory exists
+    const uploadDir = 'uploads';
+    if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+    }
+    next();
+}, upload.array('files'), async (req, res) => {
     const requestNo = req.query.requestNo;
-    console.log('Upload request for EnquiryID:', requestNo);
+    console.log('Upload request for RequestNo:', requestNo);
 
     if (!requestNo) {
         return res.status(400).send('Request No is required');
@@ -689,34 +794,44 @@ app.post('/api/attachments/upload', upload.array('files'), async (req, res) => {
         const uploadedFiles = [];
         for (const file of files) {
             const fileName = file.originalname;
-            const fileData = file.buffer; // Binary data
+            const filePath = file.path;
 
-            // Insert into DB with FileData
-            await sql.query`INSERT INTO EnquiryAttachments (EnquiryID, FileName, FileData) 
-                            VALUES (${requestNo}, ${fileName}, ${fileData})`;
+            // Check if RequestNo exists in EnquiryMaster to avoid FK violation
+            const checkEnq = await sql.query`SELECT RequestNo FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
+            if (checkEnq.recordset.length === 0) {
+                // If not found, we can't link attachment. 
+                // But we already saved the file. Should we delete it?
+                // For now, just error out.
+                throw new Error(`RequestNo ${requestNo} not found in EnquiryMaster`);
+            }
+
+            // Insert into DB with FilePath
+            await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath) 
+                            VALUES (${requestNo}, ${fileName}, ${filePath})`;
 
             uploadedFiles.push({ fileName });
         }
 
-        res.status(201).json({ message: 'Files uploaded successfully to DB', files: uploadedFiles });
+        res.status(201).json({ message: 'Files uploaded successfully', files: uploadedFiles });
     } catch (err) {
+        const logFile = path.join(__dirname, 'debug.log');
+        fs.appendFileSync(logFile, `${new Date().toISOString()} - ATTACHMENT ERROR: ${err.message}\n${err.stack}\n`);
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).send('Server Error: ' + err.message);
     }
 });
 
 // Get Attachments List
 app.get('/api/attachments', async (req, res) => {
     const requestNo = req.query.requestNo;
-    console.log('Get attachments for EnquiryID:', requestNo);
+    console.log('Get attachments for RequestNo:', requestNo);
 
     if (!requestNo) {
         return res.status(400).send('Request No is required');
     }
 
     try {
-        // Only select metadata, not the full blob
-        const result = await sql.query`SELECT AttachmentID, EnquiryID, FileName, UploadedAt FROM EnquiryAttachments WHERE EnquiryID = ${requestNo}`;
+        const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt FROM Attachments WHERE RequestNo = ${requestNo}`;
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
@@ -724,31 +839,25 @@ app.get('/api/attachments', async (req, res) => {
     }
 });
 
-// Download Attachment from DB
+// Download Attachment
 app.get('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await sql.query`SELECT FileName, FileData FROM EnquiryAttachments WHERE AttachmentID = ${id}`;
+        const result = await sql.query`SELECT FileName, FilePath FROM Attachments WHERE ID = ${id}`;
         const attachment = result.recordset[0];
 
         if (!attachment) {
             return res.status(404).send('Attachment not found');
         }
 
-        if (!attachment.FileData) {
-            // Fallback for old files (if any) or handle error
-            return res.status(404).send('File content not found in DB');
+        const filePath = attachment.FilePath;
+        if (fs.existsSync(filePath)) {
+            const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
+            res.setHeader('Content-Disposition', `${disposition}; filename="${attachment.FileName}"`);
+            res.sendFile(filePath);
+        } else {
+            res.status(404).send('File not found on server');
         }
-
-        const ext = attachment.FileName.split('.').pop().toLowerCase();
-        let contentType = 'application/octet-stream';
-        if (ext === 'pdf') contentType = 'application/pdf';
-        else if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) contentType = `image/${ext}`;
-        else if (['txt', 'csv'].includes(ext)) contentType = 'text/plain';
-
-        res.setHeader('Content-Disposition', `inline; filename="${attachment.FileName}"`);
-        res.setHeader('Content-Type', contentType);
-        res.send(attachment.FileData);
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -759,13 +868,30 @@ app.get('/api/attachments/:id', async (req, res) => {
 app.delete('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        await sql.query`DELETE FROM EnquiryAttachments WHERE AttachmentID = ${id}`;
+        // Get file path first
+        const result = await sql.query`SELECT FilePath FROM Attachments WHERE ID = ${id}`;
+        if (result.recordset.length > 0) {
+            const filePath = result.recordset[0].FilePath;
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+        }
+
+        await sql.query`DELETE FROM Attachments WHERE ID = ${id}`;
 
         res.json({ message: 'Attachment deleted' });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
     }
+});
+
+// Global Error Handler
+app.use((err, req, res, next) => {
+    console.error('Global Error Handler:', err);
+    const logFile = path.join(__dirname, 'debug.log');
+    fs.appendFileSync(logFile, `${new Date().toISOString()} - GLOBAL ERROR: ${err.message}\n${err.stack}\n`);
+    res.status(500).send('Server Error: ' + err.message);
 });
 
 app.listen(PORT, () => {

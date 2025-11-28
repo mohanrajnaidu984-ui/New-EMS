@@ -5,7 +5,7 @@ import { availableRoles } from '../../data/mockData';
 const defaultFormData = {
     FullName: '',
     Designation: '',
-    Email: '',
+    EmailId: '',
     LoginPassword: '',
     Status: 'Active',
     Department: 'MEP',
@@ -58,11 +58,16 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!formData.FullName || !formData.Email || !formData.LoginPassword) {
+        if (!formData.FullName || !formData.EmailId || !formData.LoginPassword) {
             alert('Please fill required fields (Full Name, Email, Password)');
             return;
         }
-        onSubmit(formData);
+        // Convert Roles array to comma-separated string
+        const payload = {
+            ...formData,
+            Roles: Array.isArray(formData.Roles) ? formData.Roles.join(',') : formData.Roles
+        };
+        onSubmit(payload);
         // Reset form after submission
         setFormData(defaultFormData);
         setNewRole('');
@@ -100,7 +105,7 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
                     <div className="col-md-6">
                         <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.Email} onChange={(e) => handleChange('Email', e.target.value)} />
+                            value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Login Password<span className="text-danger">*</span></label>
