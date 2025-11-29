@@ -86,7 +86,10 @@ const EnquiryForm = () => {
     // Generate RequestNo on mount for New Enquiry
     useEffect(() => {
         if (activeTab === 'New' && !isModifyMode) {
-            const generatedReqNo = `EYS/2025/11/${String(Date.now()).slice(-3)}`;
+            // Generate a more unique RequestNo to avoid collisions
+            const timestamp = Date.now();
+            const random = Math.floor(Math.random() * 1000);
+            const generatedReqNo = `EYS/2025/11/${timestamp.toString().slice(-4)}${random}`;
             setFormData(prev => ({ ...prev, RequestNo: generatedReqNo }));
         }
     }, [activeTab, isModifyMode]);
@@ -722,6 +725,11 @@ const EnquiryForm = () => {
                     // Map DB fields to Form State
                     const mappedData = {
                         ...enq,
+                        SourceOfInfo: enq.SourceOfEnquiry || enq.SourceOfInfo, // Map DB 'SourceOfEnquiry' to State 'SourceOfInfo'
+                        DetailsOfEnquiry: enq.EnquiryDetails || enq.DetailsOfEnquiry, // Map DB 'EnquiryDetails' to State 'DetailsOfEnquiry'
+                        Remark: enq.Remarks || enq.Remark, // Map DB 'Remarks' to State 'Remark'
+                        DocumentsReceived: enq.OthersSpecify || enq.DocumentsReceived, // Map DB 'OthersSpecify' to State 'DocumentsReceived'
+
                         EnquiryDate: formatDate(enq.EnquiryDate),
                         DueOn: formatDate(enq.DueDate || enq.DueOn), // Map DB 'DueDate' or Payload 'DueOn'
                         SiteVisitDate: formatDate(enq.SiteVisitDate),
@@ -1345,29 +1353,7 @@ const EnquiryForm = () => {
                                             <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail?</label>
                                         </div>
 
-                                        {/* SE Selection for Acknowledgement - only show if AutoAck is checked */}
-                                        {formData.AutoAck && (
-                                            <div className="mt-2">
-                                                <label className="form-label" style={{ fontSize: '12px', marginBottom: '4px' }}>Select SE for acknowledgement:</label>
-                                                <select
-                                                    className="form-select form-select-sm"
-                                                    value={ackSEList[0] || ''}
-                                                    onChange={(e) => {
-                                                        setAckSEList(e.target.value ? [e.target.value] : []);
-                                                    }}
-                                                    style={{ fontSize: '12px', width: '100%' }}
-                                                >
-                                                    <option value="">-- Select SE --</option>
-                                                    {seList.length === 0 ? (
-                                                        <option disabled>No SEs added yet</option>
-                                                    ) : (
-                                                        seList.map((se, idx) => (
-                                                            <option key={idx} value={se}>{se}</option>
-                                                        ))
-                                                    )}
-                                                </select>
-                                            </div>
-                                        )}
+
 
                                         <div className="form-check mt-2" style={{ fontSize: '13px' }}>
                                             <input className="form-check-input" type="checkbox" id="ceoSign"

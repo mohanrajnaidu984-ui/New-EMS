@@ -10,33 +10,40 @@ IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='EnquiryMaster' AND xtype='U'
 CREATE TABLE EnquiryMaster (
     RequestNo NVARCHAR(50) PRIMARY KEY, -- Unique Enquiry Reference Number
     
-    -- Date Fields
+    -- 1. Source
+    SourceOfEnquiry NVARCHAR(255),
+
+    -- 2. Dates
     EnquiryDate DATETIME,
     DueDate DATETIME,
     SiteVisitDate DATETIME,
-    
-    -- Single Select / Text Fields
-    SourceOfEnquiry NVARCHAR(255),
+
+    -- 3. Customer
     CustomerName NVARCHAR(255),
+    ReceivedFrom NVARCHAR(MAX),
+
+    -- 4. Project Details
     ProjectName NVARCHAR(255),
     ClientName NVARCHAR(255),
     ConsultantName NVARCHAR(255),
     
-    -- Details
+    -- 5. Details
     EnquiryDetails NVARCHAR(MAX),
     
-    -- Document Received (Checkboxes)
+    -- 6. Documents Received
     Doc_HardCopies BIT DEFAULT 0,
     Doc_Drawing BIT DEFAULT 0,
     Doc_CD_DVD BIT DEFAULT 0,
     Doc_Spec BIT DEFAULT 0,
     Doc_EquipmentSchedule BIT DEFAULT 0,
     
-    -- Other Details
+    -- 7. Others
     OthersSpecify NVARCHAR(MAX),
+    
+    -- 8. Remarks
     Remarks NVARCHAR(MAX),
     
-    -- Footer Options
+    -- 9. Footer
     SendAcknowledgementMail BIT DEFAULT 0,
     ED_CEOSignatureRequired BIT DEFAULT 0,
     

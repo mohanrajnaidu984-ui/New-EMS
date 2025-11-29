@@ -109,7 +109,7 @@ app.post('/api/auth/signup', async (req, res) => {
         }
 
         // Check if user already exists
-        const existingUser = await sql.query`SELECT * FROM Users WHERE Email = ${email}`;
+        const existingUser = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
         if (existingUser.recordset.length > 0) {
             return res.status(400).json({ message: 'Email already registered' });
         }
@@ -118,8 +118,8 @@ app.post('/api/auth/signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
 
         // Insert new user
-        // Using FullName for username, MailId for email, LoginPassword for password, Roles for role
-        await sql.query`INSERT INTO Users (FullName, Email, LoginPassword, Roles, Status) 
+        // Using FullName for username, EmailId for email, LoginPassword for password, Roles for role
+        await sql.query`INSERT INTO Master_ConcernedSE (FullName, EmailId, LoginPassword, Roles, Status) 
                         VALUES (${username}, ${email}, ${hashedPassword}, 'User', 'Active')`;
 
         res.status(201).json({ message: 'User registered successfully' });
@@ -140,7 +140,7 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         // Find user
-        const result = await sql.query`SELECT * FROM Users WHERE Email = ${email}`;
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
         const user = result.recordset[0];
 
         if (!user) {
@@ -376,9 +376,9 @@ app.post('/api/enquiries', async (req, res) => {
             // 2. Fetch Emails for Concerned SEs (To)
             if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
                 const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
-                const seRes = await sql.query(`SELECT Email FROM Users WHERE FullName IN (${sesStr})`);
+                const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
                 seRes.recordset.forEach(row => {
-                    if (row.Email) itemTo.push(row.Email.trim());
+                    if (row.EmailId) itemTo.push(row.EmailId.trim());
                 });
             }
 
@@ -411,40 +411,49 @@ app.post('/api/enquiries', async (req, res) => {
             // New Email Logic
             if (AutoAck) {
                 log('AutoAck is true, preparing to send acknowledgement emails...');
-                // Fetch SE Email
-                const ackSEName = req.body.AcknowledgementSE;
-                let seEmail = '';
-                if (ackSEName) {
-                    const seRes = await sql.query`SELECT Email FROM Users WHERE FullName = ${ackSEName}`;
-                    if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].Email;
-                    log(`SE Email found: ${seEmail} for ${ackSEName}`);
-                } else {
-                    log('No AcknowledgementSE provided');
-                }
 
-                // Send to each selected customer
-                if (SelectedCustomers && SelectedCustomers.length > 0) {
-                    for (const custName of SelectedCustomers) {
-                        const custRes = await sql.query`SELECT Email FROM Customers WHERE CompanyName = ${custName}`;
-                        if (custRes.recordset.length > 0) {
-                            const custEmail = custRes.recordset[0].Email;
-                            if (custEmail) {
-                                log(`Sending email to ${custName} (${custEmail}) CC: ${seEmail}`);
+                // 1. Fetch CC Emails (All Selected Concerned SEs)
+                let ccEmails = [];
+                if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
+                    const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
+                    const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
+                    seRes.recordset.forEach(row => {
+                        if (row.EmailId) ccEmails.push(row.EmailId.trim());
+                    });
+                }
+                const ccString = ccEmails.join(',');
+                log(`CC Emails (Concerned SEs): ${ccString}`);
+
+                // 2. Fetch To Emails (Selected Received From Contacts)
+                // The requirement is: Individual mail for each Received From with concern SE's in CC
+                if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                    const processedEmails = new Set();
+
+                    for (const item of SelectedReceivedFroms) {
+                        const [contact, company] = item.split('|');
+                        // Fetch email for this specific contact
+                        const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
+
+                        if (rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId) {
+                            const recipientEmail = rfRes.recordset[0].EmailId.trim();
+
+                            // Avoid sending duplicate emails to the same address for the same request
+                            if (!processedEmails.has(recipientEmail)) {
+                                log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${ccString}`);
                                 try {
-                                    await sendAcknowledgementEmail(emailData, custEmail, seEmail, ceosign);
-                                    log(`Email sent successfully to ${custName}`);
+                                    await sendAcknowledgementEmail(emailData, recipientEmail, ccString, ceosign);
+                                    log(`Email sent successfully to ${recipientEmail}`);
+                                    processedEmails.add(recipientEmail);
                                 } catch (e) {
-                                    log(`Error sending email to ${custName}: ${e.message}`);
+                                    log(`Error sending email to ${recipientEmail}: ${e.message}`);
                                 }
-                            } else {
-                                log(`No email found for customer ${custName}`);
                             }
                         } else {
-                            log(`Customer not found in DB: ${custName}`);
+                            log(`No email found for Received From contact: ${contact} (${company})`);
                         }
                     }
                 } else {
-                    log('No SelectedCustomers to send email to');
+                    log('No Received From contacts selected. Skipping acknowledgement email.');
                 }
             } else {
                 log('AutoAck is false, skipping email');
