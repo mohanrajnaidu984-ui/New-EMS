@@ -1,0 +1,200 @@
+[
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "ContactID",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "ContactName",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "CreatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "CustomerID",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Department",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Designation",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Email",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "IsPrimary",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Mobile1",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Mobile2",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Phone",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "Status",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 20
+  },
+  {
+    "TABLE_NAME": "Contacts",
+    "COLUMN_NAME": "UpdatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Address1",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Address2",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Category",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "City",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "CompanyName",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Country",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "CreatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "CustomerID",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "CustomerName",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "CustomerType",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Email",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "FaxNo",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Phone1",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Phone2",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "PostalCode",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 20
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Rating",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "State",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Status",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 20
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "UpdatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null
+  },
+  {
+    "TABLE_NAME": "Customers",
+    "COLUMN_NAME": "Website",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100
+  }
+]
