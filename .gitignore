@@ -34,3 +34,6 @@ yarn-error.log*
 server/test-*.js
 server/debug-*.js
 server/check-*.js
+
+# Deployment
+deployment_package/

@@ -13,8 +13,17 @@ const SearchEnquiry = ({ onOpen }) => {
     const [results, setResults] = useState([]);
 
     // Initialize results with all enquiries (already sorted by backend)
+    // Initialize results with all enquiries (sorted by latest)
     useEffect(() => {
-        const allEnquiries = Object.values(enquiries);
+        const allEnquiries = Object.values(enquiries).sort((a, b) => {
+            // Primary: CreatedAt (descending)
+            const dateA = new Date(a.CreatedAt || a.EnquiryDate);
+            const dateB = new Date(b.CreatedAt || b.EnquiryDate);
+            if (dateB - dateA !== 0) return dateB - dateA;
+
+            // Secondary: RequestNo (descending) as tie-breaker
+            return (b.RequestNo || '').localeCompare(a.RequestNo || '');
+        });
         setResults(allEnquiries);
     }, [enquiries]);
 

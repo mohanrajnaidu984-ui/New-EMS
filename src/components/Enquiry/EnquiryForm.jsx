@@ -87,13 +87,19 @@ const EnquiryForm = () => {
     // Generate RequestNo on mount for New Enquiry
     useEffect(() => {
         if (activeTab === 'New' && !isModifyMode) {
-            // Generate a more unique RequestNo to avoid collisions
-            const timestamp = Date.now();
-            const random = Math.floor(Math.random() * 1000);
-            const generatedReqNo = `EYS/2025/11/${timestamp.toString().slice(-4)}${random}`;
-            setFormData(prev => ({ ...prev, RequestNo: generatedReqNo }));
+            generateNewRequestNo();
         }
     }, [activeTab, isModifyMode]);
+
+    const generateNewRequestNo = () => {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const timestamp = Date.now().toString().slice(-6); // Last 6 digits
+        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0'); // 4 digits
+        const generatedReqNo = `EYS/${year}/${month}/${timestamp}${random}`;
+        setFormData(prev => ({ ...prev, RequestNo: generatedReqNo }));
+    };
 
     // --- ListBox Handlers ---
     const handleAddEnqType = () => {
@@ -995,6 +1001,19 @@ const EnquiryForm = () => {
 
                         {(activeTab === 'New' || (activeTab === 'Modify' && isModifyMode)) && (
                             <form onSubmit={handleSubmit}>
+                                {/* Row 0: Request No (Auto-generated) */}
+                                <div className="row mb-2">
+                                    <div className="col-md-4">
+                                        <label className="form-label">Request No <span className="text-muted" style={{ fontSize: '11px' }}>(Auto-generated)</span></label>
+                                        <div className="input-group">
+                                            <input type="text" className="form-control bg-light" value={formData.RequestNo} readOnly style={{ fontSize: '13px', fontWeight: 'bold' }} />
+                                            <button className="btn btn-outline-secondary" type="button" onClick={generateNewRequestNo} title="Regenerate Request No">
+                                                <i className="bi bi-arrow-clockwise"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 {/* Row 1: Source */}
                                 <div className="row mb-2">
                                     <div className="col-md-3">
