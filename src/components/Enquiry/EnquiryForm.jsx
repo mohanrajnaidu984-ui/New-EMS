@@ -1136,7 +1136,8 @@ const EnquiryForm = () => {
                                                                                 type="button"
                                                                                 className="btn btn-primary btn-sm"
                                                                                 style={{ fontSize: '11px', padding: '4px 12px' }}
-                                                                                onClick={() => {
+                                                                                onMouseDown={(e) => {
+                                                                                    e.preventDefault(); // Prevent input blur
                                                                                     handleOpenFromSearch(suggestion.RequestNo);
                                                                                     setShowProjectSuggestions(false);
                                                                                 }}
