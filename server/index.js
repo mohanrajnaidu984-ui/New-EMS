@@ -89,8 +89,15 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads')); // Serve uploaded files
 
+// Request Logger
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    next();
+});
+
 // Connect to Database
-connectDB();
+// Database connection initialized at startup
 
 // --- Authentication Routes ---
 
@@ -144,21 +151,165 @@ app.post('/api/auth/login', async (req, res) => {
         const user = result.recordset[0];
 
         if (!user) {
+            console.log('Login failed: User not found for', email);
             return res.status(400).json({ message: 'Invalid email or password' });
         }
 
         // Check password
+        // Check password
         const isMatch = await bcrypt.compare(password, user.LoginPassword);
         if (!isMatch) {
+            console.log('Login failed: Password mismatch for', email);
             return res.status(400).json({ message: 'Invalid email or password' });
         }
 
         // Return user info (excluding password)
         const { LoginPassword, ...userWithoutPassword } = user;
+        // Ensure ProfileImage is included (it allows NULL)
         res.json({ user: userWithoutPassword });
     } catch (err) {
         console.error('Login error:', err);
         res.status(500).json({ message: 'Server error during login' });
+    }
+});
+
+// Check if user exists and flow requirement
+app.post('/api/auth/check-user', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
+        const user = result.recordset[0];
+
+        if (!user) {
+            return res.json({ exists: false });
+        }
+
+        // Check if first time login (no password set)
+        const isFirstLogin = !user.LoginPassword || user.LoginPassword === '';
+        res.json({ exists: true, isFirstLogin });
+    } catch (err) {
+        console.error('Check user error:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Set Password
+app.post('/api/auth/set-password', async (req, res) => {
+    const { email, newPassword } = req.body;
+    try {
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
+        const user = result.recordset[0];
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        await sql.query`UPDATE Master_ConcernedSE SET LoginPassword = ${hashedPassword} WHERE EmailId = ${email}`;
+
+        // Return user info for auto-login
+        const { LoginPassword, ...userWithoutPassword } = user;
+        // Update userWithoutPassword with new info? Actually just returning basic info is enough or trigger login on frontend
+        // Assuming frontend will auto-login or ask to login. Let's return success.
+        res.json({ message: 'Password set successfully' });
+    } catch (err) {
+        console.error('Set password error:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Forgot Password
+app.post('/api/auth/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
+        const user = result.recordset[0];
+
+        if (!user) {
+            // Don't reveal user existence? Or for this internal tool it's fine.
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // In a real app, generate token + send email.
+        // Here we will simulate by sending a temp password or just a link.
+        // Since we don't have a reset page route yet, let's just send a generic email saying "Contact Admin" or similar, 
+        // OR truly implement it. 
+        // User requirement: "ability to reset password by forgot password option".
+        // Let's generate a temporary password and email it.
+
+        const tempPassword = Math.random().toString(36).slice(-8);
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(tempPassword, salt);
+
+        await sql.query`UPDATE Master_ConcernedSE SET LoginPassword = ${hashedPassword} WHERE EmailId = ${email}`;
+
+        const mailOptions = {
+            from: process.env.SMTP_USER,
+            to: email,
+            subject: 'EMS Portal - Password Reset',
+            html: `<p>Your password has been temporarily reset to: <strong>${tempPassword}</strong></p><p>Please login and change it if needed (feature pending) or use this to login.</p>`
+        };
+
+        try {
+            await transporter.sendMail(mailOptions);
+            res.json({ message: 'Temporary password sent to email.' });
+        } catch (mailErr) {
+            console.error('Mail error:', mailErr);
+            res.status(500).json({ message: 'Failed to send reset email.' });
+        }
+
+    } catch (err) {
+        console.error('Forgot password error:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Change Password (Authenticated)
+app.post('/api/auth/change-password', async (req, res) => {
+    const { userId, currentPassword, newPassword } = req.body;
+
+    try {
+        const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE ID = ${userId}`;
+        const user = result.recordset[0];
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Verify current password
+        const isMatch = await bcrypt.compare(currentPassword, user.LoginPassword);
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Incorrect current password' });
+        }
+
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        await sql.query`UPDATE Master_ConcernedSE SET LoginPassword = ${hashedPassword} WHERE ID = ${userId}`;
+
+        // Send Notification Email
+        if (user.EmailId) {
+            const mailOptions = {
+                from: process.env.SMTP_USER,
+                to: user.EmailId,
+                subject: 'Security Alert: Password Changed',
+                html: `
+                    <p>Dear ${user.FullName},</p>
+                    <p>Your password for the EMS Portal has been successfully changed.</p>
+                    <p>If you did not perform this action, please contact the administrator immediately.</p>
+                `
+            };
+            transporter.sendMail(mailOptions).catch(err => console.error('Failed to send password change notification:', err));
+        }
+
+        res.json({ message: 'Password changed successfully' });
+
+    } catch (err) {
+        console.error('Change password error:', err);
+        res.status(500).json({ message: 'Server error' });
     }
 });
 
@@ -712,10 +863,13 @@ app.get('/api/users', async (req, res) => {
 
 app.post('/api/users', async (req, res) => {
     const { FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo } = req.body;
+
     try {
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(LoginPassword, salt);
+        let hashedPassword = null;
+        if (LoginPassword && LoginPassword.trim().length > 0) {
+            const salt = await bcrypt.genSalt(10);
+            hashedPassword = await bcrypt.hash(LoginPassword, salt);
+        }
 
         await sql.query`INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo)
                         VALUES (${FullName}, ${Designation}, ${EmailId}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo})`;
@@ -895,14 +1049,52 @@ app.delete('/api/attachments/:id', async (req, res) => {
     }
 });
 
-// Global Error Handler
-app.use((err, req, res, next) => {
-    console.error('Global Error Handler:', err);
-    const logFile = path.join(__dirname, 'debug.log');
-    fs.appendFileSync(logFile, `${new Date().toISOString()} - GLOBAL ERROR: ${err.message}\n${err.stack}\n`);
-    res.status(500).send('Server Error: ' + err.message);
-});
 
-app.listen(PORT, () => {
+
+const initApp = async () => {
+    try {
+        await connectDB();
+        console.log('Database connected successfully.');
+
+        // Check if ProfileImage column exists in Master_ConcernedSE
+        try {
+            const checkColumn = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'Master_ConcernedSE' AND COLUMN_NAME = 'ProfileImage'
+            `;
+
+            if (checkColumn.recordset.length === 0) {
+                console.log('Adding ProfileImage column to Master_ConcernedSE...');
+                await sql.query`ALTER TABLE Master_ConcernedSE ADD ProfileImage NVARCHAR(MAX)`;
+                console.log('ProfileImage column added.');
+            }
+        } catch (schemaErr) {
+            console.error('Schema check error:', schemaErr);
+        }
+
+    } catch (err) {
+        console.error('Database Initialization Failed:', err);
+    }
+};
+
+initApp();
+
+console.log('Starting server initialization...');
+console.log('PORT:', PORT);
+const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+});
+server.on('error', (e) => console.error('Server Error:', e));
+
+// Update Profile Image
+app.post('/api/auth/update-profile-image', async (req, res) => {
+    const { userId, imageBase64 } = req.body;
+    try {
+        await sql.query`UPDATE Master_ConcernedSE SET ProfileImage = ${imageBase64} WHERE ID = ${userId}`;
+        res.json({ message: 'Profile image updated' });
+    } catch (err) {
+        console.error('Error updating profile image:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
 });

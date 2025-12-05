@@ -1463,8 +1463,8 @@ const EnquiryForm = () => {
                                                             listBoxItems={seList}
                                                             onAdd={handleAddSE}
                                                             onRemove={() => handleRemoveItem(seList, setSeList)}
-                                                            showNew={true}
-                                                            showEdit={true}
+                                                            showNew={(currentUser?.role || '').includes('Admin')}
+                                                            showEdit={(currentUser?.role || '').includes('Admin')}
                                                             canEdit={!!formData.ConcernedSE}
                                                             onNew={() => openNewModal(setShowUserModal)}
                                                             onEdit={handleEditSE}

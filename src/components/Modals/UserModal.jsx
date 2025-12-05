@@ -6,7 +6,6 @@ const defaultFormData = {
     FullName: '',
     Designation: '',
     EmailId: '',
-    LoginPassword: '',
     Status: 'Active',
     Department: 'MEP',
     Roles: []
@@ -58,8 +57,8 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!formData.FullName || !formData.EmailId || !formData.LoginPassword) {
-            alert('Please fill required fields (Full Name, Email, Password)');
+        if (!formData.FullName || !formData.EmailId) {
+            alert('Please fill required fields (Full Name, Email)');
             return;
         }
         // Convert Roles array to comma-separated string
@@ -106,11 +105,6 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
                         <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
-                    </div>
-                    <div className="col-md-6">
-                        <label className="form-label">Login Password<span className="text-danger">*</span></label>
-                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.LoginPassword} onChange={(e) => handleChange('LoginPassword', e.target.value)} />
                     </div>
                 </div>
                 <div className="row mb-2">

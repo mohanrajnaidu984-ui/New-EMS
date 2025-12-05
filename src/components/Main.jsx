@@ -3,6 +3,7 @@ import EnquiryForm from './Enquiry/EnquiryForm';
 import SearchEnquiry from './Enquiry/SearchEnquiry';
 import Dashboard from './Dashboard/Dashboard';
 import PricingForm from './Pricing/PricingForm';
+import UserProfile from './Layout/UserProfile';
 
 const Main = () => {
     const [activeTab, setActiveTab] = useState('Dashboard');
@@ -22,63 +23,66 @@ const Main = () => {
 
     return (
         <div>
-            {/* Tab Navigation */}
-            <ul className="nav nav-tabs mb-3">
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Dashboard' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Dashboard')}
-                    >
-                        <i className="bi bi-speedometer2 me-2"></i>
-                        Dashboard
-                    </button>
-                </li>
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Enquiry' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Enquiry')}
-                    >
-                        <i className="bi bi-clipboard-data me-2"></i>
-                        Enquiry
-                    </button>
-                </li>
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Pricing' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Pricing')}
-                    >
-                        <i className="bi bi-calculator me-2"></i>
-                        Pricing
-                    </button>
-                </li>
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Quote' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Quote')}
-                    >
-                        <i className="bi bi-file-earmark-text me-2"></i>
-                        Quote
-                    </button>
-                </li>
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Probability' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Probability')}
-                    >
-                        <i className="bi bi-graph-up me-2"></i>
-                        Probability
-                    </button>
-                </li>
-                <li className="nav-item">
-                    <button
-                        className={`nav-link ${activeTab === 'Reports' ? 'active' : ''}`}
-                        onClick={() => handleTabChange('Reports')}
-                    >
-                        <i className="bi bi-file-earmark-bar-graph me-2"></i>
-                        Reports
-                    </button>
-                </li>
-            </ul>
+            {/* Tab Navigation & User Profile */}
+            <div className="d-flex justify-content-between align-items-center mb-3 border-bottom px-3">
+                <ul className="nav nav-tabs border-bottom-0">
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Dashboard' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Dashboard')}
+                        >
+                            <i className="bi bi-speedometer2 me-2"></i>
+                            Dashboard
+                        </button>
+                    </li>
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Enquiry' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Enquiry')}
+                        >
+                            <i className="bi bi-clipboard-data me-2"></i>
+                            Enquiry
+                        </button>
+                    </li>
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Pricing' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Pricing')}
+                        >
+                            <i className="bi bi-calculator me-2"></i>
+                            Pricing
+                        </button>
+                    </li>
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Quote' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Quote')}
+                        >
+                            <i className="bi bi-file-earmark-text me-2"></i>
+                            Quote
+                        </button>
+                    </li>
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Probability' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Probability')}
+                        >
+                            <i className="bi bi-graph-up me-2"></i>
+                            Probability
+                        </button>
+                    </li>
+                    <li className="nav-item">
+                        <button
+                            className={`nav-link ${activeTab === 'Reports' ? 'active' : ''}`}
+                            onClick={() => handleTabChange('Reports')}
+                        >
+                            <i className="bi bi-file-earmark-bar-graph me-2"></i>
+                            Reports
+                        </button>
+                    </li>
+                </ul>
+                <UserProfile />
+            </div>
 
             {/* Tab Content */}
             <div className="tab-content">

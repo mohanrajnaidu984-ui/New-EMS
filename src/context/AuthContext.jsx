@@ -12,39 +12,49 @@ export const useAuth = () => {
 
 export const AuthProvider = ({ children }) => {
     const [currentUser, setCurrentUser] = useState(null);
-    const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-    // Check localStorage on mount
     useEffect(() => {
-        const storedUser = localStorage.getItem('emsUser');
+        // Attempt to load user from local storage on initial load
+        const storedUser = localStorage.getItem('currentUser');
         if (storedUser) {
-            const user = JSON.parse(storedUser);
-            setCurrentUser(user);
-            setIsAuthenticated(true);
+            setCurrentUser(JSON.parse(storedUser));
         }
     }, []);
 
-    const login = (user) => {
-        setCurrentUser(user);
-        setIsAuthenticated(true);
-        localStorage.setItem('emsUser', JSON.stringify(user));
+    const login = (userData) => {
+        console.log('AuthContext: login called with', userData);
+        // alert(`AuthContext: Logging in as ${userData.email}`);
+        setCurrentUser(userData);
+        localStorage.setItem('currentUser', JSON.stringify(userData));
     };
 
     const logout = () => {
         setCurrentUser(null);
-        setIsAuthenticated(false);
-        localStorage.removeItem('emsUser');
+        localStorage.removeItem('currentUser');
     };
 
-    const value = {
-        currentUser,
-        isAuthenticated,
-        login,
-        logout
+    const updateProfileImage = async (userId, base64) => {
+        try {
+            // Update Backend
+            await fetch('http://localhost:5000/api/auth/update-profile-image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId, imageBase64: base64 })
+            });
+
+            // Update Local State
+            if (currentUser) {
+                const updatedUser = { ...currentUser, ProfileImage: base64 };
+                setCurrentUser(updatedUser);
+                localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+            }
+        } catch (err) {
+            console.error('Failed to update profile image:', err);
+        }
     };
 
     return (
-        <AuthContext.Provider value={value}>
+        <AuthContext.Provider value={{ currentUser, login, logout, updateProfileImage, isAuthenticated: !!currentUser }}>
             {children}
         </AuthContext.Provider>
     );
