@@ -981,10 +981,11 @@ const EnquiryForm = () => {
                                             <option value="Enquiry">Enquiry</option>
                                             <option value="Pricing">Pricing</option>
                                             <option value="Quote">Quote</option>
-                                            <option value="Probability">Probability</option>
-                                            <option value="Reports">Reports</option>
+                                            <option value="Follow-up">Follow-up</option>
+                                            <option value="Won">Won</option>
+                                            <option value="Lost">Lost</option>
                                         </select>
-                                        {formData.Status === 'Reports' && (
+                                        {(formData.Status === 'Won' || formData.Status === 'Lost') && (
                                             <div className="alert alert-success mt-2 p-2" style={{ fontSize: '11px' }}>
                                                 <i className="bi bi-check-circle me-1"></i>
                                                 This enquiry is closed
@@ -1008,12 +1009,29 @@ const EnquiryForm = () => {
                                             <div className="card-body p-4">
                                                 <h6 className="card-title fw-bold mb-4" style={{ color: '#2d3748' }}>Enquiry Status Tracker</h6>
                                                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', marginTop: '10px', marginBottom: '10px' }}>
-                                                    {['Enquiry', 'Pricing', 'Quote', 'Follow-up', 'Won / Lost'].map((step, index) => {
+                                                    {['Enquiry', 'Pricing', 'Quote', 'Follow-up', 'Won'].map((step, index) => {
                                                         const stepNum = index + 1;
-                                                        const currentStep = 1; // Default to 1 for New Enquiry
+
+                                                        // Determine current step number based on formData.Status
+                                                        let currentStep = 1;
+                                                        const status = formData.Status || 'Enquiry';
+
+                                                        if (status === 'Enquiry') currentStep = 1;
+                                                        else if (status === 'Pricing') currentStep = 2;
+                                                        else if (status === 'Quote') currentStep = 3;
+                                                        else if (status === 'Follow-up') currentStep = 4;
+                                                        else if (status === 'Won' || status === 'Lost') currentStep = 5;
+
                                                         const isActive = stepNum === currentStep;
                                                         const isCompleted = stepNum < currentStep;
                                                         const isLast = index === 4;
+
+                                                        // Dynamic label for the last step
+                                                        let label = step;
+                                                        if (isLast) {
+                                                            if (status === 'Lost') label = 'Lost';
+                                                            else label = 'Won';
+                                                        }
 
                                                         return (
                                                             <React.Fragment key={step}>
@@ -1022,25 +1040,25 @@ const EnquiryForm = () => {
                                                                         width: '35px',
                                                                         height: '35px',
                                                                         borderRadius: '50%',
-                                                                        backgroundColor: isActive || isCompleted ? '#3b82f6' : '#e2e8f0', // Blue or Gray
+                                                                        backgroundColor: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#e2e8f0', // Blue generally, Red if Lost and active/completed
                                                                         color: isActive || isCompleted ? '#ffffff' : '#718096',
                                                                         display: 'flex',
                                                                         alignItems: 'center',
                                                                         justifyContent: 'center',
                                                                         fontWeight: 'bold',
                                                                         fontSize: '14px',
-                                                                        border: isActive ? '2px solid #ebf8ff' : 'none',
-                                                                        boxShadow: isActive ? '0 0 0 4px #bfdbfe' : 'none' // Ring effect for active
+                                                                        border: isActive ? `2px solid ${status === 'Lost' && isLast ? '#fca5a5' : '#ebf8ff'}` : 'none',
+                                                                        boxShadow: isActive ? `0 0 0 4px ${status === 'Lost' && isLast ? '#fecaca' : '#bfdbfe'}` : 'none'
                                                                     }}>
                                                                         {isCompleted ? '✓' : stepNum}
                                                                     </div>
                                                                     <span style={{
                                                                         marginTop: '8px',
                                                                         fontSize: '12px',
-                                                                        color: isActive || isCompleted ? '#3b82f6' : '#a0aec0',
+                                                                        color: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#a0aec0',
                                                                         fontWeight: isActive ? '600' : '400'
                                                                     }}>
-                                                                        {step}
+                                                                        {label}
                                                                     </span>
                                                                 </div>
                                                                 {!isLast && (
