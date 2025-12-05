@@ -1000,436 +1000,503 @@ const EnquiryForm = () => {
                         )}
 
                         {(activeTab === 'New' || (activeTab === 'Modify' && isModifyMode)) && (
-                            <form onSubmit={handleSubmit}>
-                                {/* Row 0: Request No (Auto-generated) */}
-                                <div className="row mb-2">
-                                    <div className="col-md-4">
-                                        <label className="form-label">Request No <span className="text-muted" style={{ fontSize: '11px' }}>(Auto-generated)</span></label>
-                                        <div className="input-group">
-                                            <input type="text" className="form-control bg-light" value={formData.RequestNo} readOnly style={{ fontSize: '13px', fontWeight: 'bold' }} />
-                                            <button className="btn btn-outline-secondary" type="button" onClick={generateNewRequestNo} title="Regenerate Request No">
-                                                <i className="bi bi-arrow-clockwise"></i>
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
+                            <div className="row justify-content-center">
+                                <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
+                                    <form onSubmit={handleSubmit}>
+                                        {/* Card 1: Enquiry Details */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
+                                            <div className="card-body p-4">
+                                                <h5 className="card-title fw-bold mb-4">Enquiry Details</h5>
 
-                                {/* Row 1: Source */}
-                                <div className="row mb-2">
-                                    <div className="col-md-3">
-                                        <label className="form-label">Source of Enquiry<span className="text-danger">*</span></label>
-                                        <select
-                                            className="form-select"
-                                            value={formData.SourceOfInfo}
-                                            onChange={(e) => handleInputChange('SourceOfInfo', e.target.value)}
-                                            style={{ fontSize: '13px' }}
-                                        >
-                                            <option value="">-- Select Source --</option>
-                                            {masters.sourceOfInfos?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                        </select>
-                                        {errors.SourceOfInfo && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.SourceOfInfo}</div>}
-                                    </div>
-                                </div>
 
-                                {/* Row 2: Dates */}
-                                <div className="row mb-2">
-                                    <div className="col-md-2">
-                                        <label className="form-label">Enquiry Date <span className="text-danger">*</span></label>
-                                        <DateInput
-                                            value={formData.EnquiryDate}
-                                            onChange={(e) => handleInputChange('EnquiryDate', e.target.value)}
-                                            placeholder="DD-MMM-YYYY"
-                                        />
-                                        {errors.EnquiryDate && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.EnquiryDate}</div>}
-                                    </div>
-                                    <div className="col-md-2">
-                                        <label className="form-label">Due Date <span className="text-danger">*</span></label>
-                                        <DateInput
-                                            value={formData.DueOn}
-                                            onChange={(e) => handleInputChange('DueOn', e.target.value)}
-                                            placeholder="DD-MMM-YYYY"
-                                        />
-                                        {errors.DueOn && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DueOn}</div>}
-                                    </div>
-                                    <div className="col-md-2">
-                                        <label className="form-label">Site visit date</label>
-                                        <DateInput
-                                            value={formData.SiteVisitDate}
-                                            onChange={(e) => handleInputChange('SiteVisitDate', e.target.value)}
-                                            placeholder="DD-MMM-YYYY"
-                                        />
-                                    </div>
-                                </div>
 
-                                {/* Row 3: Enquiry Type */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <ListBoxControl
-                                            label={<span>Enquiry Type<span className="text-danger">*</span></span>}
-                                            options={masters.enquiryType}
-                                            selectedOption={formData.EnquiryType}
-                                            onOptionChange={(val) => handleInputChange('EnquiryType', val)}
-                                            listBoxItems={enqTypeList}
-                                            onAdd={handleAddEnqType}
-                                            onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
-                                            error={errors.EnquiryType}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 4: Enquiry For */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <ListBoxControl
-                                            label={<span>Enquiry For<span className="text-danger">*</span></span>}
-                                            options={masters.enquiryFor}
-                                            selectedOption={formData.EnquiryFor}
-                                            onOptionChange={(val) => handleInputChange('EnquiryFor', val)}
-                                            listBoxItems={enqForList}
-                                            onAdd={handleAddEnqFor}
-                                            onRemove={() => handleRemoveItem(enqForList, setEnqForList)}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.EnquiryFor}
-                                            onNew={() => openNewModal(setShowEnqItemModal)}
-                                            onEdit={handleEditEnqFor}
-                                            error={errors.EnquiryFor}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 5: Customer & Received From */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <ListBoxControl
-                                            label={<span>Customer Name<span className="text-danger">*</span></span>}
-                                            options={masters.existingCustomers}
-                                            selectedOption={formData.CustomerName}
-                                            onOptionChange={(val) => handleInputChange('CustomerName', val)}
-                                            listBoxItems={customerList}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.CustomerName}
-                                            renderListBoxItem={(item, idx) => `${idx + 1}. ${item}`}
-                                            onNew={() => openNewModal(setShowCustomerModal, 'Contractor')}
-                                            onEdit={handleEditCustomer}
-                                            selectedItemDetails={renderCustomerCard()}
-                                            error={errors.CustomerName}
-                                        />
-                                    </div>
-                                    <div className="col-md-6">
-                                        <ListBoxControl
-                                            label={<span>Received From<span className="text-danger">*</span></span>}
-                                            options={
-                                                (formData.CustomerName
-                                                    ? masters.contacts.filter(c => {
-                                                        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-                                                        return normalize(c.CompanyName) === normalize(formData.CustomerName);
-                                                    })
-                                                    : []
-                                                ).map(c => `${c.ContactName}|${c.CompanyName}`)
-                                            }
-                                            selectedOption={formData.ReceivedFrom}
-                                            onOptionChange={(val) => handleInputChange('ReceivedFrom', val)}
-                                            listBoxItems={receivedFromList}
-                                            onAdd={handleAddReceivedFrom}
-                                            onRemove={handleRemoveReceivedFrom}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.ReceivedFrom}
-                                            renderOption={(opt) => {
-                                                const [name, company] = opt.split('|');
-                                                return `${name} (${company})`;
-                                            }}
-                                            renderListBoxItem={(item, idx) => {
-                                                const [name, company] = item.split('|');
-                                                return `${idx + 1}. ${name} (${company})`;
-                                            }}
-                                            onNew={() => openNewModal(setShowContactModal)}
-                                            onEdit={handleEditContact}
-                                            selectedItemDetails={renderContactCard()}
-                                            error={errors.ReceivedFrom}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 6: Project Name */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <label className="form-label">Project Name<span className="text-danger">*</span></label>
-                                        <input type="text" list="projectList" className="form-control" style={{ fontSize: '13px' }}
-                                            value={formData.ProjectName} onChange={(e) => handleInputChange('ProjectName', e.target.value)} />
-                                        <datalist id="projectList">
-                                            {masters.projectNames.map(p => <option key={p} value={p} />)}
-                                        </datalist>
-                                        {errors.ProjectName && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.ProjectName}</div>}
-                                    </div>
-                                </div>
-
-                                {/* Row 7: Client Name */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <SearchableSelectControl
-                                            label={<span>Client Name<span className="text-danger">*</span></span>}
-                                            options={masters.clientNames}
-                                            selectedOption={formData.ClientName}
-                                            onOptionChange={(val) => handleInputChange('ClientName', val)}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.ClientName}
-                                            onNew={() => openNewModal(setShowCustomerModal, 'Client')}
-                                            onEdit={handleEditClient}
-                                            error={errors.ClientName}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 8: Consultant Name */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <SearchableSelectControl
-                                            label="Consultant Name"
-                                            options={masters.consultantNames}
-                                            selectedOption={formData.ConsultantName}
-                                            onOptionChange={(val) => handleInputChange('ConsultantName', val)}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.ConsultantName}
-                                            onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
-                                            onEdit={handleEditConsultant}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 9: Concerned SE */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <ListBoxControl
-                                            label={<span>Concerned SE<span className="text-danger">*</span></span>}
-                                            options={masters.concernedSEs}
-                                            selectedOption={formData.ConcernedSE}
-                                            onOptionChange={(val) => handleInputChange('ConcernedSE', val)}
-                                            listBoxItems={seList}
-                                            onAdd={handleAddSE}
-                                            onRemove={() => handleRemoveItem(seList, setSeList)}
-                                            showNew={true}
-                                            showEdit={true}
-                                            canEdit={!!formData.ConcernedSE}
-                                            onNew={() => openNewModal(setShowUserModal)}
-                                            onEdit={handleEditSE}
-                                            error={errors.ConcernedSE}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Row 10: Details */}
-                                <div className="row mb-3">
-                                    <div className="col-md-6">
-                                        <label className="form-label">Enquiry details<span className="text-danger">*</span></label>
-                                        <textarea className="form-control" rows="3"
-                                            value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} />
-                                        {errors.DetailsOfEnquiry && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DetailsOfEnquiry}</div>}
-                                    </div>
-                                </div>
-
-                                {/* Row 11: Documents */}
-                                <div className="row mb-2">
-                                    <div className="col-md-6">
-                                        <label className="form-label">Document received</label>
-                                        <div className="d-flex gap-2 mb-2" style={{ fontSize: '13px', flexWrap: 'nowrap' }}>
-                                            {['hardcopy', 'drawing', 'dvd', 'spec', 'eqpschedule'].map(chk => (
-                                                <div className="form-check form-check-inline" key={chk}>
-                                                    <input className="form-check-input" type="checkbox" id={chk}
-                                                        checked={formData[chk]} onChange={(e) => handleInputChange(chk, e.target.checked)} />
-                                                    <label className="form-check-label" htmlFor={chk}>
-                                                        {chk === 'hardcopy' ? 'Hard Copies' :
-                                                            chk === 'drawing' ? 'Drawing' :
-                                                                chk === 'dvd' ? 'CD/DVD' :
-                                                                    chk === 'spec' ? 'Spec' : 'Equipment Schedule'}
-                                                    </label>
+                                                {/* Project Name & Source */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-6">
+                                                        <label className="form-label">Project Name<span className="text-danger">*</span></label>
+                                                        <input type="text" list="projectList" className="form-control" style={{ fontSize: '13px' }}
+                                                            value={formData.ProjectName} onChange={(e) => handleInputChange('ProjectName', e.target.value)} />
+                                                        <datalist id="projectList">
+                                                            {masters.projectNames.map(p => <option key={p} value={p} />)}
+                                                        </datalist>
+                                                        {errors.ProjectName && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.ProjectName}</div>}
+                                                    </div>
+                                                    <div className="col-md-6">
+                                                        <label className="form-label">Source of Enquiry<span className="text-danger">*</span></label>
+                                                        <select
+                                                            className="form-select"
+                                                            value={formData.SourceOfInfo}
+                                                            onChange={(e) => handleInputChange('SourceOfInfo', e.target.value)}
+                                                            style={{ fontSize: '13px' }}
+                                                        >
+                                                            <option value="">-- Select Source --</option>
+                                                            {masters.sourceOfInfos?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                                        </select>
+                                                        {errors.SourceOfInfo && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.SourceOfInfo}</div>}
+                                                    </div>
                                                 </div>
-                                            ))}
+
+                                                {/* Dates */}
+                                                <div className="mb-3" style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', width: '100%', gap: '15px' }}>
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <label className="form-label">Enquiry Date <span className="text-danger">*</span></label>
+                                                        <DateInput
+                                                            value={formData.EnquiryDate}
+                                                            onChange={(e) => handleInputChange('EnquiryDate', e.target.value)}
+                                                            placeholder="DD-MMM-YYYY"
+                                                        />
+                                                        {errors.EnquiryDate && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.EnquiryDate}</div>}
+                                                    </div>
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <label className="form-label">Due Date <span className="text-danger">*</span></label>
+                                                        <DateInput
+                                                            value={formData.DueOn}
+                                                            onChange={(e) => handleInputChange('DueOn', e.target.value)}
+                                                            placeholder="DD-MMM-YYYY"
+                                                        />
+                                                        {errors.DueOn && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DueOn}</div>}
+                                                    </div>
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <label className="form-label">Site Visit Date</label>
+                                                        <DateInput
+                                                            value={formData.SiteVisitDate}
+                                                            onChange={(e) => handleInputChange('SiteVisitDate', e.target.value)}
+                                                            placeholder="DD-MMM-YYYY"
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Enquiry Type */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <ListBoxControl
+                                                            label={<span>Enquiry Type<span className="text-danger">*</span></span>}
+                                                            options={masters.enquiryType}
+                                                            selectedOption={formData.EnquiryType}
+                                                            onOptionChange={(val) => handleInputChange('EnquiryType', val)}
+                                                            listBoxItems={enqTypeList}
+                                                            onAdd={handleAddEnqType}
+                                                            onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
+                                                            error={errors.EnquiryType}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Enquiry For */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <ListBoxControl
+                                                            label={<span>Enquiry For<span className="text-danger">*</span></span>}
+                                                            options={masters.enquiryFor}
+                                                            selectedOption={formData.EnquiryFor}
+                                                            onOptionChange={(val) => handleInputChange('EnquiryFor', val)}
+                                                            listBoxItems={enqForList}
+                                                            onAdd={handleAddEnqFor}
+                                                            onRemove={() => handleRemoveItem(enqForList, setEnqForList)}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.EnquiryFor}
+                                                            onNew={() => openNewModal(setShowEnqItemModal)}
+                                                            onEdit={handleEditEnqFor}
+                                                            error={errors.EnquiryFor}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Enquiry Details */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <label className="form-label">Enquiry details<span className="text-danger">*</span></label>
+                                                        <textarea className="form-control" rows="3"
+                                                            value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} />
+                                                        {errors.DetailsOfEnquiry && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DetailsOfEnquiry}</div>}
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
 
-                                        <label className="form-label">Others Specify</label>
-                                        <textarea className="form-control mb-2" rows="2"
-                                            value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
+                                        {/* Card 2: Customer Information */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
+                                            <div className="card-body p-4">
+                                                <h5 className="card-title fw-bold mb-4">Customer Information</h5>
 
-                                        {/* Acknowledgement Section */}
+                                                {/* Customer & Received From */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-6">
+                                                        <ListBoxControl
+                                                            label={<span>Customer Name<span className="text-danger">*</span></span>}
+                                                            options={masters.existingCustomers}
+                                                            selectedOption={formData.CustomerName}
+                                                            onOptionChange={(val) => handleInputChange('CustomerName', val)}
+                                                            listBoxItems={customerList}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.CustomerName}
+                                                            renderListBoxItem={(item, idx) => `${idx + 1}. ${item}`}
+                                                            onNew={() => openNewModal(setShowCustomerModal, 'Contractor')}
+                                                            onEdit={handleEditCustomer}
+                                                            selectedItemDetails={renderCustomerCard()}
+                                                            error={errors.CustomerName}
+                                                        />
+                                                    </div>
+                                                    <div className="col-md-6">
+                                                        <ListBoxControl
+                                                            label={<span>Received From<span className="text-danger">*</span></span>}
+                                                            options={
+                                                                (formData.CustomerName
+                                                                    ? masters.contacts.filter(c => {
+                                                                        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+                                                                        return normalize(c.CompanyName) === normalize(formData.CustomerName);
+                                                                    })
+                                                                    : []
+                                                                ).map(c => `${c.ContactName}|${c.CompanyName}`)
+                                                            }
+                                                            selectedOption={formData.ReceivedFrom}
+                                                            onOptionChange={(val) => handleInputChange('ReceivedFrom', val)}
+                                                            listBoxItems={receivedFromList}
+                                                            onAdd={handleAddReceivedFrom}
+                                                            onRemove={handleRemoveReceivedFrom}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.ReceivedFrom}
+                                                            renderOption={(opt) => {
+                                                                const [name, company] = opt.split('|');
+                                                                return `${name} (${company})`;
+                                                            }}
+                                                            renderListBoxItem={(item, idx) => {
+                                                                const [name, company] = item.split('|');
+                                                                return `${idx + 1}. ${name} (${company})`;
+                                                            }}
+                                                            onNew={() => openNewModal(setShowContactModal)}
+                                                            onEdit={handleEditContact}
+                                                            selectedItemDetails={renderContactCard()}
+                                                            error={errors.ReceivedFrom}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Client Name */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <SearchableSelectControl
+                                                            label={<span>Client Name<span className="text-danger">*</span></span>}
+                                                            options={masters.clientNames}
+                                                            selectedOption={formData.ClientName}
+                                                            onOptionChange={(val) => handleInputChange('ClientName', val)}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.ClientName}
+                                                            onNew={() => openNewModal(setShowCustomerModal, 'Client')}
+                                                            onEdit={handleEditClient}
+                                                            error={errors.ClientName}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Consultant Name */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <SearchableSelectControl
+                                                            label="Consultant Name"
+                                                            options={masters.consultantNames}
+                                                            selectedOption={formData.ConsultantName}
+                                                            onOptionChange={(val) => handleInputChange('ConsultantName', val)}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.ConsultantName}
+                                                            onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
+                                                            onEdit={handleEditConsultant}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Card 3: Assignment */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
+                                            <div className="card-body p-4">
+                                                <h5 className="card-title fw-bold mb-4">Assignment</h5>
+
+                                                {/* Concerned SE */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-6">
+                                                        <ListBoxControl
+                                                            label={<span>Concerned SE<span className="text-danger">*</span></span>}
+                                                            options={masters.concernedSEs}
+                                                            selectedOption={formData.ConcernedSE}
+                                                            onOptionChange={(val) => handleInputChange('ConcernedSE', val)}
+                                                            listBoxItems={seList}
+                                                            onAdd={handleAddSE}
+                                                            onRemove={() => handleRemoveItem(seList, setSeList)}
+                                                            showNew={true}
+                                                            showEdit={true}
+                                                            canEdit={!!formData.ConcernedSE}
+                                                            onNew={() => openNewModal(setShowUserModal)}
+                                                            onEdit={handleEditSE}
+                                                            error={errors.ConcernedSE}
+                                                        />
+                                                    </div>
+                                                </div>
 
 
-                                        {/* File Upload UI */}
-                                        <div className="mb-2">
-                                            <label className="form-label">Attachments</label>
-                                            <div className="d-flex align-items-center mb-2">
-                                                <input
-                                                    type="file"
-                                                    id="fileInput"
-                                                    style={{ display: 'none' }}
-                                                    multiple
-                                                    onChange={handleFileUpload}
-                                                />
-                                                <button
-                                                    type="button"
-                                                    className="btn btn-outline-secondary btn-sm"
-                                                    onClick={() => document.getElementById('fileInput').click()}
-                                                >
-                                                    Choose Files
+                                            </div>
+                                        </div>
+
+                                        {/* Card 4: Attachments & Remarks */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
+                                            <div className="card-body p-4">
+                                                <h5 className="card-title fw-bold mb-4">Attachments & Remarks</h5>
+
+                                                {/* Document Received */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <label className="form-label">Document received</label>
+                                                        <div className="d-flex gap-2 mb-2" style={{ fontSize: '13px', flexWrap: 'nowrap' }}>
+                                                            {['hardcopy', 'drawing', 'dvd', 'spec', 'eqpschedule'].map(chk => (
+                                                                <div className="form-check form-check-inline" key={chk}>
+                                                                    <input className="form-check-input" type="checkbox" id={chk}
+                                                                        checked={formData[chk]} onChange={(e) => handleInputChange(chk, e.target.checked)} />
+                                                                    <label className="form-check-label" htmlFor={chk}>
+                                                                        {chk === 'hardcopy' ? 'Hard Copies' :
+                                                                            chk === 'drawing' ? 'Drawing' :
+                                                                                chk === 'dvd' ? 'CD/DVD' :
+                                                                                    chk === 'spec' ? 'Spec' : 'Equipment Schedule'}
+                                                                    </label>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+
+                                                        <label className="form-label">Others Specify</label>
+                                                        <textarea className="form-control mb-2" rows="2"
+                                                            value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
+
+                                                        {/* File Upload UI */}
+                                                        <div className="mb-2">
+                                                            <label className="form-label">Attachments</label>
+                                                            <div className="d-flex align-items-center mb-2">
+                                                                <input
+                                                                    type="file"
+                                                                    id="fileInput"
+                                                                    style={{ display: 'none' }}
+                                                                    multiple
+                                                                    onChange={handleFileUpload}
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    className="btn btn-outline-secondary btn-sm"
+                                                                    onClick={() => document.getElementById('fileInput').click()}
+                                                                >
+                                                                    Choose Files
+                                                                </button>
+                                                                <span className="ms-2 text-muted" style={{ fontSize: '13px' }}>
+                                                                    {pendingFiles.length > 0
+                                                                        ? `${pendingFiles.length} file(s) pending save`
+                                                                        : 'No new files selected'}
+                                                                </span>
+                                                            </div>
+                                                            <div className="form-text mb-2" style={{ fontSize: '11px' }}>Supported: Multiple files</div>
+
+                                                            {/* Combined List of Pending and Uploaded Files */}
+                                                            {(attachments.length > 0 || pendingFiles.length > 0) && (
+                                                                <ul className="list-group mt-2 border-0">
+                                                                    {/* Pending Files */}
+                                                                    {pendingFiles.map((file, idx) => (
+                                                                        <li key={`pending-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded bg-light">
+                                                                            <div className="d-flex align-items-center text-truncate me-3" title={file.fileName}>
+                                                                                <i className="bi bi-file-earmark-text text-secondary fs-5 me-2"></i>
+                                                                                <span className="fw-medium text-dark">{file.fileName}</span>
+                                                                                <span className="badge bg-warning text-dark ms-2 rounded-pill" style={{ fontSize: '0.7em' }}>Pending</span>
+                                                                            </div>
+                                                                            <div className="d-flex align-items-center gap-2">
+                                                                                <a
+                                                                                    href={file.previewUrl}
+                                                                                    target="_blank"
+                                                                                    rel="noopener noreferrer"
+                                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
+                                                                                    style={{ width: '32px', height: '32px' }}
+                                                                                    title="View"
+                                                                                >
+                                                                                    <i className="bi bi-eye"></i>
+                                                                                </a>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
+                                                                                    style={{ width: '32px', height: '32px' }}
+                                                                                    onClick={() => handleRemoveAttachment(file.id, true)}
+                                                                                    title="Remove"
+                                                                                >
+                                                                                    <i className="bi bi-trash"></i>
+                                                                                </button>
+                                                                            </div>
+                                                                        </li>
+                                                                    ))}
+                                                                    {/* Uploaded Files */}
+                                                                    {attachments.map((att, idx) => (
+                                                                        <li key={`uploaded-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded">
+                                                                            <div className="d-flex align-items-center text-truncate me-3" title={att.FileName}>
+                                                                                <i className="bi bi-paperclip text-secondary fs-5 me-2"></i>
+                                                                                <span className="fw-medium text-dark">{att.FileName}</span>
+                                                                            </div>
+                                                                            <div className="d-flex align-items-center gap-2">
+                                                                                <a
+                                                                                    href={`http://localhost:5000/api/attachments/${att.ID}`}
+                                                                                    target="_blank"
+                                                                                    rel="noopener noreferrer"
+                                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
+                                                                                    style={{ width: '32px', height: '32px' }}
+                                                                                    title="View"
+                                                                                >
+                                                                                    <i className="bi bi-eye"></i>
+                                                                                </a>
+                                                                                <a
+                                                                                    href={`http://localhost:5000/api/attachments/${att.ID}?download=true`}
+                                                                                    target="_blank"
+                                                                                    rel="noopener noreferrer"
+                                                                                    className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"
+                                                                                    style={{ width: '32px', height: '32px' }}
+                                                                                    title="Download"
+                                                                                >
+                                                                                    <i className="bi bi-download"></i>
+                                                                                </a>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
+                                                                                    style={{ width: '32px', height: '32px' }}
+                                                                                    onClick={() => handleRemoveAttachment(att.ID, false)}
+                                                                                    title="Remove"
+                                                                                >
+                                                                                    <i className="bi bi-trash"></i>
+                                                                                </button>
+                                                                            </div>
+                                                                        </li>
+                                                                    ))}
+                                                                </ul>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Remarks */}
+                                                <div className="row mb-3">
+                                                    <div className="col-md-12">
+                                                        <label className="form-label">Remarks</label>
+                                                        <textarea className="form-control" rows="2"
+                                                            value={formData.Remark} onChange={(e) => handleInputChange('Remark', e.target.value)} />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Card 5: Collaborative Notes */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
+                                            <div className="card-body p-4">
+                                                <h5 className="card-title fw-bold mb-4">Collaborative Notes</h5>
+                                                <div className="bg-light p-3 rounded border">
+                                                    <div className="d-flex mb-3">
+                                                        <div className="me-2"><div className="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>V</div></div>
+                                                        <div className="flex-grow-1">
+                                                            <div className="bg-white p-2 rounded shadow-sm">
+                                                                <small className="text-muted d-block mb-1">Vignesh - 2 hours ago</small>
+                                                                Client mentioned they are also interested in a maintenance package. We should follow up on this when preparing the quote.
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="d-flex mb-3">
+                                                        <div className="me-2"><div className="bg-dark text-white rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>J</div></div>
+                                                        <div className="flex-grow-1">
+                                                            <div className="bg-white p-2 rounded shadow-sm">
+                                                                <small className="text-muted d-block mb-1">John - 1 hour ago</small>
+                                                                Noted. I've added the maintenance package brochure to the attachments. Make sure to reference it in the quote.
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="d-flex align-items-center">
+                                                        <div className="me-2"><div className="bg-warning text-dark rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>U</div></div>
+                                                        <input type="text" className="form-control" placeholder="Add a new note..." />
+                                                        <button type="button" className="btn btn-primary ms-2">Post</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Footer: Actions */}
+                                        <div className="d-flex justify-content-between align-items-center mt-4 mb-5 px-2">
+                                            <div className="d-flex gap-4">
+                                                <div className="form-check" style={{ fontSize: '13px' }}>
+                                                    <input className="form-check-input" type="checkbox" id="autoAck"
+                                                        checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} />
+                                                    <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail</label>
+                                                </div>
+
+                                                {/* Concerned SE Selection for Acknowledgement */}
+                                                {formData.AutoAck && seList.length > 0 && (
+                                                    <div className="ms-2" style={{ fontSize: '13px' }}>
+                                                        <select
+                                                            className="form-select form-select-sm"
+                                                            value={ackSEList[0] || ''}
+                                                            onChange={(e) => {
+                                                                setAckSEList(e.target.value ? [e.target.value] : []);
+                                                            }}
+                                                            style={{ fontSize: '13px', width: 'auto', display: 'inline-block' }}
+                                                        >
+                                                            <option value="">-- Select SE --</option>
+                                                            {seList.map((se, idx) => (
+                                                                <option key={idx} value={se}>{se}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                )}
+
+                                                <div className="form-check" style={{ fontSize: '13px' }}>
+                                                    <input className="form-check-input" type="checkbox" id="ceoSign"
+                                                        checked={formData.ceosign} onChange={(e) => handleInputChange('ceosign', e.target.checked)} />
+                                                    <label className="form-check-label" htmlFor="ceoSign">ED/CEO Signature required</label>
+                                                </div>
+                                            </div>
+                                            <div className="d-flex gap-2">
+                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>Cancel</button>
+                                                <button type="submit" className="btn btn-success">
+                                                    {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
                                                 </button>
-                                                <span className="ms-2 text-muted" style={{ fontSize: '13px' }}>
-                                                    {pendingFiles.length > 0
-                                                        ? `${pendingFiles.length} file(s) pending save`
-                                                        : 'No new files selected'}
-                                                </span>
                                             </div>
-                                            <div className="form-text mb-2" style={{ fontSize: '11px' }}>Supported: Multiple files</div>
-
-                                            {/* Combined List of Pending and Uploaded Files */}
-                                            {(attachments.length > 0 || pendingFiles.length > 0) && (
-                                                <ul className="list-group mt-2 border-0">
-                                                    {/* Pending Files */}
-                                                    {pendingFiles.map((file, idx) => (
-                                                        <li key={`pending-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded bg-light">
-                                                            <div className="d-flex align-items-center text-truncate me-3" title={file.fileName}>
-                                                                <i className="bi bi-file-earmark-text text-secondary fs-5 me-2"></i>
-                                                                <span className="fw-medium text-dark">{file.fileName}</span>
-                                                                <span className="badge bg-warning text-dark ms-2 rounded-pill" style={{ fontSize: '0.7em' }}>Pending</span>
-                                                            </div>
-                                                            <div className="d-flex align-items-center gap-2">
-                                                                <a
-                                                                    href={file.previewUrl}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
-                                                                    style={{ width: '32px', height: '32px' }}
-                                                                    title="View"
-                                                                >
-                                                                    <i className="bi bi-eye"></i>
-                                                                </a>
-                                                                <button
-                                                                    type="button"
-                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
-                                                                    style={{ width: '32px', height: '32px' }}
-                                                                    onClick={() => handleRemoveAttachment(file.id, true)}
-                                                                    title="Remove"
-                                                                >
-                                                                    <i className="bi bi-trash"></i>
-                                                                </button>
-                                                            </div>
-                                                        </li>
-                                                    ))}
-                                                    {/* Uploaded Files */}
-                                                    {attachments.map((att, idx) => (
-                                                        <li key={`uploaded-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded">
-                                                            <div className="d-flex align-items-center text-truncate me-3" title={att.FileName}>
-                                                                <i className="bi bi-paperclip text-secondary fs-5 me-2"></i>
-                                                                <span className="fw-medium text-dark">{att.FileName}</span>
-                                                            </div>
-                                                            <div className="d-flex align-items-center gap-2">
-                                                                <a
-                                                                    href={`http://localhost:5000/api/attachments/${att.ID}`}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
-                                                                    style={{ width: '32px', height: '32px' }}
-                                                                    title="View"
-                                                                >
-                                                                    <i className="bi bi-eye"></i>
-                                                                </a>
-                                                                <a
-                                                                    href={`http://localhost:5000/api/attachments/${att.ID}?download=true`}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"
-                                                                    style={{ width: '32px', height: '32px' }}
-                                                                    title="Download"
-                                                                >
-                                                                    <i className="bi bi-download"></i>
-                                                                </a>
-                                                                <button
-                                                                    type="button"
-                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
-                                                                    style={{ width: '32px', height: '32px' }}
-                                                                    onClick={() => handleRemoveAttachment(att.ID, false)}
-                                                                    title="Remove"
-                                                                >
-                                                                    <i className="bi bi-trash"></i>
-                                                                </button>
-                                                            </div>
-                                                        </li>
-                                                    ))}
-                                                </ul>
-                                            )}
                                         </div>
-                                    </div>
+                                    </form>
+
+                                    {/* Modals */}
+                                    <CustomerModal
+                                        show={showCustomerModal}
+                                        onClose={() => setShowCustomerModal(false)}
+                                        mode={modalMode}
+                                        initialData={editData}
+                                        onSubmit={handleCustomerSubmit}
+                                        fixedCategory={fixedCategory}
+                                    />
+                                    <ContactModal
+                                        show={showContactModal}
+                                        onClose={() => setShowContactModal(false)}
+                                        mode={modalMode}
+                                        initialData={editData}
+                                        onSubmit={handleContactSubmit}
+                                    />
+                                    <UserModal
+                                        show={showUserModal}
+                                        onClose={() => setShowUserModal(false)}
+                                        mode={modalMode}
+                                        initialData={editData}
+                                        onSubmit={handleUserSubmit}
+                                    />
+                                    <EnquiryItemModal
+                                        show={showEnqItemModal}
+                                        onClose={() => setShowEnqItemModal(false)}
+                                        mode={modalMode}
+                                        initialData={editData}
+                                        onSubmit={handleEnqItemSubmit}
+                                    />
                                 </div>
-
-                                {/* Row 12: Remarks */}
-                                <div className="row mb-2">
-                                    <div className="col-md-3">
-                                        <label className="form-label">Remarks</label>
-                                        <textarea className="form-control" rows="2"
-                                            value={formData.Remark} onChange={(e) => handleInputChange('Remark', e.target.value)} />
-                                    </div>
-                                </div>
-
-                                {/* Row 13: Checkboxes and SE Selection */}
-                                <div className="row mb-2">
-                                    <div className="col-md-3">
-                                        <div className="form-check" style={{ fontSize: '13px' }}>
-                                            <input className="form-check-input" type="checkbox" id="autoAck"
-                                                checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} />
-                                            <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail?</label>
-                                        </div>
-
-                                        {/* Concerned SE Selection for Acknowledgement */}
-                                        {formData.AutoAck && seList.length > 0 && (
-                                            <div className="mt-2" style={{ fontSize: '13px' }}>
-                                                <label className="form-label">Select SE for Acknowledgement</label>
-                                                <select
-                                                    className="form-select form-select-sm"
-                                                    value={ackSEList[0] || ''}
-                                                    onChange={(e) => {
-                                                        setAckSEList(e.target.value ? [e.target.value] : []);
-                                                    }}
-                                                    style={{ fontSize: '13px' }}
-                                                >
-                                                    <option value="">-- Select SE --</option>
-                                                    {seList.map((se, idx) => (
-                                                        <option key={idx} value={se}>{se}</option>
-                                                    ))}
-                                                </select>
-                                            </div>
-                                        )}
-
-                                        <div className="form-check mt-2" style={{ fontSize: '13px' }}>
-                                            <input className="form-check-input" type="checkbox" id="ceoSign"
-                                                checked={formData.ceosign} onChange={(e) => handleInputChange('ceosign', e.target.checked)} />
-                                            <label className="form-check-label" htmlFor="ceoSign">ED/CEO Signature required?</label>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Buttons */}
-                                <div className="row mt-4 mb-4" style={{ paddingBottom: '100px' }}>
-                                    <div className="col-12">
-                                        <button type="submit" className="btn btn-outline-success me-2">
-                                            {isModifyMode ? 'Save Changes' : 'Add'}
-                                        </button>
-                                        <button type="button" className="btn btn-outline-danger me-2" onClick={resetForm}>Cancel</button>
-                                    </div>
-                                </div>
-                            </form>
+                            </div>
                         )}
                     </>
                 )}
-
-
-                {/* Modals */}
-                <CustomerModal show={showCustomerModal} onClose={() => setShowCustomerModal(false)} onSubmit={handleCustomerSubmit} mode={modalMode} initialData={editData} fixedCategory={fixedCategory} />
-                <ContactModal show={showContactModal} onClose={() => setShowContactModal(false)} onSubmit={handleContactSubmit} mode={modalMode} initialData={editData} />
-                <UserModal show={showUserModal} onClose={() => setShowUserModal(false)} onSubmit={handleUserSubmit} mode={modalMode} initialData={editData} />
-                <EnquiryItemModal show={showEnqItemModal} onClose={() => setShowEnqItemModal(false)} onSubmit={handleEnqItemSubmit} mode={modalMode} initialData={editData} />
             </div>
         </div>
     );

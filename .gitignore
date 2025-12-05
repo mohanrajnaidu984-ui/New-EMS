@@ -36,4 +36,4 @@ server/debug-*.js
 server/check-*.js
 
 # Deployment
-deployment_package/
+

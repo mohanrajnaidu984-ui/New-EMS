@@ -539,6 +539,18 @@ input[type="date"]:focus::-webkit-datetime-edit {
   }
 }
 
+.col-4 {
+  flex: 0 0 auto;
+  width: 33.33333333%;
+}
+
+@media (min-width: 768px) {
+  .col-md-4 {
+    flex: 0 0 auto;
+    width: 33.33333333%;
+  }
+}
+
 /* Table */
 .table {
   width: 100%;
@@ -664,4 +676,12 @@ input[type="date"]:focus::-webkit-datetime-edit {
   color: #055160;
   background-color: #cff4fc;
   border-color: #b6effb;
+}
+
+:root {
+  --logo-color: #F8BBD0;
+}
+
+.card-overline {
+  border-top: 3px solid var(--logo-color) !important;
 }
