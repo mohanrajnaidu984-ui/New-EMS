@@ -77,6 +77,67 @@ const EnquiryForm = () => {
     const [projectSuggestions, setProjectSuggestions] = useState([]);
     const [showProjectSuggestions, setShowProjectSuggestions] = useState(false);
 
+    // Access Control State
+    const [canEdit, setCanEdit] = useState(true);
+
+    // Effect to determine edit permission when loading an enquiry or switching tabs
+    useEffect(() => {
+        if (activeTab === 'New') {
+            setCanEdit(true);
+        } else if (activeTab === 'Modify' && isModifyMode) {
+            checkEditPermission();
+        }
+    }, [activeTab, isModifyMode, formData, currentUser]);
+
+    const checkEditPermission = () => {
+        if (!currentUser) return;
+
+        // 1. Admin Override
+        // Roles is now a comma-separated string based on UserModal logic, but verify context
+        const userRoles = typeof currentUser.Roles === 'string'
+            ? currentUser.Roles.split(',').map(r => r.trim())
+            : (Array.isArray(currentUser.Roles) ? currentUser.Roles : []);
+
+        if (userRoles.includes('Admin')) {
+            setCanEdit(true);
+            return;
+        }
+
+        // 2. Creator Access
+        if (formData.CreatedBy === currentUser.FullName) {
+            setCanEdit(true);
+            return;
+        }
+
+        // 3. Division Coworker Access (via Enquiry For -> Email Check)
+        const selectedItems = enqForList;
+        const relevantItems = masters.enqItems.filter(item => selectedItems.includes(item.ItemName));
+
+        let isDivisionMember = false;
+        const userEmail = currentUser.EmailId.toLowerCase();
+
+        for (const item of relevantItems) {
+            // Check Common Emails
+            if (item.CommonMailIds && (Array.isArray(item.CommonMailIds) ? item.CommonMailIds : item.CommonMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
+                isDivisionMember = true;
+                break;
+            }
+            // Check CC Emails
+            if (item.CCMailIds && (Array.isArray(item.CCMailIds) ? item.CCMailIds : item.CCMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
+                isDivisionMember = true;
+                break;
+            }
+        }
+
+        if (isDivisionMember) {
+            setCanEdit(true);
+            return;
+        }
+
+        // No permission
+        setCanEdit(false);
+    };
+
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
         if (errors[field]) {
@@ -576,6 +637,12 @@ const EnquiryForm = () => {
     // --- Main Form Submit ---
     const handleSubmit = async (e) => {
         e.preventDefault();
+
+        if (!canEdit) {
+            alert('You do not have permission to modify this enquiry.');
+            return;
+        }
+
         const newErrors = {};
 
         // Auto-add logic removed as functions are undefined and data requires full modal input
@@ -629,7 +696,7 @@ const EnquiryForm = () => {
             SelectedReceivedFroms: receivedFromList,
             SelectedConcernedSEs: seList,
             AcknowledgementSE: ackSEList[0] || '',
-            CreatedBy: currentUser?.name || 'System'
+            CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.FullName || 'System')
         };
 
         if (isModifyMode) {
@@ -1079,7 +1146,30 @@ const EnquiryForm = () => {
                                             <div className="card-body p-4">
                                                 <h5 className="card-title fw-bold mb-4">Enquiry Details</h5>
 
+                                                {/* Created By Field */}
+                                                {!isModifyMode && (
+                                                    <div className="d-flex align-items-center mb-3">
+                                                        <span className="badge bg-light text-dark border me-2">
+                                                            <i className="bi bi-person me-1"></i>
+                                                            Created By: {currentUser?.FullName || 'Unknown'}
+                                                        </span>
+                                                    </div>
+                                                )}
 
+                                                {isModifyMode && (
+                                                    <div className="d-flex align-items-center mb-3 justify-content-between">
+                                                        <span className="badge bg-light text-dark border">
+                                                            <i className="bi bi-person me-1"></i>
+                                                            Created By: {formData.CreatedBy || 'Unknown'}
+                                                        </span>
+                                                        {!canEdit && (
+                                                            <span className="badge bg-danger">
+                                                                <i className="bi bi-lock-fill me-1"></i>
+                                                                Read Only (No Permission)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
 
                                                 {/* Project Name & Source */}
                                                 <div className="row mb-3">

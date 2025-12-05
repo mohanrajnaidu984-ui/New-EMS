@@ -136,12 +136,13 @@ const SearchEnquiry = ({ onOpen }) => {
                             <th>Due</th>
                             <th>SE(s)</th>
                             <th>Status</th>
+                            <th>Created By</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         {results.length === 0 ? (
-                            <tr><td colSpan="10" className="text-muted text-center">No results.</td></tr>
+                            <tr><td colSpan="11" className="text-muted text-center">No results.</td></tr>
                         ) : (
                             results.map(r => (
                                 <tr key={r.RequestNo}>
@@ -154,6 +155,7 @@ const SearchEnquiry = ({ onOpen }) => {
                                     <td>{r.DueOn}</td>
                                     <td>{r.SelectedConcernedSEs?.join(', ') || r.ConcernedSE}</td>
                                     <td>{r.Status || 'Enquiry'}</td>
+                                    <td>{r.CreatedBy || '-'}</td>
                                     <td>
                                         {r.Status === 'Reports' ? (
                                             <button
