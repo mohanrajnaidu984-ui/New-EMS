@@ -12,7 +12,7 @@ import EnquiryItemModal from '../Modals/EnquiryItemModal';
 import DateInput from './DateInput';
 
 const EnquiryForm = () => {
-    const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster } = useData();
+    const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
     const { currentUser } = useAuth();
     const [activeTab, setActiveTab] = useState('New');
 
@@ -73,6 +73,10 @@ const EnquiryForm = () => {
     const [pendingFiles, setPendingFiles] = useState([]); // New state for deferred uploads
     const [ackSEList, setAckSEList] = useState([]); // SEs selected for acknowledgement mail
 
+    // Project Suggestions State
+    const [projectSuggestions, setProjectSuggestions] = useState([]);
+    const [showProjectSuggestions, setShowProjectSuggestions] = useState(false);
+
     const handleInputChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
         if (errors[field]) {
@@ -81,6 +85,20 @@ const EnquiryForm = () => {
                 delete newErrors[field];
                 return newErrors;
             });
+        }
+
+        // Project Name Autocomplete Logic
+        if (field === 'ProjectName') {
+            if (value && value.trim().length > 0 && enquiries) {
+                const matches = Object.values(enquiries).filter(e =>
+                    e.ProjectName && e.ProjectName.toLowerCase().includes(value.toLowerCase())
+                );
+                setProjectSuggestions(matches);
+                setShowProjectSuggestions(true);
+            } else {
+                setProjectSuggestions([]);
+                setShowProjectSuggestions(false);
+            }
         }
     };
 
@@ -688,91 +706,69 @@ const EnquiryForm = () => {
         setModifyRequestNo('');
         setAttachments([]);
         setPendingFiles([]);
+        setProjectSuggestions([]);
+        setShowProjectSuggestions(false);
     };
 
     // --- Modify Logic ---
-    const handleLoadEnquiry = async () => {
-        const enq = getEnquiry(modifyRequestNo);
+    const loadEnquiry = async (requestNo) => {
+        const enq = getEnquiry(requestNo);
         if (enq) {
-            setFormData(enq);
-            // Parse comma-separated strings back into arrays
+            // Helper to format date for input (YYYY-MM-DD)
+            const formatDate = (d) => {
+                if (!d) return '';
+                try {
+                    return new Date(d).toISOString().split('T')[0];
+                } catch (e) { return ''; }
+            };
+
+            // Map DB fields to Form State
+            const mappedData = {
+                ...enq,
+                SourceOfInfo: enq.SourceOfEnquiry || enq.SourceOfInfo,
+                DetailsOfEnquiry: enq.EnquiryDetails || enq.DetailsOfEnquiry,
+                Remark: enq.Remarks || enq.Remark,
+                DocumentsReceived: enq.OthersSpecify || enq.DocumentsReceived,
+                EnquiryDate: formatDate(enq.EnquiryDate),
+                DueOn: formatDate(enq.DueDate || enq.DueOn),
+                SiteVisitDate: formatDate(enq.SiteVisitDate),
+                hardcopy: enq.Doc_HardCopies !== undefined ? !!enq.Doc_HardCopies : !!enq.hardcopy,
+                drawing: enq.Doc_Drawing !== undefined ? !!enq.Doc_Drawing : !!enq.drawing,
+                dvd: enq.Doc_CD_DVD !== undefined ? !!enq.Doc_CD_DVD : !!enq.dvd,
+                spec: enq.Doc_Spec !== undefined ? !!enq.Doc_Spec : !!enq.spec,
+                eqpschedule: enq.Doc_EquipmentSchedule !== undefined ? !!enq.Doc_EquipmentSchedule : !!enq.eqpschedule,
+                ceosign: enq.ED_CEOSignatureRequired !== undefined ? !!enq.ED_CEOSignatureRequired : !!enq.ceosign,
+                AutoAck: enq.SendAcknowledgementMail !== undefined ? !!enq.SendAcknowledgementMail : !!enq.AutoAck
+            };
+
+            setFormData(mappedData);
             setEnqTypeList(enq.SelectedEnquiryTypes || (enq.EnquiryType ? enq.EnquiryType.split(',').filter(Boolean) : []));
             setEnqForList(enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []));
             setCustomerList(enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []));
             setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
-            setSeList(enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []));
+            const seList = enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []);
+            setSeList(seList);
+            setAckSEList(seList);
             setIsModifyMode(true);
-            // Load attachments for this enquiry
+
             if (enq.RequestNo) {
                 await loadAttachmentsForEnquiry(enq.RequestNo);
             }
         } else {
+            console.error('Enquiry not found:', requestNo);
             alert('Enquiry not found!');
         }
     };
 
+    const handleLoadEnquiry = async () => {
+        await loadEnquiry(modifyRequestNo);
+    };
+
     const handleOpenFromSearch = (reqNo) => {
-        console.log('handleOpenFromSearch called with:', reqNo);
         setModifyRequestNo(reqNo);
         setActiveTab('Modify');
-        setTimeout(async () => {
-            try {
-                const enq = getEnquiry(reqNo);
-                console.log('Fetched enquiry for Modify:', enq);
-                console.log('Full Enquiry Object:', enq); // Added for debugging
-                if (enq) {
-                    // Helper to format date for input (YYYY-MM-DD)
-                    const formatDate = (d) => {
-                        if (!d) return '';
-                        try {
-                            return new Date(d).toISOString().split('T')[0];
-                        } catch (e) { return ''; }
-                    };
-
-                    // Map DB fields to Form State
-                    const mappedData = {
-                        ...enq,
-                        SourceOfInfo: enq.SourceOfEnquiry || enq.SourceOfInfo, // Map DB 'SourceOfEnquiry' to State 'SourceOfInfo'
-                        DetailsOfEnquiry: enq.EnquiryDetails || enq.DetailsOfEnquiry, // Map DB 'EnquiryDetails' to State 'DetailsOfEnquiry'
-                        Remark: enq.Remarks || enq.Remark, // Map DB 'Remarks' to State 'Remark'
-                        DocumentsReceived: enq.OthersSpecify || enq.DocumentsReceived, // Map DB 'OthersSpecify' to State 'DocumentsReceived'
-
-                        EnquiryDate: formatDate(enq.EnquiryDate),
-                        DueOn: formatDate(enq.DueDate || enq.DueOn), // Map DB 'DueDate' or Payload 'DueOn'
-                        SiteVisitDate: formatDate(enq.SiteVisitDate),
-                        // Map Checkboxes - DB column names are Doc_... or payload keys
-                        hardcopy: enq.Doc_HardCopies !== undefined ? !!enq.Doc_HardCopies : !!enq.hardcopy,
-                        drawing: enq.Doc_Drawing !== undefined ? !!enq.Doc_Drawing : !!enq.drawing,
-                        dvd: enq.Doc_CD_DVD !== undefined ? !!enq.Doc_CD_DVD : !!enq.dvd,
-                        spec: enq.Doc_Spec !== undefined ? !!enq.Doc_Spec : !!enq.spec,
-                        eqpschedule: enq.Doc_EquipmentSchedule !== undefined ? !!enq.Doc_EquipmentSchedule : !!enq.eqpschedule,
-                        ceosign: enq.ED_CEOSignatureRequired !== undefined ? !!enq.ED_CEOSignatureRequired : !!enq.ceosign,
-                        AutoAck: enq.SendAcknowledgementMail !== undefined ? !!enq.SendAcknowledgementMail : !!enq.AutoAck
-                    };
-
-                    setFormData(mappedData);
-                    // Parse comma-separated strings back into arrays
-                    setEnqTypeList(enq.SelectedEnquiryTypes || (enq.EnquiryType ? enq.EnquiryType.split(',').filter(Boolean) : []));
-                    setEnqForList(enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []));
-                    setCustomerList(enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []));
-                    setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
-                    setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
-                    const seList = enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []);
-                    setSeList(seList);
-                    setAckSEList(seList); // Also populate Ack SE list
-                    setIsModifyMode(true);
-                    // Load attachments for this enquiry
-                    if (enq.RequestNo) {
-                        await loadAttachmentsForEnquiry(enq.RequestNo);
-                    }
-                } else {
-                    console.error('Enquiry not found in context for:', reqNo);
-                    alert('Enquiry not found! Please try searching again.');
-                }
-            } catch (err) {
-                console.error('Error in handleOpenFromSearch:', err);
-                alert('Error loading enquiry: ' + err.message);
-            }
+        setTimeout(() => {
+            loadEnquiry(reqNo);
         }, 100);
     };
 
@@ -1087,13 +1083,72 @@ const EnquiryForm = () => {
 
                                                 {/* Project Name & Source */}
                                                 <div className="row mb-3">
-                                                    <div className="col-md-6">
+                                                    <div className="col-md-6" style={{ position: 'relative' }}>
                                                         <label className="form-label">Project Name<span className="text-danger">*</span></label>
-                                                        <input type="text" list="projectList" className="form-control" style={{ fontSize: '13px' }}
-                                                            value={formData.ProjectName} onChange={(e) => handleInputChange('ProjectName', e.target.value)} />
-                                                        <datalist id="projectList">
-                                                            {masters.projectNames.map(p => <option key={p} value={p} />)}
-                                                        </datalist>
+                                                        <div className="input-group">
+                                                            <input
+                                                                type="text"
+                                                                className="form-control"
+                                                                style={{ fontSize: '13px' }}
+                                                                value={formData.ProjectName}
+                                                                onChange={(e) => handleInputChange('ProjectName', e.target.value)}
+                                                                onBlur={() => setTimeout(() => setShowProjectSuggestions(false), 200)}
+                                                                onFocus={() => { if (formData.ProjectName) handleInputChange('ProjectName', formData.ProjectName); }}
+                                                                autoComplete="off"
+                                                            />
+                                                        </div>
+
+                                                        {/* Autocomplete Dropdown */}
+                                                        {showProjectSuggestions && projectSuggestions.length > 0 && (
+                                                            <div className="shadow-lg p-0" style={{
+                                                                position: 'absolute',
+                                                                top: '75px',
+                                                                left: '10px',
+                                                                right: '0',
+                                                                zIndex: 1000,
+                                                                backgroundColor: 'white',
+                                                                borderRadius: '8px',
+                                                                border: '1px solid #e2e8f0',
+                                                                maxHeight: '300px',
+                                                                overflowY: 'auto'
+                                                            }}>
+                                                                {/* Arrow */}
+                                                                <div style={{
+                                                                    position: 'absolute',
+                                                                    top: '-6px',
+                                                                    left: '20px',
+                                                                    width: '12px',
+                                                                    height: '12px',
+                                                                    backgroundColor: 'white',
+                                                                    borderTop: '1px solid #e2e8f0',
+                                                                    borderLeft: '1px solid #e2e8f0',
+                                                                    transform: 'rotate(45deg)'
+                                                                }}></div>
+
+                                                                <div className="list-group list-group-flush">
+                                                                    {projectSuggestions.map((suggestion) => (
+                                                                        <div key={suggestion.RequestNo} className="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
+                                                                            <div>
+                                                                                <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#2d3748' }}>{suggestion.ProjectName}</div>
+                                                                                <div style={{ fontSize: '11px', color: '#718096' }}>{suggestion.RequestNo}</div>
+                                                                            </div>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="btn btn-primary btn-sm"
+                                                                                style={{ fontSize: '11px', padding: '4px 12px' }}
+                                                                                onClick={() => {
+                                                                                    handleOpenFromSearch(suggestion.RequestNo);
+                                                                                    setShowProjectSuggestions(false);
+                                                                                }}
+                                                                            >
+                                                                                Open
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
                                                         {errors.ProjectName && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.ProjectName}</div>}
                                                     </div>
                                                     <div className="col-md-6">
