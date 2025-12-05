@@ -1108,6 +1108,8 @@ const EnquiryForm = () => {
                                                     <div className="col-md-12">
                                                         <label className="form-label">Enquiry details<span className="text-danger">*</span></label>
                                                         <textarea className="form-control" rows="3"
+                                                            style={{ resize: 'none' }}
+                                                            onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
                                                             value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} />
                                                         {errors.DetailsOfEnquiry && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DetailsOfEnquiry}</div>}
                                                     </div>
@@ -1268,6 +1270,8 @@ const EnquiryForm = () => {
 
                                                         <label className="form-label">Others Specify</label>
                                                         <textarea className="form-control mb-2" rows="2"
+                                                            style={{ resize: 'none' }}
+                                                            onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
                                                             value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
 
                                                         {/* File Upload UI */}
@@ -1381,6 +1385,8 @@ const EnquiryForm = () => {
                                                     <div className="col-md-12">
                                                         <label className="form-label">Remarks</label>
                                                         <textarea className="form-control" rows="2"
+                                                            style={{ resize: 'none' }}
+                                                            onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
                                                             value={formData.Remark} onChange={(e) => handleInputChange('Remark', e.target.value)} />
                                                     </div>
                                                 </div>

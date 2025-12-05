@@ -44,7 +44,7 @@ const ListBoxControl = ({
                 <select
                     className="form-select"
                     multiple
-                    style={{ height: '75px', fontSize: '13px' }}
+                    style={{ height: listBoxItems.length > 3 ? `${listBoxItems.length * 24 + 10}px` : '75px', fontSize: '13px' }}
                     onChange={onListBoxChange}
                 >
                     {listBoxItems.map((item, idx) => (
