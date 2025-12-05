@@ -104,7 +104,12 @@ const EnquiryForm = () => {
         }
 
         // 2. Creator Access
-        if (formData.CreatedBy === currentUser.FullName) {
+        const creatorName = (formData.CreatedBy || '').trim().toLowerCase();
+        const currentUserName = (currentUser.name || '').trim().toLowerCase();
+
+        console.log('Permission Check:', { creatorName, currentUserName, match: creatorName === currentUserName });
+
+        if (creatorName && creatorName === currentUserName) {
             setCanEdit(true);
             return;
         }
@@ -114,7 +119,14 @@ const EnquiryForm = () => {
         const relevantItems = masters.enqItems.filter(item => selectedItems.includes(item.ItemName));
 
         let isDivisionMember = false;
-        const userEmail = currentUser.EmailId.toLowerCase();
+        const userEmail = currentUser.EmailId ? currentUser.EmailId.toLowerCase() : '';
+
+        if (!userEmail) {
+            // If no email, can't verify division membership
+            if (relevantItems.length > 0) {
+                // But if items exist and we can't verify, deny access logic continues
+            }
+        }
 
         for (const item of relevantItems) {
             // Check Common Emails
@@ -696,7 +708,7 @@ const EnquiryForm = () => {
             SelectedReceivedFroms: receivedFromList,
             SelectedConcernedSEs: seList,
             AcknowledgementSE: ackSEList[0] || '',
-            CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.FullName || 'System')
+            CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.name || 'System')
         };
 
         if (isModifyMode) {
@@ -1151,7 +1163,7 @@ const EnquiryForm = () => {
                                                     <div className="d-flex align-items-center mb-3">
                                                         <span className="badge bg-light text-dark border me-2">
                                                             <i className="bi bi-person me-1"></i>
-                                                            Created By: {currentUser?.FullName || 'Unknown'}
+                                                            Created By: {currentUser?.name || 'Unknown'}
                                                         </span>
                                                     </div>
                                                 )}
