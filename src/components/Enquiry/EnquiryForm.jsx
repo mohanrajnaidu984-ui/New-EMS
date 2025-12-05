@@ -1003,6 +1003,63 @@ const EnquiryForm = () => {
                             <div className="row justify-content-center">
                                 <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
                                     <form onSubmit={handleSubmit}>
+                                        {/* Enquiry Status Tracker */}
+                                        <div className="card mb-4 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
+                                            <div className="card-body p-4">
+                                                <h6 className="card-title fw-bold mb-4" style={{ color: '#2d3748' }}>Enquiry Status Tracker</h6>
+                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', marginTop: '10px', marginBottom: '10px' }}>
+                                                    {['Enquiry', 'Pricing', 'Quote', 'Follow-up', 'Won / Lost'].map((step, index) => {
+                                                        const stepNum = index + 1;
+                                                        const currentStep = 1; // Default to 1 for New Enquiry
+                                                        const isActive = stepNum === currentStep;
+                                                        const isCompleted = stepNum < currentStep;
+                                                        const isLast = index === 4;
+
+                                                        return (
+                                                            <React.Fragment key={step}>
+                                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', zIndex: 2 }}>
+                                                                    <div style={{
+                                                                        width: '35px',
+                                                                        height: '35px',
+                                                                        borderRadius: '50%',
+                                                                        backgroundColor: isActive || isCompleted ? '#3b82f6' : '#e2e8f0', // Blue or Gray
+                                                                        color: isActive || isCompleted ? '#ffffff' : '#718096',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        justifyContent: 'center',
+                                                                        fontWeight: 'bold',
+                                                                        fontSize: '14px',
+                                                                        border: isActive ? '2px solid #ebf8ff' : 'none',
+                                                                        boxShadow: isActive ? '0 0 0 4px #bfdbfe' : 'none' // Ring effect for active
+                                                                    }}>
+                                                                        {isCompleted ? '✓' : stepNum}
+                                                                    </div>
+                                                                    <span style={{
+                                                                        marginTop: '8px',
+                                                                        fontSize: '12px',
+                                                                        color: isActive || isCompleted ? '#3b82f6' : '#a0aec0',
+                                                                        fontWeight: isActive ? '600' : '400'
+                                                                    }}>
+                                                                        {step}
+                                                                    </span>
+                                                                </div>
+                                                                {!isLast && (
+                                                                    <div style={{
+                                                                        flex: 1,
+                                                                        height: '2px',
+                                                                        backgroundColor: isCompleted ? '#3b82f6' : '#e2e8f0',
+                                                                        marginLeft: '10px',
+                                                                        marginRight: '10px',
+                                                                        marginTop: '-25px' // Align with circle center
+                                                                    }} />
+                                                                )}
+                                                            </React.Fragment>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </div>
+
                                         {/* Card 1: Enquiry Details */}
                                         <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
                                             <div className="card-body p-4">
