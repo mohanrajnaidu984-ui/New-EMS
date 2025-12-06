@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
 import { availableRoles } from '../../data/mockData';
+import ValidationTooltip from '../Common/ValidationTooltip';
 
 const defaultFormData = {
     FullName: '',
@@ -14,6 +15,7 @@ const defaultFormData = {
 const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
     const [formData, setFormData] = useState(defaultFormData);
     const [newRole, setNewRole] = useState('');
+    const [errors, setErrors] = useState({});
 
     // Sync formData with initialData when it changes (for Edit mode)
     // Reset form when modal is closed
@@ -35,10 +37,14 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
             setFormData(defaultFormData);
             setNewRole('');
         }
+        setErrors({});
     }, [initialData, show]);
 
     const handleChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
+        if (errors[field]) {
+            setErrors(prev => ({ ...prev, [field]: null }));
+        }
     };
 
     const handleAddRole = () => {
@@ -57,17 +63,25 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!formData.FullName || !formData.EmailId) {
-            alert('Please fill required fields (Full Name, Email)');
+
+        const newErrors = {};
+        if (!formData.FullName) newErrors.FullName = 'Full Name is required';
+        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
+
+        if (Object.keys(newErrors).length > 0) {
+            setErrors(newErrors);
             return;
         }
+
         // Convert Roles array to comma-separated string
         const payload = {
             ...formData,
             Roles: Array.isArray(formData.Roles) ? formData.Roles.join(',') : formData.Roles
         };
         onSubmit(payload);
-        // Reset form after submission
+        // Reset form is handled by useEffect on close/open or we can do it here if needed, 
+        // but onClose usually triggers parent state change which triggers useEffect here.
+        // For good measure:
         setFormData(defaultFormData);
         setNewRole('');
         onClose();
@@ -89,10 +103,11 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
         >
             <form>
                 <div className="row mb-2">
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Full Name<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.FullName} onChange={(e) => handleChange('FullName', e.target.value)} />
+                        {errors.FullName && <ValidationTooltip message={errors.FullName} />}
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Designation</label>
@@ -101,10 +116,11 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
                     </div>
                 </div>
                 <div className="row mb-2">
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
+                        {errors.EmailId && <ValidationTooltip message={errors.EmailId} />}
                     </div>
                 </div>
                 <div className="row mb-2">

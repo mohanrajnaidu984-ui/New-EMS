@@ -91,7 +91,8 @@ const Login = ({ onSwitchToSignup }) => {
                     id: data.user.UserID || data.user.ID, // Fallback if ID field name varies
                     name: data.user.FullName,
                     email: data.user.EmailId || data.user.MailId,
-                    role: data.user.Roles || data.user.Role || 'User'
+                    role: data.user.Roles || data.user.Role || 'User',
+                    ProfileImage: data.user.ProfileImage
                 });
             } else {
                 setError(data.message || 'Login failed');

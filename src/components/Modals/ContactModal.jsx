@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
+import ValidationTooltip from '../Common/ValidationTooltip';
 
 const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
     const defaultState = {
@@ -17,21 +18,33 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
         EmailId: ''
     };
     const [formData, setFormData] = useState(initialData || defaultState);
+    const [errors, setErrors] = useState({});
 
-    React.useEffect(() => {
+    useEffect(() => {
         setFormData(initialData || defaultState);
-    }, [initialData]);
+        setErrors({});
+    }, [initialData, show]);
 
     const handleChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
+        if (errors[field]) {
+            setErrors(prev => ({ ...prev, [field]: null }));
+        }
     };
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!formData.CompanyName || !formData.ContactName || !formData.Address1) {
-            alert('Please fill required fields (Company Name, Contact Name, Address 1)');
+
+        const newErrors = {};
+        if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
+        if (!formData.ContactName) newErrors.ContactName = 'Contact Person Name is required';
+        if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
+
+        if (Object.keys(newErrors).length > 0) {
+            setErrors(newErrors);
             return;
         }
+
         onSubmit(formData);
         onClose();
     };
@@ -61,17 +74,19 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                             <option>Consultant</option>
                         </select>
                     </div>
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Company Name<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.CompanyName} onChange={(e) => handleChange('CompanyName', e.target.value)} />
+                        {errors.CompanyName && <ValidationTooltip message={errors.CompanyName} />}
                     </div>
                 </div>
                 <div className="row mb-2">
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Contact Person Name<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.ContactName} onChange={(e) => handleChange('ContactName', e.target.value)} />
+                        {errors.ContactName && <ValidationTooltip message={errors.ContactName} />}
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Designation</label>
@@ -88,10 +103,11 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                             <option>General</option>
                         </select>
                     </div>
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Address 1<span className="text-danger">*</span></label>
                         <textarea className="form-control" style={{ fontSize: '13px', fontFamily: 'inherit' }}
                             value={formData.Address1} onChange={(e) => handleChange('Address1', e.target.value)} />
+                        {errors.Address1 && <ValidationTooltip message={errors.Address1} />}
                     </div>
                 </div>
                 <div className="row mb-2">

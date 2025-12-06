@@ -10,6 +10,8 @@ import UserModal from '../Modals/UserModal';
 import EnquiryItemModal from '../Modals/EnquiryItemModal';
 // import ParticleBackground from '../Common/ParticleBackground';
 import DateInput from './DateInput';
+import ValidationTooltip from '../Common/ValidationTooltip';
+import CollaborativeNotes from './CollaborativeNotes';
 
 const EnquiryForm = () => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
@@ -93,10 +95,11 @@ const EnquiryForm = () => {
         if (!currentUser) return;
 
         // 1. Admin Override
-        // Roles is now a comma-separated string based on UserModal logic, but verify context
-        const userRoles = typeof currentUser.Roles === 'string'
-            ? currentUser.Roles.split(',').map(r => r.trim())
-            : (Array.isArray(currentUser.Roles) ? currentUser.Roles : []);
+        // Check both 'role' and 'Roles' to be safe
+        const roleString = currentUser.role || currentUser.Roles || '';
+        const userRoles = typeof roleString === 'string'
+            ? roleString.split(',').map(r => r.trim())
+            : (Array.isArray(roleString) ? roleString : []);
 
         if (userRoles.includes('Admin')) {
             setCanEdit(true);
@@ -176,11 +179,15 @@ const EnquiryForm = () => {
     };
 
     // Generate RequestNo on mount for New Enquiry
+    // Generate RequestNo and set CreatedBy on mount for New Enquiry
     useEffect(() => {
         if (activeTab === 'New' && !isModifyMode) {
             generateNewRequestNo();
+            if (currentUser && currentUser.name) {
+                setFormData(prev => ({ ...prev, CreatedBy: currentUser.name }));
+            }
         }
-    }, [activeTab, isModifyMode]);
+    }, [activeTab, isModifyMode, currentUser]);
 
     const generateNewRequestNo = () => {
         const now = new Date();
@@ -1019,58 +1026,101 @@ const EnquiryForm = () => {
     console.log('EnquiryForm Render:', { activeTab, isModifyMode, modifyRequestNo });
     return (
         <div style={{ position: 'relative', minHeight: '100vh' }}>
-            {/* <ParticleBackground /> */}
             <div style={{ position: 'relative', zIndex: 1 }}>
-                <ul className="nav nav-tabs mb-3">
-                    <li className="nav-item">
-                        <button className={`nav-link ${activeTab === 'New' ? 'active' : ''}`} onClick={() => { setActiveTab('New'); resetForm(); }}>New Enquiry</button>
-                    </li>
-                    <li className="nav-item">
-                        <button className={`nav-link ${activeTab === 'Modify' ? 'active' : ''}`} onClick={() => { setActiveTab('Modify'); resetForm(); }}>Modify Enquiry</button>
-                    </li>
-                    <li className="nav-item">
-                        <button className={`nav-link ${activeTab === 'Search' ? 'active' : ''}`} onClick={() => setActiveTab('Search')}>Search Enquiry</button>
-                    </li>
-                </ul>
+                <div className="row justify-content-center">
+                    <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
+                        <div className="d-flex mb-4" style={{ borderBottom: '1px solid #e0e0e0' }}>
+                            <button
+                                className="btn rounded-0"
+                                style={{
+                                    color: activeTab === 'New' ? '#d63384' : '#6c757d',
+                                    borderBottom: activeTab === 'New' ? '3px solid #d63384' : '3px solid transparent',
+                                    fontWeight: activeTab === 'New' ? '600' : '500',
+                                    backgroundColor: 'transparent',
+                                    padding: '10px 20px',
+                                    marginBottom: '-2px',
+                                    fontSize: '15px'
+                                }}
+                                onClick={() => { setActiveTab('New'); resetForm(); }}
+                            >
+                                New Enquiry
+                            </button>
+                            <button
+                                className="btn rounded-0"
+                                style={{
+                                    color: activeTab === 'Modify' ? '#d63384' : '#6c757d',
+                                    borderBottom: activeTab === 'Modify' ? '3px solid #d63384' : '3px solid transparent',
+                                    fontWeight: activeTab === 'Modify' ? '600' : '500',
+                                    backgroundColor: 'transparent',
+                                    padding: '10px 20px',
+                                    marginBottom: '-2px',
+                                    fontSize: '15px'
+                                }}
+                                onClick={() => { setActiveTab('Modify'); resetForm(); }}
+                            >
+                                Modify Enquiry
+                            </button>
+                            <button
+                                className="btn rounded-0"
+                                style={{
+                                    color: activeTab === 'Search' ? '#d63384' : '#6c757d',
+                                    borderBottom: activeTab === 'Search' ? '3px solid #d63384' : '3px solid transparent',
+                                    fontWeight: activeTab === 'Search' ? '600' : '500',
+                                    backgroundColor: 'transparent',
+                                    padding: '10px 20px',
+                                    marginBottom: '-2px',
+                                    fontSize: '15px'
+                                }}
+                                onClick={() => setActiveTab('Search')}
+                            >
+                                Search Enquiry
+                            </button>
+                        </div>
+                    </div>
+                </div>
 
                 {activeTab === 'Search' ? (
                     <SearchEnquiry onOpen={handleOpenFromSearch} />
                 ) : (
                     <>
                         {activeTab === 'Modify' && (
-                            <div className="row mb-3">
-                                <div className="col-md-3">
-                                    <label className="form-label">Request No<span className="text-danger">*</span></label>
-                                    <input type="text" className="form-control" placeholder="e.g. EYS/2025/11/001"
-                                        value={modifyRequestNo} onChange={(e) => setModifyRequestNo(e.target.value)} />
-                                </div>
-                                {isModifyMode && (
-                                    <div className="col-md-3">
-                                        <label className="form-label">Status<span className="text-danger">*</span></label>
-                                        <select
-                                            className="form-select"
-                                            value={formData.Status || 'Enquiry'}
-                                            onChange={(e) => handleInputChange('Status', e.target.value)}
-                                            style={{ fontSize: '13px' }}
-                                        >
-                                            <option value="Enquiry">Enquiry</option>
-                                            <option value="Pricing">Pricing</option>
-                                            <option value="Quote">Quote</option>
-                                            <option value="Follow-up">Follow-up</option>
-                                            <option value="Won">Won</option>
-                                            <option value="Lost">Lost</option>
-                                        </select>
-                                        {(formData.Status === 'Won' || formData.Status === 'Lost') && (
-                                            <div className="alert alert-success mt-2 p-2" style={{ fontSize: '11px' }}>
-                                                <i className="bi bi-check-circle me-1"></i>
-                                                This enquiry is closed
+                            <div className="row justify-content-center mb-3">
+                                <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
+                                    <div className="row">
+                                        <div className="col-md-3">
+                                            <label className="form-label">Request No<span className="text-danger">*</span></label>
+                                            <input type="text" className="form-control" placeholder="e.g. EYS/2025/11/001"
+                                                value={modifyRequestNo} onChange={(e) => setModifyRequestNo(e.target.value)} />
+                                        </div>
+                                        {isModifyMode && (
+                                            <div className="col-md-3">
+                                                <label className="form-label">Status<span className="text-danger">*</span></label>
+                                                <select
+                                                    className="form-select"
+                                                    value={formData.Status || 'Enquiry'}
+                                                    onChange={(e) => handleInputChange('Status', e.target.value)}
+                                                    style={{ fontSize: '13px' }}
+                                                >
+                                                    <option value="Enquiry">Enquiry</option>
+                                                    <option value="Pricing">Pricing</option>
+                                                    <option value="Quote">Quote</option>
+                                                    <option value="Follow-up">Follow-up</option>
+                                                    <option value="Won">Won</option>
+                                                    <option value="Lost">Lost</option>
+                                                </select>
+                                                {(formData.Status === 'Won' || formData.Status === 'Lost') && (
+                                                    <div className="alert alert-success mt-2 p-2" style={{ fontSize: '11px' }}>
+                                                        <i className="bi bi-check-circle me-1"></i>
+                                                        This enquiry is closed
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
+                                        <div className="col-md-3 d-flex align-items-end">
+                                            <button className="btn btn-outline-primary me-2" onClick={handleLoadEnquiry}>Load</button>
+                                            <button className="btn btn-outline-secondary" onClick={resetForm}>Clear</button>
+                                        </div>
                                     </div>
-                                )}
-                                <div className="col-md-3 d-flex align-items-end">
-                                    <button className="btn btn-outline-primary me-2" onClick={handleLoadEnquiry}>Load</button>
-                                    <button className="btn btn-outline-secondary" onClick={resetForm}>Clear</button>
                                 </div>
                             </div>
                         )}
@@ -1252,9 +1302,9 @@ const EnquiryForm = () => {
                                                             </div>
                                                         )}
 
-                                                        {errors.ProjectName && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.ProjectName}</div>}
+                                                        {errors.ProjectName && <ValidationTooltip message={errors.ProjectName} />}
                                                     </div>
-                                                    <div className="col-md-6">
+                                                    <div className="col-md-6" style={{ position: 'relative' }}>
                                                         <label className="form-label">Source of Enquiry<span className="text-danger">*</span></label>
                                                         <select
                                                             className="form-select"
@@ -1265,29 +1315,29 @@ const EnquiryForm = () => {
                                                             <option value="">-- Select Source --</option>
                                                             {masters.sourceOfInfos?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                                                         </select>
-                                                        {errors.SourceOfInfo && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.SourceOfInfo}</div>}
+                                                        {errors.SourceOfInfo && <ValidationTooltip message={errors.SourceOfInfo} />}
                                                     </div>
                                                 </div>
 
                                                 {/* Dates */}
                                                 <div className="mb-3" style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', width: '100%', gap: '15px' }}>
-                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
                                                         <label className="form-label">Enquiry Date <span className="text-danger">*</span></label>
                                                         <DateInput
                                                             value={formData.EnquiryDate}
                                                             onChange={(e) => handleInputChange('EnquiryDate', e.target.value)}
                                                             placeholder="DD-MMM-YYYY"
                                                         />
-                                                        {errors.EnquiryDate && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.EnquiryDate}</div>}
+                                                        {errors.EnquiryDate && <ValidationTooltip message={errors.EnquiryDate} />}
                                                     </div>
-                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                    <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
                                                         <label className="form-label">Due Date <span className="text-danger">*</span></label>
                                                         <DateInput
                                                             value={formData.DueOn}
                                                             onChange={(e) => handleInputChange('DueOn', e.target.value)}
                                                             placeholder="DD-MMM-YYYY"
                                                         />
-                                                        {errors.DueOn && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DueOn}</div>}
+                                                        {errors.DueOn && <ValidationTooltip message={errors.DueOn} />}
                                                     </div>
                                                     <div style={{ flex: 1, minWidth: 0 }}>
                                                         <label className="form-label">Site Visit Date</label>
@@ -1300,51 +1350,47 @@ const EnquiryForm = () => {
                                                 </div>
 
                                                 {/* Enquiry Type */}
-                                                <div className="row mb-3">
-                                                    <div className="col-md-12">
-                                                        <ListBoxControl
-                                                            label={<span>Enquiry Type<span className="text-danger">*</span></span>}
-                                                            options={masters.enquiryType}
-                                                            selectedOption={formData.EnquiryType}
-                                                            onOptionChange={(val) => handleInputChange('EnquiryType', val)}
-                                                            listBoxItems={enqTypeList}
-                                                            onAdd={handleAddEnqType}
-                                                            onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
-                                                            error={errors.EnquiryType}
-                                                        />
-                                                    </div>
+                                                <div className="mb-3" style={{ width: 'calc(66.666667% - 5px)' }}>
+                                                    <ListBoxControl
+                                                        label={<span>Enquiry Type<span className="text-danger">*</span></span>}
+                                                        options={masters.enquiryType}
+                                                        selectedOption={formData.EnquiryType}
+                                                        onOptionChange={(val) => handleInputChange('EnquiryType', val)}
+                                                        listBoxItems={enqTypeList}
+                                                        onAdd={handleAddEnqType}
+                                                        onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
+                                                        error={errors.EnquiryType}
+                                                    />
                                                 </div>
 
                                                 {/* Enquiry For */}
-                                                <div className="row mb-3">
-                                                    <div className="col-md-12">
-                                                        <ListBoxControl
-                                                            label={<span>Enquiry For<span className="text-danger">*</span></span>}
-                                                            options={masters.enquiryFor}
-                                                            selectedOption={formData.EnquiryFor}
-                                                            onOptionChange={(val) => handleInputChange('EnquiryFor', val)}
-                                                            listBoxItems={enqForList}
-                                                            onAdd={handleAddEnqFor}
-                                                            onRemove={() => handleRemoveItem(enqForList, setEnqForList)}
-                                                            showNew={true}
-                                                            showEdit={true}
-                                                            canEdit={!!formData.EnquiryFor}
-                                                            onNew={() => openNewModal(setShowEnqItemModal)}
-                                                            onEdit={handleEditEnqFor}
-                                                            error={errors.EnquiryFor}
-                                                        />
-                                                    </div>
+                                                <div className="mb-3" style={{ width: 'calc(66.666667% - 5px)' }}>
+                                                    <ListBoxControl
+                                                        label={<span>Enquiry For<span className="text-danger">*</span></span>}
+                                                        options={masters.enquiryFor}
+                                                        selectedOption={formData.EnquiryFor}
+                                                        onOptionChange={(val) => handleInputChange('EnquiryFor', val)}
+                                                        listBoxItems={enqForList}
+                                                        onAdd={handleAddEnqFor}
+                                                        onRemove={() => handleRemoveItem(enqForList, setEnqForList)}
+                                                        showNew={currentUser?.role === 'Admin'}
+                                                        showEdit={currentUser?.role === 'Admin'}
+                                                        canEdit={!!formData.EnquiryFor && currentUser?.role === 'Admin'}
+                                                        onNew={() => openNewModal(setShowEnqItemModal)}
+                                                        onEdit={handleEditEnqFor}
+                                                        error={errors.EnquiryFor}
+                                                    />
                                                 </div>
 
                                                 {/* Enquiry Details */}
                                                 <div className="row mb-3">
-                                                    <div className="col-md-12">
+                                                    <div className="col-md-12" style={{ position: 'relative' }}>
                                                         <label className="form-label">Enquiry details<span className="text-danger">*</span></label>
                                                         <textarea className="form-control" rows="3"
                                                             style={{ resize: 'none' }}
                                                             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
                                                             value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} />
-                                                        {errors.DetailsOfEnquiry && <div className="text-danger" style={{ fontSize: '11px' }}>{errors.DetailsOfEnquiry}</div>}
+                                                        {errors.DetailsOfEnquiry && <ValidationTooltip message={errors.DetailsOfEnquiry} />}
                                                     </div>
                                                 </div>
                                             </div>
@@ -1411,38 +1457,34 @@ const EnquiryForm = () => {
                                                 </div>
 
                                                 {/* Client Name */}
-                                                <div className="row mb-3">
-                                                    <div className="col-md-12">
-                                                        <SearchableSelectControl
-                                                            label={<span>Client Name<span className="text-danger">*</span></span>}
-                                                            options={masters.clientNames}
-                                                            selectedOption={formData.ClientName}
-                                                            onOptionChange={(val) => handleInputChange('ClientName', val)}
-                                                            showNew={true}
-                                                            showEdit={true}
-                                                            canEdit={!!formData.ClientName}
-                                                            onNew={() => openNewModal(setShowCustomerModal, 'Client')}
-                                                            onEdit={handleEditClient}
-                                                            error={errors.ClientName}
-                                                        />
-                                                    </div>
+                                                <div className="mb-3" style={{ width: '50%', paddingRight: '12px' }}>
+                                                    <SearchableSelectControl
+                                                        label={<span>Client Name<span className="text-danger">*</span></span>}
+                                                        options={masters.clientNames}
+                                                        selectedOption={formData.ClientName}
+                                                        onOptionChange={(val) => handleInputChange('ClientName', val)}
+                                                        showNew={true}
+                                                        showEdit={true}
+                                                        canEdit={!!formData.ClientName}
+                                                        onNew={() => openNewModal(setShowCustomerModal, 'Client')}
+                                                        onEdit={handleEditClient}
+                                                        error={errors.ClientName}
+                                                    />
                                                 </div>
 
                                                 {/* Consultant Name */}
-                                                <div className="row mb-3">
-                                                    <div className="col-md-12">
-                                                        <SearchableSelectControl
-                                                            label="Consultant Name"
-                                                            options={masters.consultantNames}
-                                                            selectedOption={formData.ConsultantName}
-                                                            onOptionChange={(val) => handleInputChange('ConsultantName', val)}
-                                                            showNew={true}
-                                                            showEdit={true}
-                                                            canEdit={!!formData.ConsultantName}
-                                                            onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
-                                                            onEdit={handleEditConsultant}
-                                                        />
-                                                    </div>
+                                                <div className="mb-3" style={{ width: '50%', paddingRight: '12px' }}>
+                                                    <SearchableSelectControl
+                                                        label="Consultant Name"
+                                                        options={masters.consultantNames}
+                                                        selectedOption={formData.ConsultantName}
+                                                        onOptionChange={(val) => handleInputChange('ConsultantName', val)}
+                                                        showNew={true}
+                                                        showEdit={true}
+                                                        canEdit={!!formData.ConsultantName}
+                                                        onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
+                                                        onEdit={handleEditConsultant}
+                                                    />
                                                 </div>
                                             </div>
                                         </div>
@@ -1627,56 +1669,34 @@ const EnquiryForm = () => {
                                         </div>
 
                                         {/* Card 5: Collaborative Notes */}
-                                        <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
-                                            <div className="card-body p-4">
-                                                <h5 className="card-title fw-bold mb-4">Collaborative Notes</h5>
-                                                <div className="bg-light p-3 rounded border">
-                                                    <div className="d-flex mb-3">
-                                                        <div className="me-2"><div className="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>V</div></div>
-                                                        <div className="flex-grow-1">
-                                                            <div className="bg-white p-2 rounded shadow-sm">
-                                                                <small className="text-muted d-block mb-1">Vignesh - 2 hours ago</small>
-                                                                Client mentioned they are also interested in a maintenance package. We should follow up on this when preparing the quote.
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="d-flex mb-3">
-                                                        <div className="me-2"><div className="bg-dark text-white rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>J</div></div>
-                                                        <div className="flex-grow-1">
-                                                            <div className="bg-white p-2 rounded shadow-sm">
-                                                                <small className="text-muted d-block mb-1">John - 1 hour ago</small>
-                                                                Noted. I've added the maintenance package brochure to the attachments. Make sure to reference it in the quote.
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="d-flex align-items-center">
-                                                        <div className="me-2"><div className="bg-warning text-dark rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>U</div></div>
-                                                        <input type="text" className="form-control" placeholder="Add a new note..." />
-                                                        <button type="button" className="btn btn-primary ms-2">Post</button>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
+                                        {/* Card 5: Collaborative Notes */}
+                                        <CollaborativeNotes
+                                            enquiryId={formData?.RequestNo || modifyRequestNo}
+                                            enquiryData={formData}
+                                        />
 
                                         {/* Footer: Actions */}
-                                        <div className="d-flex justify-content-between align-items-center mt-4 mb-5 px-2">
-                                            <div className="d-flex gap-4">
+                                        {/* Footer: Actions */}
+                                        <div>
+                                            {/* Checkboxes Section */}
+                                            <div className="d-flex flex-column gap-2 mb-3">
+                                                {/* Send Acknowledgement Mail */}
                                                 <div className="form-check" style={{ fontSize: '13px' }}>
                                                     <input className="form-check-input" type="checkbox" id="autoAck"
                                                         checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} />
                                                     <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail</label>
                                                 </div>
 
-                                                {/* Concerned SE Selection for Acknowledgement */}
+                                                {/* Concerned SE Selection (Conditionally Rendered BELOW Send Ack) */}
                                                 {formData.AutoAck && seList.length > 0 && (
-                                                    <div className="ms-2" style={{ fontSize: '13px' }}>
+                                                    <div className="ms-4 mb-2" style={{ fontSize: '13px' }}>
                                                         <select
                                                             className="form-select form-select-sm"
                                                             value={ackSEList[0] || ''}
                                                             onChange={(e) => {
                                                                 setAckSEList(e.target.value ? [e.target.value] : []);
                                                             }}
-                                                            style={{ fontSize: '13px', width: 'auto', display: 'inline-block' }}
+                                                            style={{ fontSize: '13px', width: '200px' }}
                                                         >
                                                             <option value="">-- Select SE --</option>
                                                             {seList.map((se, idx) => (
@@ -1686,15 +1706,18 @@ const EnquiryForm = () => {
                                                     </div>
                                                 )}
 
+                                                {/* ED/CEO Signature Required */}
                                                 <div className="form-check" style={{ fontSize: '13px' }}>
                                                     <input className="form-check-input" type="checkbox" id="ceoSign"
                                                         checked={formData.ceosign} onChange={(e) => handleInputChange('ceosign', e.target.checked)} />
                                                     <label className="form-check-label" htmlFor="ceoSign">ED/CEO Signature required</label>
                                                 </div>
                                             </div>
-                                            <div className="d-flex gap-2">
+
+                                            {/* Buttons Section (Below Checkboxes) */}
+                                            <div className="d-flex justify-content-end gap-2 mt-4 mb-5">
                                                 <button type="button" className="btn btn-outline-danger" onClick={resetForm}>Cancel</button>
-                                                <button type="submit" className="btn btn-success">
+                                                <button type="submit" className="btn btn-outline-success">
                                                     {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
                                                 </button>
                                             </div>
@@ -1736,8 +1759,8 @@ const EnquiryForm = () => {
                         )}
                     </>
                 )}
-            </div>
-        </div>
+            </div >
+        </div >
     );
 };
 

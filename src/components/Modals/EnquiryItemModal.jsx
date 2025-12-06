@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
+import ValidationTooltip from '../Common/ValidationTooltip';
 
 const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
     const [formData, setFormData] = useState({
@@ -15,6 +16,7 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
     const [newCCMail, setNewCCMail] = useState('');
     const [selectedCommonMails, setSelectedCommonMails] = useState([]);
     const [selectedCCMails, setSelectedCCMails] = useState([]);
+    const [errors, setErrors] = useState({});
 
     useEffect(() => {
         if (show) {
@@ -45,11 +47,15 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
             setNewCCMail('');
             setSelectedCommonMails([]);
             setSelectedCCMails([]);
+            setErrors({});
         }
     }, [show, mode, initialData]);
 
     const handleChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
+        if (errors[field]) {
+            setErrors(prev => ({ ...prev, [field]: null }));
+        }
     };
 
     const handleAddList = (field, value, setter) => {
@@ -71,10 +77,15 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!formData.ItemName) {
-            alert('Please fill required fields (Item Name)');
+
+        const newErrors = {};
+        if (!formData.ItemName) newErrors.ItemName = 'Item Name is required';
+
+        if (Object.keys(newErrors).length > 0) {
+            setErrors(newErrors);
             return;
         }
+
         // Convert arrays to comma-separated strings for the backend
         const payload = {
             ...formData,
@@ -101,10 +112,11 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
         >
             <form>
                 <div className="row mb-2">
-                    <div className="col-md-6">
+                    <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Item Name<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.ItemName} onChange={(e) => handleChange('ItemName', e.target.value)} />
+                        {errors.ItemName && <ValidationTooltip message={errors.ItemName} />}
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Company Name (Dept)</label>

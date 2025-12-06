@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useData } from '../../context/DataContext';
+import { useAuth } from '../../context/AuthContext';
 
 const SearchEnquiry = ({ onOpen }) => {
-    const { enquiries } = useData();
+    const { enquiries, masters } = useData();
+    const { currentUser } = useAuth();
 
     // Search filters
     const [searchText, setSearchText] = useState('');
@@ -11,26 +13,75 @@ const SearchEnquiry = ({ onOpen }) => {
     const [toDate, setToDate] = useState('');
 
     const [results, setResults] = useState([]);
+    const [filteredEnquiries, setFilteredEnquiries] = useState([]);
 
-    // Initialize results with all enquiries (already sorted by backend)
-    // Initialize results with all enquiries (sorted by latest)
+    // Initialize filtered enquiries based on permissions
     useEffect(() => {
-        const allEnquiries = Object.values(enquiries).sort((a, b) => {
-            // Primary: CreatedAt (descending)
-            const dateA = new Date(a.CreatedAt || a.EnquiryDate);
-            const dateB = new Date(b.CreatedAt || b.EnquiryDate);
-            if (dateB - dateA !== 0) return dateB - dateA;
+        if (!currentUser) return;
 
-            // Secondary: RequestNo (descending) as tie-breaker
-            return (b.RequestNo || '').localeCompare(a.RequestNo || '');
-        });
-        setResults(allEnquiries);
-    }, [enquiries]);
+        // Determine user role
+        const roleString = currentUser.role || currentUser.Roles || '';
+        const userRoles = typeof roleString === 'string'
+            ? roleString.split(',').map(r => r.trim())
+            : (Array.isArray(roleString) ? roleString : []);
+
+        const isAdmin = userRoles.includes('Admin');
+        const userEmail = currentUser.EmailId?.toLowerCase() || '';
+        const currentUserName = currentUser.name?.trim().toLowerCase() || '';
+
+        // Filter Function
+        const isVisible = (enq) => {
+            if (isAdmin) return true;
+
+            // 1. Created By Me
+            if (enq.CreatedBy && enq.CreatedBy.trim().toLowerCase() === currentUserName) return true;
+
+            // 2. Concerned SE is Me (Check name match or list match)
+            if (enq.ConcernedSE && enq.ConcernedSE.trim().toLowerCase() === currentUserName) return true;
+            // Check if user is in SelectedConcernedSEs array if it exists
+            if (enq.SelectedConcernedSEs && enq.SelectedConcernedSEs.some(se => se.trim().toLowerCase() === currentUserName)) return true;
+
+
+            // 3. Division/Department Coworker (via EnquiryFor -> Email Check)
+            if (masters.enqItems && enq.SelectedEnquiryFor) {
+                const selectedItems = Array.isArray(enq.SelectedEnquiryFor) ? enq.SelectedEnquiryFor : enq.SelectedEnquiryFor.split(',');
+                const relevantItems = masters.enqItems.filter(item => selectedItems.includes(item.ItemName));
+
+                for (const item of relevantItems) {
+                    const allEmails = [
+                        ...(item.CommonMailIds ? item.CommonMailIds.split(',') : []),
+                        ...(item.CCMailIds ? item.CCMailIds.split(',') : [])
+                    ].map(e => e.trim().toLowerCase());
+
+                    if (userEmail && allEmails.includes(userEmail)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        };
+
+        const allowed = Object.values(enquiries)
+            .filter(isVisible)
+            .sort((a, b) => {
+                // Primary: CreatedAt (descending)
+                const dateA = new Date(a.CreatedAt || a.EnquiryDate);
+                const dateB = new Date(b.CreatedAt || b.EnquiryDate);
+                if (dateB - dateA !== 0) return dateB - dateA;
+
+                // Secondary: RequestNo (descending) as tie-breaker
+                return (b.RequestNo || '').localeCompare(a.RequestNo || '');
+            });
+
+        setFilteredEnquiries(allowed);
+        setResults(allowed);
+    }, [enquiries, currentUser, masters]);
 
     const handleSearch = () => {
-        let filtered = Object.values(enquiries);
+        let filtered = [...filteredEnquiries];
 
-        // Search text filter (Request No / Customer / Client / Project / SE)
+        // Search text filter
         if (searchText) {
             const lowerText = searchText.toLowerCase();
             filtered = filtered.filter(e =>
@@ -57,8 +108,6 @@ const SearchEnquiry = ({ onOpen }) => {
             filtered = filtered.filter(e => new Date(e.EnquiryDate) <= new Date(toDate));
         }
 
-        // No reverse needed as backend sends sorted data
-
         setResults(filtered);
     };
 
@@ -67,7 +116,7 @@ const SearchEnquiry = ({ onOpen }) => {
         setFilterCategory('All Categories');
         setFromDate('');
         setToDate('');
-        setResults(Object.values(enquiries));
+        setResults(filteredEnquiries);
     };
 
     return (

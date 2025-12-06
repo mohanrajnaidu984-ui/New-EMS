@@ -1,10 +1,13 @@
 import React from 'react';
 import Header from './Header';
-const MainLayout = ({ children }) => {
+const MainLayout = ({ children, activeTab, onNavigate }) => {
     return (
-        <div style={{ margin: '0 15%' }}>
-            <Header />
-            <div className="container-fluid px-3">
+        <div>
+            {/* Header Self-Managed */}
+            <Header activeTab={activeTab} onNavigate={onNavigate} />
+
+            {/* Content Wrapper: Centered with 83% width */}
+            <div className="container-fluid px-3" style={{ width: '83%', margin: '0 auto', paddingTop: '100px' }}>
                 {children}
             </div>
         </div>

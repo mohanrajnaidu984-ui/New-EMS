@@ -1,5 +1,6 @@
 import React from 'react';
 import Select from 'react-select';
+import ValidationTooltip from '../Common/ValidationTooltip';
 
 const SearchableSelectControl = ({
     label,
@@ -50,7 +51,7 @@ const SearchableSelectControl = ({
     };
 
     return (
-        <div className="mb-2">
+        <div className="mb-2" style={{ position: 'relative' }}>
             {label && <label className="form-label">{label}</label>}
             <div className="d-flex">
                 <Select
@@ -104,7 +105,7 @@ const SearchableSelectControl = ({
                     </div>
                 )}
             </div>
-            {error && <div className="text-danger" style={{ fontSize: '11px' }}>{error}</div>}
+            {error && <ValidationTooltip message={error} />}
 
             {/* Card View for Selected Item */}
             {selectedItemDetails && (

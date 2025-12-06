@@ -86,7 +86,7 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use('/uploads', express.static('uploads')); // Serve uploaded files
 
 // Request Logger
@@ -97,7 +97,7 @@ app.use((req, res, next) => {
 });
 
 // Connect to Database
-// Database connection initialized at startup
+connectDB();
 
 // --- Authentication Routes ---
 
@@ -1069,6 +1069,26 @@ const initApp = async () => {
                 await sql.query`ALTER TABLE Master_ConcernedSE ADD ProfileImage NVARCHAR(MAX)`;
                 console.log('ProfileImage column added.');
             }
+
+            // Check if EnquiryNotes table exists
+            const checkNotesTable = await sql.query`
+                SELECT * FROM sysobjects WHERE name='EnquiryNotes' AND xtype='U'
+            `;
+            if (checkNotesTable.recordset.length === 0) {
+                console.log('Creating EnquiryNotes table...');
+                await sql.query`
+                    CREATE TABLE EnquiryNotes (
+                        ID INT IDENTITY(1,1) PRIMARY KEY,
+                        EnquiryID INT NOT NULL,
+                        UserID INT NOT NULL,
+                        UserName NVARCHAR(255),
+                        UserProfileImage NVARCHAR(MAX),
+                        NoteContent NVARCHAR(MAX),
+                        CreatedAt DATETIME DEFAULT GETDATE()
+                    )
+                 `;
+                console.log('EnquiryNotes table created.');
+            }
         } catch (schemaErr) {
             console.error('Schema check error:', schemaErr);
         }
@@ -1096,5 +1116,42 @@ app.post('/api/auth/update-profile-image', async (req, res) => {
     } catch (err) {
         console.error('Error updating profile image:', err);
         res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// --- Collaborative Notes Endpoints ---
+
+// Get Notes
+app.get('/api/enquiries/:id/notes', async (req, res) => {
+    try {
+        const enquiryId = decodeURIComponent(req.params.id);
+        const result = await sql.query`SELECT * FROM EnquiryNotes WHERE EnquiryID = ${enquiryId} ORDER BY CreatedAt ASC`;
+        res.json(result.recordset);
+    } catch (err) {
+        console.error('Error fetching notes:', err);
+        res.status(500).send(err.message);
+    }
+});
+
+// Add Note
+app.post('/api/enquiries/:id/notes', async (req, res) => {
+    const { userId, userName, userProfileImage, content } = req.body;
+    const enquiryId = decodeURIComponent(req.params.id);
+    try {
+        const request = new sql.Request();
+        request.input('EnquiryID', sql.NVarChar, enquiryId); // Assuming RequestNo is string
+        request.input('UserID', sql.Int, userId);
+        request.input('UserName', sql.NVarChar, userName);
+        request.input('UserProfileImage', sql.NVarChar, userProfileImage);
+        request.input('NoteContent', sql.NVarChar, content);
+
+        await request.query`
+            INSERT INTO EnquiryNotes (EnquiryID, UserID, UserName, UserProfileImage, NoteContent)
+            VALUES (@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent)
+        `;
+        res.sendStatus(201);
+    } catch (err) {
+        console.error('Error adding note:', err);
+        res.status(500).send(err.message);
     }
 });

@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import ProfileImageModal from '../Modals/ProfileImageModal';
+import ChangePasswordModal from '../Modals/ChangePasswordModal';
 
 const UserProfile = () => {
     const { currentUser, logout, updateProfileImage } = useAuth();
     const [showModal, setShowModal] = useState(false);
+    const [showPasswordModal, setShowPasswordModal] = useState(false);
     const [dropdownOpen, setDropdownOpen] = useState(false);
 
     const handleImageSave = (base64) => {
@@ -25,8 +27,8 @@ const UserProfile = () => {
                 <div
                     className="rounded-circle border d-flex align-items-center justify-content-center overflow-hidden me-2"
                     style={{
-                        width: '32px',
-                        height: '32px',
+                        width: '42px',
+                        height: '42px',
                         backgroundColor: '#f0f2f5',
                         cursor: 'pointer'
                     }}
@@ -43,14 +45,14 @@ const UserProfile = () => {
                             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                         />
                     ) : (
-                        <i className="bi bi-person-fill text-secondary" style={{ fontSize: '1.2rem' }}></i>
+                        <i className="bi bi-person-fill text-secondary" style={{ fontSize: '1.5rem' }}></i>
                     )}
                 </div>
 
-                <span className={`fw-medium text-secondary ${(dropdownOpen) ? 'text-primary' : ''}`}>
+                <span className={`fw-medium text-secondary ${(dropdownOpen) ? 'text-primary' : ''}`} style={{ fontSize: '16px' }}>
                     {currentUser.name}
                 </span>
-                <i className="bi bi-chevron-down ms-1 text-secondary" style={{ fontSize: '0.7rem' }}></i>
+                <i className="bi bi-chevron-down ms-2 text-secondary" style={{ fontSize: '0.9rem' }}></i>
             </div>
 
             {/* Dropdown Menu */}
@@ -61,7 +63,7 @@ const UserProfile = () => {
                         top: '100%', // Below the bar
                         right: 0,
                         marginTop: '8px',
-                        minWidth: '150px',
+                        minWidth: '180px',
                         zIndex: 1050,
                         border: '1px solid #e0e0e0'
                     }}
@@ -77,6 +79,18 @@ const UserProfile = () => {
                         <i className="bi bi-camera me-2"></i>
                         Update Photo
                     </button>
+                    <button
+                        className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start"
+                        onClick={() => {
+                            setDropdownOpen(false);
+                            setShowPasswordModal(true);
+                        }}
+                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                    >
+                        <i className="bi bi-key me-2"></i>
+                        Change Password
+                    </button>
+                    <div className="dropdown-divider"></div>
                     <button
                         className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start text-danger"
                         onClick={() => {
@@ -95,6 +109,11 @@ const UserProfile = () => {
                 show={showModal}
                 onClose={() => setShowModal(false)}
                 onSave={handleImageSave}
+            />
+
+            <ChangePasswordModal
+                show={showPasswordModal}
+                onClose={() => setShowPasswordModal(false)}
             />
         </div>
     );

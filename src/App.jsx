@@ -23,18 +23,41 @@ function AppContent() {
           <Login onSwitchToSignup={() => setShowSignup(true)} />
         )
       ) : (
-        <MainLayout>
-          <Main />
-        </MainLayout>
+        <MainLayoutWrapper />
       )}
-      <div style={{ position: 'fixed', bottom: 10, right: 10, background: 'rgba(255,0,0,0.9)', color: 'white', padding: '15px', zIndex: 9999, fontSize: '14px', border: '2px solid white' }}>
-        <strong>Debug Info:</strong><br />
-        Auth: {isAuthenticated ? 'TRUE' : 'FALSE'}<br />
-        User: {currentUser ? currentUser.email : 'null'}
-      </div>
     </>
   );
 }
+
+function MainLayoutWrapper() {
+  const [activeTab, setActiveTab] = useState('Dashboard');
+  const [enquiryToOpen, setEnquiryToOpen] = useState(null);
+
+  const handleOpenEnquiry = (requestNo) => {
+    setEnquiryToOpen(requestNo);
+    setActiveTab('Enquiry');
+  };
+
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    if (tab !== 'Enquiry') {
+      setEnquiryToOpen(null);
+    }
+  };
+
+  return (
+    <MainLayout activeTab={activeTab} onNavigate={handleTabChange}>
+      <Main
+        activeTab={activeTab}
+        onNavigate={handleTabChange}
+        enquiryToOpen={enquiryToOpen}
+        onOpenEnquiry={handleOpenEnquiry}
+      />
+    </MainLayout>
+  );
+}
+
+
 
 function App() {
   return (

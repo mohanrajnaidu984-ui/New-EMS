@@ -9,23 +9,69 @@ const ProfileImageModal = ({ show, onClose, onSave }) => {
     const [position, setPosition] = useState({ x: 0, y: 0 });
     const fileInputRef = useRef(null);
     const imageRef = useRef(null);
-    const containerRef = useRef(null);
+    const wrapperRef = useRef(null); // Ref for Draggable wrapper
     const [loading, setLoading] = useState(false);
+    const [imgDimensions, setImgDimensions] = useState({ width: 0, height: 0 });
+    const containerRef = useRef(null);
+
+    // Passive: false listener to ensure preventDefault works
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+
+        const onWheel = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const direction = e.deltaY < 0 ? 1 : -1;
+            const step = 0.1;
+            setScale(prev => Math.min(Math.max(prev + (direction * step), 1), 3));
+        };
+
+        container.addEventListener('wheel', onWheel, { passive: false });
+        return () => container.removeEventListener('wheel', onWheel);
+    }, [image]);
 
     const handleFileChange = (e) => {
         if (e.target.files && e.target.files.length > 0) {
             const reader = new FileReader();
-            reader.addEventListener('load', () => setImage(reader.result));
+            reader.addEventListener('load', () => {
+                const img = new Image();
+                img.src = reader.result;
+                img.onload = () => {
+                    setImage(reader.result);
+                    setScale(1);
+                    setPosition({ x: 0, y: 0 });
+                };
+            });
             reader.readAsDataURL(e.target.files[0]);
-            setScale(1);
-            setPosition({ x: 0, y: 0 });
         }
     };
 
-    const handleWheel = (e) => {
-        e.preventDefault();
-        const sc = scale + (e.deltaY * -0.001);
-        setScale(Math.min(Math.max(1, sc), 3));
+
+    const handleImageLoad = (e) => {
+        const { naturalWidth, naturalHeight } = e.target;
+        // Logic to fit image in 250x250 container
+        // If landscape, fit height = 250, width = auto
+        // If portrait, fit width = 250, height = auto
+        // Actually, we want it to COVER the area usually, but for easy cropping, fitting one dimension is good.
+        // Let's go with "Fit one dimension so at least one fills the box"
+        // But for cropping, we usually want to be able to zoom in from a "contain" or "cover" state.
+        // Let's try to make it render with height 250px by default as previously, but handle width properly.
+
+        const aspect = naturalWidth / naturalHeight;
+        let renderedWidth, renderedHeight;
+        const containerSize = 250;
+
+        if (naturalHeight > naturalWidth) {
+            // Portrait
+            renderedWidth = containerSize;
+            renderedHeight = containerSize / aspect;
+        } else {
+            // Landscape or Square
+            renderedHeight = containerSize;
+            renderedWidth = containerSize * aspect;
+        }
+        setImgDimensions({ width: renderedWidth, height: renderedHeight });
     };
 
     const handleSave = async () => {
@@ -42,85 +88,46 @@ const ProfileImageModal = ({ show, onClose, onSave }) => {
         img.src = image;
 
         img.onload = () => {
-            // Calculate crop based on position and scale
-            // The container is 250x250 (defined in CSS below)
-            // The image is scaled and translated.
-            // We need to draw the visible portion of the image into the 200x200 canvas.
-
-            // Actually, easier approach:
-            // 1. Draw image to canvas with transformations.
-
-            // The container size 
             const containerSize = 250;
-            const relativeScale = size / containerSize;
+            const factor = size / containerSize; // 0.8
 
-            // Clear canvas
-            ctx.clearRect(0, 0, size, size);
             ctx.fillStyle = '#fff';
             ctx.fillRect(0, 0, size, size);
 
-            // Calculate where to draw
-            // position.x and position.y are the offsets in the 250px container
+            // Save context
+            ctx.save();
 
-            // We want to map the view in the 250px container to the 200px canvas
+            // 1. Scale to match canvas coordinate system (200 vs 250)
+            ctx.scale(factor, factor);
 
-            // Draw logic:
-            // ctx.drawImage(img, dx, dy, dWidth, dHeight)
-            // effective width/height of image on screen = naturalWidth * scale * (containerWidth / naturalWidth? No, we set width to 100% usually)
-            // user adjusts scale.
+            // 2. Apply Translation (Draggable position)
+            // Draggable moves the wrapper.
+            ctx.translate(position.x, position.y);
 
-            // Let's assume image fits width or height.
-            // Simplified:
-            // The Draggable component applies transform: translate(x, y). 
-            // We need to apply the same transform to drawing.
+            // 3. Apply Scale (Zoom)
+            // Original CSS transform: scale(scale). Transform origin: top left.
+            ctx.scale(scale, scale);
 
-            // Let's assume the image is rendered with explicit width/height in the container based on aspect ratio?
-            // To make it robust:
-            // 1. Calculate the aspect ratio of the image.
-            // 2. Determine rendered width/height in the container (before scale).
-            // 3. Apply scale and translation.
-
+            // 4. Draw Image
+            // We need to draw it at the same size it is rendered on screen (before scale)
+            // We calculated dimensions in handleImageLoad, but simpler to recalc or trust layout.
+            // Let's recalculate simply:
             const aspect = img.naturalWidth / img.naturalHeight;
-            let renderedWidth, renderedHeight;
-
-            if (aspect > 1) {
-                renderedHeight = containerSize;
-                renderedWidth = renderedHeight * aspect;
+            let dw, dh;
+            // Logic must match the CSS styling logic below
+            // Below: defaults to height 250px usually.
+            // Let's replicate CSS logic:
+            if (img.naturalHeight > img.naturalWidth) {
+                // width: 250px, height: auto
+                dw = containerSize;
+                dh = containerSize / aspect;
             } else {
-                renderedWidth = containerSize;
-                renderedHeight = renderedWidth / aspect;
+                // height: 250px, width: auto
+                dh = containerSize;
+                dw = containerSize * aspect;
             }
 
-            // Current transform: translate(position.x, position.y) scale(scale)
-            // We want to draw onto a 200x200 canvas which corresponds to the 250x250 view.
-
-            ctx.save();
-            // Clip to circle? Requirement didn't say circle, but profile usually is.
-            // Let's stick to square for now as per requirement "crop".
-
-            // Translate to center first? No, Drag starts at 0,0.
-
-            // Check draggable bounds?
-            // Since we use react-draggable, we just take x/y.
-
-            // Mapping 250px view coords to 200px canvas coords: factor = 0.8
-            const factor = size / containerSize;
-
-            ctx.scale(factor, factor);
-            ctx.translate(position.x, position.y);
-            // Scale from the center of the image? 
-            // Draggable usually moves the element. Transform origin is usually center?
-            // We'll set transform-origin to center in CSS.
-            // In canvas, translate to center of image, scale, translate back.
-
-            // Let's try simple:
-            // The image top-left is at (position.x, position.y) relative to container top-left.
-            // It has size (renderedWidth * scale, renderedHeight * scale).
-            // Wait, if transform-origin is center (default for some), scale expands from center.
-            // We will set transform-origin: top left to make math easier.
-
-            ctx.scale(scale, scale);
-            ctx.drawImage(img, 0, 0, renderedWidth, renderedHeight);
+            ctx.drawImage(img, 0, 0, dw, dh);
 
             ctx.restore();
 
@@ -158,28 +165,43 @@ const ProfileImageModal = ({ show, onClose, onSave }) => {
                         </div>
                     </div>
                 ) : (
-                    <div className="mb-3 position-relative" style={{ width: '250px', height: '250px', overflow: 'hidden', border: '2px solid #ddd', borderRadius: '50%' }}>
-                        {/* Container is circular to show how it looks as profile */}
+                    <div
+                        ref={containerRef}
+                        className="mb-3 position-relative"
+                        style={{ width: '250px', height: '250px', overflow: 'hidden', border: '2px solid #ddd', borderRadius: '50%' }}
+                    >
                         <Draggable
-                            nodeRef={imageRef}
+                            nodeRef={wrapperRef}
                             position={position}
-                            onDrag={(e, data) => setPosition({ x: data.x, y: data.y })}
+                            onStart={(e) => e.stopPropagation()}
+                            onDrag={(e, data) => {
+                                e.stopPropagation();
+                                setPosition({ x: data.x, y: data.y });
+                            }}
                         >
-                            <img
-                                ref={imageRef}
-                                src={image}
-                                alt="Crop Preview"
-                                style={{
-                                    maxWidth: 'none',
-                                    /* Logic to fit at least one dimension */
-                                    height: '250px', // Default fit height, width auto
-                                    transformOrigin: 'top left', // Important for math above
-                                    transform: `scale(${scale})`,
-                                    cursor: 'move',
-                                    userSelect: 'none'
-                                }}
-                                draggable={false}
-                            />
+                            <div ref={wrapperRef} style={{ transformOrigin: 'top left', cursor: 'move' }}>
+                                <img
+                                    ref={imageRef}
+                                    src={image}
+                                    alt="Crop Preview"
+                                    onLoad={handleImageLoad}
+                                    style={{
+                                        maxWidth: 'none',
+                                        // Match Logic: Portrait -> width 250, Landscape -> height 250
+                                        // This ensures at least one dimension fits perfectly without gaps if scale=1
+                                        // But wait, if aspect > 1 (Landscape), height=250. width > 250. OK.
+                                        // If aspect < 1 (Portrait), width=250. height > 250. OK.
+                                        height: imgDimensions.height > 0 && imgDimensions.width > imgDimensions.height ? '250px' : 'auto',
+                                        width: imgDimensions.width > 0 && imgDimensions.height >= imgDimensions.width ? '250px' : 'auto',
+
+                                        transformOrigin: 'top left',
+                                        transform: `scale(${scale})`,
+                                        userSelect: 'none',
+                                        display: 'block'
+                                    }}
+                                    draggable={false}
+                                />
+                            </div>
                         </Draggable>
                     </div>
                 )}
@@ -193,19 +215,10 @@ const ProfileImageModal = ({ show, onClose, onSave }) => {
                 />
 
                 {image && (
-                    <div className="w-75 mb-3">
-                        <label className="form-label text-muted small">Zoom</label>
-                        <input
-                            type="range"
-                            className="form-range"
-                            min="1"
-                            max="3"
-                            step="0.1"
-                            value={scale}
-                            onChange={(e) => setScale(parseFloat(e.target.value))}
-                        />
+                    <div className="w-75 mb-3 text-center">
+                        <p className="small text-muted mb-2">Drag to adjust • Scroll to zoom</p>
                         <div className="text-center mt-2">
-                            <button className="btn btn-sm btn-outline-secondary" onClick={() => { setImage(null); }}>
+                            <button className="btn btn-sm btn-outline-secondary" onClick={() => { setImage(null); fileInputRef.current.value = ''; }}>
                                 Change Image
                             </button>
                         </div>
