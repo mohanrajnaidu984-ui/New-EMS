@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import emsoLogo from '../../assets/ems_logo_new.png';
+import almoayyedLogo from '../../assets/almoayyed-logo.png';
 import './Login.css';
 
 const Login = ({ onSwitchToSignup }) => {
@@ -287,12 +289,37 @@ const Login = ({ onSwitchToSignup }) => {
 
     return (
         <div className="login-container">
+            <style>
+                {`
+                    @keyframes slideDown {
+                        from { opacity: 0; transform: translateY(-20px); }
+                        to { opacity: 1; transform: translateY(0); }
+                    }
+                    @keyframes fadeInUp {
+                        from { opacity: 0; transform: translateY(20px); }
+                        to { opacity: 1; transform: translateY(0); }
+                    }
+                    .logo-animated {
+                        animation: slideDown 0.8s ease-out;
+                    }
+                    .footer-logo-animated {
+                        animation: fadeInUp 0.8s ease-out 0.2s backwards;
+                    }
+                `}
+            </style>
             <div className="login-background">
                 <div className="login-card">
-                    <div className="login-header">
-                        <div className="login-logo"><i className="bi bi-building"></i></div>
-                        <h1>EMS Portal</h1>
-                        <p>Enquiry Management System</p>
+                    <div className="login-header mb-4">
+                        <img
+                            src={emsoLogo}
+                            alt="EMS"
+                            className="logo-animated"
+                            style={{
+                                maxWidth: '280px',
+                                height: 'auto',
+                                marginBottom: '10px'
+                            }}
+                        />
                     </div>
 
                     {error && (
@@ -313,6 +340,19 @@ const Login = ({ onSwitchToSignup }) => {
                             <p>Don't have an account? <button className="link-button" onClick={onSwitchToSignup} disabled={loading}>Sign up here</button></p>
                         </div>
                     )}
+
+                    <div className="d-flex justify-content-center mt-4 pt-3 border-top">
+                        <img
+                            src={almoayyedLogo}
+                            alt="Almoayyed Contracting Group"
+                            className="footer-logo-animated"
+                            style={{
+                                height: '40px',
+                                width: 'auto',
+                                opacity: 0.8
+                            }}
+                        />
+                    </div>
                 </div>
             </div>
         </div>

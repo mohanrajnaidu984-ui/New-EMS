@@ -10,7 +10,10 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen }) => {
             {/* Tab Content */}
             <div className="tab-content">
                 {activeTab === 'Dashboard' && (
-                    <Dashboard onNavigate={onNavigate} />
+                    <div className="alert alert-info">
+                        <i className="bi bi-info-circle me-2"></i>
+                        Dashboard module coming soon...
+                    </div>
                 )}
                 {activeTab === 'Enquiry' && (
                     <EnquiryForm requestNoToOpen={enquiryToOpen} />

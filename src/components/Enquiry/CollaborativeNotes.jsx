@@ -46,10 +46,17 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
             access = true;
         }
         // 3. Concerned SE
-        else if (enquiryData && enquiryData.ConcernedSE && currentUser.name &&
-            (enquiryData.ConcernedSE.trim().toLowerCase() === currentUser.name.trim().toLowerCase() ||
-                enquiryData.ConcernedSE == currentUser.id)) {
-            access = true;
+        else if (enquiryData && currentUser.name) {
+            const concernedSEs = enquiryData.SelectedConcernedSEs ||
+                (enquiryData.ConcernedSE ? enquiryData.ConcernedSE.split(',').map(s => s.trim()) : []);
+
+            const isConcernedSE = concernedSEs.some(se =>
+                se.toLowerCase() === currentUser.name.trim().toLowerCase()
+            );
+
+            if (isConcernedSE || (enquiryData.ConcernedSE == currentUser.id)) {
+                access = true;
+            }
         }
         // 4. Enquiry For (Email match)
         else if (enquiryData && enquiryData.EnquiryFor && masters.enqItems) {
@@ -126,7 +133,49 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
         return date.toLocaleDateString('en-GB') + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     };
 
-    // If new enquiry (no ID), show placeholder
+    const [mentionQuery, setMentionQuery] = useState('');
+    const [showSuggestions, setShowSuggestions] = useState(false);
+    const [filteredUsers, setFilteredUsers] = useState([]);
+
+    const handleInputChange = (e) => {
+        const val = e.target.value;
+        setNewNote(val);
+
+        const cursor = e.target.selectionStart;
+        const textBeforeCursor = val.slice(0, cursor);
+        const words = textBeforeCursor.split(/\s+/);
+        const lastWord = words[words.length - 1];
+
+        if (lastWord.startsWith('@')) {
+            const query = lastWord.slice(1).toLowerCase();
+            setMentionQuery(query);
+            setShowSuggestions(true);
+
+            if (masters.concernedSEs) {
+                const matches = masters.concernedSEs.filter(u =>
+                    u.FullName.toLowerCase().includes(query)
+                );
+                setFilteredUsers(matches);
+            }
+        } else {
+            setShowSuggestions(false);
+        }
+    };
+
+    const selectUser = (userName) => {
+        // Find the last @ and replace
+        const cursor = document.querySelector('#noteInput').selectionStart;
+        const textBeforeCursor = newNote.slice(0, cursor);
+        const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+
+        const prefix = newNote.slice(0, lastAtIndex);
+        const suffix = newNote.slice(cursor);
+
+        setNewNote(`${prefix}@${userName} ${suffix}`);
+        setShowSuggestions(false);
+        document.querySelector('#noteInput').focus();
+    };
+
     if (!effectiveID) {
         return (
             <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
@@ -142,12 +191,6 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
     }
 
     if (!hasAccess) {
-        // Only show placeholder/denied message if we actually have an enquiryId but access is denied.
-        // If no enquiryId (New mode), usually handled above.
-        // But what if enquiryId exists but access denied?
-        // User might be confused if they see nothing.
-        // Let's return null (invisible) as per current logic, or show "Access Restricted".
-        // Current logic: returns null.
         return (
             <div className="card mb-4 shadow-sm border-0 bg-light card-overline">
                 <div className="card-body p-4 text-center">
@@ -188,7 +231,11 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                                             <small className="fw-bold text-dark">{note.UserName}</small>
                                             <small className="text-muted" style={{ fontSize: '0.75rem' }}>{formatTime(note.CreatedAt)}</small>
                                         </div>
-                                        <p className="mb-0 text-secondary" style={{ fontSize: '0.9rem' }}>{note.NoteContent}</p>
+                                        <p className="mb-0 text-secondary" style={{ fontSize: '0.9rem' }}>
+                                            {note.NoteContent.split(' ').map((word, i) =>
+                                                word.startsWith('@') ? <span key={i} className="text-primary fw-bold me-1">{word}</span> : word + ' '
+                                            )}
+                                        </p>
                                     </div>
                                 </div>
                             </div>
@@ -197,7 +244,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                 </div>
 
                 {/* Input */}
-                <div className="d-flex gap-2 align-items-center">
+                <div className="d-flex gap-2 align-items-center position-relative">
                     <div className="me-0">
                         {currentUser.ProfileImage ? (
                             <img src={currentUser.ProfileImage} alt={currentUser.name} className="rounded-circle" style={{ width: 32, height: 32, objectFit: 'cover' }} />
@@ -207,14 +254,43 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                             </div>
                         )}
                     </div>
-                    <input
-                        type="text"
-                        className="form-control"
-                        placeholder="Add a new note..."
-                        value={newNote}
-                        onChange={(e) => setNewNote(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handlePost()}
-                    />
+                    <div className="flex-grow-1 position-relative">
+                        <input
+                            id="noteInput"
+                            type="text"
+                            className="form-control"
+                            placeholder="Add a new note..."
+                            value={newNote}
+                            onChange={handleInputChange}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    if (showSuggestions && filteredUsers.length > 0) {
+                                        e.preventDefault();
+                                        selectUser(filteredUsers[0].FullName);
+                                    } else {
+                                        handlePost();
+                                    }
+                                }
+                            }}
+                            autoComplete="off"
+                        />
+                        {/* Suggestions Dropdown */}
+                        {showSuggestions && filteredUsers.length > 0 && (
+                            <div className="card position-absolute shadow-sm" style={{ bottom: '100%', left: 0, width: '100%', zIndex: 1000, maxHeight: '150px', overflowY: 'auto' }}>
+                                <div className="list-group list-group-flush">
+                                    {filteredUsers.map(u => (
+                                        <button
+                                            key={u.ID}
+                                            className="list-group-item list-group-item-action py-2 small"
+                                            onClick={() => selectUser(u.FullName)}
+                                        >
+                                            {u.FullName}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                     <button className="btn btn-primary" onClick={handlePost} disabled={loading || !newNote.trim()}>
                         {loading ? 'Posting...' : 'Post'}
                     </button>

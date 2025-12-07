@@ -79,7 +79,10 @@ const SearchEnquiry = ({ onOpen }) => {
     }, [enquiries, currentUser, masters]);
 
     const handleSearch = () => {
-        let filtered = [...filteredEnquiries];
+        // If searching, search ALL enquiries. If no search, show only filtered "relevant" enquiries.
+        let sourceList = (searchText || fromDate || toDate) ? Object.values(enquiries) : filteredEnquiries;
+
+        let filtered = [...sourceList];
 
         // Search text filter
         if (searchText) {
@@ -107,6 +110,13 @@ const SearchEnquiry = ({ onOpen }) => {
         if (toDate) {
             filtered = filtered.filter(e => new Date(e.EnquiryDate) <= new Date(toDate));
         }
+
+        // Sort results (Recent first)
+        filtered.sort((a, b) => {
+            const dateA = new Date(a.CreatedAt || a.EnquiryDate);
+            const dateB = new Date(b.CreatedAt || b.EnquiryDate);
+            return dateB - dateA;
+        });
 
         setResults(filtered);
     };

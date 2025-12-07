@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import emsoLogo from '../../assets/ems_logo_new.png';
 import almoayyedLogo from '../../assets/almoayyed-logo.png';
+import NotificationDropdown from './NotificationDropdown';
 import UserProfile from './UserProfile';
 
-const Header = ({ activeTab, onNavigate }) => {
+import { useAuth } from '../../context/AuthContext';
+
+const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
+  const { currentUser } = useAuth();
   const [isScrolled, setIsScrolled] = useState(false);
 
   useEffect(() => {
@@ -24,14 +28,29 @@ const Header = ({ activeTab, onNavigate }) => {
     { id: 'Reports', label: 'Reports', icon: 'bi-file-earmark-bar-graph' }
   ];
 
+  // Role Based Access
+  const roleString = currentUser?.role || currentUser?.Roles || '';
+  const userRoles = typeof roleString === 'string'
+    ? roleString.split(',').map(r => r.trim())
+    : (Array.isArray(roleString) ? roleString : []);
+
+  const visibleItems = navItems.filter(item => {
+    if (item.id === 'Dashboard') return true;
+    if (userRoles.includes('Admin')) return true;
+    if (item.id === 'Enquiry' && userRoles.includes('Enquiry')) return true;
+    if (item.id === 'Quote' && userRoles.includes('Quotation')) return true;
+    if ((item.id === 'Pricing' || item.id === 'Probability') && userRoles.includes('Sales')) return true;
+    return false;
+  });
+
   return (
     <>
       <nav className="navbar navbar-light" style={{
         backgroundColor: 'rgba(255, 255, 255, 0.72)',
         backdropFilter: 'saturate(180%) blur(20px)',
         WebkitBackdropFilter: 'saturate(180%) blur(20px)',
-        padding: '0', // moved padding handling to inner container or handled by width
-        height: '80px',
+        padding: '0',
+        height: '100px',
         borderBottom: '1px solid rgba(0, 0, 0, 0.16)',
         position: 'fixed',
         top: 0,
@@ -49,22 +68,31 @@ const Header = ({ activeTab, onNavigate }) => {
           width: isScrolled ? '70%' : '100%',
           transition: 'width 0.4s ease',
           margin: '0 auto',
-          padding: '0 24px' // Original padding
+          padding: '0 24px'
         }}>
           <div className="d-flex align-items-center justify-content-between w-100 h-100 position-relative">
-            {/* Left: EMSO Logo (Acts as Page Title) */}
-            <div className="d-flex align-items-center">
+            {/* Left: EMSO Logo */}
+            <div className="d-flex align-items-center logo-container" style={{ animation: 'fadeInLeft 1s ease-out' }}>
               <img
                 src={emsoLogo}
-                alt="EMSO"
-                style={{ height: '60px', width: 'auto', objectFit: 'contain' }}
+                alt="EMS - Enquiry Management System"
+                style={{ height: '90px', width: 'auto', display: 'block' }}
               />
             </div>
 
-            {/* Center: Navigation Links - Centered and Bottom Seated */}
-            <div className="position-absolute start-50 translate-middle-x h-100 d-flex align-items-end pb-2">
+            <style>
+              {`
+                @keyframes fadeInLeft {
+                    from { opacity: 0; transform: translateX(-20px); }
+                    to { opacity: 1; transform: translateX(0); }
+                }
+                `}
+            </style>
+
+            {/* Center: Navigation Links */}
+            <div className="position-absolute start-50 translate-middle-x h-100 d-flex align-items-end pb-3">
               <ul className="nav d-flex align-items-center gap-4 m-0">
-                {navItems.map(item => (
+                {visibleItems.map(item => (
                   <li className="nav-item" key={item.id}>
                     <button
                       className="nav-link bg-transparent border-0 p-0 d-flex align-items-center"
@@ -77,7 +105,7 @@ const Header = ({ activeTab, onNavigate }) => {
                         transition: 'color 0.2s ease, opacity 0.2s ease',
                         letterSpacing: '-0.01em',
                         cursor: 'pointer',
-                        paddingBottom: '4px' // Subtle lift
+                        paddingBottom: '4px'
                       }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.color = '#1d1d1f';
@@ -96,8 +124,8 @@ const Header = ({ activeTab, onNavigate }) => {
               </ul>
             </div>
 
-            {/* Right Group: Just ACG Logo */}
-            <div className="d-flex align-items-end h-100 pb-2">
+            {/* Right Group: ACG Logo */}
+            <div className="d-flex align-items-end h-100 pb-3">
               <div className="d-flex flex-column align-items-end ps-2 mb-1">
                 <img
                   src={almoayyedLogo}
@@ -110,16 +138,18 @@ const Header = ({ activeTab, onNavigate }) => {
         </div>
       </nav>
 
-      {/* Floating Profile - Positioned below the header's right logo */}
+      {/* Floating Profile & Notification - Positioned below the header's right logo */}
       <div style={{
         position: 'fixed',
-        top: '85px',
+        top: '105px',
         right: 'calc(15% + 24px)',
         zIndex: 9998,
         display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'flex-end'
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: '10px'
       }}>
+        <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
         <UserProfile />
       </div>
     </>

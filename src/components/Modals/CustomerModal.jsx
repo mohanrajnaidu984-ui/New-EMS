@@ -41,6 +41,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
         if (!formData.Phone1) newErrors.Phone1 = 'Phone 1 is required';
+        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
@@ -133,10 +134,11 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                     </div>
                 </div>
                 <div className="row mb-2">
-                    <div className="col-md-6">
-                        <label className="form-label">E-Mail ID</label>
+                    <div className="col-md-6" style={{ position: 'relative' }}>
+                        <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
+                        {errors.EmailId && <ValidationTooltip message={errors.EmailId} />}
                     </div>
                     <div className="col-md-6">
                         <label className="form-label">Website</label>

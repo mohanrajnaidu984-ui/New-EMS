@@ -80,6 +80,7 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
 
         const newErrors = {};
         if (!formData.ItemName) newErrors.ItemName = 'Item Name is required';
+        if (formData.CommonMailIds.length === 0) newErrors.CommonMailIds = 'At least one Common Mail ID is required';
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
@@ -140,10 +141,11 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
                     </div>
                 </div>
                 <div className="row mb-2">
-                    <div className="col-md-6">
-                        <label className="form-label">Common mail ID</label>
+                    <div className="col-md-6" style={{ position: 'relative' }}>
+                        <label className="form-label">Common mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }} placeholder="Enter email"
                             value={newCommonMail} onChange={(e) => setNewCommonMail(e.target.value)} />
+                        {errors.CommonMailIds && <ValidationTooltip message={errors.CommonMailIds} />}
                         <div className="d-flex align-items-center mt-1">
                             <select
                                 className="form-select"

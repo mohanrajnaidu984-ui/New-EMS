@@ -39,6 +39,8 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.ContactName) newErrors.ContactName = 'Contact Person Name is required';
         if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
+        if (!formData.Mobile1) newErrors.Mobile1 = 'Mobile 1 is required';
+        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
@@ -128,10 +130,11 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.Phone} onChange={(e) => handleChange('Phone', e.target.value)} />
                     </div>
-                    <div className="col-md-6">
-                        <label className="form-label">Mobile 1</label>
+                    <div className="col-md-6" style={{ position: 'relative' }}>
+                        <label className="form-label">Mobile 1<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.Mobile1} onChange={(e) => handleChange('Mobile1', e.target.value)} />
+                        {errors.Mobile1 && <ValidationTooltip message={errors.Mobile1} />}
                     </div>
                 </div>
                 <div className="row mb-2">
@@ -140,10 +143,11 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.Mobile2} onChange={(e) => handleChange('Mobile2', e.target.value)} />
                     </div>
-                    <div className="col-md-6">
-                        <label className="form-label">E-Mail ID</label>
+                    <div className="col-md-6" style={{ position: 'relative' }}>
+                        <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
+                        {errors.EmailId && <ValidationTooltip message={errors.EmailId} />}
                     </div>
                 </div>
             </form>

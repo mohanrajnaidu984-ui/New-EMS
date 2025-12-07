@@ -1,22 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import ProfileImageModal from '../Modals/ProfileImageModal';
 import ChangePasswordModal from '../Modals/ChangePasswordModal';
+import UserManagementModal from '../Modals/UserManagementModal';
 
 const UserProfile = () => {
     const { currentUser, logout, updateProfileImage } = useAuth();
     const [showModal, setShowModal] = useState(false);
     const [showPasswordModal, setShowPasswordModal] = useState(false);
+    const [showUserManagementModal, setShowUserManagementModal] = useState(false);
     const [dropdownOpen, setDropdownOpen] = useState(false);
+    const dropdownRef = useRef(null);
 
     const handleImageSave = (base64) => {
         updateProfileImage(currentUser.id, base64);
     };
 
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+                setDropdownOpen(false);
+            }
+        };
+
+        if (dropdownOpen) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [dropdownOpen]);
+
     if (!currentUser) return null;
 
+    // Check Admin Role
+    const roleString = currentUser.role || currentUser.Roles || '';
+    const userRoles = typeof roleString === 'string'
+        ? roleString.split(',').map(r => r.trim())
+        : (Array.isArray(roleString) ? roleString : []);
+    const isAdmin = userRoles.includes('Admin');
+
     return (
-        <div className="d-flex align-items-center position-relative">
+        <div ref={dropdownRef} className="d-flex align-items-center position-relative">
             {/* User Name & Dropdown Toggle */}
             <div
                 className="d-flex align-items-center me-3"
@@ -90,6 +116,21 @@ const UserProfile = () => {
                         <i className="bi bi-key me-2"></i>
                         Change Password
                     </button>
+
+                    {isAdmin && (
+                        <button
+                            className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start"
+                            onClick={() => {
+                                setDropdownOpen(false);
+                                setShowUserManagementModal(true);
+                            }}
+                            style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                        >
+                            <i className="bi bi-gear me-2"></i>
+                            User Management
+                        </button>
+                    )}
+
                     <div className="dropdown-divider"></div>
                     <button
                         className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start text-danger"
@@ -114,6 +155,11 @@ const UserProfile = () => {
             <ChangePasswordModal
                 show={showPasswordModal}
                 onClose={() => setShowPasswordModal(false)}
+            />
+
+            <UserManagementModal
+                show={showUserManagementModal}
+                onClose={() => setShowUserManagementModal(false)}
             />
         </div>
     );

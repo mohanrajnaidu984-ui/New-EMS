@@ -13,8 +13,9 @@ import DateInput from './DateInput';
 import ValidationTooltip from '../Common/ValidationTooltip';
 import CollaborativeNotes from './CollaborativeNotes';
 
-const EnquiryForm = () => {
+const EnquiryForm = ({ requestNoToOpen }) => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
+
     const { currentUser } = useAuth();
     const [activeTab, setActiveTab] = useState('New');
 
@@ -32,6 +33,15 @@ const EnquiryForm = () => {
     // Modify State
     const [modifyRequestNo, setModifyRequestNo] = useState('');
     const [isModifyMode, setIsModifyMode] = useState(false);
+    const [hasOpenedFromProp, setHasOpenedFromProp] = useState(false);
+
+    // Effect to open from prop
+    useEffect(() => {
+        if (requestNoToOpen && !hasOpenedFromProp && enquiries) {
+            handleOpenFromSearch(requestNoToOpen);
+            setHasOpenedFromProp(true);
+        }
+    }, [requestNoToOpen, enquiries, hasOpenedFromProp]);
 
     // Form State
     const initialFormState = {
@@ -72,8 +82,8 @@ const EnquiryForm = () => {
     // Validation Errors
     const [errors, setErrors] = useState({});
     const [attachments, setAttachments] = useState([]);
-    const [pendingFiles, setPendingFiles] = useState([]); // New state for deferred uploads
-    const [ackSEList, setAckSEList] = useState([]); // SEs selected for acknowledgement mail
+    const [pendingFiles, setPendingFiles] = useState([]);
+    const [ackSEList, setAckSEList] = useState([]);
 
     // Project Suggestions State
     const [projectSuggestions, setProjectSuggestions] = useState([]);
@@ -82,20 +92,17 @@ const EnquiryForm = () => {
     // Access Control State
     const [canEdit, setCanEdit] = useState(true);
 
-    // Effect to determine edit permission when loading an enquiry or switching tabs
+    // Effect to determine edit permission
     useEffect(() => {
         if (activeTab === 'New') {
             setCanEdit(true);
         } else if (activeTab === 'Modify' && isModifyMode) {
             checkEditPermission();
         }
-    }, [activeTab, isModifyMode, formData, currentUser]);
+    }, [activeTab, isModifyMode, formData, currentUser, seList, enqForList]);
 
     const checkEditPermission = () => {
         if (!currentUser) return;
-
-        // 1. Admin Override
-        // Check both 'role' and 'Roles' to be safe
         const roleString = currentUser.role || currentUser.Roles || '';
         const userRoles = typeof roleString === 'string'
             ? roleString.split(',').map(r => r.trim())
@@ -106,38 +113,26 @@ const EnquiryForm = () => {
             return;
         }
 
-        // 2. Creator Access
         const creatorName = (formData.CreatedBy || '').trim().toLowerCase();
         const currentUserName = (currentUser.name || '').trim().toLowerCase();
 
-        console.log('Permission Check:', { creatorName, currentUserName, match: creatorName === currentUserName });
-
-        if (creatorName && creatorName === currentUserName) {
+        if (creatorName === currentUserName) {
             setCanEdit(true);
             return;
         }
 
-        // 3. Division Coworker Access (via Enquiry For -> Email Check)
-        const selectedItems = enqForList;
-        const relevantItems = masters.enqItems.filter(item => selectedItems.includes(item.ItemName));
-
+        // 3. Division Member Access (Enquiry For items)
         let isDivisionMember = false;
-        const userEmail = currentUser.EmailId ? currentUser.EmailId.toLowerCase() : '';
+        const userEmail = (currentUser.email || '').trim().toLowerCase();
 
-        if (!userEmail) {
-            // If no email, can't verify division membership
-            if (relevantItems.length > 0) {
-                // But if items exist and we can't verify, deny access logic continues
-            }
-        }
+        for (const itemName of enqForList) {
+            const item = masters.enqItems.find(i => i.ItemName === itemName);
+            if (!item) continue;
 
-        for (const item of relevantItems) {
-            // Check Common Emails
             if (item.CommonMailIds && (Array.isArray(item.CommonMailIds) ? item.CommonMailIds : item.CommonMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
                 isDivisionMember = true;
                 break;
             }
-            // Check CC Emails
             if (item.CCMailIds && (Array.isArray(item.CCMailIds) ? item.CCMailIds : item.CCMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
                 isDivisionMember = true;
                 break;
@@ -149,7 +144,6 @@ const EnquiryForm = () => {
             return;
         }
 
-        // No permission
         setCanEdit(false);
     };
 
@@ -189,14 +183,19 @@ const EnquiryForm = () => {
         }
     }, [activeTab, isModifyMode, currentUser]);
 
-    const generateNewRequestNo = () => {
-        const now = new Date();
-        const year = now.getFullYear();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const timestamp = Date.now().toString().slice(-6); // Last 6 digits
-        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0'); // 4 digits
-        const generatedReqNo = `EYS/${year}/${month}/${timestamp}${random}`;
-        setFormData(prev => ({ ...prev, RequestNo: generatedReqNo }));
+    const generateNewRequestNo = async () => {
+        try {
+            const res = await fetch('http://localhost:5000/api/system/next-request-no');
+            if (res.ok) {
+                const data = await res.json();
+                setFormData(prev => ({ ...prev, RequestNo: data.nextId }));
+            } else {
+                console.error('Failed to get next request no');
+                // Fallback or error handling? For now allow manual entry or retry
+            }
+        } catch (err) {
+            console.error('Error fetching next request no:', err);
+        }
     };
 
     // --- ListBox Handlers ---
@@ -715,7 +714,8 @@ const EnquiryForm = () => {
             SelectedReceivedFroms: receivedFromList,
             SelectedConcernedSEs: seList,
             AcknowledgementSE: ackSEList[0] || '',
-            CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.name || 'System')
+            CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.name || 'System'),
+            ModifiedBy: currentUser?.name || 'System'
         };
 
         if (isModifyMode) {
@@ -758,8 +758,9 @@ const EnquiryForm = () => {
         });
 
         try {
-            // Send RequestNo as query parameter
-            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}`, {
+            // Send RequestNo and UserName as query parameter
+            const userName = currentUser?.name || 'System';
+            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}`, {
                 method: 'POST',
                 body: uploadData
             });
@@ -929,8 +930,9 @@ const EnquiryForm = () => {
         }
 
         try {
-            // Send RequestNo as query parameter to avoid URL encoding issues
-            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(formData.RequestNo)}`, {
+            // Send RequestNo and UserName as query parameters
+            const userName = currentUser?.name || 'System';
+            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(formData.RequestNo)}&userName=${encodeURIComponent(userName)}`, {
                 method: 'POST',
                 body: uploadData
             });
@@ -1417,6 +1419,8 @@ const EnquiryForm = () => {
                                                             onNew={() => openNewModal(setShowCustomerModal, 'Contractor')}
                                                             onEdit={handleEditCustomer}
                                                             selectedItemDetails={renderCustomerCard()}
+                                                            onAdd={onAddCustomerClick}
+                                                            onRemove={handleRemoveCustomer}
                                                             error={errors.CustomerName}
                                                         />
                                                     </div>
@@ -1669,11 +1673,16 @@ const EnquiryForm = () => {
                                         </div>
 
                                         {/* Card 5: Collaborative Notes */}
-                                        {/* Card 5: Collaborative Notes */}
-                                        <CollaborativeNotes
-                                            enquiryId={formData?.RequestNo || modifyRequestNo}
-                                            enquiryData={formData}
-                                        />
+                                        {isModifyMode && (
+                                            <CollaborativeNotes
+                                                enquiryId={formData?.RequestNo || modifyRequestNo}
+                                                enquiryData={{
+                                                    ...formData,
+                                                    SelectedConcernedSEs: seList,
+                                                    SelectedEnquiryFor: enqForList
+                                                }}
+                                            />
+                                        )}
 
                                         {/* Footer: Actions */}
                                         {/* Footer: Actions */}
@@ -1794,10 +1803,10 @@ class ErrorBoundary extends React.Component {
     }
 }
 
-export default function EnquiryFormWrapper() {
+export default function EnquiryFormWrapper(props) {
     return (
         <ErrorBoundary>
-            <EnquiryForm />
+            <EnquiryForm {...props} />
         </ErrorBoundary>
     );
 }

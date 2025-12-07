@@ -30,7 +30,7 @@ function AppContent() {
 }
 
 function MainLayoutWrapper() {
-  const [activeTab, setActiveTab] = useState('Dashboard');
+  const [activeTab, setActiveTab] = useState('Enquiry');
   const [enquiryToOpen, setEnquiryToOpen] = useState(null);
 
   const handleOpenEnquiry = (requestNo) => {
@@ -46,7 +46,7 @@ function MainLayoutWrapper() {
   };
 
   return (
-    <MainLayout activeTab={activeTab} onNavigate={handleTabChange}>
+    <MainLayout activeTab={activeTab} onNavigate={handleTabChange} onOpenEnquiry={handleOpenEnquiry}>
       <Main
         activeTab={activeTab}
         onNavigate={handleTabChange}

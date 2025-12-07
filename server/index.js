@@ -62,6 +62,105 @@ const sendEnquiryEmail = async (enquiryData, recipients) => {
     }
 };
 
+// Updated createNotifications helper to fix syntax and logic
+const createNotifications = async (requestNo, type, message, triggerUserEmail, triggerUserName) => {
+    try {
+        console.log('--- START NOTIFICATION GENERATION ---');
+        console.log(`Request: ${requestNo}, Type: ${type}, Trigger: ${triggerUserName} (${triggerUserEmail})`);
+
+        let recipientEmails = new Set();
+
+        // 1. Get Enquiry Details (CreatedBy)
+        const enqRes = await sql.query`SELECT CreatedBy FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
+        let createdBy = '';
+        if (enqRes.recordset.length > 0) {
+            createdBy = enqRes.recordset[0].CreatedBy;
+            console.log(`Enquiry Created By: ${createdBy}`);
+        }
+
+        // A. Add Creator
+        if (createdBy) {
+            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${createdBy}`;
+            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
+                const email = u.recordset[0].EmailId.trim().toLowerCase();
+                recipientEmails.add(email);
+                console.log(`Added Creator Email: ${email}`);
+            }
+        }
+
+        // B. Add Concerned SEs
+        const seRes = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
+        console.log(`Found ${seRes.recordset.length} Concerned SEs linked.`);
+        for (const row of seRes.recordset) {
+            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${row.SEName}`;
+            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
+                const email = u.recordset[0].EmailId.trim().toLowerCase();
+                recipientEmails.add(email);
+                console.log(`Added Concerned SE Email: ${email} (Name: ${row.SEName})`);
+            }
+        }
+
+        // C. Add Enquiry For Items -> Emails (Division Members)
+        const itemRes = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
+        console.log(`Found ${itemRes.recordset.length} Enquiry Items linked.`);
+        if (itemRes.recordset.length > 0) {
+            for (const itemRow of itemRes.recordset) {
+                const mItem = await sql.query`SELECT CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName = ${itemRow.ItemName}`;
+                if (mItem.recordset.length > 0) {
+                    const { CommonMailIds, CCMailIds } = mItem.recordset[0];
+                    if (CommonMailIds) {
+                        CommonMailIds.split(',').forEach(e => {
+                            const email = e.trim().toLowerCase();
+                            if (email) {
+                                recipientEmails.add(email);
+                                console.log(`Added CommonMailId: ${email} (Item: ${itemRow.ItemName})`);
+                            }
+                        });
+                    }
+                    if (CCMailIds) {
+                        CCMailIds.split(',').forEach(e => {
+                            const email = e.trim().toLowerCase();
+                            if (email) {
+                                recipientEmails.add(email);
+                                console.log(`Added CCMailId: ${email} (Item: ${itemRow.ItemName})`);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // Remove Trigger User
+        if (triggerUserEmail) {
+            const triggerEmailLower = triggerUserEmail.trim().toLowerCase();
+            if (recipientEmails.has(triggerEmailLower)) {
+                recipientEmails.delete(triggerEmailLower);
+                console.log(`Removed Trigger User Email: ${triggerEmailLower}`);
+            }
+        }
+
+        console.log('Final Recipient List:', Array.from(recipientEmails));
+
+        // Insert
+        for (const email of recipientEmails) {
+            const u = await sql.query`SELECT ID FROM Master_ConcernedSE WHERE EmailId = ${email}`;
+            if (u.recordset.length > 0) {
+                const userId = u.recordset[0].ID;
+                await sql.query`
+                    INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy)
+                    VALUES (${userId}, ${type}, ${message}, ${requestNo}, ${triggerUserName})
+                 `;
+                console.log(`Notification inserted for UserID: ${userId} (${email})`);
+            } else {
+                console.log(`WARNING: No UserID found for email: ${email} - Notification skipped.`);
+            }
+        }
+        console.log('--- END NOTIFICATION GENERATION ---');
+    } catch (e) {
+        console.error('CRITICAL ERROR creating notifications:', e);
+    }
+};
+
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -555,57 +654,65 @@ app.post('/api/enquiries', async (req, res) => {
                 Remark
             };
 
-            // Send Email
-            await sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC });
+            // Send Email (Async - Do not await to speed up UI)
+            sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC })
+                .then(() => log('Internal Enquiry Email sent successfully'))
+                .catch(err => log(`Error sending Internal Enquiry Email: ${err.message}`));
 
             // New Email Logic
             // New Email Logic
             if (AutoAck) {
-                log('AutoAck is true, preparing to send acknowledgement emails...');
+                // Async Execution
+                (async () => {
+                    try {
+                        log('AutoAck is true, preparing to send acknowledgement emails...');
 
-                // 1. Fetch CC Emails (All Selected Concerned SEs)
-                let ccEmails = [];
-                if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
-                    const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
-                    const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
-                    seRes.recordset.forEach(row => {
-                        if (row.EmailId) ccEmails.push(row.EmailId.trim());
-                    });
-                }
-                const ccString = ccEmails.join(',');
-                log(`CC Emails (Concerned SEs): ${ccString}`);
+                        // 1. Fetch CC Emails (All Selected Concerned SEs)
+                        let ccEmails = [];
+                        if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
+                            const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
+                            const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
+                            seRes.recordset.forEach(row => {
+                                if (row.EmailId) ccEmails.push(row.EmailId.trim());
+                            });
+                        }
+                        const ccString = ccEmails.join(',');
+                        log(`CC Emails (Concerned SEs): ${ccString}`);
 
-                // 2. Fetch To Emails (Selected Received From Contacts)
-                // The requirement is: Individual mail for each Received From with concern SE's in CC
-                if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
-                    const processedEmails = new Set();
+                        // 2. Fetch To Emails (Selected Received From Contacts)
+                        if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                            const processedEmails = new Set();
 
-                    for (const item of SelectedReceivedFroms) {
-                        const [contact, company] = item.split('|');
-                        // Fetch email for this specific contact
-                        const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
+                            for (const item of SelectedReceivedFroms) {
+                                const [contact, company] = item.split('|');
+                                // Fetch email for this specific contact
+                                const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
 
-                        if (rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId) {
-                            const recipientEmail = rfRes.recordset[0].EmailId.trim();
+                                if (rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId) {
+                                    const recipientEmail = rfRes.recordset[0].EmailId.trim();
 
-                            // Avoid sending duplicate emails to the same address for the same request
-                            if (!processedEmails.has(recipientEmail)) {
-                                log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${ccString}`);
-                                try {
-                                    await sendAcknowledgementEmail(emailData, recipientEmail, ccString, ceosign);
-                                    log(`Email sent successfully to ${recipientEmail}`);
-                                    processedEmails.add(recipientEmail);
-                                } catch (e) {
-                                    log(`Error sending email to ${recipientEmail}: ${e.message}`);
+                                    // Avoid sending duplicate emails to the same address for the same request
+                                    if (!processedEmails.has(recipientEmail)) {
+                                        log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${ccString}`);
+                                        try {
+                                            await sendAcknowledgementEmail(emailData, recipientEmail, ccString, ceosign);
+                                            log(`Email sent successfully to ${recipientEmail}`);
+                                            processedEmails.add(recipientEmail);
+                                        } catch (e) {
+                                            log(`Error sending email to ${recipientEmail}: ${e.message}`);
+                                        }
+                                    }
+                                } else {
+                                    log(`No email found for Received From contact: ${contact} (${company})`);
                                 }
                             }
                         } else {
-                            log(`No email found for Received From contact: ${contact} (${company})`);
+                            log('No Received From contacts selected. Skipping acknowledgement email.');
                         }
+                    } catch (err) {
+                        log(`Async Email Error: ${err.message}`);
                     }
-                } else {
-                    log('No Received From contacts selected. Skipping acknowledgement email.');
-                }
+                })();
             } else {
                 log('AutoAck is false, skipping email');
             }
@@ -614,6 +721,11 @@ app.post('/api/enquiries', async (req, res) => {
             console.error('Failed to send email notification:', emailErr);
             // Don't fail the request if email fails, just log it
         }
+
+        // Notification
+        const currentUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${req.body.CreatedBy}`;
+        const currentUserEmail = currentUserEmailRes.recordset.length > 0 ? currentUserEmailRes.recordset[0].EmailId : null;
+        await createNotifications(RequestNo, 'New Enquiry', `New Enquiry ${RequestNo} created by ${req.body.CreatedBy}`, currentUserEmail, req.body.CreatedBy);
 
         res.status(201).json({ message: 'Enquiry created' });
     } catch (err) {
@@ -704,52 +816,14 @@ app.put('/api/enquiries/:id', async (req, res) => {
         }
 
 
-        // Send Acknowledgement Email on Update if checked
-        if (AutoAck) {
-            console.log('AutoAck is true (Update), preparing to send acknowledgement emails...');
-            const ackSEName = req.body.AcknowledgementSE;
-            let seEmail = '';
-            if (ackSEName) {
-                const seRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${ackSEName}`;
-                if (seRes.recordset.length > 0) seEmail = seRes.recordset[0].EmailId;
-            }
+        // Send Acknowledgement Email on Update if checked - REMOVED per user request
+        // if (AutoAck) { ... }
 
-            // Re-construct email data for update
-            const emailData = {
-                RequestNo: id,
-                EnquiryDate,
-                ReceivedFrom: SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(', ') : '',
-                EnquiryType: SelectedEnquiryTypes ? SelectedEnquiryTypes.join(', ') : '',
-                ProjectName,
-                ClientName,
-                ConsultantName,
-                DetailsOfEnquiry,
-                DueOn,
-                DocumentsReceived,
-                Remark
-            };
-
-            if (SelectedCustomers && SelectedCustomers.length > 0) {
-                for (const custName of SelectedCustomers) {
-                    const custRes = await sql.query`
-                        SELECT EmailId FROM Master_CustomerName WHERE CompanyName = ${custName}
-                        UNION
-                        SELECT EmailId FROM Master_ClientName WHERE CompanyName = ${custName}
-                        UNION
-                        SELECT EmailId FROM Master_ConsultantName WHERE CompanyName = ${custName}
-                    `;
-                    if (custRes.recordset.length > 0) {
-                        const custEmail = custRes.recordset[0].EmailId;
-                        if (custEmail) {
-                            console.log(`Sending email to ${custName} (${custEmail}) CC: ${seEmail}`);
-                            await sendAcknowledgementEmail(emailData, custEmail, seEmail, ceosign);
-                        } else {
-                            console.log(`No email found for customer ${custName}`);
-                        }
-                    }
-                }
-            }
-        }
+        // Notification
+        const modBy = req.body.ModifiedBy || 'System';
+        const modUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${modBy}`;
+        const modUserEmail = modUserEmailRes.recordset.length > 0 ? modUserEmailRes.recordset[0].EmailId : null;
+        await createNotifications(id, 'Enquiry Update', `Enquiry ${id} updated by ${modBy}`, modUserEmail, modBy);
 
         res.json({ message: 'Enquiry updated' });
     } catch (err) {
@@ -862,7 +936,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 app.post('/api/users', async (req, res) => {
-    const { FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo } = req.body;
+    const { FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo, ModifiedBy } = req.body;
 
     try {
         let hashedPassword = null;
@@ -871,9 +945,26 @@ app.post('/api/users', async (req, res) => {
             hashedPassword = await bcrypt.hash(LoginPassword, salt);
         }
 
-        await sql.query`INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo)
-                        VALUES (${FullName}, ${Designation}, ${EmailId}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo})`;
-        res.status(201).json({ message: 'User added' });
+        // Insert and get ID
+        const result = await sql.query`
+            INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo)
+            VALUES (${FullName}, ${Designation}, ${EmailId}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo});
+            SELECT SCOPE_IDENTITY() AS ID;
+        `;
+
+        const newUserId = result.recordset[0].ID;
+
+        // Notification
+        const displayRoles = Array.isArray(Roles) ? Roles.join(', ') : Roles;
+        const msg = `Welcome to EMS! Your account has been created with roles: ${displayRoles}.`;
+        const adminName = ModifiedBy || 'Admin';
+
+        await sql.query`
+            INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy)
+            VALUES (${newUserId}, 'System', ${msg}, 'Profile', ${adminName})
+        `;
+
+        res.status(201).json({ message: 'User added', id: newUserId });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -882,14 +973,47 @@ app.post('/api/users', async (req, res) => {
 
 app.put('/api/users/:id', async (req, res) => {
     const { id } = req.params;
-    const { FullName, Designation, EmailId, Status, Department, Roles } = req.body;
+    const { FullName, Designation, EmailId, Status, Department, Roles, ModifiedBy } = req.body; // Expect ModifiedBy (Admin Name)
     try {
         // Note: Password update logic should be separate or handled carefully. Skipping password update here for simplicity unless provided.
         await sql.query`UPDATE Master_ConcernedSE SET FullName=${FullName}, Designation=${Designation}, EmailId=${EmailId}, Status=${Status}, Department=${Department}, Roles=${Roles} WHERE ID=${id}`;
-        res.json({ message: 'User updated' });
+
+        // Notify the user
+        const displayRoles = Array.isArray(Roles) ? Roles.join(', ') : Roles;
+        const msg = `Your roles have been updated to: ${displayRoles}. Please refresh your page.`;
+        const adminName = ModifiedBy || 'Admin';
+
+        // Insert Notification directly for this user
+        // Using 'System' as LinkID to indicate system message or no link
+        await sql.query`
+            INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy)
+            VALUES (${id}, 'System', ${msg}, 'Profile', ${adminName})
+        `;
+
+        res.json({ message: 'User updated and notified' });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
+    }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        console.log(`Deleting user with ID: ${id}`);
+        // 1. Delete notifications related to this user (Clean up)
+        await sql.query`DELETE FROM Notifications WHERE UserID = ${id}`;
+
+        // 2. Delete the user
+        // Note: If there are other foreign keys (e.g. EnquiryMaster.CreatedBy), this might still fail if UserID is used there.
+        // However, standard master tables usually don't cascade delete.
+        // If "Remove" is requested, we assume hard delete.
+        await sql.query`DELETE FROM Master_ConcernedSE WHERE ID = ${id}`;
+
+        res.json({ message: 'User deleted' });
+    } catch (err) {
+        console.error('Delete User Error:', err);
+        res.status(500).send('Server Error: ' + err.message);
     }
 });
 
@@ -970,17 +1094,39 @@ app.post('/api/attachments/upload', (req, res, next) => {
 
             // Insert into DB with FilePath
             await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath) 
-                            VALUES (${requestNo}, ${fileName}, ${filePath})`;
+            VALUES(${requestNo}, ${fileName}, ${filePath})`;
 
             uploadedFiles.push({ fileName });
         }
 
         res.status(201).json({ message: 'Files uploaded successfully', files: uploadedFiles });
     } catch (err) {
-        const logFile = path.join(__dirname, 'debug.log');
-        fs.appendFileSync(logFile, `${new Date().toISOString()} - ATTACHMENT ERROR: ${err.message}\n${err.stack}\n`);
         console.error(err);
-        res.status(500).send('Server Error: ' + err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// --- System Routes ---
+
+// Get Next Request No
+app.get('/api/system/next-request-no', async (req, res) => {
+    try {
+        const result = await sql.query`
+            SELECT MAX(TRY_CAST(RequestNo AS BIGINT)) as MaxID 
+            FROM EnquiryMaster 
+            WHERE RequestNo NOT LIKE '%/%' AND TRY_CAST(RequestNo AS BIGINT) IS NOT NULL
+        `;
+
+        let nextId = 9;
+        const maxVal = result.recordset[0].MaxID;
+        if (maxVal != null) {
+            nextId = parseInt(maxVal, 10) + 1;
+        }
+
+        res.json({ nextId: nextId.toString() });
+    } catch (err) {
+        console.error('Error generating next ID:', err);
+        res.status(500).send('Error generating ID');
     }
 });
 
@@ -994,7 +1140,7 @@ app.get('/api/attachments', async (req, res) => {
     }
 
     try {
-        const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt FROM Attachments WHERE RequestNo = ${requestNo}`;
+        const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt FROM Attachments WHERE RequestNo = ${requestNo} `;
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
@@ -1006,7 +1152,7 @@ app.get('/api/attachments', async (req, res) => {
 app.get('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await sql.query`SELECT FileName, FilePath FROM Attachments WHERE ID = ${id}`;
+        const result = await sql.query`SELECT FileName, FilePath FROM Attachments WHERE ID = ${id} `;
         const attachment = result.recordset[0];
 
         if (!attachment) {
@@ -1016,7 +1162,7 @@ app.get('/api/attachments/:id', async (req, res) => {
         const filePath = attachment.FilePath;
         if (fs.existsSync(filePath)) {
             const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
-            res.setHeader('Content-Disposition', `${disposition}; filename="${attachment.FileName}"`);
+            res.setHeader('Content-Disposition', `${disposition}; filename = "${attachment.FileName}"`);
             res.sendFile(filePath);
         } else {
             res.status(404).send('File not found on server');
@@ -1032,7 +1178,7 @@ app.delete('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
     try {
         // Get file path first
-        const result = await sql.query`SELECT FilePath FROM Attachments WHERE ID = ${id}`;
+        const result = await sql.query`SELECT FilePath FROM Attachments WHERE ID = ${id} `;
         if (result.recordset.length > 0) {
             const filePath = result.recordset[0].FilePath;
             if (fs.existsSync(filePath)) {
@@ -1040,7 +1186,7 @@ app.delete('/api/attachments/:id', async (req, res) => {
             }
         }
 
-        await sql.query`DELETE FROM Attachments WHERE ID = ${id}`;
+        await sql.query`DELETE FROM Attachments WHERE ID = ${id} `;
 
         res.json({ message: 'Attachment deleted' });
     } catch (err) {
@@ -1049,69 +1195,11 @@ app.delete('/api/attachments/:id', async (req, res) => {
     }
 });
 
-
-
-const initApp = async () => {
-    try {
-        await connectDB();
-        console.log('Database connected successfully.');
-
-        // Check if ProfileImage column exists in Master_ConcernedSE
-        try {
-            const checkColumn = await sql.query`
-                SELECT COLUMN_NAME 
-                FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_NAME = 'Master_ConcernedSE' AND COLUMN_NAME = 'ProfileImage'
-            `;
-
-            if (checkColumn.recordset.length === 0) {
-                console.log('Adding ProfileImage column to Master_ConcernedSE...');
-                await sql.query`ALTER TABLE Master_ConcernedSE ADD ProfileImage NVARCHAR(MAX)`;
-                console.log('ProfileImage column added.');
-            }
-
-            // Check if EnquiryNotes table exists
-            const checkNotesTable = await sql.query`
-                SELECT * FROM sysobjects WHERE name='EnquiryNotes' AND xtype='U'
-            `;
-            if (checkNotesTable.recordset.length === 0) {
-                console.log('Creating EnquiryNotes table...');
-                await sql.query`
-                    CREATE TABLE EnquiryNotes (
-                        ID INT IDENTITY(1,1) PRIMARY KEY,
-                        EnquiryID INT NOT NULL,
-                        UserID INT NOT NULL,
-                        UserName NVARCHAR(255),
-                        UserProfileImage NVARCHAR(MAX),
-                        NoteContent NVARCHAR(MAX),
-                        CreatedAt DATETIME DEFAULT GETDATE()
-                    )
-                 `;
-                console.log('EnquiryNotes table created.');
-            }
-        } catch (schemaErr) {
-            console.error('Schema check error:', schemaErr);
-        }
-
-    } catch (err) {
-        console.error('Database Initialization Failed:', err);
-    }
-};
-
-initApp();
-
-console.log('Starting server initialization...');
-console.log('PORT:', PORT);
-const server = app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
-server.on('error', (e) => console.error('Server Error:', e));
-
 // Update Profile Image
 app.post('/api/auth/update-profile-image', async (req, res) => {
     const { userId, imageBase64 } = req.body;
     try {
-        await sql.query`UPDATE Master_ConcernedSE SET ProfileImage = ${imageBase64} WHERE ID = ${userId}`;
+        await sql.query`UPDATE Master_ConcernedSE SET ProfileImage = ${imageBase64} WHERE ID = ${userId} `;
         res.json({ message: 'Profile image updated' });
     } catch (err) {
         console.error('Error updating profile image:', err);
@@ -1119,7 +1207,40 @@ app.post('/api/auth/update-profile-image', async (req, res) => {
     }
 });
 
-// --- Collaborative Notes Endpoints ---
+// --- Notifications API ---
+app.get('/api/notifications/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const result = await sql.query`SELECT * FROM Notifications WHERE UserID = ${userId} ORDER BY CreatedAt DESC`;
+        res.json(result.recordset);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+app.put('/api/notifications/:id/read', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await sql.query`UPDATE Notifications SET IsRead = 1 WHERE ID = ${id}`;
+        res.json({ message: 'Marked as read' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
+
+// Clear All Notifications
+app.delete('/api/notifications/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        await sql.query`DELETE FROM Notifications WHERE UserID = ${userId}`;
+        res.json({ message: 'All notifications cleared' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+});
 
 // Get Notes
 app.get('/api/enquiries/:id/notes', async (req, res) => {
@@ -1146,12 +1267,100 @@ app.post('/api/enquiries/:id/notes', async (req, res) => {
         request.input('NoteContent', sql.NVarChar, content);
 
         await request.query`
-            INSERT INTO EnquiryNotes (EnquiryID, UserID, UserName, UserProfileImage, NoteContent)
-            VALUES (@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent)
+            INSERT INTO EnquiryNotes(EnquiryID, UserID, UserName, UserProfileImage, NoteContent)
+            VALUES(@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent)
         `;
+
+        // Notify Group
+        const uRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE ID = ${userId} `;
+        const uEmail = uRes.recordset.length > 0 ? uRes.recordset[0].EmailId : null;
+        await createNotifications(enquiryId, 'Note', `New note from ${userName} `, uEmail, userName);
+
+        // Mention Logic
+        try {
+            const allUsers = await sql.query`SELECT FullName, ID FROM Master_ConcernedSE`;
+            for (const u of allUsers.recordset) {
+                // Create regex for case-insensitive match of @FullName
+                const mentionRegex = new RegExp(`@${u.FullName} `, 'i');
+                if (mentionRegex.test(content)) {
+                    if (u.ID !== userId) {
+                        await sql.query`INSERT INTO Notifications(UserID, Type, Message, LinkID, CreatedBy) VALUES(${u.ID}, 'Mention', ${userName + ' mentioned you in a note'}, ${enquiryId}, ${userName})`;
+                    }
+                }
+            }
+        } catch (mentionErr) {
+            console.error('Mention error:', mentionErr);
+        }
+
         res.sendStatus(201);
     } catch (err) {
         console.error('Error adding note:', err);
         res.status(500).send(err.message);
     }
 });
+
+
+
+const initApp = async () => {
+    try {
+        await connectDB();
+        console.log('Database connected successfully.');
+
+        // Check if ProfileImage column exists in Master_ConcernedSE
+        try {
+            const checkColumn = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'Master_ConcernedSE' AND COLUMN_NAME = 'ProfileImage'
+    `;
+
+            if (checkColumn.recordset.length === 0) {
+                console.log('Adding ProfileImage column to Master_ConcernedSE...');
+                await sql.query`ALTER TABLE Master_ConcernedSE ADD ProfileImage NVARCHAR(MAX)`;
+                console.log('ProfileImage column added.');
+            }
+
+            // Check if EnquiryNotes table exists
+            const checkNotesTable = await sql.query`
+SELECT * FROM sysobjects WHERE name = 'EnquiryNotes' AND xtype = 'U'
+    `;
+            if (checkNotesTable.recordset.length === 0) {
+                console.log('Creating EnquiryNotes table...');
+                await sql.query`
+                    CREATE TABLE EnquiryNotes(
+        ID INT IDENTITY(1, 1) PRIMARY KEY,
+        EnquiryID INT NOT NULL,
+        UserID INT NOT NULL,
+        UserName NVARCHAR(255),
+        UserProfileImage NVARCHAR(MAX),
+        NoteContent NVARCHAR(MAX),
+        CreatedAt DATETIME DEFAULT GETDATE()
+    )
+                 `;
+                console.log('EnquiryNotes table created.');
+            }
+        } catch (schemaErr) {
+            console.error('Schema check error:', schemaErr);
+        }
+
+    } catch (err) {
+        console.error('Database Initialization Failed:', err);
+    }
+};
+
+initApp();
+
+console.log('Starting server initialization...');
+console.log('PORT:', PORT);
+const server = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT} `);
+});
+server.on('error', (e) => console.error('Server Error:', e));
+
+
+
+
+
+
+
+

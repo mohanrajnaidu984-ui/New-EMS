@@ -93,12 +93,8 @@ export const DataProvider = ({ children }) => {
                 body: JSON.stringify(data)
             });
             if (res.ok) {
-                // Re-fetch or manually update state? Manual update is faster for UI.
-                // But for simplicity and consistency, let's just append to local state.
-                // However, we need to know the exact structure.
-                // For now, I'll let the component handle the local state update via updateMasters
-                // and this function just handles the DB save.
-                return true;
+                const responseData = await res.json();
+                return responseData;
             }
         } catch (err) {
             console.error(err);
@@ -121,6 +117,25 @@ export const DataProvider = ({ children }) => {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
+            });
+            return res.ok;
+        } catch (err) {
+            console.error(err);
+            return false;
+        }
+    };
+
+    const deleteMaster = async (type, id) => {
+        let endpoint = '';
+        switch (type) {
+            case 'user': endpoint = `/users/${id}`; break;
+            // Add other cases if needed later
+            default: return;
+        }
+
+        try {
+            const res = await fetch(`${API_URL}${endpoint}`, {
+                method: 'DELETE'
             });
             return res.ok;
         } catch (err) {
@@ -195,7 +210,8 @@ export const DataProvider = ({ children }) => {
         searchEnquiries,
         updateMasters: setMasters,
         addMaster,
-        updateMaster
+        updateMaster,
+        deleteMaster
     };
 
     return (
