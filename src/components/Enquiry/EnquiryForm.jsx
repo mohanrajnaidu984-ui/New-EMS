@@ -67,7 +67,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         Remark: '',
         AutoAck: false,
         ceosign: false,
-        Status: 'Enquiry'
+        Status: 'Enquiry',
+        EnquiryStatus: 'Active'
     };
 
     const [formData, setFormData] = useState(initialFormState);
@@ -185,9 +186,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     const generateNewRequestNo = async () => {
         try {
-            const res = await fetch('http://localhost:5000/api/system/next-request-no');
+            const res = await fetch(`http://localhost:5000/api/system/next-request-no?t=${Date.now()}`);
             if (res.ok) {
                 const data = await res.json();
+                console.log('Next ID fetched:', data.nextId);
                 setFormData(prev => ({ ...prev, RequestNo: data.nextId }));
             } else {
                 console.error('Failed to get next request no');
@@ -258,6 +260,17 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleAddReceivedFrom = () => {
+        // Check if both Customer Name and Received From are selected
+        if (!formData.CustomerName) {
+            alert('Please select a Customer Name first');
+            return;
+        }
+
+        if (!formData.ReceivedFrom) {
+            alert('Please select a Received From contact');
+            return;
+        }
+
         if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
             setReceivedFromList([...receivedFromList, formData.ReceivedFrom]);
 
@@ -338,8 +351,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     // --- Modal Open Handlers ---
-    const openNewModal = (setter, category = null) => {
-        setEditData(null);
+    const openNewModal = (setter, category = null, prefilledData = null) => {
+        setEditData(prefilledData);
         setModalMode('Add');
         setFixedCategory(category);
         setter(true);
@@ -425,8 +438,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const handleCustomerSubmit = async (data) => {
         console.log('handleCustomerSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('customer', { ...data, RequestNo: formData.RequestNo });
-
+            const result = await addMaster('customer', { ...data, RequestNo: formData.RequestNo });
+            if (!result) return;
+            const newItem = { ...data, ID: result.id };
 
             // Update specific list based on category
             if (data.Category === 'Contractor') {
@@ -434,21 +448,21 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 updateMasters(prev => ({
                     ...prev,
                     existingCustomers: [...prev.existingCustomers, data.CompanyName],
-                    customers: [...prev.customers, data]
+                    customers: [...prev.customers, newItem]
                 }));
             } else if (data.Category === 'Client') {
                 handleInputChange('ClientName', data.CompanyName);
                 updateMasters(prev => ({
                     ...prev,
                     clientNames: [...prev.clientNames, data.CompanyName],
-                    customers: [...prev.customers, data]
+                    customers: [...prev.customers, newItem]
                 }));
             } else if (data.Category === 'Consultant') {
                 handleInputChange('ConsultantName', data.CompanyName);
                 updateMasters(prev => ({
                     ...prev,
                     consultantNames: [...prev.consultantNames, data.CompanyName],
-                    customers: [...prev.customers, data]
+                    customers: [...prev.customers, newItem]
                 }));
             }
         } else {
@@ -499,9 +513,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const handleContactSubmit = async (data) => {
         console.log('handleContactSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('contact', { ...data, RequestNo: formData.RequestNo });
+            const result = await addMaster('contact', { ...data, RequestNo: formData.RequestNo });
+            if (!result) return;
+            const newItem = { ...data, ID: result.id };
             updateMasters(prev => {
-                const newContacts = [...prev.contacts, data];
+                const newContacts = [...prev.contacts, newItem];
                 const newCustomers = prev.existingCustomers.includes(data.CompanyName)
                     ? prev.existingCustomers
                     : [...prev.existingCustomers, data.CompanyName];
@@ -569,11 +585,13 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     const handleUserSubmit = async (data) => {
         if (modalMode === 'Add') {
-            await addMaster('user', { ...data, RequestNo: formData.RequestNo });
+            const result = await addMaster('user', { ...data, RequestNo: formData.RequestNo });
+            if (!result) return;
+            const newItem = { ...data, ID: result.id };
             handleInputChange('ConcernedSE', data.FullName);
             updateMasters(prev => ({
                 ...prev,
-                users: [...prev.users, data],
+                users: [...prev.users, newItem],
                 concernedSEs: [...prev.concernedSEs, data.FullName]
             }));
         } else {
@@ -599,11 +617,13 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const handleEnqItemSubmit = async (data) => {
         console.log('handleEnqItemSubmit data:', data);
         if (modalMode === 'Add') {
-            await addMaster('enquiryItem', { ...data, RequestNo: formData.RequestNo });
+            const result = await addMaster('enquiryItem', { ...data, RequestNo: formData.RequestNo });
+            if (!result) return;
+            const newItem = { ...data, ID: result.id };
             handleInputChange('EnquiryFor', data.ItemName);
             updateMasters(prev => ({
                 ...prev,
-                enqItems: [...prev.enqItems, data],
+                enqItems: [...prev.enqItems, newItem],
                 enquiryFor: [...prev.enquiryFor, data.ItemName]
             }));
         } else {
@@ -715,7 +735,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             SelectedConcernedSEs: seList,
             AcknowledgementSE: ackSEList[0] || '',
             CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.name || 'System'),
-            ModifiedBy: currentUser?.name || 'System'
+            ModifiedBy: currentUser?.name || 'System',
+            // Only trigger email if EnquiryStatus is Active
+            AutoAck: formData.EnquiryStatus === 'Active' ? formData.AutoAck : false
         };
 
         if (isModifyMode) {
@@ -739,15 +761,45 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             alert(`Enquiry Updated: ${formData.RequestNo}`);
         } else {
             // RequestNo is already generated in useEffect
-            await addEnquiry(payload);
+            const result = await addEnquiry(payload);
 
-            // Upload pending files if any BEFORE resetting form
-            if (pendingFiles.length > 0) {
-                await uploadPendingFiles(formData.RequestNo);
+            // If duplicate error, regenerate number and retry
+            if (!result.success && result.error && result.error.includes('already exists')) {
+                alert('Duplicate enquiry number detected. Generating a new unique number...');
+                generateNewRequestNo();
+                return; // Don't reset form, let user resubmit with new number
             }
 
-            alert(`Enquiry Added: ${formData.RequestNo}`);
-            resetForm();
+            if (result.success) {
+                // Upload pending files if any BEFORE triggering notification
+                if (pendingFiles.length > 0) {
+                    await uploadPendingFiles(formData.RequestNo);
+                }
+
+                // Trigger Email Notification (Created Mode only)
+                await sendNotification(formData.RequestNo);
+
+                alert(`Enquiry Added: ${formData.RequestNo}`);
+                resetForm();
+            }
+        }
+    };
+
+    const sendNotification = async (requestNo) => {
+        try {
+            console.log('Triggering notification for:', requestNo);
+            const res = await fetch('http://localhost:5000/api/enquiries/notify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ requestNo })
+            });
+            if (!res.ok) {
+                console.error('Failed to send notification email');
+            } else {
+                console.log('Notification email triggered successfully');
+            }
+        } catch (err) {
+            console.error('Error triggering notification:', err);
         }
     };
 
@@ -772,12 +824,12 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 await fetchAttachments();
             } else {
                 const errorText = await res.text();
-                console.error('Failed to upload pending files:', errorText);
-                alert(`Enquiry saved, but failed to upload pending files: ${errorText}`);
+                // console.error('Failed to upload pending files:', errorText);
+                // alert(`Enquiry saved, but failed to upload pending files: ${errorText}`);
             }
         } catch (err) {
             console.error('Error uploading pending files:', err);
-            alert(`Enquiry saved, but error uploading pending files: ${err.message}`);
+            // alert(`Enquiry saved, but error uploading pending files: ${err.message}`);
         }
     };
 
@@ -795,6 +847,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setPendingFiles([]);
         setProjectSuggestions([]);
         setShowProjectSuggestions(false);
+        if (activeTab === 'New') {
+            generateNewRequestNo();
+        }
     };
 
     // --- Modify Logic ---
@@ -893,70 +948,24 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         console.log('=== handleFileUpload called ===');
         const files = e.target.files;
         console.log('Files selected:', files ? files.length : 0);
-        console.log('Current RequestNo:', formData.RequestNo);
-        console.log('Is Modify Mode:', isModifyMode);
 
         if (!files || files.length === 0) {
             console.log('No files selected, returning');
             return;
         }
 
-        // If not Modify Mode (New Enquiry), add to pendingFiles
-        if (!isModifyMode) {
-            console.log('No RequestNo, adding to pending files');
-            const newPending = [];
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const fileName = file.webkitRelativePath || file.name;
-                const previewUrl = URL.createObjectURL(file);
-                newPending.push({ file, fileName, isPending: true, id: Date.now() + i, previewUrl });
-            }
-            setPendingFiles(prev => [...prev, ...newPending]);
-            e.target.value = null; // Clear input
-            console.log('Added to pending files:', newPending.length);
-            return;
-        }
-
-        // Existing logic for immediate upload
-        console.log('Attempting immediate upload. RequestNo:', formData.RequestNo);
-
-        const uploadData = new FormData();
+        // Always add to pending files (New or Modify Mode)
+        // This ensures users can review and delete files before final save
+        const newPending = [];
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
-            // Use webkitRelativePath if available (folder upload), otherwise use name
             const fileName = file.webkitRelativePath || file.name;
-            uploadData.append('files', file, fileName);
-            console.log(`Added file ${i + 1}:`, fileName);
+            const previewUrl = URL.createObjectURL(file);
+            newPending.push({ file, fileName, isPending: true, id: Date.now() + i, previewUrl });
         }
-
-        try {
-            // Send RequestNo and UserName as query parameters
-            const userName = currentUser?.name || 'System';
-            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(formData.RequestNo)}&userName=${encodeURIComponent(userName)}`, {
-                method: 'POST',
-                body: uploadData
-            });
-
-            if (res.ok) {
-                const data = await res.json();
-                // Optimistic update with new files
-                const newAttachments = data.files.map(f => ({ FileName: f.fileName, FilePath: f.filePath, ID: Date.now() + Math.random() }));
-                setAttachments([...attachments, ...newAttachments]);
-                alert('Files uploaded successfully');
-                // Refresh attachments
-                await fetchAttachments();
-            } else {
-                const errorText = await res.text();
-                console.error('Upload failed:', errorText);
-                alert('Failed to upload files: ' + errorText);
-            }
-        } catch (err) {
-            console.error('Upload error:', err);
-            alert('Error uploading files: ' + err.message);
-        } finally {
-            // Clear the input value to allow re-selection of the same file if needed
-            e.target.value = null;
-        }
+        setPendingFiles(prev => [...prev, ...newPending]);
+        e.target.value = null; // Clear input
+        console.log('Added to pending files:', newPending.length);
     };
 
     const handleRemoveAttachment = async (attachmentId, isPending = false) => {
@@ -1419,8 +1428,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onNew={() => openNewModal(setShowCustomerModal, 'Contractor')}
                                                             onEdit={handleEditCustomer}
                                                             selectedItemDetails={renderCustomerCard()}
-                                                            onAdd={onAddCustomerClick}
-                                                            onRemove={handleRemoveCustomer}
                                                             error={errors.CustomerName}
                                                         />
                                                     </div>
@@ -1431,7 +1438,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 (formData.CustomerName
                                                                     ? masters.contacts.filter(c => {
                                                                         const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-                                                                        return normalize(c.CompanyName) === normalize(formData.CustomerName);
+                                                                        const companyMatch = normalize(c.CompanyName) === normalize(formData.CustomerName);
+                                                                        if (c.CompanyName.includes('ECO')) console.log(`Checking Contact: ${c.ContactName}, Company: ${c.CompanyName} vs Selected: ${formData.CustomerName} -> Match: ${companyMatch}`);
+                                                                        return companyMatch;
                                                                     })
                                                                     : []
                                                                 ).map(c => `${c.ContactName}|${c.CompanyName}`)
@@ -1452,7 +1461,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 const [name, company] = item.split('|');
                                                                 return `${idx + 1}. ${name} (${company})`;
                                                             }}
-                                                            onNew={() => openNewModal(setShowContactModal)}
+                                                            onNew={() => openNewModal(setShowContactModal, null, { CompanyName: formData.CustomerName })}
                                                             onEdit={handleEditContact}
                                                             selectedItemDetails={renderContactCard()}
                                                             error={errors.ReceivedFrom}
@@ -1641,7 +1650,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                                 >
                                                                                     <i className="bi bi-download"></i>
                                                                                 </a>
-                                                                                <button
+                                                                                {/* <button
                                                                                     type="button"
                                                                                     className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
                                                                                     style={{ width: '32px', height: '32px' }}
@@ -1649,7 +1658,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                                     title="Remove"
                                                                                 >
                                                                                     <i className="bi bi-trash"></i>
-                                                                                </button>
+                                                                                </button> */}
                                                                             </div>
                                                                         </li>
                                                                     ))}
@@ -1721,14 +1730,28 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         checked={formData.ceosign} onChange={(e) => handleInputChange('ceosign', e.target.checked)} />
                                                     <label className="form-check-label" htmlFor="ceoSign">ED/CEO Signature required</label>
                                                 </div>
+
+                                                {/* Enquiry Status Dropdown */}
+                                                <div className="d-flex align-items-center gap-2 mt-2" style={{ fontSize: '13px' }}>
+                                                    <label className="mb-0">Enquiry Status:</label>
+                                                    <select
+                                                        className="form-select form-select-sm"
+                                                        style={{ width: '120px', fontSize: '13px' }}
+                                                        value={formData.EnquiryStatus}
+                                                        onChange={(e) => handleInputChange('EnquiryStatus', e.target.value)}
+                                                    >
+                                                        <option value="Active">Active</option>
+                                                        <option value="Inactive">Inactive</option>
+                                                    </select>
+                                                </div>
                                             </div>
 
-                                            {/* Buttons Section (Below Checkboxes) */}
-                                            <div className="d-flex justify-content-end gap-2 mt-4 mb-5">
-                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>Cancel</button>
+                                            {/* Buttons Section (Left Aligned, Add then Cancel) */}
+                                            <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
                                                 <button type="submit" className="btn btn-outline-success">
                                                     {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
                                                 </button>
+                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>Cancel</button>
                                             </div>
                                         </div>
                                     </form>

@@ -1,0 +1,39 @@
+﻿node : D:\Data\Anti gr
+avity\EMS_Demo-by-Anti
+gravity-master\EMS\New
+-EMS-de9b154a3f16b4989
+8b382f5d7bad10bd9734b5
+1\server\index.js:837
+At line:1 char:1
++ node -c 
+server/index.js 2> 
+syntax_error.txt
++ ~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
+~
+    + CategoryInfo    
+          : NotSpeci  
+  fied: (D:\Data\An   
+ ti gr...er\index.    
+js:837:String) []    
+, RemoteException
+    + FullyQualifiedE 
+   rrorId : NativeCo  
+  mmandError
+ 
+                      
+      } else {
+                      
+        ^^^^
+
+SyntaxError: 
+Unexpected token 
+'else'
+    at wrapSafe (node:
+internal/modules/cjs/l
+oader:1692:18)
+    at checkSyntax (no
+de:internal/main/check
+_syntax:76:3)
+
+Node.js v24.11.1

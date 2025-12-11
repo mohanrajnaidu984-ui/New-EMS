@@ -75,7 +75,7 @@ const UserProfile = () => {
                     )}
                 </div>
 
-                <span className={`fw-medium text-secondary ${(dropdownOpen) ? 'text-primary' : ''}`} style={{ fontSize: '16px' }}>
+                <span className={`fw-medium text-secondary ${(dropdownOpen) ? 'text-primary' : ''}`} style={{ fontSize: '11.2px' }}>
                     {currentUser.name}
                 </span>
                 <i className="bi bi-chevron-down ms-2 text-secondary" style={{ fontSize: '0.9rem' }}></i>

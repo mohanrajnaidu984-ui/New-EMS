@@ -21,7 +21,11 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
     const [errors, setErrors] = useState({});
 
     useEffect(() => {
-        setFormData(initialData || defaultState);
+        if (initialData) {
+            setFormData({ ...defaultState, ...initialData });
+        } else {
+            setFormData(defaultState);
+        }
         setErrors({});
     }, [initialData, show]);
 
@@ -36,11 +40,19 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
         e.preventDefault();
 
         const newErrors = {};
+
+        // Email validation regex
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.ContactName) newErrors.ContactName = 'Contact Person Name is required';
         if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
         if (!formData.Mobile1) newErrors.Mobile1 = 'Mobile 1 is required';
-        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
+        if (!formData.EmailId) {
+            newErrors.EmailId = 'E-Mail ID is required';
+        } else if (!emailRegex.test(formData.EmailId.trim())) {
+            newErrors.EmailId = 'Please enter a valid email address (e.g., user@example.com)';
+        }
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);

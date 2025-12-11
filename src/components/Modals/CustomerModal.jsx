@@ -38,10 +38,18 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
         e.preventDefault();
 
         const newErrors = {};
+
+        // Email validation regex
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
         if (!formData.Phone1) newErrors.Phone1 = 'Phone 1 is required';
-        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
+        if (!formData.EmailId) {
+            newErrors.EmailId = 'E-Mail ID is required';
+        } else if (!emailRegex.test(formData.EmailId.trim())) {
+            newErrors.EmailId = 'Please enter a valid email address (e.g., user@example.com)';
+        }
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
@@ -103,8 +111,15 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                 <div className="row mb-2">
                     <div className="col-md-3">
                         <label className="form-label">Rating</label>
-                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.Rating} onChange={(e) => handleChange('Rating', e.target.value)} />
+                        <select className="form-select" style={{ fontSize: '13px' }}
+                            value={formData.Rating} onChange={(e) => handleChange('Rating', e.target.value)}>
+                            <option value="">-- Select Rating --</option>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                        </select>
                     </div>
                     <div className="col-md-3">
                         <label className="form-label">Type</label>

@@ -158,14 +158,23 @@ export const DataProvider = ({ children }) => {
                     ...prev,
                     [newEnquiry.RequestNo]: newEnquiry
                 }));
+                return { success: true };
             } else {
-                const errorText = await res.text();
-                console.error('Save failed:', errorText);
-                alert(`Failed to save to DB: ${errorText}`);
+                let errorMessage = 'Failed to save to DB';
+                try {
+                    const errorData = await res.json();
+                    errorMessage = errorData.error || errorData.message || errorMessage;
+                } catch {
+                    errorMessage = await res.text();
+                }
+                console.error('Save failed:', errorMessage);
+                alert(`Failed to save to DB: ${errorMessage}`);
+                return { success: false, error: errorMessage };
             }
         } catch (err) {
             console.error(err);
             alert('Server Error');
+            return { success: false, error: err.message };
         }
     };
 

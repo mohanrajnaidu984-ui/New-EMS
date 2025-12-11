@@ -130,7 +130,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
                 <img
                   src={almoayyedLogo}
                   alt="ACG"
-                  style={{ height: '40px', width: 'auto', objectFit: 'contain', opacity: 0.8 }}
+                  style={{ height: '34px', width: 'auto', objectFit: 'contain', opacity: 0.8 }}
                 />
               </div>
             </div>

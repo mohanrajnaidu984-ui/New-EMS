@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+console.log('SERVER STARTING - ACK FIX APPLIED V2');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -8,44 +9,77 @@ const multer = require('multer');
 const nodemailer = require('nodemailer');
 
 // Configure Nodemailer Transporter
+console.log('--- Email Config ---');
+console.log('SMTP_HOST:', process.env.SMTP_HOST);
+console.log('SMTP_USER:', process.env.SMTP_USER);
+console.log('SMTP_PORT:', process.env.SMTP_PORT);
+
+// Strip quotes if present
+let user = process.env.SMTP_USER;
 const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: process.env.SMTP_PORT,
-    secure: false, // true for 465, false for other ports
+    secure: process.env.SMTP_PORT == 465, // true for 465, false for other ports
     auth: {
         user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-    }
+        pass: process.env.SMTP_PASS ? process.env.SMTP_PASS.replace(/^"|"$/g, '') : process.env.SMTP_PASS
+    },
+    tls: {
+        rejectUnauthorized: false
+    },
+    logger: true,
+    debug: true
 });
 
-const sendEnquiryEmail = async (enquiryData, recipients) => {
+const sendEnquiryEmail = async (enquiryData, recipients, attachments = []) => {
     const { to, cc } = recipients;
     if ((!to || to.length === 0) && (!cc || cc.length === 0)) {
         console.log('No recipients for email.');
         return;
     }
 
+    // Generate Attachment Links List
+    let attachmentHtml = '';
+    if (attachments && attachments.length > 0) {
+        attachmentHtml = `
+            <tr><td style="background-color: #d4edda; font-weight: bold;">Attachments:</td>
+            <td>
+                <ul style="margin: 0; padding-left: 20px;">
+                    ${attachments.map(att => `
+                        <li><a href="http://localhost:5000/api/attachments/${att.ID}" target="_blank">${att.FileName}</a></li>
+                    `).join('')}
+                </ul>
+            </td></tr>
+        `;
+    }
+
+    const formatDate = (date) => {
+        if (!date) return '';
+        return new Date(date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-');
+    };
+
     const mailOptions = {
-        from: process.env.SMTP_USER,
+        from: 'ems@almoayyedcg.com', // Hardcoded to ensure visibility
         to: to.join(','),
         cc: cc ? cc.join(',') : '',
-        subject: `New Enquiry Received - ${enquiryData.RequestNo}`,
+        subject: `New Enquiry No.${enquiryData.RequestNo} dated: ${formatDate(enquiryData.EnquiryDate)}`,
         html: `
             <p>Dear Sir/Madam,</p>
             <p>Greetings !!!</p>
-            <p>Please find given below, details pertaining to a customer Enquiry no. ${enquiryData.RequestNo} on ${new Date(enquiryData.EnquiryDate).toLocaleDateString('en-GB')}. Please report closure in Enquiry Management System.</p>
+            <p>Please find given below, details pertaining to a customer Enquiry no. ${enquiryData.RequestNo} on ${formatDate(enquiryData.EnquiryDate)}. Please report closure in Enquiry Management System.</p>
             <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Enquiry Ref No. :</td><td>${enquiryData.RequestNo}</td></tr>
-                <tr><td style="background-color: #d4edda; font-weight: bold;">Enquiry Date:</td><td>${new Date(enquiryData.EnquiryDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td></tr>
+                <tr><td style="background-color: #d4edda; font-weight: bold;">Enquiry Date:</td><td>${formatDate(enquiryData.EnquiryDate)}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Received From:</td><td>${enquiryData.ReceivedFrom}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Category :</td><td>${enquiryData.EnquiryType}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Project Name:</td><td>${enquiryData.ProjectName}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Client Name:</td><td>${enquiryData.ClientName}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Consultant Name:</td><td>${enquiryData.ConsultantName}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Enquiry Details :</td><td>${enquiryData.DetailsOfEnquiry}</td></tr>
-                <tr><td style="background-color: #d4edda; font-weight: bold;">Due Date:</td><td>${new Date(enquiryData.DueOn).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td></tr>
+                <tr><td style="background-color: #d4edda; font-weight: bold;">Due Date:</td><td>${formatDate(enquiryData.DueOn)}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Supplementary received with:</td><td>${enquiryData.DocumentsReceived || ''}</td></tr>
                 <tr><td style="background-color: #d4edda; font-weight: bold;">Remarks:</td><td>${enquiryData.Remark || ''}</td></tr>
+                ${attachmentHtml}
             </table>
             <br/>
             <p>Thanx in advance,</p>
@@ -61,6 +95,8 @@ const sendEnquiryEmail = async (enquiryData, recipients) => {
         console.error('Error sending email:', error);
     }
 };
+
+// ... (keep existing code) ...
 
 // Updated createNotifications helper to fix syntax and logic
 const createNotifications = async (requestNo, type, message, triggerUserEmail, triggerUserName) => {
@@ -275,8 +311,24 @@ app.post('/api/auth/login', async (req, res) => {
 // Check if user exists and flow requirement
 app.post('/api/auth/check-user', async (req, res) => {
     const { email } = req.body;
+    console.log('=== CHECK USER REQUEST ===');
+    console.log('Email received:', email);
+    console.log('Email type:', typeof email);
+    console.log('Email length:', email ? email.length : 0);
+
     try {
         const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
+        console.log('Query result count:', result.recordset.length);
+
+        if (result.recordset.length > 0) {
+            console.log('User found:', result.recordset[0].FullName, result.recordset[0].EmailId);
+        } else {
+            console.log('No user found with email:', email);
+            // Try to find similar emails
+            const similarResult = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE EmailId LIKE ${'%' + email.split('@')[0] + '%'}`;
+            console.log('Similar emails found:', similarResult.recordset.map(r => r.EmailId));
+        }
+
         const user = result.recordset[0];
 
         if (!user) {
@@ -285,6 +337,7 @@ app.post('/api/auth/check-user', async (req, res) => {
 
         // Check if first time login (no password set)
         const isFirstLogin = !user.LoginPassword || user.LoginPassword === '';
+        console.log('Is first login:', isFirstLogin);
         res.json({ exists: true, isFirstLogin });
     } catch (err) {
         console.error('Check user error:', err);
@@ -449,7 +502,9 @@ app.get('/api/enquiries', async (req, res) => {
                 ClientName: enq.ClientName,
                 ConsultantName: enq.ConsultantName,
                 ReceivedFrom: relatedContacts.map(c => c.split('|')[0]).join(', '),
-                ConcernedSE: relatedSEs.join(', ')
+                ConcernedSE: relatedSEs.join(', '),
+                SourceOfInfo: enq.SourceOfEnquiry,
+                DueOn: enq.DueDate
             };
         });
         res.json(enquiries);
@@ -464,58 +519,74 @@ app.post('/api/enquiries', async (req, res) => {
     const logFile = path.join(__dirname, 'debug.log');
     const log = (msg) => fs.appendFileSync(logFile, `${new Date().toISOString()} - ${msg}\n`);
 
-    log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
-
-    const {
-        RequestNo, SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
-        SelectedEnquiryTypes, SelectedEnquiryFor,
-        SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
-        ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
-        DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-        AutoAck, ceosign, Status, AcknowledgementSE
-    } = req.body;
-
-    log(`AutoAck Value: ${AutoAck}, Type: ${typeof AutoAck}`);
-    log(`SelectedCustomers: ${JSON.stringify(SelectedCustomers)}`);
-
     try {
+        log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
+
+        const {
+            RequestNo, SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
+            SelectedEnquiryTypes, SelectedEnquiryFor,
+            SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
+            ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
+            DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
+            AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, EnquiryStatus
+        } = req.body;
+
+        log(`AutoAck Value: ${AutoAck}, Type: ${typeof AutoAck}`);
+        log(`SelectedCustomers: ${JSON.stringify(SelectedCustomers)}`);
+
+        // Check if RequestNo already exists
+        const checkResult = await sql.query`SELECT RequestNo FROM EnquiryMaster WHERE RequestNo = ${RequestNo}`;
+        if (checkResult.recordset.length > 0) {
+            log(`Duplicate RequestNo detected: ${RequestNo}`);
+            return res.status(400).json({
+                message: 'Duplicate Enquiry Number',
+                error: `Enquiry number ${RequestNo} already exists. Please refresh the page to generate a new unique number.`
+            });
+        }
+
         const request = new sql.Request();
         request.input('RequestNo', sql.NVarChar, RequestNo);
-        request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo); // Mapped to SourceOfEnquiry
+        request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo || null);
         request.input('EnquiryDate', sql.DateTime, EnquiryDate);
-        request.input('DueDate', sql.DateTime, DueOn); // Mapped to DueDate
+        request.input('DueDate', sql.DateTime, DueOn || null);
         request.input('SiteVisitDate', sql.DateTime, SiteVisitDate || null);
 
         request.input('CustomerName', sql.NVarChar, SelectedCustomers ? SelectedCustomers.join(',') : null);
         request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
-        request.input('ProjectName', sql.NVarChar, ProjectName);
-        request.input('ClientName', sql.NVarChar, ClientName);
-        request.input('ConsultantName', sql.NVarChar, ConsultantName);
-        request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry); // Mapped to EnquiryDetails
-        // DocumentsReceived is not in new schema as a single field, it's checkboxes
-        request.input('Doc_HardCopies', sql.Bit, hardcopy);
-        request.input('Doc_Drawing', sql.Bit, drawing);
-        request.input('Doc_CD_DVD', sql.Bit, dvd);
-        request.input('Doc_Spec', sql.Bit, spec);
-        request.input('Doc_EquipmentSchedule', sql.Bit, eqpschedule);
-        request.input('Remarks', sql.NVarChar, Remark); // Mapped to Remarks
-        request.input('SendAcknowledgementMail', sql.Bit, AutoAck); // Mapped
-        request.input('ED_CEOSignatureRequired', sql.Bit, ceosign); // Mapped
-        request.input('Status', sql.NVarChar, Status);
-        request.input('OthersSpecify', sql.NVarChar, DocumentsReceived); // Using OthersSpecify for DocumentsReceived text if needed, or ignore
-        request.input('CreatedBy', sql.NVarChar, req.body.CreatedBy);
+        request.input('ProjectName', sql.NVarChar, ProjectName || null);
+        request.input('ClientName', sql.NVarChar, ClientName || null);
+        request.input('ConsultantName', sql.NVarChar, ConsultantName || null);
+        request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry || null);
+
+        request.input('Doc_HardCopies', sql.Bit, hardcopy ?? false);
+        request.input('Doc_Drawing', sql.Bit, drawing ?? false);
+        request.input('Doc_CD_DVD', sql.Bit, dvd ?? false);
+        request.input('Doc_Spec', sql.Bit, spec ?? false);
+        request.input('Doc_EquipmentSchedule', sql.Bit, eqpschedule ?? false);
+        request.input('Remarks', sql.NVarChar, Remark || null);
+        request.input('SendAcknowledgementMail', sql.Bit, AutoAck ?? false);
+        request.input('ED_CEOSignatureRequired', sql.Bit, ceosign ?? false);
+        request.input('Status', sql.NVarChar, Status || 'Open');
+        request.input('EnquiryStatus', sql.NVarChar, EnquiryStatus || 'Pending');
+        request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE || null);
+        request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails || null);
+        request.input('OthersSpecify', sql.NVarChar, DocumentsReceived || null);
+        request.input('CreatedBy', sql.NVarChar, req.body.CreatedBy || 'System');
+
+        log(`DEBUG - AcknowledgementSE value: '${AcknowledgementSE}', Type: ${typeof AcknowledgementSE}`);
+        log(`DEBUG - AdditionalNotificationEmails value: '${AdditionalNotificationEmails}', Type: ${typeof AdditionalNotificationEmails}`);
 
         await request.query(`
             INSERT INTO EnquiryMaster (
                 RequestNo, SourceOfEnquiry, EnquiryDate, DueDate, SiteVisitDate,
                 CustomerName, ReceivedFrom, ProjectName, ClientName, ConsultantName,
                 EnquiryDetails, Doc_HardCopies, Doc_Drawing, Doc_CD_DVD,
-                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, OthersSpecify, CreatedBy
+                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, EnquiryStatus, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
             ) VALUES (
                 @RequestNo, @SourceOfEnquiry, @EnquiryDate, @DueDate, @SiteVisitDate,
                 @CustomerName, @ReceivedFrom, @ProjectName, @ClientName, @ConsultantName,
                 @EnquiryDetails, @Doc_HardCopies, @Doc_Drawing, @Doc_CD_DVD,
-                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @OthersSpecify, @CreatedBy
+                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @EnquiryStatus, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
             )
         `);
 
@@ -523,7 +594,10 @@ app.post('/api/enquiries', async (req, res) => {
         const insertRelated = async (table, col, items) => {
             if (items && items.length > 0) {
                 for (const item of items) {
-                    await sql.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES ('${RequestNo}', '${item}')`);
+                    const r = new sql.Request();
+                    r.input('reqNo', sql.NVarChar, RequestNo);
+                    r.input('val', sql.NVarChar, item);
+                    await r.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@reqNo, @val)`);
                 }
             }
         };
@@ -536,7 +610,11 @@ app.post('/api/enquiries', async (req, res) => {
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');
-                await sql.query`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (${RequestNo}, ${contact}, ${company})`;
+                const r = new sql.Request();
+                r.input('reqNo', sql.NVarChar, RequestNo);
+                r.input('contact', sql.NVarChar, contact);
+                r.input('company', sql.NVarChar, company);
+                await r.query(`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (@reqNo, @contact, @company)`);
             }
         }
 
@@ -655,62 +733,113 @@ app.post('/api/enquiries', async (req, res) => {
             };
 
             // Send Email (Async - Do not await to speed up UI)
-            sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC })
-                .then(() => log('Internal Enquiry Email sent successfully'))
-                .catch(err => log(`Error sending Internal Enquiry Email: ${err.message}`));
+            // COMMENTED OUT: Logic moved to /api/enquiries/notify to handle attachments
+            // sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC })
+            //    .then(() => log('Internal Enquiry Email sent successfully'))
+            //    .catch(err => log(`Error sending Internal Enquiry Email: ${err.message}`));
 
             // New Email Logic
-            // New Email Logic
-            if (AutoAck) {
-                // Async Execution
+            console.log(`[Email Debug] Checking AutoAck: '${AutoAck}' (Type: ${typeof AutoAck})`);
+            if (AutoAck === true || AutoAck === 'true') {
+                console.log('--- AUTOACK STARTING ---');
+                log('Processing AutoAck...');
+                // Trigger sending email asynchronously
                 (async () => {
                     try {
                         log('AutoAck is true, preparing to send acknowledgement emails...');
 
-                        // 1. Fetch CC Emails (All Selected Concerned SEs)
-                        let ccEmails = [];
-                        if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
-                            const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
-                            const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
-                            seRes.recordset.forEach(row => {
-                                if (row.EmailId) ccEmails.push(row.EmailId.trim());
-                            });
+                        const emailData = {
+                            RequestNo: RequestNo,
+                            EnquiryDate: EnquiryDate,
+                            CustomerName: SelectedCustomers ? SelectedCustomers.join(', ') : '',
+                            ProjectName: ProjectName,
+                            ClientName: ClientName,
+                            ConsultantName: ConsultantName,
+                            DetailsOfEnquiry: DetailsOfEnquiry
+                        };
+
+                        // 1. Fetch CC Email
+                        let ccString = '';
+                        if (AcknowledgementSE) {
+                            const ccRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${AcknowledgementSE}`;
+                            if (ccRes.recordset.length > 0 && ccRes.recordset[0].EmailId) {
+                                ccString = ccRes.recordset[0].EmailId;
+                                log(`CC found: ${ccString}`);
+                            } else {
+                                log(`CC NOT found for AcknowledgementSE: ${AcknowledgementSE}`);
+                            }
                         }
-                        const ccString = ccEmails.join(',');
-                        log(`CC Emails (Concerned SEs): ${ccString}`);
 
                         // 2. Fetch To Emails (Selected Received From Contacts)
                         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                            log(`Proccessing ${SelectedReceivedFroms.length} contacts for AutoAck`);
                             const processedEmails = new Set();
 
                             for (const item of SelectedReceivedFroms) {
                                 const [contact, company] = item.split('|');
+                                log(`Looking up email for Contact: ${contact}, Company: ${company}`);
                                 // Fetch email for this specific contact
                                 const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
 
                                 if (rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId) {
                                     const recipientEmail = rfRes.recordset[0].EmailId.trim();
+                                    log(`Found email: ${recipientEmail}`);
 
                                     // Avoid sending duplicate emails to the same address for the same request
                                     if (!processedEmails.has(recipientEmail)) {
-                                        log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${ccString}`);
-                                        try {
-                                            await sendAcknowledgementEmail(emailData, recipientEmail, ccString, ceosign);
-                                            log(`Email sent successfully to ${recipientEmail}`);
-                                            processedEmails.add(recipientEmail);
-                                        } catch (e) {
-                                            log(`Error sending email to ${recipientEmail}: ${e.message}`);
+                                        // 3. Fetch CC Emails from Enquiry Items (Master_EnquiryFor)
+                                        let itemCCs = [];
+                                        if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
+                                            const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
+                                            try {
+                                                const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
+                                                itemsRes.recordset.forEach(row => {
+                                                    if (row.CCMailIds) {
+                                                        const emails = row.CCMailIds.split(',').map(e => e.trim().toLowerCase());
+                                                        itemCCs.push(...emails);
+                                                    }
+                                                });
+                                            } catch (ccErr) {
+                                                log(`Error fetching Item CCs: ${ccErr.message}`);
+                                            }
                                         }
+
+                                        // Combine relevant CCs (AcknowledgementSE + Item CCs)
+                                        let allCCs = [];
+                                        if (ccString) allCCs.push(ccString);
+                                        if (itemCCs.length > 0) allCCs.push(...itemCCs);
+
+                                        // Deduplicate CCs
+                                        const uniqueCCs = [...new Set(allCCs)].filter(Boolean);
+                                        const finalCCString = uniqueCCs.join(',');
+
+                                        log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${finalCCString}`);
+                                        log(`Item CCs found: ${itemCCs.join(', ')}`);
+
+                                        try {
+                                            const sent = await sendAcknowledgementEmail(emailData, recipientEmail, finalCCString, ceosign);
+                                            if (sent) {
+                                                log(`Email sent successfully to ${recipientEmail}`);
+                                                processedEmails.add(recipientEmail);
+                                            } else {
+                                                log(`Failed to send email to ${recipientEmail}`);
+                                            }
+                                        } catch (e) {
+                                            log(`Error sending email to ${recipientEmail}: ${e.stack || e}`);
+                                        }
+                                    } else {
+                                        log(`Email ${recipientEmail} already processed in this batch.`);
                                     }
                                 } else {
                                     log(`No email found for Received From contact: ${contact} (${company})`);
+                                    // Try fallback query just by ContactName if Company might be mismatched? No, stay strict.
                                 }
                             }
                         } else {
                             log('No Received From contacts selected. Skipping acknowledgement email.');
                         }
                     } catch (err) {
-                        log(`Async Email Error: ${err.message}`);
+                        log(`Async Email Error: ${err.message}\n${err.stack}`);
                     }
                 })();
             } else {
@@ -746,7 +875,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
         ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
         DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-        AutoAck, ceosign, Status
+        AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, EnquiryStatus
     } = req.body;
 
     try {
@@ -772,6 +901,9 @@ app.put('/api/enquiries/:id', async (req, res) => {
         request.input('SendAcknowledgementMail', sql.Bit, AutoAck);
         request.input('ED_CEOSignatureRequired', sql.Bit, ceosign);
         request.input('Status', sql.NVarChar, Status);
+        request.input('EnquiryStatus', sql.NVarChar, EnquiryStatus);
+        request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE);
+        request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails);
         request.input('OthersSpecify', sql.NVarChar, DocumentsReceived);
 
         await request.query(`
@@ -779,7 +911,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 SourceOfEnquiry=@SourceOfEnquiry, EnquiryDate=@EnquiryDate, DueDate=@DueDate, SiteVisitDate=@SiteVisitDate,
                 ReceivedFrom=@ReceivedFrom, ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
                 EnquiryDetails=@EnquiryDetails, Doc_HardCopies=@Doc_HardCopies, Doc_Drawing=@Doc_Drawing, Doc_CD_DVD=@Doc_CD_DVD,
-                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, OthersSpecify=@OthersSpecify
+                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, EnquiryStatus=@EnquiryStatus, AcknowledgementSE=@AcknowledgementSE, AdditionalNotificationEmails=@AdditionalNotificationEmails, OthersSpecify=@OthersSpecify
             WHERE RequestNo=@RequestNo
         `);
 
@@ -853,18 +985,22 @@ app.get('/api/customers', async (req, res) => {
 app.post('/api/customers', async (req, res) => {
     const { CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, Category } = req.body;
     try {
+        let result;
         if (Category === 'Client') {
-            await sql.query`INSERT INTO Master_ClientName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
-                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+            result = await sql.query`INSERT INTO Master_ClientName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo});
+                            SELECT SCOPE_IDENTITY() AS ID;`;
         } else if (Category === 'Consultant') {
-            await sql.query`INSERT INTO Master_ConsultantName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
-                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+            result = await sql.query`INSERT INTO Master_ConsultantName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo});
+                            SELECT SCOPE_IDENTITY() AS ID;`;
         } else {
             // Default to Contractor/Customer
-            await sql.query`INSERT INTO Master_CustomerName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
-                            VALUES (${Category || 'Contractor'}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo})`;
+            result = await sql.query`INSERT INTO Master_CustomerName (Category, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo)
+                            VALUES (${Category || 'Contractor'}, ${CompanyName}, ${Address1}, ${Address2}, ${Rating}, ${Type}, ${FaxNo}, ${Phone1}, ${Phone2}, ${EmailId}, ${Website}, ${Status}, ${req.body.RequestNo});
+                            SELECT SCOPE_IDENTITY() AS ID;`;
         }
-        res.status(201).json({ message: 'Customer added' });
+        res.status(201).json({ message: 'Customer added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -901,11 +1037,12 @@ app.get('/api/contacts', async (req, res) => {
 });
 
 app.post('/api/contacts', async (req, res) => {
-    const { Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, RequestNo } = req.body;
+    const { Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId } = req.body;
     try {
-        await sql.query`INSERT INTO Master_ReceivedFrom (Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId, RequestNo)
-                        VALUES (${Category}, ${CompanyName}, ${ContactName}, ${Designation}, ${CategoryOfDesignation}, ${Address1}, ${Address2}, ${FaxNo}, ${Phone}, ${Mobile1}, ${Mobile2}, ${EmailId}, ${RequestNo})`;
-        res.status(201).json({ message: 'Contact added' });
+        const result = await sql.query`INSERT INTO Master_ReceivedFrom (Category, CompanyName, ContactName, Designation, CategoryOfDesignation, Address1, Address2, FaxNo, Phone, Mobile1, Mobile2, EmailId)
+                        VALUES (${Category}, ${CompanyName}, ${ContactName}, ${Designation}, ${CategoryOfDesignation}, ${Address1}, ${Address2}, ${FaxNo}, ${Phone}, ${Mobile1}, ${Mobile2}, ${EmailId});
+                        SELECT SCOPE_IDENTITY() AS ID;`;
+        res.status(201).json({ message: 'Contact added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -933,6 +1070,11 @@ app.get('/api/users', async (req, res) => {
         console.error(err);
         res.status(500).send('Server Error');
     }
+});
+
+// DEBUG ENDPOINT TO VERIFY CODE VERSION
+app.get('/api/version', (req, res) => {
+    res.json({ version: 'v2-fixed', timestamp: new Date() });
 });
 
 app.post('/api/users', async (req, res) => {
@@ -1031,9 +1173,10 @@ app.get('/api/enquiry-items', async (req, res) => {
 app.post('/api/enquiry-items', async (req, res) => {
     const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo } = req.body;
     try {
-        await sql.query`INSERT INTO Master_EnquiryFor (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo)
-                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${CommonMailIds}, ${CCMailIds}, ${RequestNo})`;
-        res.status(201).json({ message: 'Item added' });
+        const result = await sql.query`INSERT INTO Master_EnquiryFor (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo)
+                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${CommonMailIds}, ${CCMailIds}, ${RequestNo});
+                        SELECT SCOPE_IDENTITY() AS ID;`;
+        res.status(201).json({ message: 'Item added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -1111,18 +1254,24 @@ app.post('/api/attachments/upload', (req, res, next) => {
 // Get Next Request No
 app.get('/api/system/next-request-no', async (req, res) => {
     try {
+        // Use a robust query to get the maximum numeric RequestNo, ignoring text/legacy values
+        // filtering for only digits ensures TRY_CAST works reliably or CAST is safe
         const result = await sql.query`
-            SELECT MAX(TRY_CAST(RequestNo AS BIGINT)) as MaxID 
+            SELECT MAX(CAST(RequestNo AS BIGINT)) as MaxID 
             FROM EnquiryMaster 
-            WHERE RequestNo NOT LIKE '%/%' AND TRY_CAST(RequestNo AS BIGINT) IS NOT NULL
+            WHERE RequestNo NOT LIKE '%[^0-9]%'
         `;
 
         let nextId = 9;
         const maxVal = result.recordset[0].MaxID;
+
+        console.log(`[NextID] MaxID found in DB: ${maxVal}`);
+
         if (maxVal != null) {
             nextId = parseInt(maxVal, 10) + 1;
         }
 
+        console.log(`[NextID] Returning: ${nextId}`);
         res.json({ nextId: nextId.toString() });
     } catch (err) {
         console.error('Error generating next ID:', err);
@@ -1347,6 +1496,100 @@ SELECT * FROM sysobjects WHERE name = 'EnquiryNotes' AND xtype = 'U'
         console.error('Database Initialization Failed:', err);
     }
 };
+
+// NEW ENDPOINT for Triggering Email manually (usually after file upload)
+app.post('/api/enquiries/notify', async (req, res) => {
+    try {
+        const { requestNo } = req.body;
+        console.log('Received notification request for:', requestNo);
+        if (!requestNo) return res.status(400).json({ success: false, message: 'RequestNo required' });
+
+        // 1. Fetch Enquiry Data
+        const enqResult = await sql.query`SELECT * FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
+        if (enqResult.recordset.length === 0) return res.status(404).json({ success: false, message: 'Enquiry not found' });
+        const enquiryData = enqResult.recordset[0];
+
+        // 2. Fetch Attachments
+        const attResult = await sql.query`SELECT * FROM Attachments WHERE RequestNo = ${requestNo}`;
+        const attachments = attResult.recordset;
+        console.log(`Found ${attachments.length} attachments for RequestNo ${requestNo}`);
+
+        // 3. Determine Recipients (Same logic as createNotifications)
+        let recipientEmails = new Set();
+
+        // REMOVED Creator from recipient list as per user request
+
+        // Add Concerned SEs
+        const seRes = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
+        console.log(`[Notify Debug] Found ${seRes.recordset.length} Concerned SEs for RequestNo ${requestNo}`);
+        for (const row of seRes.recordset) {
+            console.log(`[Notify Debug] Processing Concerned SE: ${row.SEName}`);
+            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${row.SEName}`;
+            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
+                recipientEmails.add(u.recordset[0].EmailId.toLowerCase());
+                console.log(`[Notify Debug] Added email: ${u.recordset[0].EmailId}`);
+            } else {
+                console.log(`[Notify Debug] No email found for SE: ${row.SEName}`);
+            }
+        }
+
+        // Add Acknowledgement SE
+        if (enquiryData.AcknowledgementSE) {
+            console.log(`[Notify Debug] Processing Acknowledgement SE: ${enquiryData.AcknowledgementSE}`);
+            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${enquiryData.AcknowledgementSE}`;
+            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
+                recipientEmails.add(u.recordset[0].EmailId.toLowerCase());
+                console.log(`[Notify Debug] Added email: ${u.recordset[0].EmailId}`);
+            } else {
+                console.log(`[Notify Debug] No email found for Ack SE: ${enquiryData.AcknowledgementSE}`);
+            }
+        }
+
+        // 4. Fetch CCs from EnquiryItems
+        let ccEmails = new Set();
+        if (enquiryData.SelectedEnquiryFor) {
+            let items = [];
+            try {
+                // Try parsing as JSON first
+                items = JSON.parse(enquiryData.SelectedEnquiryFor);
+            } catch (e) {
+                // If it's just a regular string or comma-separated
+                items = typeof enquiryData.SelectedEnquiryFor === 'string'
+                    ? enquiryData.SelectedEnquiryFor.split(',').map(s => s.trim())
+                    : [];
+            }
+
+            if (Array.isArray(items) && items.length > 0) {
+                const itemsStr = items.map(i => `'${i}'`).join(',');
+                try {
+                    const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
+                    itemsRes.recordset.forEach(row => {
+                        if (row.CCMailIds) {
+                            const emails = row.CCMailIds.split(',').map(e => e.trim().toLowerCase());
+                            emails.forEach(e => ccEmails.add(e));
+                        }
+                    });
+                } catch (ccErr) {
+                    console.error(`Error fetching Item CCs for notification: ${ccErr.message}`);
+                }
+            }
+        }
+
+        const toList = Array.from(recipientEmails);
+        const ccList = Array.from(ccEmails);
+
+        console.log(`Notification To: ${toList.join(', ')}`);
+        console.log(`Notification CC: ${ccList.join(', ')}`);
+
+        // Send Email
+        await sendEnquiryEmail(enquiryData, { to: toList, cc: ccList }, attachments);
+
+        res.json({ success: true, message: 'Notification sent successfully' });
+    } catch (error) {
+        console.error('Error in /notify:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
 
 initApp();
 

@@ -1,0 +1,200 @@
+﻿    "New Tender"
+  ],
+  "SelectedEnquiryFor": [
+    "Mobile phone"
+  ],
+  "SelectedCustomers": [
+    "TCS"
+  ],
+  "SelectedReceivedFroms": [
+    "vignesh Govardhan|TCS"
+  ],
+  "SelectedConcernedSEs": [
+    "vignesh"
+  ],
+  "AcknowledgementSE": "vignesh",
+  "ModifiedBy": "Mohan Naidu"
+}
+2025-12-10T09:44:50.157Z - AutoAck Value: true, Type: boolean
+2025-12-10T09:44:50.165Z - SelectedCustomers: ["TCS"]
+2025-12-10T09:44:50.210Z - DEBUG - AcknowledgementSE value: 'vignesh', Type: string
+2025-12-10T09:44:50.218Z - DEBUG - AdditionalNotificationEmails value: 'undefined', Type: undefined
+2025-12-10T09:44:50.578Z - Processing AutoAck...
+2025-12-10T09:44:50.580Z - AutoAck is true, preparing to send acknowledgement emails...
+2025-12-10T09:44:50.597Z - CC found: atypicalstore5163@gmail.com
+2025-12-10T09:44:50.599Z - Proccessing 1 contacts for AutoAck
+2025-12-10T09:44:50.602Z - Looking up email for Contact: vignesh Govardhan, Company: TCS
+2025-12-10T09:44:50.619Z - Found email: xcvyu@gmail.com
+2025-12-10T09:44:50.621Z - Sending acknowledgement to Received From: vignesh Govardhan (xcvyu@gmail.com) CC: atypicalstore5163@gmail.com
+2025-12-10T09:44:51.073Z - Email sent successfully to xcvyu@gmail.com
+2025-12-10T12:11:22.843Z - POST /api/enquiries Body: {
+  "SourceOfInfo": "Tender Board",
+  "EnquiryDate": "2025-12-10",
+  "DueOn": "2025-12-11",
+  "SiteVisitDate": "",
+  "EnquiryType": "",
+  "EnquiryFor": "",
+  "CustomerName": "",
+  "ReceivedFrom": "",
+  "ProjectName": "dgf",
+  "ClientName": "wipro",
+  "ConsultantName": "siemens",
+  "ConcernedSE": "",
+  "DetailsOfEnquiry": "dgdg",
+  "DocumentsReceived": "",
+  "hardcopy": false,
+  "drawing": false,
+  "dvd": false,
+  "spec": false,
+  "eqpschedule": false,
+  "Remark": "",
+  "AutoAck": true,
+  "ceosign": false,
+  "Status": "Enquiry",
+  "EnquiryStatus": "Active",
+  "CreatedBy": "Mohan Naidu",
+  "RequestNo": "34",
+  "SelectedEnquiryTypes": [
+    "New Tender"
+  ],
+  "SelectedEnquiryFor": [
+    "BMS"
+  ],
+  "SelectedCustomers": [
+    "Test customer"
+  ],
+  "SelectedReceivedFroms": [
+    "Customer test|Test customer"
+  ],
+  "SelectedConcernedSEs": [
+    "Lakshman"
+  ],
+  "AcknowledgementSE": "Lakshman",
+  "ModifiedBy": "Mohan Naidu"
+}
+2025-12-10T12:11:22.845Z - AutoAck Value: true, Type: boolean
+2025-12-10T12:11:22.859Z - SelectedCustomers: ["Test customer"]
+2025-12-10T12:11:22.879Z - DEBUG - AcknowledgementSE value: 'Lakshman', Type: string
+2025-12-10T12:11:22.889Z - DEBUG - AdditionalNotificationEmails value: 'undefined', Type: undefined
+2025-12-10T12:11:23.212Z - Processing AutoAck...
+2025-12-10T12:11:23.216Z - AutoAck is true, preparing to send acknowledgement emails...
+2025-12-10T12:11:23.233Z - CC found: bmselveng1@almoayyedcg.com
+2025-12-10T12:11:23.237Z - Proccessing 1 contacts for AutoAck
+2025-12-10T12:11:23.240Z - Looking up email for Contact: Customer test, Company: Test customer
+2025-12-10T12:11:23.263Z - Found email: mohanraj.naidu984@gmail.com
+2025-12-10T12:11:23.267Z - Sending acknowledgement to Received From: Customer test (mohanraj.naidu984@gmail.com) CC: bmselveng1@almoayyedcg.com
+2025-12-10T12:11:24.099Z - Email sent successfully to mohanraj.naidu984@gmail.com
+2025-12-11T07:45:19.990Z - POST /api/enquiries Body: {
+  "SourceOfInfo": "Tender Board",
+  "EnquiryDate": "2025-12-11",
+  "DueOn": "2025-12-12",
+  "SiteVisitDate": "",
+  "EnquiryType": "",
+  "EnquiryFor": "",
+  "CustomerName": "",
+  "ReceivedFrom": "",
+  "ProjectName": "tewwey",
+  "ClientName": "wipro",
+  "ConsultantName": "siemens",
+  "ConcernedSE": "",
+  "DetailsOfEnquiry": "egrrerreh",
+  "DocumentsReceived": "",
+  "hardcopy": false,
+  "drawing": false,
+  "dvd": false,
+  "spec": false,
+  "eqpschedule": false,
+  "Remark": "",
+  "AutoAck": true,
+  "ceosign": false,
+  "Status": "Enquiry",
+  "EnquiryStatus": "Active",
+  "CreatedBy": "Mohan Naidu",
+  "RequestNo": "35",
+  "SelectedEnquiryTypes": [
+    "New Tender"
+  ],
+  "SelectedEnquiryFor": [
+    "BMS"
+  ],
+  "SelectedCustomers": [
+    "Test customer"
+  ],
+  "SelectedReceivedFroms": [
+    "Customer test|Test customer"
+  ],
+  "SelectedConcernedSEs": [
+    "Lakshman"
+  ],
+  "AcknowledgementSE": "Lakshman",
+  "ModifiedBy": "Mohan Naidu"
+}
+2025-12-11T07:45:20.009Z - AutoAck Value: true, Type: boolean
+2025-12-11T07:45:20.019Z - SelectedCustomers: ["Test customer"]
+2025-12-11T07:45:20.042Z - DEBUG - AcknowledgementSE value: 'Lakshman', Type: string
+2025-12-11T07:45:20.044Z - DEBUG - AdditionalNotificationEmails value: 'undefined', Type: undefined
+2025-12-11T07:45:20.487Z - Processing AutoAck...
+2025-12-11T07:45:20.490Z - AutoAck is true, preparing to send acknowledgement emails...
+2025-12-11T07:45:20.505Z - CC found: bmselveng1@almoayyedcg.com
+2025-12-11T07:45:20.507Z - Proccessing 1 contacts for AutoAck
+2025-12-11T07:45:20.509Z - Looking up email for Contact: Customer test, Company: Test customer
+2025-12-11T07:45:20.526Z - Found email: mohanraj.naidu984@gmail.com
+2025-12-11T07:45:20.527Z - Sending acknowledgement to Received From: Customer test (mohanraj.naidu984@gmail.com) CC: bmselveng1@almoayyedcg.com
+2025-12-11T07:45:21.000Z - Email sent successfully to mohanraj.naidu984@gmail.com
+2025-12-11T12:06:04.869Z - POST /api/enquiries Body: {
+  "SourceOfInfo": "Tender Board",
+  "EnquiryDate": "2025-12-11",
+  "DueOn": "2025-12-12",
+  "SiteVisitDate": "",
+  "EnquiryType": "",
+  "EnquiryFor": "",
+  "CustomerName": "",
+  "ReceivedFrom": "",
+  "ProjectName": "jkyggk",
+  "ClientName": "wipro",
+  "ConsultantName": "siemens",
+  "ConcernedSE": "",
+  "DetailsOfEnquiry": "tjtyk",
+  "DocumentsReceived": "",
+  "hardcopy": true,
+  "drawing": false,
+  "dvd": false,
+  "spec": false,
+  "eqpschedule": false,
+  "Remark": "",
+  "AutoAck": true,
+  "ceosign": false,
+  "Status": "Enquiry",
+  "EnquiryStatus": "Active",
+  "CreatedBy": "Mohan Naidu",
+  "RequestNo": "36",
+  "SelectedEnquiryTypes": [
+    "New Tender"
+  ],
+  "SelectedEnquiryFor": [
+    "BMS"
+  ],
+  "SelectedCustomers": [
+    "Test customer"
+  ],
+  "SelectedReceivedFroms": [
+    "Customer test|Test customer"
+  ],
+  "SelectedConcernedSEs": [
+    "Lakshman"
+  ],
+  "AcknowledgementSE": "Lakshman",
+  "ModifiedBy": "Mohan Naidu"
+}
+2025-12-11T12:06:04.875Z - AutoAck Value: true, Type: boolean
+2025-12-11T12:06:04.885Z - SelectedCustomers: ["Test customer"]
+2025-12-11T12:06:04.916Z - DEBUG - AcknowledgementSE value: 'Lakshman', Type: string
+2025-12-11T12:06:04.922Z - DEBUG - AdditionalNotificationEmails value: 'undefined', Type: undefined
+2025-12-11T12:06:05.287Z - Processing AutoAck...
+2025-12-11T12:06:05.288Z - AutoAck is true, preparing to send acknowledgement emails...
+2025-12-11T12:06:05.318Z - CC found: bmselveng1@almoayyedcg.com
+2025-12-11T12:06:05.319Z - Proccessing 1 contacts for AutoAck
+2025-12-11T12:06:05.320Z - Looking up email for Contact: Customer test, Company: Test customer
+2025-12-11T12:06:05.347Z - Found email: mohanraj.naidu984@gmail.com
+2025-12-11T12:06:05.348Z - Sending acknowledgement to Received From: Customer test (mohanraj.naidu984@gmail.com) CC: bmselveng1@almoayyedcg.com
+2025-12-11T12:06:05.816Z - Email sent successfully to mohanraj.naidu984@gmail.com

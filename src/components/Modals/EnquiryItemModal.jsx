@@ -59,10 +59,26 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
     };
 
     const handleAddList = (field, value, setter) => {
-        if (value && !formData[field].includes(value)) {
-            setFormData(prev => ({ ...prev, [field]: [...prev[field], value] }));
-            setter('');
+        // Email validation regex
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if (!value || value.trim() === '') {
+            alert('Please enter an email address');
+            return;
         }
+
+        if (!emailRegex.test(value.trim())) {
+            alert('Please enter a valid email address (e.g., user@example.com)');
+            return;
+        }
+
+        if (formData[field].includes(value.trim())) {
+            alert('This email is already in the list');
+            return;
+        }
+
+        setFormData(prev => ({ ...prev, [field]: [...prev[field], value.trim()] }));
+        setter('');
     };
 
     const handleRemoveList = (field, selectedItems, setSelectedItems) => {

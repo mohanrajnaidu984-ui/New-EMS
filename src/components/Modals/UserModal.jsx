@@ -65,8 +65,16 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
         e.preventDefault();
 
         const newErrors = {};
+
+        // Email validation regex
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
         if (!formData.FullName) newErrors.FullName = 'Full Name is required';
-        if (!formData.EmailId) newErrors.EmailId = 'E-Mail ID is required';
+        if (!formData.EmailId) {
+            newErrors.EmailId = 'E-Mail ID is required';
+        } else if (!emailRegex.test(formData.EmailId.trim())) {
+            newErrors.EmailId = 'Please enter a valid email address (e.g., user@example.com)';
+        }
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);

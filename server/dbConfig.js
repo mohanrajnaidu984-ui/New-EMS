@@ -22,7 +22,7 @@ const connectDB = async () => {
         console.log('Connected to MSSQL Database');
     } catch (err) {
         console.error('Database connection failed:', err);
-        process.exit(1);
+        // process.exit(1); // Don't exit, allow server to run for static files/mock mode
     }
 };
 

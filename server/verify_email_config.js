@@ -18,13 +18,17 @@ async function verifyEmail() {
 
     for (const conf of configs) {
         console.log(`\nTesting ${conf.name}...`);
+        const isSecure = conf.port == 465;
         const transporter = nodemailer.createTransport({
             host: process.env.SMTP_HOST,
             port: conf.port,
-            secure: conf.secure,
+            secure: isSecure,
             auth: {
                 user: process.env.SMTP_USER,
                 pass: process.env.SMTP_PASS
+            },
+            tls: {
+                rejectUnauthorized: false
             }
         });
 
@@ -48,24 +52,8 @@ async function verifyEmail() {
         }
     }
 
-    try {
-        console.log("Verifying connection...");
-        await transporter.verify();
-        console.log("✅ Connection verified successfully!");
-
-        console.log("Sending test email...");
-        const info = await transporter.sendMail({
-            from: process.env.SMTP_USER,
-            to: process.env.SMTP_USER, // Send to self
-            subject: "EMS Test Email",
-            text: "This is a test email from the Enquiry Management System to verify configuration."
-        });
-
-        console.log("✅ Test email sent successfully!");
-        console.log(`Message ID: ${info.messageId}`);
-    } catch (error) {
-        console.error("❌ Error:", error);
-    }
+    // If we reach here, no config worked
+    console.log("❌ All configurations failed.");
 }
 
 verifyEmail();
