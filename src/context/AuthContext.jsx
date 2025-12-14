@@ -36,7 +36,7 @@ export const AuthProvider = ({ children }) => {
     const updateProfileImage = async (userId, base64) => {
         try {
             // Update Backend
-            await fetch('http://localhost:5000/api/auth/update-profile-image', {
+            await fetch('/api/auth/update-profile-image', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId, imageBase64: base64 })

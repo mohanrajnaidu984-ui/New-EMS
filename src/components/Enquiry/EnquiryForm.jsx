@@ -186,7 +186,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     const generateNewRequestNo = async () => {
         try {
-            const res = await fetch(`http://localhost:5000/api/system/next-request-no?t=${Date.now()}`);
+            const res = await fetch(`/api/system/next-request-no?t=${Date.now()}`);
             if (res.ok) {
                 const data = await res.json();
                 console.log('Next ID fetched:', data.nextId);
@@ -788,7 +788,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const sendNotification = async (requestNo) => {
         try {
             console.log('Triggering notification for:', requestNo);
-            const res = await fetch('http://localhost:5000/api/enquiries/notify', {
+            const res = await fetch('/api/enquiries/notify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ requestNo })
@@ -812,7 +812,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         try {
             // Send RequestNo and UserName as query parameter
             const userName = currentUser?.name || 'System';
-            const res = await fetch(`http://localhost:5000/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}`, {
+            const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}`, {
                 method: 'POST',
                 body: uploadData
             });
@@ -994,7 +994,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
 
         try {
-            const res = await fetch(`http://localhost:5000/api/attachments/${attachmentId}`, {
+            const res = await fetch(`/api/attachments/${attachmentId}`, {
                 method: 'DELETE'
             });
 
@@ -1014,7 +1014,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setAttachments([]);
         try {
             // Send RequestNo as query parameter
-            const res = await fetch(`http://localhost:5000/api/attachments?requestNo=${encodeURIComponent(requestNo)}`);
+            const res = await fetch(`/api/attachments?requestNo=${encodeURIComponent(requestNo)}`);
             if (res.ok) {
                 const data = await res.json();
                 setAttachments(data);
@@ -1631,7 +1631,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                             </div>
                                                                             <div className="d-flex align-items-center gap-2">
                                                                                 <a
-                                                                                    href={`http://localhost:5000/api/attachments/${att.ID}`}
+                                                                                    href={`/api/attachments/${att.ID}`}
                                                                                     target="_blank"
                                                                                     rel="noopener noreferrer"
                                                                                     className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
@@ -1641,7 +1641,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                                     <i className="bi bi-eye"></i>
                                                                                 </a>
                                                                                 <a
-                                                                                    href={`http://localhost:5000/api/attachments/${att.ID}?download=true`}
+                                                                                    href={`/api/attachments/${att.ID}?download=true`}
                                                                                     target="_blank"
                                                                                     rel="noopener noreferrer"
                                                                                     className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"

@@ -4,16 +4,13 @@ import SearchEnquiry from './Enquiry/SearchEnquiry';
 import Dashboard from './Dashboard/Dashboard';
 import PricingForm from './Pricing/PricingForm';
 
-const Main = ({ activeTab, onNavigate, enquiryToOpen }) => {
+const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
     return (
         <div className="pt-2">
             {/* Tab Content */}
             <div className="tab-content">
                 {activeTab === 'Dashboard' && (
-                    <div className="alert alert-info">
-                        <i className="bi bi-info-circle me-2"></i>
-                        Dashboard module coming soon...
-                    </div>
+                    <Dashboard onNavigate={onNavigate} onOpenEnquiry={onOpenEnquiry} />
                 )}
                 {activeTab === 'Enquiry' && (
                     <EnquiryForm requestNoToOpen={enquiryToOpen} />

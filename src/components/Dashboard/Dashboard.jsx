@@ -1,226 +1,193 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, Users, CheckCircle, Clock, TrendingUp, Mail, Phone } from 'lucide-react';
-import { useData } from '../../context/DataContext';
-import DashboardLayout from './DashboardLayout';
-import KPICard from './KPICard';
-import GaugeChart from './GaugeChart';
-import StatBarChart from './StatBarChart';
-import CalendarView from './CalendarView';
+import { useData } from '../../context/DataContext'; // Reuse for masters if needed
+import DashboardFilters from './LeftPanel/DashboardFilters';
+import CalendarView from './LeftPanel/CalendarView';
+import SummaryCards from './RightPanel/SummaryCards';
+import EnquiryTable from './RightPanel/EnquiryTable';
+import AnalyticsRow from './AnalyticsRow';
 
-const Dashboard = () => {
-    const { enquiries } = useData();
+const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props passed from Main
+    const { masters } = useData();
+    // Use relative path to leverage Vite proxy (targets port 5000), avoids port mismatch
+    const API_URL = '/api/dashboard';
 
-    // Date State
-    const today = new Date();
-    const [day, setDay] = useState(today.getDate().toString());
-    const [month, setMonth] = useState(today.toLocaleString('default', { month: 'short' }));
-    const [year, setYear] = useState(today.getFullYear().toString());
+    // State
+    const [dateState, setDateState] = useState({
+        month: new Date().getMonth() + 1,
+        year: new Date().getFullYear(),
+        selectedDate: null,
+        selectedType: 'all' // 'all', 'enquiry', 'due', 'visit'
+    });
 
-    // Dashboard Data State
-    const [kpiData, setKpiData] = useState([]);
-    const [gaugeData, setGaugeData] = useState([]);
-    const [barDataTrend, setBarDataTrend] = useState([]);
-    const [barDataSource, setBarDataSource] = useState([]);
-    const [calendarData, setCalendarData] = useState({});
+    const [filters, setFilters] = useState({
+        division: 'All',
+        salesEngineer: 'All',
+        mode: 'all', // Default to All (which now means >= Today)
+    });
 
-    const months = {
-        'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
-        'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-    };
+    const [data, setData] = useState({
+        calendar: [],
+        summary: {},
+        table: []
+    });
 
-    const calculateStats = () => {
-        const selectedMonthNum = months[month];
-        const selectedYear = year;
-        const selectedDay = day.padStart(2, '0');
-        const fullDateStr = `${selectedYear}-${selectedMonthNum}-${selectedDay}`;
+    const [filteredTableData, setFilteredTableData] = useState([]);
 
-        const allEnquiries = Object.values(enquiries);
+    const [loading, setLoading] = useState(false);
 
-        // 1. KPIs
-        const enquiriesToday = allEnquiries.filter(e => e.EnquiryDate === fullDateStr).length;
-        const siteVisitsToday = allEnquiries.filter(e => e.SiteVisitDate === fullDateStr).length;
-        const dueToday = allEnquiries.filter(e => e.DueOn === fullDateStr).length;
+    // Fetch Data
+    const fetchData = async () => {
+        setLoading(true);
+        try {
+            // preparing params
+            const params = new URLSearchParams({
+                month: dateState.month,
+                year: dateState.year,
+                division: filters.division,
+                salesEngineer: filters.salesEngineer
+            });
 
-        // Pending Quotes: Status is Pricing or Quote
-        const pendingQuotes = allEnquiries.filter(e => ['Pricing', 'Quote'].includes(e.Status)).length;
+            // 1. Calendar
+            const calRes = await fetch(`${API_URL}/calendar?${params}`);
+            const calData = await calRes.json();
 
-        // Orders Won (Month): Status is Reports (Closed) in selected Month/Year
-        const ordersWon = allEnquiries.filter(e =>
-            e.Status === 'Reports' &&
-            e.EnquiryDate?.startsWith(`${selectedYear}-${selectedMonthNum}`)
-        ).length;
+            // 2. Summary (KPI)
+            // KPI depends on global filters only (Today is implied)
+            const sumParams = new URLSearchParams({
+                division: filters.division,
+                salesEngineer: filters.salesEngineer
+            });
+            const sumRes = await fetch(`${API_URL}/summary?${sumParams}`);
+            const sumData = await sumRes.json();
 
-        // Total Enquiries (Year)
-        const totalEnquiriesYear = allEnquiries.filter(e => e.EnquiryDate?.startsWith(selectedYear)).length;
+            // 3. Table
+            const listParams = new URLSearchParams({
+                division: filters.division,
+                salesEngineer: filters.salesEngineer,
+                mode: filters.mode
+            });
 
-        setKpiData([
-            { title: 'Enquiries Today', main: enquiriesToday, sub: 'New', color: 'kpi-yellow' },
-            { title: 'Site Visits Today', main: siteVisitsToday, sub: 'Scheduled', color: 'kpi-yellow' },
-            { title: 'Due Today', main: dueToday, sub: 'Deadlines', color: 'kpi-green' },
-            { title: 'Pending Quotes', main: pendingQuotes, sub: 'Processing', color: 'kpi-orange' },
-            { title: 'Orders Won (Month)', main: ordersWon, sub: 'Converted', color: 'kpi-orange' },
-            { title: 'Total Enquiries (Year)', main: totalEnquiriesYear, sub: 'YTD', color: 'kpi-blue' },
-            { title: 'Total Revenue (Year)', main: 'N/A', sub: 'YTD', color: 'kpi-blue' }, // No revenue field yet
-        ]);
+            // If specific date is selected in calendar, filter table by that date
+            if (dateState.selectedDate) {
+                listParams.set('date', dateState.selectedDate);
+            } else {
+                // Determine mode if no date selected? or uses 'mode' state
+                // filters.mode handles 'today'/'future'/'all'
+                if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
+                if (filters.toDate) listParams.set('toDate', filters.toDate);
+            }
 
-        // 2. Gauge Charts (Mock calculations for now as we lack specific fields)
-        const total = allEnquiries.length || 1;
-        const conversionRate = Math.round((ordersWon / total) * 100) || 0;
+            const listRes = await fetch(`${API_URL}/enquiries?${listParams}`);
+            const listData = await listRes.json();
 
-        setGaugeData([
-            { value: conversionRate, label: 'Conversion Rate' },
-            { value: 90, label: 'Response Target' }, // Mock
-            { value: 45, label: 'Win Rate' }, // Mock
-            { value: 80, label: 'Customer Sat.' }, // Mock
-            { value: 20, label: 'Lost Rate' }, // Mock
-            { value: 12, label: 'Active SEs' }, // Mock
-            { value: 5, label: 'Pending Approvals' }, // Mock
-        ]);
+            setData({
+                calendar: calData,
+                summary: sumData,
+                table: listData
+            });
 
-        // 3. Bar Charts
-        // Trend: Daily count for selected month
-        const daysInMonth = new Date(selectedYear, parseInt(selectedMonthNum), 0).getDate();
-        const trendData = Array.from({ length: daysInMonth }, (_, i) => {
-            const d = (i + 1).toString().padStart(2, '0');
-            const dateStr = `${selectedYear}-${selectedMonthNum}-${d}`;
-            return {
-                name: i + 1,
-                value: allEnquiries.filter(e => e.EnquiryDate === dateStr).length
-            };
-        });
-        setBarDataTrend(trendData);
-
-        // Source: Count by SourceOfInfo
-        const sourceCounts = {};
-        allEnquiries.forEach(e => {
-            const src = e.SourceOfInfo || 'Unknown';
-            sourceCounts[src] = (sourceCounts[src] || 0) + 1;
-        });
-        const sourceData = Object.keys(sourceCounts).map(key => ({ name: key, value: sourceCounts[key] }));
-        setBarDataSource(sourceData);
-
-        // 4. Calendar Data
-        const calData = {};
-        for (let i = 1; i <= daysInMonth; i++) {
-            const d = i.toString().padStart(2, '0');
-            const dateStr = `${selectedYear}-${selectedMonthNum}-${d}`;
-            const newCount = allEnquiries.filter(e => e.EnquiryDate === dateStr).length;
-            const dueCount = allEnquiries.filter(e => e.DueOn === dateStr).length;
-            calData[i] = {
-                main: `New: ${newCount}`,
-                sub: `Due: ${dueCount}`
-            };
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
         }
-        setCalendarData(calData);
     };
 
-    // Initial Load
+    // Filter Table Data based on selectedType (Frontend Filtering)
     useEffect(() => {
-        calculateStats();
-    }, [enquiries]); // Recalculate when enquiries change
+        if (!dateState.selectedDate || dateState.selectedType === 'all') {
+            setFilteredTableData(data.table);
+            return;
+        }
 
-    const handleGenerate = () => {
-        calculateStats();
+        const type = dateState.selectedType;
+        const targetDate = new Date(dateState.selectedDate).toDateString(); // Compare dates properly
+
+        const filtered = data.table.filter(row => {
+            if (type === 'enquiry') return new Date(row.EnquiryDate).toDateString() === targetDate;
+            if (type === 'due') return new Date(row.DueDate).toDateString() === targetDate;
+            if (type === 'visit') return new Date(row.SiteVisitDate).toDateString() === targetDate;
+            return true;
+        });
+
+        setFilteredTableData(filtered);
+    }, [data.table, dateState.selectedDate, dateState.selectedType]);
+
+
+    // Effects
+    useEffect(() => {
+        fetchData();
+    }, [dateState.month, dateState.year, dateState.selectedDate, filters.division, filters.salesEngineer, filters.mode, filters.fromDate, filters.toDate]);
+
+    // Handlers
+    const handleMonthChange = (m, y) => {
+        setDateState(prev => ({ ...prev, month: m, year: y }));
+    };
+
+    const handleDateClick = (dateStr, type = 'all') => {
+        setDateState(prev => ({
+            ...prev,
+            selectedDate: dateStr,
+            selectedType: type
+        }));
+    };
+
+    const handleTableFilterChange = (newFilters) => {
+        // If changing mode, we might want to clear selectedDate?
+        if (newFilters.mode) {
+            setDateState(prev => ({ ...prev, selectedDate: null, selectedType: 'all' }));
+        }
+        if (newFilters.date === null) {
+            setDateState(prev => ({ ...prev, selectedDate: null, selectedType: 'all' }));
+        }
+        setFilters(newFilters);
+    };
+
+    // Wire up row click to open enquiry
+    const handleRowClick = (reqNo) => {
+        if (onOpenEnquiry) onOpenEnquiry(reqNo); // Needs to be passed down from App -> Main -> Dashboard
     };
 
     return (
-        <DashboardLayout>
-            {/* Header */}
-            <div className="dashboard-header">
-                <div className="dashboard-title">
-                    <FileText size={24} color="#ffd700" />
-                    ENQUIRY MANAGEMENT DASHBOARD
-                </div>
-                <div className="dashboard-controls">
-                    <div className="control-group">
-                        <span className="control-label">Day</span>
-                        <input
-                            type="text"
-                            className="control-input"
-                            value={day}
-                            onChange={(e) => setDay(e.target.value)}
-                            style={{ width: '40px' }}
-                        />
-                        <span className="control-label">Month</span>
-                        <select
-                            className="control-input"
-                            value={month}
-                            onChange={(e) => setMonth(e.target.value)}
-                            style={{ width: '60px' }}
-                        >
-                            {Object.keys(months).map(m => <option key={m} value={m}>{m}</option>)}
-                        </select>
-                        <span className="control-label">Year</span>
-                        <input
-                            type="text"
-                            className="control-input"
-                            value={year}
-                            onChange={(e) => setYear(e.target.value)}
-                            style={{ width: '60px' }}
-                        />
-                    </div>
-                    <button className="generate-btn" onClick={handleGenerate}>Generate</button>
-                </div>
+        <div className="container-fluid p-4" style={{ height: '94vh', display: 'flex', flexDirection: 'column' }}>
+
+            {/* Row 1: Global Filters (Horizontal Layout) */}
+            <div className="mb-4 flex-shrink-0">
+                <DashboardFilters
+                    filters={filters}
+                    setFilters={setFilters}
+                    masters={masters}
+                    horizontal={true}
+                />
             </div>
 
-            {/* KPI Cards */}
-            <div className="kpi-grid">
-                {kpiData.map((kpi, index) => (
-                    <KPICard
-                        key={index}
-                        title={kpi.title}
-                        mainValue={kpi.main}
-                        subValue={kpi.sub}
-                        footer="EMS Metrics"
-                        colorClass={kpi.color}
+            {/* Row 2: Content Area (Calendar + Table) */}
+            <div className="d-flex w-100 h-100" style={{ minHeight: 0, overflow: 'hidden' }}>
+                {/* Calendar Panel - 40% */}
+                <div style={{ width: '40%', flexShrink: 0, overflowY: 'auto', paddingRight: '1rem', borderRight: '1px solid #dee2e6' }}>
+                    <CalendarView
+                        month={dateState.month}
+                        year={dateState.year}
+                        onMonthChange={handleMonthChange}
+                        data={data.calendar}
+                        selectedDate={dateState.selectedDate}
+                        selectedType={dateState.selectedType}
+                        onDateClick={handleDateClick}
                     />
-                ))}
-            </div>
-
-            {/* Gauge Charts */}
-            <div className="gauge-grid">
-                {gaugeData.map((gauge, index) => (
-                    <GaugeChart
-                        key={index}
-                        value={gauge.value}
-                        subLabel={gauge.label}
-                    />
-                ))}
-            </div>
-
-            {/* Main Content Grid */}
-            <div className="main-content-grid">
-                {/* Left Column: Calendar */}
-                <div>
-                    <div style={{ marginBottom: '10px', color: '#333', textAlign: 'center', fontWeight: 'bold' }}>
-                        {month}/{year}
-                    </div>
-                    <CalendarView month={month} year={year} data={calendarData} />
                 </div>
 
-                {/* Right Column: Charts */}
-                <div className="charts-column">
-                    <StatBarChart
-                        data={barDataTrend}
-                        color="#00bfff"
-                        title={`${month}-${year.slice(2)} ENQUIRY TREND (DAILY)`}
-                        icon={<TrendingUp size={16} color="#00bfff" />}
-                    />
-                    <StatBarChart
-                        data={barDataSource}
-                        color="#32cd32"
-                        title={`${month}-${year.slice(2)} ENQUIRIES BY SOURCE`}
-                        icon={<Mail size={16} color="#32cd32" />}
-                    />
-                    <StatBarChart
-                        data={barDataTrend}
-                        color="#ff8c00"
-                        title={`${month}-${year.slice(2)} SITE VISITS SCHEDULED`}
-                        icon={<Users size={16} color="#ff8c00" />}
+                {/* Table Panel - 60% */}
+                <div style={{ width: '60%', flexShrink: 0, display: 'flex', flexDirection: 'column', paddingLeft: '1rem' }}>
+                    <EnquiryTable
+                        data={filteredTableData} // Use filtered data
+                        onRowClick={handleRowClick}
+                        filters={filters}
+                        setFilters={handleTableFilterChange}
+                        selectedDate={dateState.selectedDate}
                     />
                 </div>
             </div>
-        </DashboardLayout>
+        </div>
     );
 };
 

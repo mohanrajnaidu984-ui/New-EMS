@@ -2,16 +2,29 @@ import React from 'react';
 
 const CalendarView = ({ month, year, data }) => {
     const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const monthMap = {
+        'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
+        'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
+    };
 
-    // Mock logic to generate calendar days
-    // In a real app, use date-fns to generate actual days for the month
     const generateCalendarDays = () => {
         const calendarDays = [];
-        // Start with some empty slots if month doesn't start on Sunday
-        // For Demo: September 2025 starts on Monday (based on image)
-        calendarDays.push({ type: 'empty', key: 'empty-1' });
+        const monthIndex = monthMap[month];
+        const yearInt = parseInt(year);
 
-        for (let i = 1; i <= 30; i++) {
+        // First day of the month
+        const firstDay = new Date(yearInt, monthIndex, 1).getDay(); // 0 = Sunday
+
+        // Days in month
+        const daysInMonth = new Date(yearInt, monthIndex + 1, 0).getDate();
+
+        // Add empty slots
+        for (let i = 0; i < firstDay; i++) {
+            calendarDays.push({ type: 'empty', key: `empty-${i}` });
+        }
+
+        // Add days
+        for (let i = 1; i <= daysInMonth; i++) {
             calendarDays.push({
                 type: 'day',
                 date: i,
@@ -35,8 +48,8 @@ const CalendarView = ({ month, year, data }) => {
                     <div key={day} className="calendar-day-header">{day}</div>
                 ))}
 
-                {calendarDays.map(item => (
-                    <div key={item.key} className="calendar-cell">
+                {calendarDays.map((item, index) => (
+                    <div key={item.key || index} className="calendar-cell">
                         {item.type === 'day' && (
                             <>
                                 <div className="calendar-date">{item.date}</div>

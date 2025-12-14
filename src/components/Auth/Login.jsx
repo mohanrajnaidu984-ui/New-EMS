@@ -42,7 +42,7 @@ const Login = ({ onSwitchToSignup }) => {
 
         setLoading(true);
         try {
-            const res = await fetch('http://localhost:5000/api/auth/check-user', {
+            const res = await fetch('/api/auth/check-user', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: formData.email })
@@ -76,7 +76,7 @@ const Login = ({ onSwitchToSignup }) => {
 
         setLoading(true);
         try {
-            const response = await fetch('http://localhost:5000/api/auth/login', {
+            const response = await fetch('/api/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -125,7 +125,7 @@ const Login = ({ onSwitchToSignup }) => {
 
         setLoading(true);
         try {
-            const res = await fetch('http://localhost:5000/api/auth/set-password', {
+            const res = await fetch('/api/auth/set-password', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -139,7 +139,7 @@ const Login = ({ onSwitchToSignup }) => {
                 // Reuse handleLogin logic but with new password
                 setFormData(prev => ({ ...prev, password: prev.newPassword }));
                 // We need to trigger login, can't verify state update immediately, so call login API directly
-                const loginRes = await fetch('http://localhost:5000/api/auth/login', {
+                const loginRes = await fetch('/api/auth/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -174,7 +174,7 @@ const Login = ({ onSwitchToSignup }) => {
         e.preventDefault();
         setLoading(true);
         try {
-            const res = await fetch('http://localhost:5000/api/auth/forgot-password', {
+            const res = await fetch('/api/auth/forgot-password', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: formData.email })

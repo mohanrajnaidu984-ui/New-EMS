@@ -12,7 +12,7 @@ export const useData = () => useContext(DataContext);
 
 export const DataProvider = ({ children }) => {
     // --- API Integration ---
-    const API_URL = 'http://localhost:5000/api';
+    const API_URL = '/api';
 
     // Master Data State
     const [masters, setMasters] = useState({
@@ -162,10 +162,15 @@ export const DataProvider = ({ children }) => {
             } else {
                 let errorMessage = 'Failed to save to DB';
                 try {
-                    const errorData = await res.json();
-                    errorMessage = errorData.error || errorData.message || errorMessage;
-                } catch {
-                    errorMessage = await res.text();
+                    const text = await res.text();
+                    try {
+                        const errorData = JSON.parse(text);
+                        errorMessage = errorData.error || errorData.message || errorMessage;
+                    } catch {
+                        errorMessage = text;
+                    }
+                } catch (e) {
+                    console.error('Error reading response:', e);
                 }
                 console.error('Save failed:', errorMessage);
                 alert(`Failed to save to DB: ${errorMessage}`);

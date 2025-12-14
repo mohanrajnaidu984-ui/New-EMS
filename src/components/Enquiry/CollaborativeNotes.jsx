@@ -87,7 +87,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
 
     const fetchNotes = async () => {
         try {
-            const res = await fetch(`http://localhost:5000/api/enquiries/${encodeURIComponent(effectiveID)}/notes`);
+            const res = await fetch(`/api/enquiries/${encodeURIComponent(effectiveID)}/notes`);
             if (res.ok) {
                 const data = await res.json();
                 setNotes(data);
@@ -101,7 +101,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
         if (!newNote.trim()) return;
         setLoading(true);
         try {
-            const res = await fetch(`http://localhost:5000/api/enquiries/${encodeURIComponent(effectiveID)}/notes`, {
+            const res = await fetch(`/api/enquiries/${encodeURIComponent(effectiveID)}/notes`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

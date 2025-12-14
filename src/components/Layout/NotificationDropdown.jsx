@@ -22,7 +22,7 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
     const fetchNotifications = async () => {
         if (!currentUser) return;
         try {
-            const res = await fetch(`http://localhost:5000/api/notifications/${currentUser.id}`);
+            const res = await fetch(`/api/notifications/${currentUser.id}`);
             if (res.ok) {
                 const data = await res.json();
                 setNotifications(data);
@@ -43,7 +43,7 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
     const handleRead = async (notification) => {
         if (!notification.IsRead) {
             try {
-                await fetch(`http://localhost:5000/api/notifications/${notification.ID}/read`, { method: 'PUT' });
+                await fetch(`/api/notifications/${notification.ID}/read`, { method: 'PUT' });
                 // Update local state
                 setNotifications(prev => prev.map(n => n.ID === notification.ID ? { ...n, IsRead: true } : n));
                 setUnreadCount(prev => Math.max(0, prev - 1));
@@ -77,7 +77,7 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
         e.stopPropagation();
         if (!currentUser) return;
         try {
-            const res = await fetch(`http://localhost:5000/api/notifications/${currentUser.id}`, { method: 'DELETE' });
+            const res = await fetch(`/api/notifications/${currentUser.id}`, { method: 'DELETE' });
             if (res.ok) {
                 setNotifications([]);
                 setUnreadCount(0);

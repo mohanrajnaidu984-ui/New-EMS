@@ -46,7 +46,7 @@ const sendEnquiryEmail = async (enquiryData, recipients, attachments = []) => {
             <td>
                 <ul style="margin: 0; padding-left: 20px;">
                     ${attachments.map(att => `
-                        <li><a href="http://localhost:5000/api/attachments/${att.ID}" target="_blank">${att.FileName}</a></li>
+                        <li><a href="http://localhost:5001/api/attachments/${att.ID}" target="_blank">${att.FileName}</a></li>
                     `).join('')}
                 </ul>
             </td></tr>
@@ -232,7 +232,14 @@ app.use((req, res, next) => {
 });
 
 // Connect to Database
+// Connect to Database
 connectDB();
+
+// New RAG & Chat API Routes
+const apiRoutes = require('./routes/api');
+const dashboardRoutes = require('./routes/dashboard'); // New Dashboard Routes
+app.use('/api', apiRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // --- Authentication Routes ---
 
@@ -1596,7 +1603,7 @@ initApp();
 console.log('Starting server initialization...');
 console.log('PORT:', PORT);
 const server = app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT} `);
+    console.log(`Server running on port ${PORT}`);
 });
 server.on('error', (e) => console.error('Server Error:', e));
 

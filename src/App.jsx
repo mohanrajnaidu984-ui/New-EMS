@@ -29,6 +29,9 @@ function AppContent() {
   );
 }
 
+// Import ChatWidget
+import ChatWidget from './components/Chat/ChatWidget'; // Ensure path is correct
+
 function MainLayoutWrapper() {
   const [activeTab, setActiveTab] = useState('Enquiry');
   const [enquiryToOpen, setEnquiryToOpen] = useState(null);
@@ -53,6 +56,7 @@ function MainLayoutWrapper() {
         enquiryToOpen={enquiryToOpen}
         onOpenEnquiry={handleOpenEnquiry}
       />
+      <ChatWidget onOpenEnquiry={handleOpenEnquiry} />
     </MainLayout>
   );
 }
