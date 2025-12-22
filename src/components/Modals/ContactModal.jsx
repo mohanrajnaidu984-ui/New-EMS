@@ -6,6 +6,7 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
     const defaultState = {
         Category: 'Contractor',
         CompanyName: '',
+        Prefix: 'Mr',
         ContactName: '',
         Designation: '',
         CategoryOfDesignation: 'Technical',
@@ -19,10 +20,12 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
     };
     const [formData, setFormData] = useState(initialData || defaultState);
     const [errors, setErrors] = useState({});
+    const [isScanning, setIsScanning] = useState(false);
+    const fileInputRef = React.useRef(null);
 
     useEffect(() => {
         if (initialData) {
-            setFormData({ ...defaultState, ...initialData });
+            setFormData({ ...defaultState, ...initialData, Prefix: initialData.Prefix || 'Mr' });
         } else {
             setFormData(defaultState);
         }
@@ -36,12 +39,70 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
         }
     };
 
+    const processOcrFile = async (file) => {
+        if (!file) return;
+
+        setIsScanning(true);
+        const data = new FormData();
+        data.append('image', file);
+
+        try {
+            const res = await fetch('/api/extract-contact-ocr', {
+                method: 'POST',
+                body: data
+            });
+
+            if (res.ok) {
+                const extracted = await res.json();
+                console.log('OCR Result:', extracted);
+
+                // Merge extracted data, prioritizing non-empty scanned values
+                setFormData(prev => ({
+                    ...prev,
+                    ContactName: extracted.ContactName || prev.ContactName,
+                    CompanyName: extracted.CompanyName || prev.CompanyName,
+                    Mobile1: extracted.Mobile1 || prev.Mobile1,
+                    EmailId: extracted.EmailId || prev.EmailId,
+                    Designation: extracted.Designation || prev.Designation,
+                    Address1: extracted.Address1 || prev.Address1,
+                    Phone: extracted.Phone || prev.Phone,
+                    FaxNo: extracted.FaxNo || prev.FaxNo,
+                }));
+                alert('Scanned successfully! Please review the auto-filled details.');
+            } else {
+                alert('Failed to scan image.');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Error scanning image.');
+        } finally {
+            setIsScanning(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    const handleImageUpload = (e) => {
+        processOcrFile(e.target.files[0]);
+    };
+
+    const handlePaste = (e) => {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                const file = items[i].getAsFile();
+                processOcrFile(file);
+                e.preventDefault();
+                return;
+            }
+        }
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
 
         const newErrors = {};
 
-        // Email validation regex
+        // Email validation regex, allow empty if not sure but it is validation rule from before
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
@@ -59,7 +120,12 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
             return;
         }
 
-        onSubmit(formData);
+        const finalData = {
+            ...formData,
+            Prefix: formData.Prefix || 'Mr'
+        };
+
+        onSubmit(finalData);
         onClose();
     };
 
@@ -70,6 +136,29 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
             onClose={onClose}
             footer={
                 <>
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        style={{ display: 'none' }}
+                        accept="image/*"
+                        onChange={handleImageUpload}
+                    />
+                    <button
+                        type="button"
+                        className="btn btn-success"
+                        disabled={isScanning}
+                        onClick={() => fileInputRef.current.click()}
+                    >
+                        {isScanning ? 'Scanning...' : 'Scan V-Card'}
+                    </button>
+                    <textarea
+                        className="form-control"
+                        placeholder="Paste image (Ctrl+V)"
+                        rows="1"
+                        style={{ width: '150px', marginLeft: '10px', marginRight: 'auto', fontSize: '12px', resize: 'none' }}
+                        onPaste={handlePaste}
+                    />
+
                     <button type="button" className="btn btn-primary" style={{ width: '80px' }} onClick={handleSubmit}>
                         {mode === 'Add' ? 'Add' : 'Update'}
                     </button>
@@ -96,7 +185,16 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                     </div>
                 </div>
                 <div className="row mb-2">
-                    <div className="col-md-6" style={{ position: 'relative' }}>
+                    <div className="col-md-2">
+                        <label className="form-label">Prefix</label>
+                        <select className="form-select" style={{ fontSize: '13px' }}
+                            value={formData.Prefix || 'Mr'} onChange={(e) => handleChange('Prefix', e.target.value)}>
+                            <option>Mr</option>
+                            <option>Mrs</option>
+                            <option>Miss</option>
+                        </select>
+                    </div>
+                    <div className="col-md-4" style={{ position: 'relative' }}>
                         <label className="form-label">Contact Person Name<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.ContactName} onChange={(e) => handleChange('ContactName', e.target.value)} />

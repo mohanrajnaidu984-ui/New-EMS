@@ -97,10 +97,26 @@ router.get('/summary', async (req, res) => {
 // 3. Enquiry Table
 router.get('/enquiries', async (req, res) => {
     try {
-        const { division, salesEngineer, date, fromDate, toDate, status } = req.query;
+        const { division, salesEngineer, date, fromDate, toDate, status, dateType, search } = req.query;
+        console.log('API /enquiries params:', { division, salesEngineer, date, fromDate, toDate, status, dateType, search });
         const request = new sql.Request();
 
         let whereClause = ' WHERE 1=1 ';
+
+        // 0. Global Search (Overrides default mode, but respects explicit filters)
+        if (search && search.trim() !== '') {
+            whereClause += ` AND (
+                em.ProjectName LIKE @search OR
+                em.CustomerName LIKE @search OR
+                em.RequestNo LIKE @search OR
+                em.ClientName LIKE @search OR
+                em.ConsultantName LIKE @search OR
+                em.EnquiryDetails LIKE @search OR
+                EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName LIKE @search) OR
+                EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName LIKE @search)
+            ) `;
+            request.input('search', sql.NVarChar, `%${search}%`);
+        }
 
         // 1. Filter by Division/SE/Status
         if (division && division !== 'All') {
@@ -117,41 +133,53 @@ router.get('/enquiries', async (req, res) => {
         }
 
         // 2. Date Logic
-        if (date) {
-            // Specific Date Clicked: Show any event on this date
+        // If search is active and NO explicit date provided, we skip default 'future' mode to allow global search history.
+        const isSearchActive = search && search.trim().length > 0;
+
+        console.log('--- Filtering Logic ---');
+        console.log('fromDate:', fromDate, 'toDate:', toDate, 'date:', date, 'mode:', req.query.mode, 'search:', search);
+
+        if (fromDate && toDate) {
+            console.log('Path: Range Filter');
+            const type = dateType || 'Enquiry Date';
+            console.log('Type:', type);
+
+            if (type === 'Due Date') {
+                whereClause += ` AND CAST(em.DueDate AS DATE) BETWEEN @fromDate AND @toDate `;
+            } else {
+                whereClause += ` AND CAST(em.EnquiryDate AS DATE) BETWEEN @fromDate AND @toDate `;
+            }
+
+            request.input('fromDate', sql.Date, new Date(fromDate));
+            request.input('toDate', sql.Date, new Date(toDate));
+        } else if (date) {
+            console.log('Path: Specific Date');
             whereClause += ` AND (
                 CAST(em.EnquiryDate AS DATE) = @date OR
                 CAST(em.DueDate AS DATE) = @date OR
                 CAST(em.SiteVisitDate AS DATE) = @date
             ) `;
             request.input('date', sql.Date, new Date(date));
-        } else if (fromDate && toDate) {
-            // Date Range Filter
-            whereClause += ` AND (
-                (CAST(em.EnquiryDate AS DATE) BETWEEN @fromDate AND @toDate) OR
-                (CAST(em.DueDate AS DATE) BETWEEN @fromDate AND @toDate) OR
-                (CAST(em.SiteVisitDate AS DATE) BETWEEN @fromDate AND @toDate)
-             ) `;
-            request.input('fromDate', sql.Date, new Date(fromDate));
-            request.input('toDate', sql.Date, new Date(toDate));
         } else {
-            // Mode based logic
-            // Default to 'future' if no mode specified to match previous behavior
-            const currentMode = req.query.mode || 'future';
+            // Only apply default mode if NOT searching
+            if (!isSearchActive) {
+                console.log('Path: Mode/Default');
+                const currentMode = req.query.mode || 'future';
+                console.log('Mode:', currentMode);
 
-            if (currentMode === 'today') {
-                whereClause += ` AND (
-                    CAST(em.DueDate AS DATE) = CAST(GETDATE() AS DATE) OR
-                    CAST(em.SiteVisitDate AS DATE) = CAST(GETDATE() AS DATE)
-                ) `;
-            } else if (currentMode === 'future') {
-                // Future implies Today + Future Due Dates
-                whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(GETDATE() AS DATE) `;
-            } else if (currentMode === 'all') {
-                // "All" now means: Present date to next coming due (>= Today)
-                whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(GETDATE() AS DATE) `;
+                if (currentMode === 'today') {
+                    whereClause += ` AND (
+                        CAST(em.DueDate AS DATE) = CAST(GETDATE() AS DATE) OR
+                        CAST(em.SiteVisitDate AS DATE) = CAST(GETDATE() AS DATE)
+                    ) `;
+                } else if (currentMode === 'future') {
+                    whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(GETDATE() AS DATE) `;
+                }
+            } else {
+                console.log('Path: Search Active (Skipping Default Mode)');
             }
         }
+        console.log('Generated WHERE:', whereClause);
 
         const query = `
             SELECT 

@@ -5,6 +5,8 @@ import CalendarView from './LeftPanel/CalendarView';
 import SummaryCards from './RightPanel/SummaryCards';
 import EnquiryTable from './RightPanel/EnquiryTable';
 import AnalyticsRow from './AnalyticsRow';
+import './DashboardLayout.css';
+
 
 const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props passed from Main
     const { masters } = useData();
@@ -22,7 +24,11 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     const [filters, setFilters] = useState({
         division: 'All',
         salesEngineer: 'All',
-        mode: 'all', // Default to All (which now means >= Today)
+        division: 'All',
+        salesEngineer: 'All',
+        mode: 'future', // Default to Future (Due >= Today)
+        dateType: 'Enquiry Date',
+        search: ''
     });
 
     const [data, setData] = useState({
@@ -75,6 +81,8 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 // filters.mode handles 'today'/'future'/'all'
                 if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
                 if (filters.toDate) listParams.set('toDate', filters.toDate);
+                if (filters.dateType) listParams.set('dateType', filters.dateType);
+                if (filters.search) listParams.set('search', filters.search);
             }
 
             const listRes = await fetch(`${API_URL}/enquiries?${listParams}`);
@@ -116,8 +124,11 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
     // Effects
     useEffect(() => {
-        fetchData();
-    }, [dateState.month, dateState.year, dateState.selectedDate, filters.division, filters.salesEngineer, filters.mode, filters.fromDate, filters.toDate]);
+        const timer = setTimeout(() => {
+            fetchData();
+        }, 500); // Debounce API calls slightly
+        return () => clearTimeout(timer);
+    }, [dateState.month, dateState.year, dateState.selectedDate, filters.division, filters.salesEngineer, filters.mode, filters.fromDate, filters.toDate, filters.dateType, filters.search]);
 
     // Handlers
     const handleMonthChange = (m, y) => {
@@ -149,10 +160,10 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     };
 
     return (
-        <div className="container-fluid p-4" style={{ height: '94vh', display: 'flex', flexDirection: 'column' }}>
+        <div className="container-fluid" style={{ height: 'calc(100vh - 110px)', display: 'flex', flexDirection: 'column', padding: 0 }}>
 
             {/* Row 1: Global Filters (Horizontal Layout) */}
-            <div className="mb-4 flex-shrink-0">
+            <div className="flex-shrink-0 border-bottom bg-white px-3 py-2">
                 <DashboardFilters
                     filters={filters}
                     setFilters={setFilters}
@@ -161,30 +172,35 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 />
             </div>
 
+
             {/* Row 2: Content Area (Calendar + Table) */}
-            <div className="d-flex w-100 h-100" style={{ minHeight: 0, overflow: 'hidden' }}>
+            <div className="flex-grow-1 dashboard-split-container" style={{ minHeight: 0 }}>
                 {/* Calendar Panel - 40% */}
-                <div style={{ width: '40%', flexShrink: 0, overflowY: 'auto', paddingRight: '1rem', borderRight: '1px solid #dee2e6' }}>
-                    <CalendarView
-                        month={dateState.month}
-                        year={dateState.year}
-                        onMonthChange={handleMonthChange}
-                        data={data.calendar}
-                        selectedDate={dateState.selectedDate}
-                        selectedType={dateState.selectedType}
-                        onDateClick={handleDateClick}
-                    />
+                <div className="dashboard-left-panel">
+                    <div style={{ flex: 1, overflowY: 'auto' }} className="p-2 h-100">
+                        <CalendarView
+                            month={dateState.month}
+                            year={dateState.year}
+                            onMonthChange={handleMonthChange}
+                            data={data.calendar}
+                            selectedDate={dateState.selectedDate}
+                            selectedType={dateState.selectedType}
+                            onDateClick={handleDateClick}
+                        />
+                    </div>
                 </div>
 
                 {/* Table Panel - 60% */}
-                <div style={{ width: '60%', flexShrink: 0, display: 'flex', flexDirection: 'column', paddingLeft: '1rem' }}>
-                    <EnquiryTable
-                        data={filteredTableData} // Use filtered data
-                        onRowClick={handleRowClick}
-                        filters={filters}
-                        setFilters={handleTableFilterChange}
-                        selectedDate={dateState.selectedDate}
-                    />
+                <div className="dashboard-right-panel">
+                    <div style={{ flex: 1, overflow: 'hidden' }} className="p-2 h-100">
+                        <EnquiryTable
+                            data={filteredTableData}
+                            onRowClick={handleRowClick}
+                            filters={filters}
+                            setFilters={handleTableFilterChange}
+                            selectedDate={dateState.selectedDate}
+                        />
+                    </div>
                 </div>
             </div>
         </div>

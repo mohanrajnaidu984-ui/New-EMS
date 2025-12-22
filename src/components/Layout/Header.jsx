@@ -56,16 +56,16 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
         top: 0,
         zIndex: 9999,
         transition: 'all 0.4s ease',
-        width: isScrolled ? '100%' : '70%',
+        width: '100%',
         maxWidth: '100%',
-        borderRadius: isScrolled ? '0' : '0 0 16px 16px',
+        borderRadius: '0',
         margin: '0 auto',
         left: 0,
         right: 0,
         boxShadow: isScrolled ? '0 4px 6px -1px rgba(0, 0, 0, 0.1)' : 'none'
       }}>
         <div className="container-fluid h-100" style={{
-          width: isScrolled ? '70%' : '100%',
+          width: '100%',
           transition: 'width 0.4s ease',
           margin: '0 auto',
           padding: '0 24px'
@@ -142,7 +142,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
       <div style={{
         position: 'fixed',
         top: '105px',
-        right: 'calc(15% + 24px)',
+        right: '24px',
         zIndex: 9998,
         display: 'flex',
         flexDirection: 'row',

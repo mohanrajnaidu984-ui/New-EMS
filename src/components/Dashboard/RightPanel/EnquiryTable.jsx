@@ -1,5 +1,25 @@
-import React, { useState } from 'react';
-import { ChevronRight, ChevronDown } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { ChevronRight, ChevronDown, MapPin, Calendar, User, Info, AlertCircle, ArrowUp, ArrowDown, ArrowUpDown, Search, X } from 'lucide-react';
+import { format, startOfWeek, endOfWeek, startOfMonth, endOfMonth, addDays, isSameDay } from 'date-fns';
+
+const DateShortcutBtn = ({ label, isActive, onClick }) => {
+    const [isHovered, setIsHovered] = useState(false);
+    return (
+        <button
+            type="button"
+            className={`btn btn-sm rounded-pill px-3 fw-bold text-capitalize ${isActive ? 'bg-white shadow-sm text-primary' : 'text-muted border-0'}`}
+            style={{
+                backgroundColor: !isActive && isHovered ? 'rgba(255,255,255,0.5)' : undefined,
+                transition: 'all 0.2s'
+            }}
+            onClick={onClick}
+            onMouseEnter={() => setIsHovered(true)}
+            onMouseLeave={() => setIsHovered(false)}
+        >
+            {label}
+        </button>
+    );
+};
 
 const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) => {
 
@@ -15,6 +35,147 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
     };
 
     const [expandedRows, setExpandedRows] = useState(new Set());
+    const [hoveredField, setHoveredField] = useState(null);
+    const [searchText, setSearchText] = useState('');
+    const [suggestions, setSuggestions] = useState([]);
+    const [showSuggestions, setShowSuggestions] = useState(false);
+
+    // Suggestion Logic
+    const handleSearchChange = (e) => {
+        const val = e.target.value;
+        setSearchText(val);
+
+        if (!val.trim() || val.trim().length < 3) {
+            setSuggestions([]);
+            setShowSuggestions(false);
+            setFilters(prev => ({ ...prev, search: '' }));
+            return;
+        }
+
+        const lowerVal = val.toLowerCase();
+
+        // Update global filters to trigger server search
+        setFilters(prev => ({ ...prev, search: val }));
+
+        const matches = new Set();
+        const fields = ['ProjectName', 'CustomerName', 'RequestNo', 'ClientName', 'ConsultantName', 'EnquiryFor', 'ConcernedSE', 'EnquiryDetails'];
+
+        for (const row of data) {
+            if (matches.size >= 10) break; // Limit suggestions
+
+            for (const field of fields) {
+                const fieldValue = row[field] ? String(row[field]) : '';
+                if (fieldValue.toLowerCase().includes(lowerVal)) {
+                    // Start checking from the match index to extract relevant substring or just use the full value?
+                    // User probably wants the full value like "Project A" if they type "Proj"
+                    // But if EnquiryDetails is long, maybe not. 
+                    // Let's stick to full field values for names/IDs, maybe truncate details?
+                    // Actually, usually suggestions are distinct values found.
+                    matches.add(fieldValue);
+                    if (matches.size >= 10) break;
+                }
+            }
+        }
+        setSuggestions(Array.from(matches));
+        setShowSuggestions(true);
+    };
+
+    const handleSuggestionClick = (val) => {
+        setSearchText(val);
+        setFilters(prev => ({ ...prev, search: val }));
+        setShowSuggestions(false);
+    };
+
+    // Handle Date Shortcuts
+    const handleDateShortcut = (type) => {
+        const today = new Date();
+        let from = '';
+        let to = '';
+        let mode = '';
+
+        switch (type) {
+            case 'today':
+                from = format(today, 'yyyy-MM-dd');
+                to = format(today, 'yyyy-MM-dd');
+                break;
+            case 'tomorrow':
+                const tom = addDays(today, 1);
+                from = format(tom, 'yyyy-MM-dd');
+                to = format(tom, 'yyyy-MM-dd');
+                break;
+            case 'week':
+                from = format(startOfWeek(today, { weekStartsOn: 1 }), 'yyyy-MM-dd'); // Monday start
+                to = format(endOfWeek(today, { weekStartsOn: 1 }), 'yyyy-MM-dd');
+                break;
+            case 'month':
+                from = format(startOfMonth(today), 'yyyy-MM-dd');
+                to = format(endOfMonth(today), 'yyyy-MM-dd');
+                break;
+            case 'all':
+                mode = 'all';
+                break;
+            default:
+                break;
+        }
+
+        setFilters(prev => ({
+            ...prev,
+            fromDate: from,
+            toDate: to,
+            mode: mode,
+            dateType: prev.dateType || 'Enquiry Date', // Use existing or default
+            date: null
+        }));
+    };
+
+
+
+    // Sorting State
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+
+    const handleSort = (key) => {
+        setSortConfig((prev) => {
+            if (prev.key === key) {
+                // Toggle direction
+                return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: 'asc' };
+        });
+    };
+
+    // Memoized Sorted Data (Client-side filtering removed as Server handles search)
+    const processedData = useMemo(() => {
+        let result = [...data];
+
+        // 2. Sorting
+        if (sortConfig.key) {
+            result.sort((a, b) => {
+                const valA = a[sortConfig.key];
+                const valB = b[sortConfig.key];
+
+                // Handle Dates
+                if (['EnquiryDate', 'DueDate', 'SiteVisitDate'].includes(sortConfig.key)) {
+                    const dateA = valA ? new Date(valA) : new Date(0);
+                    const dateB = valB ? new Date(valB) : new Date(0);
+                    return sortConfig.direction === 'asc' ? dateA - dateB : dateB - dateA;
+                }
+
+                // Handle Strings/Numbers
+                if (valA === null || valA === undefined) return 1; // Move nulls to bottom
+                if (valB === null || valB === undefined) return -1;
+
+                if (typeof valA === 'string') {
+                    return sortConfig.direction === 'asc'
+                        ? valA.localeCompare(valB)
+                        : valB.localeCompare(valA);
+                }
+
+                return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+            });
+        }
+
+        return result;
+    }, [data, sortConfig, searchText]);
 
     const toggleRow = (e, id) => {
         e.stopPropagation();
@@ -26,13 +187,162 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
         });
     };
 
+    // STRICT COLOR LOGIC
+    // Enquiry: Blue
+    // Due Today: Orange
+    // Overdue: Red
+    // Site Visit: Green
+    const getRowColor = (dueDate, status, siteVisitDate) => {
+        // Normalize today
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let due = null;
+        if (dueDate) {
+            due = new Date(dueDate);
+            due.setHours(0, 0, 0, 0);
+        }
+
+        let visit = null;
+        if (siteVisitDate) {
+            visit = new Date(siteVisitDate);
+            visit.setHours(0, 0, 0, 0);
+        }
+
+        // Priority 1: Overdue (Red)
+        if (due && due < today && status !== 'Closed') return '#ef4444';
+
+        // Priority 2: Due Today (Orange)
+        if (due && due.getTime() === today.getTime() && status !== 'Closed') return '#f97316';
+
+        // Priority 3: Site Visit (Green)
+        // If there is a site visit in future or today? Prompt says "Site Visit -> Green".
+        // Let's assume upcoming/today site visits trigger this.
+        if (visit && visit >= today) return '#22c55e';
+
+        // Default: Enquiry (Blue)
+        return '#3b82f6';
+    };
+
+    // Column Resizing Logic
+    const [colWidths, setColWidths] = useState({
+        col1: 150,
+        col2: 180,
+        col3: 200,
+        col4: 300,
+        col5: 120,
+        col6: 120
+    });
+
+    const resizingRef = useRef({ col: null, startX: 0, startWidth: 0 });
+
+    const startResize = (e, col) => {
+        e.preventDefault();
+        resizingRef.current = {
+            col,
+            startX: e.pageX,
+            startWidth: colWidths[col]
+        };
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+        document.body.style.cursor = 'col-resize';
+    };
+
+    const handleMouseMove = (e) => {
+        if (!resizingRef.current.col) return;
+        const { col, startX, startWidth } = resizingRef.current;
+        const diff = e.pageX - startX;
+        setColWidths(prev => ({
+            ...prev,
+            [col]: Math.max(50, startWidth + diff) // Min width 50px
+        }));
+    };
+
+    const handleMouseUp = () => {
+        resizingRef.current = { col: null, startX: 0, startWidth: 0 };
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        document.body.style.cursor = '';
+    };
+
+    // Resizer Component
+    const Resizer = ({ col }) => (
+        <div
+            style={{
+                position: 'absolute',
+                right: 0,
+                top: 0,
+                bottom: 0,
+                width: '5px',
+                cursor: 'col-resize',
+                userSelect: 'none',
+                zIndex: 20
+            }}
+            onMouseDown={(e) => startResize(e, col)}
+        />
+    );
+
+    // Helper for Header Styling
+    const getHeaderStyle = (field) => {
+        const isHovered = hoveredField === field;
+        return {
+            transition: 'all 0.2s ease',
+            transform: isHovered ? 'scale(1.1) translateX(5px)' : 'scale(1)',
+            fontWeight: isHovered ? '800' : '600',
+            color: isHovered ? '#111827' : 'inherit', // Dark black on hover
+            display: 'block', // Ensure transform works
+            width: 'fit-content' // Don't take full width so scale looks natural
+        };
+    };
+
+    // Helper for Row Value Events
+    const hoverEvents = (field) => ({
+        onMouseEnter: () => setHoveredField(field),
+        onMouseLeave: () => setHoveredField(null)
+    });
+
+    // Sortable Header Component
+    const SortableHeader = ({ label, fieldKey }) => {
+        const isHovered = hoveredField === fieldKey;
+        const isSorted = sortConfig.key === fieldKey;
+
+        return (
+            <div
+                onClick={() => handleSort(fieldKey)}
+                onMouseEnter={() => setHoveredField(fieldKey)}
+                onMouseLeave={() => setHoveredField(null)}
+                style={{
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    transition: 'all 0.2s ease',
+                    // Only apply scale/transform on hover if needed, or keep it subtle
+                    transform: isHovered ? 'translateX(2px)' : 'none',
+                    fontWeight: isHovered || isSorted ? '800' : '600',
+                    color: isHovered || isSorted ? '#111827' : 'inherit',
+                    width: 'fit-content'
+                }}
+                className="mb-1"
+            >
+                {label}
+                <span className="d-flex align-items-center text-muted" style={{ opacity: isSorted || isHovered ? 1 : 0.3 }}>
+                    {isSorted ? (
+                        sortConfig.direction === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />
+                    ) : (
+                        <ArrowUpDown size={12} />
+                    )}
+                </span>
+            </div>
+        );
+    };
+
     return (
         <div className="d-flex flex-column h-100 bg-white rounded shadow-sm overflow-hidden" style={{ minHeight: 0 }}>
             {/* Header / Table Filters */}
-            <div className="p-3 border-bottom d-flex align-items-center justify-content-between bg-white sticky-top" style={{ zIndex: 10 }}>
+            <div className="p-3 border-bottom d-flex align-items-center justify-content-between sticky-top" style={{ zIndex: 1050, backgroundColor: '#eff6ff' }}>
                 <div>
-                    <h6 className="fw-bold mb-0 text-dark">Enquiries</h6>
-                    {selectedDate ? (
+                    {selectedDate && (
                         <div className="small text-muted mt-1">
                             Filtered by Date: <span className="fw-bold text-dark">{formatDate(selectedDate)}</span>
                             <span
@@ -43,153 +353,240 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                                 Clear Date
                             </span>
                         </div>
-                    ) : (
-                        <div className="small text-muted mt-1">Showing upcoming dues & site visits</div>
                     )}
                 </div>
 
                 {/* Filters (Only if no specific calendar date selected) */}
                 {!selectedDate && (
-                    <div className="d-flex align-items-center gap-2 flex-wrap justify-content-end">
-                        <div className="d-flex align-items-center gap-1 bg-light p-1 rounded">
+                    <div className="d-flex align-items-center gap-2 flex-wrap justify-content-end" style={{ flex: 1 }}>
+                        {/* Search Box */}
+                        <div className="position-relative" style={{ minWidth: '375px', zIndex: 1050 }}>
+                            <Search size={16} className="text-muted position-absolute top-50 start-0 translate-middle-y ms-2" />
                             <input
-                                type="date"
-                                className="form-control form-control-sm border-0 bg-transparent"
-                                style={{ width: '130px', fontSize: '0.8rem' }}
-                                value={filters.fromDate || ''}
-                                onChange={(e) => setFilters(prev => ({ ...prev, fromDate: e.target.value, mode: '' }))}
+                                type="text"
+                                className="form-control form-control-sm ps-4 rounded-pill border-light bg-light"
+                                placeholder="Search project, customer, no..."
+                                value={searchText}
+                                onChange={handleSearchChange}
+                                onFocus={() => searchText && setShowSuggestions(true)}
+                                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} // Delay to allow click
                             />
-                            <span className="text-muted small">-</span>
-                            <input
-                                type="date"
-                                className="form-control form-control-sm border-0 bg-transparent"
-                                style={{ width: '130px', fontSize: '0.8rem' }}
-                                value={filters.toDate || ''}
-                                onChange={(e) => setFilters(prev => ({ ...prev, toDate: e.target.value, mode: '' }))}
-                            />
+                            {showSuggestions && suggestions.length > 0 && (
+                                <ul className="list-group position-absolute w-100 shadow-sm mt-1" style={{ zIndex: 2000, maxHeight: '300px', overflowY: 'auto' }}>
+                                    {suggestions.map((s, i) => (
+                                        <li
+                                            key={i}
+                                            className="list-group-item list-group-item-action py-1 px-3"
+                                            style={{ fontSize: '0.85rem', cursor: 'pointer' }}
+                                            onClick={() => handleSuggestionClick(s)}
+                                        >
+                                            {s}
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+
+                        {/* Separate Clear Button */}
+                        {(searchText || filters.fromDate || filters.toDate) && (
+                            <button
+                                className="btn btn-sm btn-light text-danger fw-bold d-flex align-items-center gap-1 border ms-2"
+                                onClick={() => {
+                                    setSearchText('');
+                                    setFilters({ ...filters, search: '', fromDate: '', toDate: '', date: null, mode: 'future' });
+                                }}
+                            >
+                                <X size={14} /> Clear
+                            </button>
+                        )}
+
+                        <div className="me-auto"></div> {/* Spacer to push rest to right */}
+
+
+
+
+                        {/* Date Type Selector */}
+                        <div className="p-1 rounded" style={{ backgroundColor: '#eff6ff' }}>
+                            <select
+                                className="form-select form-select-sm border-0 bg-transparent fw-bold text-primary"
+                                style={{ width: 'auto', fontSize: '0.85rem', cursor: 'pointer', outline: 'none', boxShadow: 'none' }}
+                                value={filters.dateType || 'Enquiry Date'}
+                                onChange={(e) => setFilters(prev => ({ ...prev, dateType: e.target.value }))}
+                            >
+                                <option value="Enquiry Date">Enquiry Date</option>
+                                <option value="Due Date">Due Date</option>
+                            </select>
                         </div>
 
                         <div className="btn-group btn-group-sm bg-light p-1 rounded" role="group">
-                            {['today', 'all'].map(mode => (
-                                <button
-                                    key={mode}
-                                    type="button"
-                                    className={`btn btn-sm rounded-pill px-3 fw-bold text-capitalize ${filters.mode === mode && !filters.fromDate ? 'bg-white shadow-sm text-primary' : 'text-muted border-0'}`}
-                                    onClick={() => setFilters(prev => ({ ...prev, mode: mode, fromDate: '', toDate: '' }))}
-                                >
-                                    {mode}
-                                </button>
-                            ))}
+                            <DateShortcutBtn
+                                label="Today"
+                                isActive={filters.fromDate === format(new Date(), 'yyyy-MM-dd') && filters.toDate === format(new Date(), 'yyyy-MM-dd')}
+                                onClick={() => handleDateShortcut('today')}
+                            />
+                            <DateShortcutBtn
+                                label="Tomorrow"
+                                isActive={filters.fromDate === format(addDays(new Date(), 1), 'yyyy-MM-dd')}
+                                onClick={() => handleDateShortcut('tomorrow')}
+                            />
+                            <DateShortcutBtn
+                                label="This Week"
+                                isActive={filters.mode === '' && filters.fromDate && filters.toDate && !isSameDay(new Date(filters.fromDate), new Date(filters.toDate)) && !isSameDay(new Date(filters.fromDate), addDays(new Date(), 1))}
+                                onClick={() => handleDateShortcut('week')}
+                            />
+                            <DateShortcutBtn
+                                label="This Month"
+                                isActive={filters.fromDate === format(startOfMonth(new Date()), 'yyyy-MM-dd') && filters.toDate === format(endOfMonth(new Date()), 'yyyy-MM-dd')}
+                                onClick={() => handleDateShortcut('month')}
+                            />
                         </div>
-
-                        {(filters.fromDate || filters.toDate || filters.mode !== 'all') && (
-                            <span
-                                className="badge rounded-pill bg-danger bg-opacity-10 text-danger border border-danger border-opacity-10 ms-2"
-                                style={{ cursor: 'pointer' }}
-                                onClick={() => setFilters({ ...filters, date: null, mode: 'all', fromDate: '', toDate: '' })}
-                                title="Reset all filters"
-                            >
-                                Clear
-                            </span>
-                        )}
-                    </div>
+                    </div >
                 )}
-            </div>
+            </div >
 
             {/* Table Content */}
-            <div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>
-                <table className="table table-bordered table-hover mb-0" style={{ fontSize: '0.85rem', tableLayout: 'fixed', minWidth: '100%' }}>
-                    <thead className="bg-light sticky-top" style={{ zIndex: 10, top: 0 }}>
+            < div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>
+                <table className="table table-hover mb-0" style={{ fontSize: '0.85rem', tableLayout: 'fixed', minWidth: '100%', width: 'max-content' }}>
+                    <thead className="sticky-top" style={{ zIndex: 10, top: 0, backgroundColor: '#eff6ff' }}>
                         <tr className="border-bottom">
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '13%', minWidth: '130px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Enquiry No <br /> Enquiry Date <br /> Due Date
+                            {/* Column 1 Header */}
+                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col1, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Enquiry No" fieldKey="RequestNo" />
+                                <SortableHeader label="Enquiry Date" fieldKey="EnquiryDate" />
+                                <SortableHeader label="Due Date" fieldKey="DueDate" />
+                                <Resizer col="col1" />
                             </th>
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '18%', minWidth: '160px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Project Name <br /> Division <br /> Sales Engineer
+
+                            {/* Column 2 Header */}
+                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col2, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Project Name" fieldKey="ProjectName" />
+                                <SortableHeader label="Division" fieldKey="EnquiryFor" />
+                                <SortableHeader label="Sales Engineer" fieldKey="ConcernedSE" />
+                                <Resizer col="col2" />
                             </th>
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '22%', minWidth: '180px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Customer <br /> Received From <br /> Client <br /> Consultant
+
+                            {/* Column 3 Header */}
+                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col3, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Customer" fieldKey="CustomerName" />
+                                <SortableHeader label="Client" fieldKey="ClientName" />
+                                <SortableHeader label="Consultant" fieldKey="ConsultantName" />
+                                <Resizer col="col3" />
                             </th>
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '25%', minWidth: '200px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Enquiry Details
+
+                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col4, minWidth: '150px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Enquiry Details" fieldKey="EnquiryDetails" />
+                                <Resizer col="col4" />
                             </th>
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '10%', minWidth: '100px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Site Visit Date
+                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col5, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Site Visit Date" fieldKey="SiteVisitDate" />
+                                <Resizer col="col5" />
                             </th>
-                            <th className="p-2 text-dark fw-bold bg-light" style={{ width: '12%', minWidth: '120px', resize: 'horizontal', overflow: 'hidden', verticalAlign: 'top' }}>
-                                Remarks
+                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col6, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                <SortableHeader label="Remarks" fieldKey="Status" />
+                                <Resizer col="col6" />
                             </th>
                         </tr>
                     </thead>
                     <tbody>
-                        {data.length > 0 ? (
-                            data.map((row, idx) => {
+                        {processedData.length > 0 ? (
+                            processedData.map((row, idx) => {
                                 const isExpanded = expandedRows.has(row.RequestNo);
                                 const contentClass = isExpanded ? "text-wrap text-break" : "text-truncate";
-                                const cellStyle = isExpanded ? {} : { maxWidth: '0' }; // Use maxWidth 0 only when truncated to force ellipsis
+                                const cellStyle = { verticalAlign: 'top' };
+                                const rowColor = getRowColor(row.DueDate, row.Status, row.SiteVisitDate);
 
                                 return (
                                     <tr key={idx}
                                         onClick={() => onRowClick(row.RequestNo)}
-                                        style={{ cursor: 'pointer', transition: 'none' }}
+                                        style={{ cursor: 'pointer', borderLeft: `4px solid ${rowColor}` }}
                                     >
                                         {/* Column 1: Enquiry No / Date / Due */}
-                                        <td className="p-2 align-top" style={cellStyle}>
-                                            <div className="d-flex align-items-center gap-1">
+                                        <td className="p-2" style={cellStyle}>
+                                            <div className="d-flex align-items-center gap-2 mb-1" {...hoverEvents('Enquiry No')} style={{ width: 'fit-content' }}>
                                                 <button
-                                                    className="btn btn-sm btn-link p-0 text-muted text-decoration-none border-0"
+                                                    className="btn btn-sm btn-link p-0 text-muted"
                                                     onClick={(e) => toggleRow(e, row.RequestNo)}
-                                                    style={{ width: '16px', height: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                                    title={isExpanded ? "Collapse" : "Expand"}
                                                 >
                                                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                                                 </button>
-                                                <div className={`badge rounded-pill bg-light text-dark border border-secondary border-opacity-25 fw-bold ${contentClass}`} title={!isExpanded ? row.RequestNo : ''}>
-                                                    {row.RequestNo}
-                                                </div>
+                                                <span className="fw-bold text-dark">{row.RequestNo}</span>
                                             </div>
-                                            <div className={`ps-4 ${contentClass}`} title={!isExpanded ? formatDate(row.EnquiryDate) : ''}>{formatDate(row.EnquiryDate)}</div>
-                                            <div className={`ps-4 ${contentClass} ${new Date(row.DueDate) < new Date() ? 'text-danger fw-bold' : ''}`} title={!isExpanded ? formatDate(row.DueDate) : ''}>
-                                                {formatDate(row.DueDate)}
+                                            <div className="ps-4 mb-1" {...hoverEvents('Enquiry Date')} style={{ width: 'fit-content' }}>
+                                                <span className="badge bg-light text-secondary border fw-normal" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                                                    {formatDate(row.EnquiryDate)}
+                                                </span>
+                                            </div>
+                                            <div className="ps-4" {...hoverEvents('Due Date')} style={{ width: 'fit-content' }}>
+                                                <span
+                                                    className={`badge border fw-normal ${new Date(row.DueDate) < new Date() ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-25' : 'bg-light text-dark'}`}
+                                                    style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
+                                                >
+                                                    {formatDate(row.DueDate)}
+                                                </span>
                                             </div>
                                         </td>
 
                                         {/* Column 2: Project / Division / SE */}
-                                        <td className="p-2 align-top" style={cellStyle}>
-                                            <div className={`fw-bold ${contentClass}`} title={!isExpanded ? (row.ProjectName || '-') : ''}>{row.ProjectName || '-'}</div>
-                                            <div className={contentClass} title={!isExpanded ? (row.EnquiryFor || '-') : ''}>{row.EnquiryFor || '-'}</div>
-                                            <div className={contentClass} title={!isExpanded ? (row.ConcernedSE || '-') : ''}>{row.ConcernedSE || '-'}</div>
+                                        <td className="p-2" style={cellStyle}>
+                                            <div {...hoverEvents('Project Name')} style={{ width: 'fit-content' }}>
+                                                <div className={`fw-bold text-dark mb-1 ${contentClass}`} title={row.ProjectName}>{row.ProjectName || '-'}</div>
+                                            </div>
+                                            <div {...hoverEvents('Division')} style={{ width: 'fit-content' }}>
+                                                <div className="d-flex flex-wrap gap-1 align-items-center mb-1">
+                                                    <span className="badge border fw-normal text-secondary bg-light">{row.EnquiryFor || '-'}</span>
+                                                </div>
+                                            </div>
+                                            <div {...hoverEvents('Sales Engineer')} style={{ width: 'fit-content' }}>
+                                                <div className="d-flex align-items-center gap-1 text-secondary small">
+                                                    <User size={13} />
+                                                    <span className={contentClass} title={row.ConcernedSE}>{row.ConcernedSE || '-'}</span>
+                                                </div>
+                                            </div>
                                         </td>
 
-                                        {/* Column 3: Parties - Separate lines for Customer, Recv, Client, Consultant */}
-                                        <td className="p-2 align-top" style={cellStyle}>
-                                            <div className={`fw-bold ${contentClass}`} title={!isExpanded ? (row.CustomerName || '-') : ''}>{row.CustomerName || '-'}</div>
-                                            <div className={`text-secondary ${contentClass}`} title={!isExpanded ? (row.ReceivedFrom ? row.ReceivedFrom.split('|')[0] : '-') : ''}>{row.ReceivedFrom ? row.ReceivedFrom.split('|')[0] : '-'}</div>
-                                            <div className={contentClass} title={!isExpanded ? (row.ClientName || '-') : ''}>{row.ClientName || '-'}</div>
-                                            <div className={`text-muted ${contentClass}`} title={!isExpanded ? (row.ConsultantName || '-') : ''}>{row.ConsultantName || '-'}</div>
+                                        {/* Column 3: Parties */}
+                                        <td className="p-2" style={cellStyle}>
+                                            <div {...hoverEvents('Customer')} style={{ width: 'fit-content' }}>
+                                                <div className={`fw-bold text-dark mb-1 ${contentClass}`} title={row.CustomerName}>{row.CustomerName || '-'}</div>
+                                            </div>
+
+                                            <div {...hoverEvents('Client')} style={{ width: 'fit-content' }}>
+                                                <div className={`small text-secondary mb-1 ${contentClass}`} title={row.ClientName}>
+                                                    {row.ClientName || '-'}
+                                                </div>
+                                            </div>
+                                            <div {...hoverEvents('Consultant')} style={{ width: 'fit-content' }}>
+                                                <div className={`small text-muted ${contentClass}`} title={row.ConsultantName}>
+                                                    {row.ConsultantName || '-'}
+                                                </div>
+                                            </div>
                                         </td>
 
                                         {/* Column 4: Enquiry Details */}
-                                        <td className="p-2 align-top" style={cellStyle}>
-                                            <div className={`text-secondary ${contentClass}`} style={isExpanded ? {} : { maxHeight: 'none', overflow: 'hidden' }} title={!isExpanded ? (row.EnquiryDetails || '-') : ''}>
+                                        <td className="p-2" style={cellStyle}>
+                                            <div className={`text-secondary ${contentClass}`} style={!isExpanded ? { maxHeight: '60px', overflow: 'hidden' } : {}}>
                                                 {row.EnquiryDetails || '-'}
                                             </div>
                                         </td>
 
-                                        {/* Column 5: Site Visit Date */}
-                                        <td className="p-2 align-top" style={cellStyle}>
+                                        {/* Column 5: Site Visit */}
+                                        <td className="p-2" style={cellStyle}>
                                             {row.SiteVisitDate ? (
-                                                <div className={`fw-bold text-dark d-inline-block ${contentClass}`} title={!isExpanded ? formatDate(row.SiteVisitDate) : ''}>
+                                                <span className="badge bg-success bg-opacity-10 text-success border border-success border-opacity-25 fw-normal d-inline-flex align-items-center gap-1" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                                                    <Calendar size={12} />
                                                     {formatDate(row.SiteVisitDate)}
-                                                </div>
+                                                </span>
                                             ) : '-'}
                                         </td>
 
-                                        {/* Column 6: Remarks (Mapped to Status or empty) */}
-                                        <td className="p-2 align-top" style={cellStyle}>
-                                            <div className={contentClass} title={!isExpanded ? (row.Status || '-') : ''}>{row.Status || '-'}</div>
+                                        {/* Column 6: Remarks */}
+                                        <td className="p-2" style={cellStyle}>
+                                            <span className="badge bg-light text-dark border rounded-pill fw-normal d-inline-flex align-items-center gap-1 px-2">
+                                                {row.Status === 'Closed' ? <div className="rounded-circle bg-success" style={{ width: 6, height: 6 }} /> :
+                                                    <div className="rounded-circle bg-warning" style={{ width: 6, height: 6 }} />}
+                                                {row.Status || 'Open'}
+                                            </span>
                                         </td>
-
                                     </tr>
                                 );
                             })
@@ -202,8 +599,8 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                         )}
                     </tbody>
                 </table>
-            </div>
-        </div>
+            </div >
+        </div >
     );
 };
 

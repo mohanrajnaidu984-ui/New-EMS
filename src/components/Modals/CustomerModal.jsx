@@ -20,6 +20,8 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
     };
     const [formData, setFormData] = useState(initialData || defaultState);
     const [errors, setErrors] = useState({});
+    const [isScanning, setIsScanning] = useState(false);
+    const fileInputRef = React.useRef(null);
 
     useEffect(() => {
         setFormData(initialData || defaultState);
@@ -34,12 +36,66 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
         }
     };
 
+    const processOcrFile = async (file) => {
+        if (!file) return;
+
+        setIsScanning(true);
+        const data = new FormData();
+        data.append('image', file);
+
+        try {
+            const res = await fetch('/api/extract-contact-ocr', {
+                method: 'POST',
+                body: data
+            });
+
+            if (res.ok) {
+                const extracted = await res.json();
+                console.log('OCR Result:', extracted);
+
+                setFormData(prev => ({
+                    ...prev,
+                    CompanyName: extracted.CompanyName || prev.CompanyName,
+                    EmailId: extracted.EmailId || prev.EmailId,
+                    Phone1: (extracted.Mobile1 || extracted.Phone) || prev.Phone1,
+                    Address1: extracted.Address1 || prev.Address1,
+                    FaxNo: extracted.FaxNo || prev.FaxNo,
+                }));
+                alert('Scanned successfully! Please review the auto-filled details.');
+            } else {
+                alert('Failed to scan image.');
+            }
+        } catch (err) {
+            console.error(err);
+            alert('Error scanning image.');
+        } finally {
+            setIsScanning(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    const handleImageUpload = (e) => {
+        processOcrFile(e.target.files[0]);
+    };
+
+    const handlePaste = (e) => {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                const file = items[i].getAsFile();
+                processOcrFile(file);
+                e.preventDefault();
+                return;
+            }
+        }
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
 
         const newErrors = {};
 
-        // Email validation regex
+        // Email validation regex, allow empty if needed but keep standard
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
@@ -67,6 +123,29 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
             onClose={onClose}
             footer={
                 <>
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        style={{ display: 'none' }}
+                        accept="image/*"
+                        onChange={handleImageUpload}
+                    />
+                    <button
+                        type="button"
+                        className="btn btn-success"
+                        disabled={isScanning}
+                        onClick={() => fileInputRef.current.click()}
+                    >
+                        {isScanning ? 'Scanning...' : 'Scan V-Card'}
+                    </button>
+                    <textarea
+                        className="form-control"
+                        placeholder="Paste image (Ctrl+V)"
+                        rows="1"
+                        style={{ width: '150px', marginLeft: '10px', marginRight: 'auto', fontSize: '12px', resize: 'none' }}
+                        onPaste={handlePaste}
+                    />
+
                     <button type="button" className="btn btn-primary" style={{ width: '80px' }} onClick={handleSubmit}>
                         {mode === 'Add' ? 'Add' : 'Update'}
                     </button>
@@ -172,7 +251,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                     </div>
                 </div>
             </form>
-        </Modal>
+        </Modal >
     );
 };
 

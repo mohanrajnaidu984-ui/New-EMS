@@ -62,7 +62,7 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
     return (
         <div className="bg-white rounded shadow-sm border border-light overflow-hidden">
             {/* Header */}
-            <div className="d-flex justify-content-between align-items-center p-3 bg-light border-bottom">
+            <div className="d-flex justify-content-between align-items-center p-3 border-bottom" style={{ backgroundColor: '#eff6ff' }}>
                 <button className="btn btn-sm btn-link text-dark" onClick={prevMonth}><ChevronLeft size={16} /></button>
                 <div className="fw-bold">{monthNames[month - 1]} {year}</div>
                 <button className="btn btn-sm btn-link text-dark" onClick={nextMonth}><ChevronRight size={16} /></button>
@@ -106,35 +106,32 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
                                     <div className="d-flex flex-column gap-1 w-100 px-1">
                                         {info?.Enquiries > 0 && (
                                             <div
-                                                className={`badge rounded-pill bg-primary bg-opacity-10 text-primary border border-primary border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'enquiry' ? 'ring-2 ring-primary' : ''}`}
+                                                className={`calendar-chip badge rounded-pill bg-primary bg-opacity-10 text-primary border border-primary border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'enquiry' ? 'ring-2 ring-primary' : ''}`}
                                                 style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
                                                 onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'enquiry'); }}
                                                 title="Show Enquiries Created"
                                             >
-                                                <div className="rounded-circle bg-primary me-1" style={{ width: '4px', height: '4px' }}></div>
-                                                {info.Enquiries} New
+                                                {info.Enquiries} {info.Enquiries > 1 ? 'Enquiries' : 'Enquiry'}
                                             </div>
                                         )}
                                         {info?.Due > 0 && (
                                             <div
-                                                className={`badge rounded-pill bg-danger bg-opacity-10 text-danger border border-danger border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'due' ? 'ring-2 ring-danger' : ''}`}
+                                                className={`calendar-chip badge rounded-pill bg-danger bg-opacity-10 text-danger border border-danger border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'due' ? 'ring-2 ring-danger' : ''}`}
                                                 style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
                                                 onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'due'); }}
                                                 title="Show Enquiries Due"
                                             >
-                                                <div className="rounded-circle bg-danger me-1" style={{ width: '4px', height: '4px' }}></div>
                                                 {info.Due} Due
                                             </div>
                                         )}
                                         {info?.SiteVisits > 0 && (
                                             <div
-                                                className={`badge rounded-pill bg-success bg-opacity-10 text-success border border-success border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'visit' ? 'ring-2 ring-success' : ''}`}
+                                                className={`calendar-chip badge rounded-pill bg-success bg-opacity-10 text-success border border-success border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'visit' ? 'ring-2 ring-success' : ''}`}
                                                 style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
                                                 onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'visit'); }}
                                                 title="Show Site Visits"
                                             >
-                                                <div className="rounded-circle bg-success me-1" style={{ width: '4px', height: '4px' }}></div>
-                                                {info.SiteVisits} Visit
+                                                {info.SiteVisits} {info.SiteVisits > 1 ? 'Site Visits' : 'Site Visit'}
                                             </div>
                                         )}
                                     </div>
@@ -148,6 +145,8 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
                 .bg-aliceblue { background-color: #f0f8ff; }
                 .bg-selected-date { background-color: #fff3cdc9 !important; border: 2px solid #ffc107; }
                 .ring-2 { box-shadow: 0 0 0 2px currentColor; }
+                .calendar-chip { transition: transform 0.15s ease-in-out; }
+                .calendar-chip:hover { transform: scale(1.05); opacity: 0.95; box-shadow: 0 2px 4px rgba(0,0,0,0.1); z-index: 5; }
             `}</style>
         </div>
     );
