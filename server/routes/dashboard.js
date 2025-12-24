@@ -3,15 +3,50 @@ const router = express.Router();
 const { sql } = require('../dbConfig');
 
 // Helper to construct filter clauses (kept for reference or future use if needed, though active logic is inline below)
-const applyFilters = (request, query, filters) => {
-    // ... logic is duplicated in endpoints, keeping this for potential refactor but ensure endpoints are self-sufficient as written.
+// --- Helper: Apply Access Control Logic ---
+const applyAccessControl = (request, params) => {
+    const { userRole, userName, userEmail } = params;
+
+    // If Role is NOT Admin (and exists), apply visibility filters
+    // FORCE ADMIN for ranigovardhan@gmail.com
+    if (userEmail && userEmail.toLowerCase() === 'ranigovardhan@gmail.com') return '';
+
+    const userRoles = typeof userRole === 'string'
+        ? userRole.split(',').map(r => r.trim().toLowerCase())
+        : [];
+
+    const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
+
+    if (userRole && !isAdmin) {
+        // Logic: 
+        // 1. CreatedBy = userName
+        // 2. ConcernedSE (Assigned) = userName
+        // 3. Common/CC Email matches userEmail (via EnquiryFor Item)
+
+        request.input('currentUserName', sql.NVarChar, userName || '');
+        request.input('currentUserEmail', sql.NVarChar, userEmail || '');
+
+        return ` AND (
+                em.CreatedBy = @currentUserName
+                OR EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @currentUserName)
+                OR EXISTS (
+                    SELECT 1 FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
+                    WHERE ef.RequestNo = em.RequestNo
+                    AND (
+                        mef.CommonMailIds LIKE '%' + @currentUserEmail + '%'
+                        OR mef.CCMailIds LIKE '%' + @currentUserEmail + '%'
+                    )
+                )
+            ) `;
+    }
     return '';
 };
 
 // 1. Calendar Aggregation
 router.get('/calendar', async (req, res) => {
     try {
-        const { month, year, division, salesEngineer } = req.query;
+        const { month, year, division, salesEngineer, userEmail, userName, userRole } = req.query;
 
         if (!month || !year) return res.status(400).json({ error: 'Month and Year required' });
 
@@ -28,6 +63,9 @@ router.get('/calendar', async (req, res) => {
             baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
             request.input('salesEngineer', sql.NVarChar, salesEngineer);
         }
+
+        // Apply Access Control
+        baseFilter += applyAccessControl(request, { userRole, userName, userEmail });
 
         // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
         const query = `
@@ -65,7 +103,7 @@ router.get('/calendar', async (req, res) => {
 // 2. KPISummary
 router.get('/summary', async (req, res) => {
     try {
-        const { division, salesEngineer } = req.query;
+        const { division, salesEngineer, userEmail, userName, userRole } = req.query;
         const request = new sql.Request();
 
         let baseFilter = '';
@@ -77,6 +115,9 @@ router.get('/summary', async (req, res) => {
             baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
             request.input('salesEngineer', sql.NVarChar, salesEngineer);
         }
+
+        // Apply Access Control
+        baseFilter += applyAccessControl(request, { userRole, userName, userEmail });
 
         const query = `
             SELECT
@@ -97,11 +138,14 @@ router.get('/summary', async (req, res) => {
 // 3. Enquiry Table
 router.get('/enquiries', async (req, res) => {
     try {
-        const { division, salesEngineer, date, fromDate, toDate, status, dateType, search } = req.query;
-        console.log('API /enquiries params:', { division, salesEngineer, date, fromDate, toDate, status, dateType, search });
+        const { division, salesEngineer, date, fromDate, toDate, status, dateType, search, userEmail, userName, userRole } = req.query;
+        console.log('API /enquiries params:', { division, salesEngineer, date, fromDate, toDate, status, dateType, search, userEmail, userName, userRole });
         const request = new sql.Request();
 
         let whereClause = ' WHERE 1=1 ';
+
+        // --- ACCESS CONTROL LOGIC ---
+        whereClause += applyAccessControl(request, { userRole, userName, userEmail });
 
         // 0. Global Search (Overrides default mode, but respects explicit filters)
         if (search && search.trim() !== '') {
@@ -196,7 +240,8 @@ router.get('/enquiries', async (req, res) => {
                 em.ReceivedFrom,
                 -- Subqueries for aggregates (efficient enough for reasonable paging, but here unlimited)
                 (SELECT STRING_AGG(SEName, ', ') FROM ConcernedSE WHERE RequestNo = em.RequestNo) as ConcernedSE,
-                (SELECT STRING_AGG(ItemName, ', ') FROM EnquiryFor WHERE RequestNo = em.RequestNo) as EnquiryFor
+                (SELECT STRING_AGG(ItemName, ', ') FROM EnquiryFor WHERE RequestNo = em.RequestNo) as EnquiryFor,
+                em.CreatedBy
             FROM EnquiryMaster em
             ${whereClause}
             ORDER BY em.DueDate ASC -- Prioritize upcoming

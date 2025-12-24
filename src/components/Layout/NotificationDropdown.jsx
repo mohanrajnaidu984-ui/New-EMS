@@ -122,7 +122,7 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
             </button>
 
             {isOpen && (
-                <div className="card position-absolute end-0 mt-2 shadow-lg border-0" style={{ width: '350px', zIndex: 1050, maxHeight: '400px', overflow: 'hidden' }}>
+                <div className="card position-absolute end-0 mt-2 shadow-lg border-0" style={{ width: '350px', zIndex: 999, maxHeight: '400px', overflow: 'hidden' }}>
                     <div className="card-header bg-white border-bottom py-2 d-flex justify-content-between align-items-center">
                         <h6 className="mb-0 fw-bold">Notifications</h6>
                         {notifications.length > 0 && (

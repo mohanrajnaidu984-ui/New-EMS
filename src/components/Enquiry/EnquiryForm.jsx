@@ -106,10 +106,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         if (!currentUser) return;
         const roleString = currentUser.role || currentUser.Roles || '';
         const userRoles = typeof roleString === 'string'
-            ? roleString.split(',').map(r => r.trim())
-            : (Array.isArray(roleString) ? roleString : []);
+            ? roleString.split(',').map(r => r.trim().toLowerCase())
+            : (Array.isArray(roleString) ? roleString.map(r => r.toLowerCase()) : []);
 
-        if (userRoles.includes('Admin')) {
+        if (userRoles.includes('admin')) {
             setCanEdit(true);
             return;
         }
@@ -906,12 +906,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         await loadEnquiry(modifyRequestNo);
     };
 
-    const handleOpenFromSearch = (reqNo) => {
+    const handleOpenFromSearch = async (reqNo) => {
+        console.log('Opening from search:', reqNo);
         setModifyRequestNo(reqNo);
+        await loadEnquiry(reqNo);
         setActiveTab('Modify');
-        setTimeout(() => {
-            loadEnquiry(reqNo);
-        }, 100);
     };
 
     const renderCustomerCard = () => {

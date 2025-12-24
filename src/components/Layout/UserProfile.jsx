@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../context/AuthContext';
 import ProfileImageModal from '../Modals/ProfileImageModal';
 import ChangePasswordModal from '../Modals/ChangePasswordModal';
@@ -19,6 +20,13 @@ const UserProfile = () => {
     useEffect(() => {
         const handleClickOutside = (event) => {
             if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+                // Also check if click is inside the portal dropdown
+                // Since portal is in body, we need a ref for it or handle it carefully.
+                // We'll add a ref to the dropdown content below.
+                const dropdownEl = document.getElementById('user-profile-dropdown');
+                if (dropdownEl && dropdownEl.contains(event.target)) {
+                    return;
+                }
                 setDropdownOpen(false);
             }
         };
@@ -37,9 +45,9 @@ const UserProfile = () => {
     // Check Admin Role
     const roleString = currentUser.role || currentUser.Roles || '';
     const userRoles = typeof roleString === 'string'
-        ? roleString.split(',').map(r => r.trim())
-        : (Array.isArray(roleString) ? roleString : []);
-    const isAdmin = userRoles.includes('Admin');
+        ? roleString.split(',').map(r => r.trim().toLowerCase())
+        : (Array.isArray(roleString) ? roleString.map(r => r.trim().toLowerCase()) : []);
+    const isAdmin = userRoles.includes('admin');
 
     return (
         <div ref={dropdownRef} className="d-flex align-items-center position-relative">
@@ -81,37 +89,49 @@ const UserProfile = () => {
                 <i className="bi bi-chevron-down ms-2 text-secondary" style={{ fontSize: '0.9rem' }}></i>
             </div>
 
-            {/* Dropdown Menu */}
-            {dropdownOpen && (
+            {/* Dropdown Menu - Portaled to Body */}
+            {dropdownOpen && createPortal(
                 <div
-                    className="position-absolute bg-white shadow rounded py-2"
+                    id="user-profile-dropdown"
+                    className="position-fixed bg-white shadow rounded py-2"
                     style={{
-                        top: '100%', // Below the bar
-                        right: 0,
-                        marginTop: '8px',
-                        minWidth: '180px',
-                        zIndex: 1050,
+                        top: '110px',
+                        right: '80px',
+                        minWidth: '220px',
+                        zIndex: 20000,
                         border: '1px solid #e0e0e0'
                     }}
                 >
                     <button
-                        className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start"
-                        onClick={() => {
+                        type="button"
+                        className="d-flex align-items-center px-3 py-2 w-100 text-start btn btn-light rounded-0"
+                        onClick={(e) => {
+                            // alert("Update Photo Clicked");
+                            console.log("Update Photo Clicked");
+                            e.preventDefault();
+                            e.stopPropagation();
                             setDropdownOpen(false);
                             setShowModal(true);
                         }}
-                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem', cursor: 'pointer' }}
+                        onMouseEnter={(e) => e.target.style.backgroundColor = '#f8f9fa'}
+                        onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
                     >
                         <i className="bi bi-camera me-2"></i>
                         Update Photo
                     </button>
                     <button
-                        className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start"
-                        onClick={() => {
+                        type="button"
+                        className="d-flex align-items-center px-3 py-2 w-100 text-start btn btn-light rounded-0"
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
                             setDropdownOpen(false);
                             setShowPasswordModal(true);
                         }}
-                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem', cursor: 'pointer' }}
+                        onMouseEnter={(e) => e.target.style.backgroundColor = '#f8f9fa'}
+                        onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
                     >
                         <i className="bi bi-key me-2"></i>
                         Change Password
@@ -119,12 +139,17 @@ const UserProfile = () => {
 
                     {isAdmin && (
                         <button
-                            className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start"
-                            onClick={() => {
+                            type="button"
+                            className="d-flex align-items-center px-3 py-2 w-100 text-start btn btn-light rounded-0"
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
                                 setDropdownOpen(false);
                                 setShowUserManagementModal(true);
                             }}
-                            style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                            style={{ background: 'transparent', border: 'none', fontSize: '0.9rem', cursor: 'pointer' }}
+                            onMouseEnter={(e) => e.target.style.backgroundColor = '#f8f9fa'}
+                            onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
                         >
                             <i className="bi bi-gear me-2"></i>
                             User Management
@@ -133,17 +158,26 @@ const UserProfile = () => {
 
                     <div className="dropdown-divider"></div>
                     <button
-                        className="dropdown-item d-flex align-items-center px-3 py-2 w-100 text-start text-danger"
-                        onClick={() => {
+                        type="button"
+                        className="d-flex align-items-center px-3 py-2 w-100 text-start btn btn-light rounded-0 text-danger"
+                        onClick={(e) => {
+                            // alert("Logout Clicked");
+                            console.log("Logout Clicked");
+                            e.preventDefault();
+                            e.stopPropagation();
                             setDropdownOpen(false);
+                            // Call logout
                             logout();
                         }}
-                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem' }}
+                        style={{ background: 'transparent', border: 'none', fontSize: '0.9rem', cursor: 'pointer' }}
+                        onMouseEnter={(e) => e.target.style.backgroundColor = '#f8f9fa'}
+                        onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
                     >
                         <i className="bi bi-box-arrow-right me-2"></i>
                         Logout
                     </button>
-                </div>
+                </div>,
+                document.body
             )}
 
             <ProfileImageModal

@@ -22,10 +22,10 @@ const SearchEnquiry = ({ onOpen }) => {
         // Determine user role
         const roleString = currentUser.role || currentUser.Roles || '';
         const userRoles = typeof roleString === 'string'
-            ? roleString.split(',').map(r => r.trim())
-            : (Array.isArray(roleString) ? roleString : []);
+            ? roleString.split(',').map(r => r.trim().toLowerCase())
+            : (Array.isArray(roleString) ? roleString.map(r => r.toLowerCase()) : []);
 
-        const isAdmin = userRoles.includes('Admin');
+        const isAdmin = userRoles.includes('admin');
         const userEmail = currentUser.EmailId?.toLowerCase() || '';
         const currentUserName = currentUser.name?.trim().toLowerCase() || '';
 
@@ -186,6 +186,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 <table className="table table-sm table-hover align-middle" style={{ fontSize: '13px' }}>
                     <thead className="table-light">
                         <tr>
+                            <th>Action</th>
                             <th>Request No</th>
                             <th>Enquiry Date</th>
                             <th>Customer</th>
@@ -196,7 +197,6 @@ const SearchEnquiry = ({ onOpen }) => {
                             <th>SE(s)</th>
                             <th>Status</th>
                             <th>Created By</th>
-                            <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -205,6 +205,26 @@ const SearchEnquiry = ({ onOpen }) => {
                         ) : (
                             results.map(r => (
                                 <tr key={r.RequestNo}>
+                                    <td className="position-relative">
+                                        <span
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                console.log('SearchEnquiry: Modify clicked for', r.RequestNo);
+                                                onOpen(r.RequestNo);
+                                            }}
+                                            style={{
+                                                color: '#0066cc',
+                                                textDecoration: 'underline',
+                                                cursor: 'pointer',
+                                                fontWeight: '500',
+                                                fontSize: '13px',
+                                                display: 'inline-block'
+                                            }}
+                                            className="action-btn"
+                                        >
+                                            Modify
+                                        </span>
+                                    </td>
                                     <td>{r.RequestNo}</td>
                                     <td>{r.EnquiryDate}</td>
                                     <td>{r.SelectedCustomers?.join(', ') || r.CustomerName}</td>
@@ -215,30 +235,6 @@ const SearchEnquiry = ({ onOpen }) => {
                                     <td>{r.SelectedConcernedSEs?.join(', ') || r.ConcernedSE}</td>
                                     <td>{r.Status || 'Enquiry'}</td>
                                     <td>{r.CreatedBy || '-'}</td>
-                                    <td>
-                                        {r.Status === 'Reports' ? (
-                                            <button
-                                                className="btn btn-sm"
-                                                style={{
-                                                    backgroundColor: '#d4edda',
-                                                    color: '#155724',
-                                                    border: '1px solid #c3e6cb',
-                                                    fontSize: '12px'
-                                                }}
-                                                onClick={() => onOpen(r.RequestNo)}
-                                            >
-                                                Closed
-                                            </button>
-                                        ) : (
-                                            <button
-                                                className="btn btn-outline-primary btn-sm"
-                                                onClick={() => onOpen(r.RequestNo)}
-                                                style={{ fontSize: '12px' }}
-                                            >
-                                                Open
-                                            </button>
-                                        )}
-                                    </td>
                                 </tr>
                             ))
                         )}

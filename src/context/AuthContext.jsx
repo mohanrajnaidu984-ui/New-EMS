@@ -17,20 +17,36 @@ export const AuthProvider = ({ children }) => {
         // Attempt to load user from local storage on initial load
         const storedUser = localStorage.getItem('currentUser');
         if (storedUser) {
-            setCurrentUser(JSON.parse(storedUser));
+            let userData = JSON.parse(storedUser);
+            // Force Admin for ranigovardhan@gmail.com
+            if (userData.EmailId?.toLowerCase() === 'ranigovardhan@gmail.com' || userData.email?.toLowerCase() === 'ranigovardhan@gmail.com') {
+                userData.Roles = 'Admin';
+                userData.role = 'Admin';
+            }
+            setCurrentUser(userData);
         }
     }, []);
 
     const login = (userData) => {
         console.log('AuthContext: login called with', userData);
-        // alert(`AuthContext: Logging in as ${userData.email}`);
-        setCurrentUser(userData);
-        localStorage.setItem('currentUser', JSON.stringify(userData));
+
+        let finalUserData = { ...userData };
+        // Force Admin for ranigovardhan@gmail.com
+        if (finalUserData.EmailId?.toLowerCase() === 'ranigovardhan@gmail.com' || finalUserData.email?.toLowerCase() === 'ranigovardhan@gmail.com') {
+            finalUserData.Roles = 'Admin';
+            finalUserData.role = 'Admin';
+        }
+
+        setCurrentUser(finalUserData);
+        localStorage.setItem('currentUser', JSON.stringify(finalUserData));
     };
 
     const logout = () => {
+        console.log('AuthContext: Logout called');
         setCurrentUser(null);
         localStorage.removeItem('currentUser');
+        window.location.href = '/';
+        // window.location.reload(); 
     };
 
     const updateProfileImage = async (userId, base64) => {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useData } from '../../context/DataContext'; // Reuse for masters if needed
+import { useAuth } from '../../context/AuthContext';
 import DashboardFilters from './LeftPanel/DashboardFilters';
 import CalendarView from './LeftPanel/CalendarView';
 import SummaryCards from './RightPanel/SummaryCards';
@@ -10,6 +11,7 @@ import './DashboardLayout.css';
 
 const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props passed from Main
     const { masters } = useData();
+    const { currentUser } = useAuth();
     // Use relative path to leverage Vite proxy (targets port 5000), avoids port mismatch
     const API_URL = '/api/dashboard';
 
@@ -22,8 +24,6 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     });
 
     const [filters, setFilters] = useState({
-        division: 'All',
-        salesEngineer: 'All',
         division: 'All',
         salesEngineer: 'All',
         mode: 'future', // Default to Future (Due >= Today)
@@ -46,30 +46,42 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         setLoading(true);
         try {
             // preparing params
-            const params = new URLSearchParams({
-                month: dateState.month,
-                year: dateState.year,
+            // Start with basic filters
+            const baseParams = {
                 division: filters.division,
                 salesEngineer: filters.salesEngineer
+            };
+
+            // Add User Context for Access Control
+            if (currentUser) {
+                baseParams.userEmail = currentUser.email || '';
+                baseParams.userName = currentUser.name || '';
+                // Handle different role structures (AuthContext maps it, but safe check)
+                baseParams.userRole = currentUser.role || (currentUser.Roles ? currentUser.Roles.split(',')[0] : 'User');
+            }
+
+            // 1. Calendar Params
+            const calParams = new URLSearchParams({
+                ...baseParams,
+                month: dateState.month,
+                year: dateState.year
             });
 
             // 1. Calendar
-            const calRes = await fetch(`${API_URL}/calendar?${params}`);
+            const calRes = await fetch(`${API_URL}/calendar?${calParams}`);
             const calData = await calRes.json();
+
+            // 2. Summary (KPI) Params
+            const sumParams = new URLSearchParams(baseParams);
 
             // 2. Summary (KPI)
             // KPI depends on global filters only (Today is implied)
-            const sumParams = new URLSearchParams({
-                division: filters.division,
-                salesEngineer: filters.salesEngineer
-            });
             const sumRes = await fetch(`${API_URL}/summary?${sumParams}`);
             const sumData = await sumRes.json();
 
-            // 3. Table
+            // 3. Table Params
             const listParams = new URLSearchParams({
-                division: filters.division,
-                salesEngineer: filters.salesEngineer,
+                ...baseParams,
                 mode: filters.mode
             });
 
@@ -93,6 +105,7 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 summary: sumData,
                 table: listData
             });
+
 
         } catch (err) {
             console.error(err);

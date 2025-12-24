@@ -31,15 +31,15 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
   // Role Based Access
   const roleString = currentUser?.role || currentUser?.Roles || '';
   const userRoles = typeof roleString === 'string'
-    ? roleString.split(',').map(r => r.trim())
-    : (Array.isArray(roleString) ? roleString : []);
+    ? roleString.split(',').map(r => r.trim().toLowerCase())
+    : (Array.isArray(roleString) ? roleString.map(r => r.toLowerCase()) : []);
 
   const visibleItems = navItems.filter(item => {
     if (item.id === 'Dashboard') return true;
-    if (userRoles.includes('Admin')) return true;
-    if (item.id === 'Enquiry' && userRoles.includes('Enquiry')) return true;
-    if (item.id === 'Quote' && userRoles.includes('Quotation')) return true;
-    if ((item.id === 'Pricing' || item.id === 'Probability') && userRoles.includes('Sales')) return true;
+    if (userRoles.includes('admin')) return true;
+    if (item.id === 'Enquiry' && userRoles.includes('enquiry')) return true;
+    if (item.id === 'Quote' && userRoles.includes('quotation')) return true;
+    if ((item.id === 'Pricing' || item.id === 'Probability') && userRoles.includes('sales')) return true;
     return false;
   });
 
@@ -124,8 +124,14 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
               </ul>
             </div>
 
-            {/* Right Group: ACG Logo */}
+            {/* Right Group: User Controls & Logo */}
             <div className="d-flex align-items-end h-100 pb-3">
+              <div className="d-flex align-items-center mb-2 me-4">
+                <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
+                <div className="ms-3">
+                  <UserProfile />
+                </div>
+              </div>
               <div className="d-flex flex-column align-items-end ps-2 mb-1">
                 <img
                   src={almoayyedLogo}
@@ -137,21 +143,6 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
           </div>
         </div>
       </nav>
-
-      {/* Floating Profile & Notification - Positioned below the header's right logo */}
-      <div style={{
-        position: 'fixed',
-        top: '105px',
-        right: '24px',
-        zIndex: 9998,
-        display: 'flex',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: '10px'
-      }}>
-        <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
-        <UserProfile />
-      </div>
     </>
   );
 };

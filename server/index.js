@@ -48,7 +48,7 @@ const sendEnquiryEmail = async (enquiryData, recipients, attachments = []) => {
             <td>
                 <ul style="margin: 0; padding-left: 20px;">
                     ${attachments.map(att => `
-                        <li><a href="http://localhost:5001/api/attachments/${att.ID}" target="_blank">${att.FileName}</a></li>
+                        <li><a href="http://localhost:5000/api/attachments/${att.ID}" target="_blank">${att.FileName}</a></li>
                     `).join('')}
                 </ul>
             </td></tr>
@@ -448,6 +448,13 @@ app.post('/api/auth/login', async (req, res) => {
 
         // Return user info (excluding password)
         const { LoginPassword, ...userWithoutPassword } = user;
+
+        // Force Admin for ranigovardhan@gmail.com
+        if (email.toLowerCase() === 'ranigovardhan@gmail.com') {
+            userWithoutPassword.Roles = 'Admin';
+            userWithoutPassword.role = 'Admin';
+        }
+
         // Ensure ProfileImage is included (it allows NULL)
         res.json({ user: userWithoutPassword });
     } catch (err) {
@@ -676,7 +683,7 @@ app.post('/api/enquiries', async (req, res) => {
             SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
             ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
             DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-            AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, EnquiryStatus
+            AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails
         } = req.body;
 
         log(`AutoAck Value: ${AutoAck}, Type: ${typeof AutoAck}`);
@@ -715,7 +722,6 @@ app.post('/api/enquiries', async (req, res) => {
         request.input('SendAcknowledgementMail', sql.Bit, AutoAck ?? false);
         request.input('ED_CEOSignatureRequired', sql.Bit, ceosign ?? false);
         request.input('Status', sql.NVarChar, Status || 'Open');
-        request.input('EnquiryStatus', sql.NVarChar, EnquiryStatus || 'Pending');
         request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE || null);
         request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails || null);
         request.input('OthersSpecify', sql.NVarChar, DocumentsReceived || null);
@@ -729,12 +735,12 @@ app.post('/api/enquiries', async (req, res) => {
                 RequestNo, SourceOfEnquiry, EnquiryDate, DueDate, SiteVisitDate,
                 CustomerName, ReceivedFrom, ProjectName, ClientName, ConsultantName,
                 EnquiryDetails, Doc_HardCopies, Doc_Drawing, Doc_CD_DVD,
-                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, EnquiryStatus, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
+                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
             ) VALUES (
                 @RequestNo, @SourceOfEnquiry, @EnquiryDate, @DueDate, @SiteVisitDate,
                 @CustomerName, @ReceivedFrom, @ProjectName, @ClientName, @ConsultantName,
                 @EnquiryDetails, @Doc_HardCopies, @Doc_Drawing, @Doc_CD_DVD,
-                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @EnquiryStatus, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
+                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
             )
         `);
 
@@ -1023,7 +1029,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
         ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
         DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-        AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, EnquiryStatus
+        AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails
     } = req.body;
 
     try {
@@ -1049,7 +1055,6 @@ app.put('/api/enquiries/:id', async (req, res) => {
         request.input('SendAcknowledgementMail', sql.Bit, AutoAck);
         request.input('ED_CEOSignatureRequired', sql.Bit, ceosign);
         request.input('Status', sql.NVarChar, Status);
-        request.input('EnquiryStatus', sql.NVarChar, EnquiryStatus);
         request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE);
         request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails);
         request.input('OthersSpecify', sql.NVarChar, DocumentsReceived);
@@ -1059,7 +1064,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 SourceOfEnquiry=@SourceOfEnquiry, EnquiryDate=@EnquiryDate, DueDate=@DueDate, SiteVisitDate=@SiteVisitDate,
                 ReceivedFrom=@ReceivedFrom, ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
                 EnquiryDetails=@EnquiryDetails, Doc_HardCopies=@Doc_HardCopies, Doc_Drawing=@Doc_Drawing, Doc_CD_DVD=@Doc_CD_DVD,
-                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, EnquiryStatus=@EnquiryStatus, AcknowledgementSE=@AcknowledgementSE, AdditionalNotificationEmails=@AdditionalNotificationEmails, OthersSpecify=@OthersSpecify
+                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, AcknowledgementSE=@AcknowledgementSE, AdditionalNotificationEmails=@AdditionalNotificationEmails, OthersSpecify=@OthersSpecify
             WHERE RequestNo=@RequestNo
         `);
 

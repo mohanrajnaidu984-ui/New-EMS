@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import Modal from './Modal';
 import { useData } from '../../context/DataContext';
 import UserModal from './UserModal';
@@ -173,8 +174,8 @@ const UserManagementModal = ({ show, onClose }) => {
                 onSubmit={handleUserSubmit}
             />
 
-            {/* Delete Confirmation Modal */}
-            {showDeleteConfirm && (
+            {/* Delete Confirmation Modal - Portaled to Body */}
+            {showDeleteConfirm && createPortal(
                 <div className="modal d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10100 }}>
                     <div className="modal-dialog modal-dialog-centered">
                         <div className="modal-content shadow-lg">
@@ -192,7 +193,8 @@ const UserManagementModal = ({ show, onClose }) => {
                             </div>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </>
     );

@@ -409,7 +409,7 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                         <div className="p-1 rounded" style={{ backgroundColor: '#eff6ff' }}>
                             <select
                                 className="form-select form-select-sm border-0 bg-transparent fw-bold text-primary"
-                                style={{ width: 'auto', fontSize: '0.85rem', cursor: 'pointer', outline: 'none', boxShadow: 'none' }}
+                                style={{ width: 'auto', fontSize: '0.85rem', cursor: 'pointer', outline: 'none', boxShadow: 'none', paddingRight: '2rem' }}
                                 value={filters.dateType || 'Enquiry Date'}
                                 onChange={(e) => setFilters(prev => ({ ...prev, dateType: e.target.value }))}
                             >
