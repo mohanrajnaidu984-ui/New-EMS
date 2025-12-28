@@ -70,42 +70,32 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
           margin: '0 auto',
           padding: '0 24px'
         }}>
-          <div className="d-flex align-items-center justify-content-between w-100 h-100 position-relative">
+          <div className="d-flex align-items-end w-100 h-100 pb-0">
             {/* Left: EMSO Logo */}
             <div className="d-flex align-items-center logo-container" style={{ animation: 'fadeInLeft 1s ease-out' }}>
               <img
                 src={emsoLogo}
-                alt="EMS - Enquiry Management System"
-                style={{ height: '90px', width: 'auto', display: 'block' }}
+                alt="EMS"
+                style={{ height: '85px', width: 'auto', display: 'block' }}
               />
             </div>
 
-            <style>
-              {`
-                @keyframes fadeInLeft {
-                    from { opacity: 0; transform: translateX(-20px); }
-                    to { opacity: 1; transform: translateX(0); }
-                }
-                `}
-            </style>
-
-            {/* Center: Navigation Links */}
-            <div className="position-absolute start-50 translate-middle-x h-100 d-flex align-items-end pb-3">
+            {/* Centered: Navigation Links + User Controls */}
+            <div className="flex-grow-1 d-flex justify-content-center align-items-center">
               <ul className="nav d-flex align-items-center gap-4 m-0">
                 {visibleItems.map(item => (
                   <li className="nav-item" key={item.id}>
                     <button
-                      className="nav-link bg-transparent border-0 p-0 d-flex align-items-center"
+                      className="nav-link bg-transparent border-0 p-0 d-flex align-items-center shadow-none"
                       onClick={() => onNavigate(item.id)}
                       style={{
                         fontSize: '14px',
                         color: activeTab === item.id ? '#1d1d1f' : '#6e6e73',
                         fontWeight: activeTab === item.id ? '600' : '400',
                         opacity: activeTab === item.id ? 1 : 0.8,
-                        transition: 'color 0.2s ease, opacity 0.2s ease',
+                        transition: 'all 0.2s ease',
                         letterSpacing: '-0.01em',
-                        cursor: 'pointer',
-                        paddingBottom: '4px'
+                        cursor: 'pointer'
                       }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.color = '#1d1d1f';
@@ -124,20 +114,22 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
               </ul>
             </div>
 
-            {/* Right Group: User Controls & Logo */}
-            <div className="d-flex align-items-end h-100 pb-3">
-              <div className="d-flex align-items-center mb-2 me-4">
+            {/* Right: Stacked ACG Logo + User Controls */}
+            <div className="d-flex flex-column align-items-end justify-content-end h-100 pb-1">
+              {/* Top: ACG Logo */}
+              <img
+                src={almoayyedLogo}
+                alt="ACG"
+                className="mb-1"
+                style={{ height: '35px', width: 'auto', objectFit: 'contain', opacity: 0.9 }}
+              />
+
+              {/* Bottom: User Controls */}
+              <div className="d-flex align-items-center gap-2">
                 <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
-                <div className="ms-3">
+                <div style={{ transform: 'scale(0.9)', transformOrigin: 'right bottom' }}>
                   <UserProfile />
                 </div>
-              </div>
-              <div className="d-flex flex-column align-items-end ps-2 mb-1">
-                <img
-                  src={almoayyedLogo}
-                  alt="ACG"
-                  style={{ height: '34px', width: 'auto', objectFit: 'contain', opacity: 0.8 }}
-                />
               </div>
             </div>
           </div>

@@ -109,7 +109,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             ? roleString.split(',').map(r => r.trim().toLowerCase())
             : (Array.isArray(roleString) ? roleString.map(r => r.toLowerCase()) : []);
 
-        if (userRoles.includes('admin')) {
+        if (userRoles.includes('admin') || userRoles.includes('system')) {
             setCanEdit(true);
             return;
         }
@@ -123,24 +123,23 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
 
         // 3. Division Member Access (Enquiry For items)
-        let isDivisionMember = false;
-        const userEmail = (currentUser.email || '').trim().toLowerCase();
+        const userEmail = (currentUser.email || currentUser.EmailId || '').trim().toLowerCase();
+
+        let isCCMember = false;
 
         for (const itemName of enqForList) {
             const item = masters.enqItems.find(i => i.ItemName === itemName);
             if (!item) continue;
 
-            if (item.CommonMailIds && (Array.isArray(item.CommonMailIds) ? item.CommonMailIds : item.CommonMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
-                isDivisionMember = true;
-                break;
-            }
-            if (item.CCMailIds && (Array.isArray(item.CCMailIds) ? item.CCMailIds : item.CCMailIds.split(',')).some(email => email.trim().toLowerCase() === userEmail)) {
-                isDivisionMember = true;
+            const ccEmails = (item.CCMailIds ? (Array.isArray(item.CCMailIds) ? item.CCMailIds : item.CCMailIds.split(/[,;]/)) : []).map(e => e.trim().toLowerCase());
+
+            if (ccEmails.includes(userEmail)) {
+                isCCMember = true;
                 break;
             }
         }
 
-        if (isDivisionMember) {
+        if (isCCMember) {
             setCanEdit(true);
             return;
         }
@@ -1039,50 +1038,56 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             <div style={{ position: 'relative', zIndex: 1 }}>
                 <div className="row justify-content-center">
                     <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
-                        <div className="d-flex mb-4" style={{ borderBottom: '1px solid #e0e0e0' }}>
+                        <div className="d-flex mb-3" style={{ borderBottom: '1px solid #e0e0e0' }}>
                             <button
-                                className="btn rounded-0"
+                                className="btn rounded-0 d-flex align-items-center"
                                 style={{
-                                    color: activeTab === 'New' ? '#d63384' : '#6c757d',
-                                    borderBottom: activeTab === 'New' ? '3px solid #d63384' : '3px solid transparent',
-                                    fontWeight: activeTab === 'New' ? '600' : '500',
+                                    color: activeTab === 'New' ? '#1d1d1f' : '#6c757d',
+                                    borderBottom: '3px solid transparent',
+                                    fontWeight: activeTab === 'New' ? '600' : '400',
                                     backgroundColor: 'transparent',
-                                    padding: '10px 20px',
+                                    padding: '8px 16px',
                                     marginBottom: '-2px',
-                                    fontSize: '15px'
+                                    fontSize: '12px',
+                                    opacity: activeTab === 'New' ? 1 : 0.8
                                 }}
                                 onClick={() => { setActiveTab('New'); resetForm(); }}
                             >
+                                <i className="bi bi-plus-lg me-2"></i>
                                 New Enquiry
                             </button>
                             <button
-                                className="btn rounded-0"
+                                className="btn rounded-0 d-flex align-items-center"
                                 style={{
-                                    color: activeTab === 'Modify' ? '#d63384' : '#6c757d',
-                                    borderBottom: activeTab === 'Modify' ? '3px solid #d63384' : '3px solid transparent',
-                                    fontWeight: activeTab === 'Modify' ? '600' : '500',
+                                    color: activeTab === 'Modify' ? '#1d1d1f' : '#6c757d',
+                                    borderBottom: '3px solid transparent',
+                                    fontWeight: activeTab === 'Modify' ? '600' : '400',
                                     backgroundColor: 'transparent',
-                                    padding: '10px 20px',
+                                    padding: '8px 16px',
                                     marginBottom: '-2px',
-                                    fontSize: '15px'
+                                    fontSize: '12px',
+                                    opacity: activeTab === 'Modify' ? 1 : 0.8
                                 }}
                                 onClick={() => { setActiveTab('Modify'); resetForm(); }}
                             >
-                                Modify Enquiry
+                                <i className="bi bi-pencil-square me-2"></i>
+                                {activeTab === 'Modify' && !canEdit ? 'View Enquiry' : 'Modify Enquiry'}
                             </button>
                             <button
-                                className="btn rounded-0"
+                                className="btn rounded-0 d-flex align-items-center"
                                 style={{
-                                    color: activeTab === 'Search' ? '#d63384' : '#6c757d',
-                                    borderBottom: activeTab === 'Search' ? '3px solid #d63384' : '3px solid transparent',
-                                    fontWeight: activeTab === 'Search' ? '600' : '500',
+                                    color: activeTab === 'Search' ? '#1d1d1f' : '#6c757d',
+                                    borderBottom: '3px solid transparent',
+                                    fontWeight: activeTab === 'Search' ? '600' : '400',
                                     backgroundColor: 'transparent',
-                                    padding: '10px 20px',
+                                    padding: '8px 16px',
                                     marginBottom: '-2px',
-                                    fontSize: '15px'
+                                    fontSize: '12px',
+                                    opacity: activeTab === 'Search' ? 1 : 0.8
                                 }}
                                 onClick={() => setActiveTab('Search')}
                             >
+                                <i className="bi bi-search me-2"></i>
                                 Search Enquiry
                             </button>
                         </div>
@@ -1098,7 +1103,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                 <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
                                     <div className="row">
                                         <div className="col-md-3">
-                                            <label className="form-label">Request No<span className="text-danger">*</span></label>
+                                            <label className="form-label">Enquiry No.<span className="text-danger">*</span></label>
                                             <input type="text" className="form-control" placeholder="e.g. EYS/2025/11/001"
                                                 value={modifyRequestNo} onChange={(e) => setModifyRequestNo(e.target.value)} />
                                         </div>
@@ -1747,10 +1752,14 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
                                             {/* Buttons Section (Left Aligned, Add then Cancel) */}
                                             <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
-                                                <button type="submit" className="btn btn-outline-success">
-                                                    {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
+                                                {(!isModifyMode || (isModifyMode && canEdit)) && (
+                                                    <button type="submit" className="btn btn-outline-success">
+                                                        {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
+                                                    </button>
+                                                )}
+                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>
+                                                    {isModifyMode && !canEdit ? 'Close' : 'Cancel'}
                                                 </button>
-                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>Cancel</button>
                                             </div>
                                         </div>
                                     </form>

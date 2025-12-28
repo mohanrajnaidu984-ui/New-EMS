@@ -23,15 +23,15 @@ const DateShortcutBtn = ({ label, isActive, onClick }) => {
 
 const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) => {
 
-    // Helper to format date: DD - MMM - YY
+    // Helper to format date: DD-MMM-YY
     const formatDate = (dateStr) => {
         if (!dateStr) return null;
         const d = new Date(dateStr);
         if (isNaN(d.getTime())) return null;
         const day = String(d.getDate()).padStart(2, '0');
-        const month = d.toLocaleString('default', { month: 'short' });
+        const month = d.toLocaleString('default', { month: 'short' }).toUpperCase();
         const year = String(d.getFullYear()).slice(-2);
-        return `${day} - ${month} - ${year}`;
+        return `${day}-${month}-${year}`;
     };
 
     const [expandedRows, setExpandedRows] = useState(new Set());
@@ -339,110 +339,7 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
 
     return (
         <div className="d-flex flex-column h-100 bg-white rounded shadow-sm overflow-hidden" style={{ minHeight: 0 }}>
-            {/* Header / Table Filters */}
-            <div className="p-3 border-bottom d-flex align-items-center justify-content-between sticky-top" style={{ zIndex: 1050, backgroundColor: '#eff6ff' }}>
-                <div>
-                    {selectedDate && (
-                        <div className="small text-muted mt-1">
-                            Filtered by Date: <span className="fw-bold text-dark">{formatDate(selectedDate)}</span>
-                            <span
-                                className="badge rounded-pill bg-primary bg-opacity-10 text-primary border border-primary border-opacity-10 ms-2"
-                                style={{ cursor: 'pointer' }}
-                                onClick={() => setFilters({ ...filters, date: null, mode: 'all', fromDate: '', toDate: '' })}
-                            >
-                                Clear Date
-                            </span>
-                        </div>
-                    )}
-                </div>
 
-                {/* Filters (Only if no specific calendar date selected) */}
-                {!selectedDate && (
-                    <div className="d-flex align-items-center gap-2 flex-wrap justify-content-end" style={{ flex: 1 }}>
-                        {/* Search Box */}
-                        <div className="position-relative" style={{ minWidth: '375px', zIndex: 1050 }}>
-                            <Search size={16} className="text-muted position-absolute top-50 start-0 translate-middle-y ms-2" />
-                            <input
-                                type="text"
-                                className="form-control form-control-sm ps-4 rounded-pill border-light bg-light"
-                                placeholder="Search project, customer, no..."
-                                value={searchText}
-                                onChange={handleSearchChange}
-                                onFocus={() => searchText && setShowSuggestions(true)}
-                                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} // Delay to allow click
-                            />
-                            {showSuggestions && suggestions.length > 0 && (
-                                <ul className="list-group position-absolute w-100 shadow-sm mt-1" style={{ zIndex: 2000, maxHeight: '300px', overflowY: 'auto' }}>
-                                    {suggestions.map((s, i) => (
-                                        <li
-                                            key={i}
-                                            className="list-group-item list-group-item-action py-1 px-3"
-                                            style={{ fontSize: '0.85rem', cursor: 'pointer' }}
-                                            onClick={() => handleSuggestionClick(s)}
-                                        >
-                                            {s}
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </div>
-
-                        {/* Separate Clear Button */}
-                        {(searchText || filters.fromDate || filters.toDate) && (
-                            <button
-                                className="btn btn-sm btn-light text-danger fw-bold d-flex align-items-center gap-1 border ms-2"
-                                onClick={() => {
-                                    setSearchText('');
-                                    setFilters({ ...filters, search: '', fromDate: '', toDate: '', date: null, mode: 'future' });
-                                }}
-                            >
-                                <X size={14} /> Clear
-                            </button>
-                        )}
-
-                        <div className="me-auto"></div> {/* Spacer to push rest to right */}
-
-
-
-
-                        {/* Date Type Selector */}
-                        <div className="p-1 rounded" style={{ backgroundColor: '#eff6ff' }}>
-                            <select
-                                className="form-select form-select-sm border-0 bg-transparent fw-bold text-primary"
-                                style={{ width: 'auto', fontSize: '0.85rem', cursor: 'pointer', outline: 'none', boxShadow: 'none', paddingRight: '2rem' }}
-                                value={filters.dateType || 'Enquiry Date'}
-                                onChange={(e) => setFilters(prev => ({ ...prev, dateType: e.target.value }))}
-                            >
-                                <option value="Enquiry Date">Enquiry Date</option>
-                                <option value="Due Date">Due Date</option>
-                            </select>
-                        </div>
-
-                        <div className="btn-group btn-group-sm bg-light p-1 rounded" role="group">
-                            <DateShortcutBtn
-                                label="Today"
-                                isActive={filters.fromDate === format(new Date(), 'yyyy-MM-dd') && filters.toDate === format(new Date(), 'yyyy-MM-dd')}
-                                onClick={() => handleDateShortcut('today')}
-                            />
-                            <DateShortcutBtn
-                                label="Tomorrow"
-                                isActive={filters.fromDate === format(addDays(new Date(), 1), 'yyyy-MM-dd')}
-                                onClick={() => handleDateShortcut('tomorrow')}
-                            />
-                            <DateShortcutBtn
-                                label="This Week"
-                                isActive={filters.mode === '' && filters.fromDate && filters.toDate && !isSameDay(new Date(filters.fromDate), new Date(filters.toDate)) && !isSameDay(new Date(filters.fromDate), addDays(new Date(), 1))}
-                                onClick={() => handleDateShortcut('week')}
-                            />
-                            <DateShortcutBtn
-                                label="This Month"
-                                isActive={filters.fromDate === format(startOfMonth(new Date()), 'yyyy-MM-dd') && filters.toDate === format(endOfMonth(new Date()), 'yyyy-MM-dd')}
-                                onClick={() => handleDateShortcut('month')}
-                            />
-                        </div>
-                    </div >
-                )}
-            </div >
 
             {/* Table Content */}
             < div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>

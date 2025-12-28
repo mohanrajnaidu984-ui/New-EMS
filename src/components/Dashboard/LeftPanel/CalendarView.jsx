@@ -62,7 +62,7 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
     return (
         <div className="bg-white rounded shadow-sm border border-light overflow-hidden">
             {/* Header */}
-            <div className="d-flex justify-content-between align-items-center p-3 border-bottom" style={{ backgroundColor: '#eff6ff' }}>
+            <div className="d-flex justify-content-between align-items-center p-3 border-bottom" style={{ backgroundColor: '#eff6ff', minHeight: '86px' }}>
                 <button className="btn btn-sm btn-link text-dark" onClick={prevMonth}><ChevronLeft size={16} /></button>
                 <div className="fw-bold">{monthNames[month - 1]} {year}</div>
                 <button className="btn btn-sm btn-link text-dark" onClick={nextMonth}><ChevronRight size={16} /></button>
@@ -89,7 +89,7 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
                         <div
                             key={idx}
                             className={`border-end border-bottom p-1 d-flex flex-column align-items-center justify-content-start position-relative ${today ? 'bg-primary bg-opacity-10' : ''}`}
-                            style={{ width: '14.28%', minHeight: '100px', cursor: 'default', transition: 'all 0.2s' }}
+                            style={{ width: '14.28%', minHeight: '75px', cursor: 'default', transition: 'all 0.2s' }}
                             onMouseEnter={(e) => day && (e.currentTarget.style.backgroundColor = today ? '' : '#f8fafc')}
                             onMouseLeave={(e) => day && (e.currentTarget.style.backgroundColor = today ? '' : 'transparent')}
                         >

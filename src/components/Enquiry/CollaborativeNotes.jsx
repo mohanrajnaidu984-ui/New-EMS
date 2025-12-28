@@ -8,16 +8,71 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
     const [notes, setNotes] = useState([]);
     const [newNote, setNewNote] = useState('');
     const [loading, setLoading] = useState(false);
-    const [hasAccess, setHasAccess] = useState(false);
 
     // Fallback if enquiryId prop is missing but exists in data
     const effectiveID = enquiryId || enquiryData?.RequestNo || enquiryData?.ID;
 
-    useEffect(() => {
-        if (currentUser && enquiryData) {
-            checkAccess();
+    // Derived Access State using useMemo to ensure reactivity
+    const hasAccess = React.useMemo(() => {
+        if (!currentUser) return false;
+
+        const roleString = currentUser.role || currentUser.Roles || '';
+        const roles = typeof roleString === 'string'
+            ? roleString.split(',').map(r => r.trim())
+            : (Array.isArray(roleString) ? roleString : []);
+
+        // 1. Admin
+        if (roles.includes('Admin')) return true;
+
+        // 2. Created By
+        if (enquiryData && enquiryData.CreatedBy && currentUser.name &&
+            enquiryData.CreatedBy.trim().toLowerCase() === currentUser.name.trim().toLowerCase()) {
+            return true;
         }
-    }, [effectiveID, enquiryData, currentUser, masters]);
+
+        // 3. Concerned SE
+        if (enquiryData && currentUser.name) {
+            const concernedSEs = enquiryData.SelectedConcernedSEs ||
+                (enquiryData.ConcernedSE ? enquiryData.ConcernedSE.split(',').map(s => s.trim()) : []);
+
+            const isConcernedSE = concernedSEs.some(se =>
+                se.toLowerCase() === currentUser.name.trim().toLowerCase()
+            );
+
+            if (isConcernedSE || (enquiryData.ConcernedSE == currentUser.id)) return true;
+        }
+
+        // 4. Enquiry For (Email match)
+        if (enquiryData && enquiryData.EnquiryFor && masters.enqItems) {
+            const selectedItems = Array.isArray(enquiryData.EnquiryFor)
+                ? enquiryData.EnquiryFor
+                : (typeof enquiryData.EnquiryFor === 'string' ? enquiryData.EnquiryFor.split(',') : []);
+
+            const cleanedItems = selectedItems.map(i => i.trim());
+            const userEmail = (currentUser.email || currentUser.EmailId || '').trim().toLowerCase();
+
+            for (const item of cleanedItems) {
+                const masterItem = masters.enqItems.find(m => m.ItemName === item);
+                if (masterItem) {
+                    const commonMails = masterItem.CommonMailIds
+                        ? (Array.isArray(masterItem.CommonMailIds) ? masterItem.CommonMailIds : masterItem.CommonMailIds.split(/[,;]/))
+                        : [];
+
+                    const ccMails = masterItem.CCMailIds
+                        ? (Array.isArray(masterItem.CCMailIds) ? masterItem.CCMailIds : masterItem.CCMailIds.split(/[,;]/))
+                        : [];
+
+                    const emails = [...commonMails, ...ccMails].map(e => e.trim().toLowerCase());
+
+                    if (userEmail && emails.includes(userEmail)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }, [currentUser, enquiryData, masters.enqItems]);
 
     useEffect(() => {
         if (effectiveID && hasAccess) {
@@ -27,63 +82,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
         }
     }, [effectiveID, hasAccess]);
 
-    const checkAccess = () => {
-        if (!currentUser) return;
-
-        let access = false;
-        const roleString = currentUser.role || currentUser.Roles || '';
-        const roles = typeof roleString === 'string'
-            ? roleString.split(',').map(r => r.trim())
-            : (Array.isArray(roleString) ? roleString : []);
-
-        // 1. Admin
-        if (roles.includes('Admin')) {
-            access = true;
-        }
-        // 2. Created By
-        else if (enquiryData && enquiryData.CreatedBy && currentUser.name &&
-            enquiryData.CreatedBy.trim().toLowerCase() === currentUser.name.trim().toLowerCase()) {
-            access = true;
-        }
-        // 3. Concerned SE
-        else if (enquiryData && currentUser.name) {
-            const concernedSEs = enquiryData.SelectedConcernedSEs ||
-                (enquiryData.ConcernedSE ? enquiryData.ConcernedSE.split(',').map(s => s.trim()) : []);
-
-            const isConcernedSE = concernedSEs.some(se =>
-                se.toLowerCase() === currentUser.name.trim().toLowerCase()
-            );
-
-            if (isConcernedSE || (enquiryData.ConcernedSE == currentUser.id)) {
-                access = true;
-            }
-        }
-        // 4. Enquiry For (Email match)
-        else if (enquiryData && enquiryData.EnquiryFor && masters.enqItems) {
-            const selectedItems = Array.isArray(enquiryData.EnquiryFor)
-                ? enquiryData.EnquiryFor
-                : (typeof enquiryData.EnquiryFor === 'string' ? enquiryData.EnquiryFor.split(',') : []);
-
-            const cleanedItems = selectedItems.map(i => i.trim());
-
-            for (const item of cleanedItems) {
-                const masterItem = masters.enqItems.find(m => m.ItemName === item);
-                if (masterItem) {
-                    const emails = [
-                        ...(masterItem.CommonMailIds ? masterItem.CommonMailIds.split(',') : []),
-                        ...(masterItem.CCMailIds ? masterItem.CCMailIds.split(',') : [])
-                    ].map(e => e.trim().toLowerCase());
-
-                    if (currentUser.email && emails.includes(currentUser.email.toLowerCase())) {
-                        access = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        setHasAccess(access);
-    };
+    // Removed checkAccess function and initial useEffect
 
     const fetchNotes = async () => {
         try {

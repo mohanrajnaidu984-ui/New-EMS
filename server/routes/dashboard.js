@@ -34,8 +34,8 @@ const applyAccessControl = (request, params) => {
                     JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
                     WHERE ef.RequestNo = em.RequestNo
                     AND (
-                        mef.CommonMailIds LIKE '%' + @currentUserEmail + '%'
-                        OR mef.CCMailIds LIKE '%' + @currentUserEmail + '%'
+                        ',' + REPLACE(REPLACE(mef.CommonMailIds, ' ', ''), ';', ',') + ',' LIKE '%,' + @currentUserEmail + ',%'
+                        OR ',' + REPLACE(REPLACE(mef.CCMailIds, ' ', ''), ';', ',') + ',' LIKE '%,' + @currentUserEmail + ',%'
                     )
                 )
             ) `;

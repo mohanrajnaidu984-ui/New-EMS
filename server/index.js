@@ -449,6 +449,14 @@ app.post('/api/auth/login', async (req, res) => {
         // Return user info (excluding password)
         const { LoginPassword, ...userWithoutPassword } = user;
 
+        // Fetch user's primary division name based on RequestNo
+        if (user.RequestNo) {
+            const divisionResult = await sql.query`SELECT TOP 1 ItemName FROM EnquiryFor WHERE RequestNo = ${user.RequestNo}`;
+            if (divisionResult.recordset.length > 0) {
+                userWithoutPassword.DivisionName = divisionResult.recordset[0].ItemName;
+            }
+        }
+
         // Force Admin for ranigovardhan@gmail.com
         if (email.toLowerCase() === 'ranigovardhan@gmail.com') {
             userWithoutPassword.Roles = 'Admin';
@@ -678,13 +686,15 @@ app.post('/api/enquiries', async (req, res) => {
         log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
 
         const {
-            RequestNo, SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
+            SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
             SelectedEnquiryTypes, SelectedEnquiryFor,
             SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
             ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
             DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
             AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails
         } = req.body;
+
+        const RequestNo = req.body.RequestNo ? req.body.RequestNo.trim() : '';
 
         log(`AutoAck Value: ${AutoAck}, Type: ${typeof AutoAck}`);
         log(`SelectedCustomers: ${JSON.stringify(SelectedCustomers)}`);
@@ -1022,7 +1032,7 @@ app.post('/api/enquiries', async (req, res) => {
 // Update Enquiry
 // Update Enquiry
 app.put('/api/enquiries/:id', async (req, res) => {
-    const { id } = req.params;
+    const id = req.params.id.trim();
     const {
         SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
         SelectedEnquiryTypes, SelectedEnquiryFor,
@@ -1059,7 +1069,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails);
         request.input('OthersSpecify', sql.NVarChar, DocumentsReceived);
 
-        await request.query(`
+        const updateResult = await request.query(`
             UPDATE EnquiryMaster SET
                 SourceOfEnquiry=@SourceOfEnquiry, EnquiryDate=@EnquiryDate, DueDate=@DueDate, SiteVisitDate=@SiteVisitDate,
                 ReceivedFrom=@ReceivedFrom, ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
@@ -1068,9 +1078,16 @@ app.put('/api/enquiries/:id', async (req, res) => {
             WHERE RequestNo=@RequestNo
         `);
 
+        if (updateResult.rowsAffected[0] === 0) {
+            return res.status(404).json({ message: 'Enquiry not found', error: `Enquiry with Number ${id} does not exist.` });
+        }
+
         // Helper to update related items (Delete + Insert)
         const updateRelated = async (table, col, items) => {
-            await sql.query(`DELETE FROM ${table} WHERE RequestNo = '${id}'`);
+            const delReq = new sql.Request();
+            delReq.input('reqNo', sql.NVarChar, id);
+            await delReq.query(`DELETE FROM ${table} WHERE RequestNo = @reqNo`);
+
             if (items && items.length > 0) {
                 for (const item of items) {
                     const req = new sql.Request();
@@ -1088,7 +1105,9 @@ app.put('/api/enquiries/:id', async (req, res) => {
 
         // ReceivedFrom has multiple columns, handle separately if needed, or just ContactName/CompanyName
         // For now assuming simple string or split logic similar to POST
-        await sql.query(`DELETE FROM ReceivedFrom WHERE RequestNo = '${id}'`);
+        const delRF = new sql.Request();
+        delRF.input('reqNo', sql.NVarChar, id);
+        await delRF.query(`DELETE FROM ReceivedFrom WHERE RequestNo = @reqNo`);
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');

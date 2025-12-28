@@ -6,7 +6,7 @@ import PricingForm from './Pricing/PricingForm';
 
 const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
     return (
-        <div className="pt-2">
+        <div>
             {/* Tab Content */}
             <div className="tab-content">
                 {activeTab === 'Dashboard' && (

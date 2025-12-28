@@ -94,6 +94,9 @@ const Login = ({ onSwitchToSignup }) => {
                     name: data.user.FullName,
                     email: data.user.EmailId || data.user.MailId,
                     role: data.user.Roles || data.user.Role || 'User',
+                    Department: data.user.Department,
+                    RequestNo: data.user.RequestNo,
+                    DivisionName: data.user.DivisionName,
                     ProfileImage: data.user.ProfileImage
                 });
             } else {
@@ -153,7 +156,8 @@ const Login = ({ onSwitchToSignup }) => {
                         id: loginData.user.UserID || loginData.user.ID,
                         name: loginData.user.FullName,
                         email: loginData.user.EmailId || loginData.user.MailId,
-                        role: loginData.user.Roles || 'User'
+                        role: loginData.user.Roles || 'User',
+                        DivisionName: loginData.user.DivisionName
                     });
                 } else {
                     setStep('password');

@@ -110,12 +110,12 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
         <div className="position-relative me-3" ref={dropdownRef}>
             <button
                 className="btn btn-light position-relative rounded-circle d-flex align-items-center justify-content-center border-0 shadow-sm"
-                style={{ width: '40px', height: '40px' }}
+                style={{ width: '32px', height: '32px' }}
                 onClick={() => setIsOpen(!isOpen)}
             >
-                <i className="bi bi-bell fs-5 text-secondary"></i>
+                <i className="bi bi-bell fs-6 text-secondary"></i>
                 {unreadCount > 0 && (
-                    <span className="position-absolute top-0 end-0 badge rounded-pill bg-danger" style={{ fontSize: '0.65rem', marginTop: '2px', marginRight: '2px' }}>
+                    <span className="position-absolute top-0 end-0 badge rounded-pill bg-danger" style={{ fontSize: '0.6rem', marginTop: '0px', marginRight: '0px' }}>
                         {unreadCount}
                     </span>
                 )}

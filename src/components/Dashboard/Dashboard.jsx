@@ -41,6 +41,54 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
     const [loading, setLoading] = useState(false);
 
+    useEffect(() => {
+        if (currentUser && masters.enquiryFor && masters.enqItems) {
+            const roleString = currentUser.role || currentUser.Roles || '';
+            const userRoles = typeof roleString === 'string'
+                ? roleString.split(',').map(r => r.trim().toLowerCase())
+                : (Array.isArray(roleString) ? roleString.map(r => r.trim().toLowerCase()) : []);
+            const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
+
+            if (!isAdmin) {
+                const userEmail = (currentUser.email || currentUser.EmailId || '').trim().toLowerCase();
+                const userRequestNo = String(currentUser.RequestNo || '');
+                const userDivisionName = currentUser.DivisionName; // From login API
+
+                // Find matched division based on email in masters
+                let matchedItem = (masters.enqItems || []).find(item => {
+                    const common = (item.CommonMailIds || '').toLowerCase().split(/[,;]/).map(e => e.trim()).filter(Boolean);
+                    const cc = (item.CCMailIds || '').toLowerCase().split(/[,;]/).map(e => e.trim()).filter(Boolean);
+                    return common.includes(userEmail) || cc.includes(userEmail);
+                });
+
+                // Fallback 1: Match by DivisionName from Login (most reliable SE link)
+                if (!matchedItem && userDivisionName) {
+                    matchedItem = (masters.enqItems || []).find(item =>
+                        item.ItemName.toLowerCase() === userDivisionName.toLowerCase()
+                    );
+                }
+
+                // Fallback 2: Match by RequestNo if SE profile has it (links to division template)
+                if (!matchedItem && userRequestNo) {
+                    matchedItem = (masters.enqItems || []).find(item =>
+                        String(item.RequestNo) === userRequestNo
+                    );
+                }
+
+                const isCCUser = (masters.enqItems || []).some(item => {
+                    const cc = (item.CCMailIds || '').toLowerCase().split(/[,;]/).map(e => e.trim()).filter(Boolean);
+                    return cc.includes(userEmail);
+                });
+
+                setFilters(prev => ({
+                    ...prev,
+                    division: matchedItem ? matchedItem.ItemName : (userDivisionName || 'All'),
+                    salesEngineer: isCCUser ? 'All' : (currentUser.name || 'All')
+                }));
+            }
+        }
+    }, [currentUser, masters.enqItems, masters.enquiryFor]);
+
     // Fetch Data
     const fetchData = async () => {
         setLoading(true);
@@ -54,10 +102,10 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
             // Add User Context for Access Control
             if (currentUser) {
-                baseParams.userEmail = currentUser.email || '';
+                baseParams.userEmail = currentUser.email || currentUser.EmailId || '';
                 baseParams.userName = currentUser.name || '';
-                // Handle different role structures (AuthContext maps it, but safe check)
-                baseParams.userRole = currentUser.role || (currentUser.Roles ? currentUser.Roles.split(',')[0] : 'User');
+                // Handle different role structures
+                baseParams.userRole = currentUser.role || currentUser.Roles || 'User';
             }
 
             // 1. Calendar Params
@@ -175,22 +223,22 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     return (
         <div className="container-fluid" style={{ height: 'calc(100vh - 110px)', display: 'flex', flexDirection: 'column', padding: 0 }}>
 
-            {/* Row 1: Global Filters (Horizontal Layout) */}
-            <div className="flex-shrink-0 border-bottom bg-white px-3 py-2">
-                <DashboardFilters
-                    filters={filters}
-                    setFilters={setFilters}
-                    masters={masters}
-                    horizontal={true}
-                />
-            </div>
+
 
 
             {/* Row 2: Content Area (Calendar + Table) */}
             <div className="flex-grow-1 dashboard-split-container" style={{ minHeight: 0 }}>
                 {/* Calendar Panel - 40% */}
                 <div className="dashboard-left-panel">
-                    <div style={{ flex: 1, overflowY: 'auto' }} className="p-2 h-100">
+                    <div className="px-3 py-2 border-bottom bg-white">
+                        <DashboardFilters
+                            filters={filters}
+                            setFilters={setFilters}
+                            masters={masters}
+                            viewMode="division_se"
+                        />
+                    </div>
+                    <div style={{ flex: 1, overflowY: 'auto' }} className="p-2">
                         <CalendarView
                             month={dateState.month}
                             year={dateState.year}
@@ -205,7 +253,15 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
                 {/* Table Panel - 60% */}
                 <div className="dashboard-right-panel">
-                    <div style={{ flex: 1, overflow: 'hidden' }} className="p-2 h-100">
+                    <div className="px-3 py-2 border-bottom bg-white">
+                        <DashboardFilters
+                            filters={filters}
+                            setFilters={setFilters}
+                            masters={masters}
+                            viewMode="search_date"
+                        />
+                    </div>
+                    <div style={{ flex: 1, overflow: 'hidden' }} className="p-2">
                         <EnquiryTable
                             data={filteredTableData}
                             onRowClick={handleRowClick}
