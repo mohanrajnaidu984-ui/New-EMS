@@ -239,8 +239,8 @@ router.get('/enquiries', async (req, res) => {
                 em.Status,
                 em.ReceivedFrom,
                 -- Subqueries for aggregates (efficient enough for reasonable paging, but here unlimited)
-                (SELECT STRING_AGG(SEName, ', ') FROM ConcernedSE WHERE RequestNo = em.RequestNo) as ConcernedSE,
-                (SELECT STRING_AGG(ItemName, ', ') FROM EnquiryFor WHERE RequestNo = em.RequestNo) as EnquiryFor,
+                STUFF((SELECT ', ' + SEName FROM ConcernedSE WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as ConcernedSE,
+                STUFF((SELECT ', ' + ItemName FROM EnquiryFor WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as EnquiryFor,
                 em.CreatedBy
             FROM EnquiryMaster em
             ${whereClause}
