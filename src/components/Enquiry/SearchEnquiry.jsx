@@ -104,7 +104,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 const selectedItems = (Array.isArray(enq.SelectedEnquiryFor)
                     ? enq.SelectedEnquiryFor
                     : enq.SelectedEnquiryFor.split(',')
-                ).map(i => i.trim().toLowerCase());
+                ).map(i => (typeof i === 'object' ? (i.itemName || '') : i).trim().toLowerCase());
 
                 const relevantItems = masters.enqItems.filter(item =>
                     item.ItemName && selectedItems.includes(item.ItemName.trim().toLowerCase())
@@ -133,7 +133,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 const selectedItems = (Array.isArray(enq.SelectedEnquiryFor)
                     ? enq.SelectedEnquiryFor
                     : enq.SelectedEnquiryFor.split(',')
-                ).map(i => i.trim().toLowerCase());
+                ).map(i => (typeof i === 'object' ? (i.itemName || '') : i).trim().toLowerCase());
 
                 const relevantItems = masters.enqItems.filter(item =>
                     item.ItemName && selectedItems.includes(item.ItemName.trim().toLowerCase())

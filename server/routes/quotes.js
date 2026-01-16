@@ -99,6 +99,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
         // Get EnquiryFor items (divisions/inclusions)
         let divisions = [];
+        let leadJobPrefix = '';
         let companyDetails = {
             code: 'AAC', // Default
             logo: null,
@@ -117,10 +118,20 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
             divisions = enquiryForResult.recordset.map(r => r.ItemName);
 
-            // Use the first valid DepartmentCode and Logo found
-            const match = enquiryForResult.recordset.find(r => r.DepartmentCode || r.CompanyLogo || r.Address);
+            // Find the Lead Job (prioritize items starting with 'L1' or take the first one)
+            const leadItem = enquiryForResult.recordset.find(r => r.ItemName && r.ItemName.startsWith('L1')) ||
+                enquiryForResult.recordset[0];
+
+            leadJobPrefix = leadItem ? leadItem.ItemName.split('-')[0].trim() : '';
+
+            // Use the Lead Job for Company Details/Codes
+            const match = leadItem || enquiryForResult.recordset.find(r => r.DepartmentCode || r.CompanyLogo || r.Address);
+
             if (match) {
                 if (match.DepartmentCode) companyDetails.code = match.DepartmentCode;
+                companyDetails.divisionCode = match.DivisionCode || 'AAC';
+                companyDetails.departmentCode = match.DepartmentCode || '';
+
                 if (match.CompanyLogo) companyDetails.logo = match.CompanyLogo.replace(/\\/g, '/');
                 if (match.CompanyName) companyDetails.name = match.CompanyName;
                 if (match.Address) companyDetails.address = match.Address;
@@ -198,6 +209,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             companyDetails,
             preparedByOptions,
             customerOptions,
+            leadJobPrefix,
             quoteNumber: 'Draft'
         });
 
@@ -233,6 +245,8 @@ router.post('/', async (req, res) => {
     try {
         const {
             divisionCode,
+            departmentCode,
+            leadJobPrefix,
             requestNo,
             validityDays = 30,
             preparedBy,
@@ -287,8 +301,11 @@ router.post('/', async (req, res) => {
         `;
         const quoteNo = quoteCountResult.recordset[0].NextQuoteNo;
         const revisionNo = 0;
+        const dept = departmentCode || "GEN";
         const division = divisionCode || "AAC";
-        const quoteNumber = `${division}/${requestNo}/${quoteNo}-R${revisionNo}`;
+        const requestRef = leadJobPrefix ? `${requestNo}-${leadJobPrefix}` : requestNo;
+
+        const quoteNumber = `${dept}/${division}/${requestRef}/${quoteNo}-R${revisionNo}`;
 
         const result = await sql.query`
             INSERT INTO EnquiryQuotes (
@@ -420,8 +437,12 @@ router.post('/:id/revise', async (req, res) => {
         const newRevisionNo = existing.RevisionNo + 1;
 
         const existingParts = existing.QuoteNumber ? existing.QuoteNumber.split("/") : [];
-        const division = existingParts.length > 0 ? existingParts[0] : "AAC";
-        const newQuoteNumber = `${division}/${existing.RequestNo}/${existing.QuoteNo}-R${newRevisionNo}`;
+        // Preserve existing structure, just replace the last part (Quote-Rev)
+        if (existingParts.length > 0) {
+            existingParts.pop(); // Remove old Rev
+        }
+        const quoteRevPart = `${existing.QuoteNo}-R${newRevisionNo}`;
+        const newQuoteNumber = existingParts.length > 0 ? `${existingParts.join('/')}/${quoteRevPart}` : `${existing.QuoteNumber}-R${newRevisionNo}`;
 
         const customClausesJson = customClauses ? JSON.stringify(customClauses) : existing.CustomClauses;
         const clauseOrderJson = clauseOrder ? JSON.stringify(clauseOrder) : existing.ClauseOrder;

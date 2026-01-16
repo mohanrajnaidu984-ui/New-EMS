@@ -681,19 +681,28 @@ app.get('/api/enquiries', async (req, res) => {
             const relatedCustomers = customersResult.recordset.filter(c => c.RequestNo === reqNo).map(c => c.CustomerName);
             const relatedContacts = contactsResult.recordset.filter(c => c.RequestNo === reqNo).map(c => `${c.ContactName}|${c.CompanyName || ''}`);
             const relatedTypes = typesResult.recordset.filter(t => t.RequestNo === reqNo).map(t => t.TypeName);
-            const relatedItems = itemsResult.recordset.filter(i => i.RequestNo === reqNo).map(i => i.ItemName);
+            // Use full object for hierarchy
+            const relatedItemsRaw = itemsResult.recordset.filter(i => i.RequestNo === reqNo);
+            const relatedItemsStructured = relatedItemsRaw.map(i => ({
+                id: i.ID,
+                parentId: i.ParentID,
+                itemName: i.ItemName,
+                parentName: i.ParentItemName
+            }));
+            const relatedItemsDisplay = relatedItemsRaw.map(i => i.ItemName);
+
             const relatedSEs = seResult.recordset.filter(s => s.RequestNo === reqNo).map(s => s.SEName);
 
             return {
                 ...enq,
                 SelectedEnquiryTypes: relatedTypes,
-                SelectedEnquiryFor: relatedItems,
+                SelectedEnquiryFor: relatedItemsStructured, // Pass structure
                 SelectedCustomers: relatedCustomers,
                 SelectedReceivedFroms: relatedContacts,
                 SelectedConcernedSEs: relatedSEs,
                 // Legacy fields for backward compatibility & List View
                 EnquiryType: relatedTypes.join(', '),
-                EnquiryFor: relatedItems.join(', '),
+                EnquiryFor: relatedItemsDisplay.join(', '),
                 CustomerName: enq.CustomerName || relatedCustomers.join(', '), // Prefer Master, fallback to transaction
                 ClientName: enq.ClientName,
                 ConsultantName: enq.ConsultantName,
@@ -790,11 +799,60 @@ app.post('/api/enquiries', async (req, res) => {
         // Helper to insert related items
         const insertRelated = async (table, col, items) => {
             if (items && items.length > 0) {
-                for (const item of items) {
-                    const r = new sql.Request();
-                    r.input('reqNo', sql.NVarChar, RequestNo);
-                    r.input('val', sql.NVarChar, item);
-                    await r.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@reqNo, @val)`);
+                if (table === 'EnquiryFor') {
+                    const normalized = items.map(i => {
+                        if (typeof i === 'string') return { tempId: i, itemName: i, parentId: null };
+                        return {
+                            tempId: i.id || Math.random().toString(36),
+                            itemName: i.itemName,
+                            parentId: i.parentId,
+                            parentName: i.parentName
+                        };
+                    });
+
+                    const idMap = {};
+                    let remaining = [...normalized];
+                    let pass = 0;
+
+                    while (remaining.length > 0 && pass < 10) {
+                        const nextBatch = [];
+                        for (const item of remaining) {
+                            const ready = !item.parentId || idMap[item.parentId];
+                            if (ready) {
+                                const r = new sql.Request();
+                                r.input('reqNo', sql.NVarChar, RequestNo);
+                                r.input('val', sql.NVarChar, item.itemName);
+                                r.input('pName', sql.NVarChar, item.parentName || null);
+                                r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
+
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                idMap[item.tempId] = res.recordset[0].id;
+                            } else {
+                                nextBatch.push(item);
+                            }
+                        }
+                        if (nextBatch.length === remaining.length) {
+                            for (const item of nextBatch) {
+                                const r = new sql.Request();
+                                r.input('reqNo', sql.NVarChar, RequestNo);
+                                r.input('val', sql.NVarChar, item.itemName);
+                                r.input('pName', sql.NVarChar, item.parentName || null);
+                                r.input('pId', sql.Int, null);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                idMap[item.tempId] = res.recordset[0].id;
+                            }
+                            break;
+                        }
+                        remaining = nextBatch;
+                        pass++;
+                    }
+                } else {
+                    for (const item of items) {
+                        const r = new sql.Request();
+                        r.input('reqNo', sql.NVarChar, RequestNo);
+                        r.input('val', sql.NVarChar, item);
+                        await r.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@reqNo, @val)`);
+                    }
                 }
             }
         };
@@ -834,7 +892,8 @@ app.post('/api/enquiries', async (req, res) => {
             // 3. Enquiry For
             if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
                 for (const item of SelectedEnquiryFor) {
-                    await sql.query`UPDATE Master_EnquiryFor SET RequestNo = ${RequestNo} WHERE ItemName = ${item}`;
+                    const name = typeof item === 'object' ? item.itemName : item;
+                    await sql.query`UPDATE Master_EnquiryFor SET RequestNo = ${RequestNo} WHERE ItemName = ${name}`;
                 }
             }
 
@@ -1122,11 +1181,60 @@ app.put('/api/enquiries/:id', async (req, res) => {
             await delReq.query(`DELETE FROM ${table} WHERE RequestNo = @reqNo`);
 
             if (items && items.length > 0) {
-                for (const item of items) {
-                    const req = new sql.Request();
-                    req.input('RequestNo', sql.NVarChar, id);
-                    req.input('ItemValue', sql.NVarChar, item);
-                    await req.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@RequestNo, @ItemValue)`);
+                if (table === 'EnquiryFor') {
+                    const normalized = items.map(i => {
+                        if (typeof i === 'string') return { tempId: i, itemName: i, parentId: null };
+                        return {
+                            tempId: i.id || Math.random().toString(36),
+                            itemName: i.itemName,
+                            parentId: i.parentId,
+                            parentName: i.parentName
+                        };
+                    });
+
+                    const idMap = {};
+                    let remaining = [...normalized];
+                    let pass = 0;
+
+                    while (remaining.length > 0 && pass < 10) {
+                        const nextBatch = [];
+                        for (const item of remaining) {
+                            const ready = !item.parentId || idMap[item.parentId];
+                            if (ready) {
+                                const r = new sql.Request();
+                                r.input('reqNo', sql.NVarChar, id);
+                                r.input('val', sql.NVarChar, item.itemName);
+                                r.input('pName', sql.NVarChar, item.parentName || null);
+                                r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
+
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                idMap[item.tempId] = res.recordset[0].id;
+                            } else {
+                                nextBatch.push(item);
+                            }
+                        }
+                        if (nextBatch.length === remaining.length) {
+                            for (const item of nextBatch) {
+                                const r = new sql.Request();
+                                r.input('reqNo', sql.NVarChar, id);
+                                r.input('val', sql.NVarChar, item.itemName);
+                                r.input('pName', sql.NVarChar, item.parentName || null);
+                                r.input('pId', sql.Int, null);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                idMap[item.tempId] = res.recordset[0].id;
+                            }
+                            break;
+                        }
+                        remaining = nextBatch;
+                        pass++;
+                    }
+                } else {
+                    for (const item of items) {
+                        const req = new sql.Request();
+                        req.input('RequestNo', sql.NVarChar, id);
+                        req.input('ItemValue', sql.NVarChar, item);
+                        await req.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@RequestNo, @ItemValue)`);
+                    }
                 }
             }
         };
@@ -1678,6 +1786,18 @@ const initApp = async () => {
                 console.log('Adding ProfileImage column to Master_ConcernedSE...');
                 await sql.query`ALTER TABLE Master_ConcernedSE ADD ProfileImage NVARCHAR(MAX)`;
                 console.log('ProfileImage column added.');
+            }
+
+            // Check ParentID in EnquiryFor
+            const checkParentID = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'EnquiryFor' AND COLUMN_NAME = 'ParentID'
+            `;
+            if (checkParentID.recordset.length === 0) {
+                console.log('Adding ParentID column to EnquiryFor...');
+                await sql.query`ALTER TABLE EnquiryFor ADD ParentID INT NULL`;
+                console.log('ParentID column added.');
             }
 
             // Check if EnquiryNotes table exists

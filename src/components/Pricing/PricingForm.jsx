@@ -31,6 +31,7 @@ const PricingForm = () => {
     const [addingCustomer, setAddingCustomer] = useState(false);
     const [newCustomerName, setNewCustomerName] = useState('');
     const [customerSuggestions, setCustomerSuggestions] = useState([]);
+    const [selectedLeadId, setSelectedLeadId] = useState(null); // Filter by Lead Job ID
 
 
     // Debounce timer
@@ -135,9 +136,9 @@ const PricingForm = () => {
                 // Ensure ALL linked customers (Main + Extra) have pricing tabs.
                 // If they are missing, auto-create "Base Price" for them.
                 const linkedCustomers = [
-                    data.enquiry.customerName,
-                    ...(data.extraCustomers || [])
-                ].filter(Boolean);
+                    ...(data.enquiry.customerName || '').split(','),
+                    ...(data.extraCustomers || []).flatMap(c => (c || '').split(','))
+                ].map(s => s.trim()).filter(Boolean);
 
                 const existingPricingCustomers = data.customers || [];
 
@@ -150,13 +151,15 @@ const PricingForm = () => {
                         const allJobs = data.jobs || [];
                         const promises = [];
 
-                        // Create Base Price for EACH Missing Customer for EACH Job
+                        // Create Base Price for EACH Missing Customer for EACH UNIQUE ItemName
+                        const distinctItemNames = [...new Set(allJobs.map(j => j.itemName))];
+
                         customersToInit.forEach(cName => {
-                            allJobs.forEach(job => {
+                            distinctItemNames.forEach(itemName => {
                                 const payload = {
                                     requestNo: requestNo,
                                     optionName: 'Base Price',
-                                    itemName: job.itemName,
+                                    itemName: itemName,
                                     customerName: cName
                                 };
                                 promises.push(
@@ -200,33 +203,88 @@ const PricingForm = () => {
                     }
                 }
 
+                // --- KEY MIGRATION: Ensure all values use ID-based keys ---
+                const remappedValues = {};
+                const legacyEntries = [];
+
+                if (data.values && data.jobs) {
+                    // First pass: Process strict ID-based keys
+                    Object.entries(data.values).forEach(([key, val]) => {
+                        const firstUnderscore = key.indexOf('_');
+                        if (firstUnderscore === -1) return;
+
+                        const suffix = key.substring(firstUnderscore + 1);
+                        const jobById = data.jobs.find(j => String(j.id) === suffix);
+
+                        if (jobById) {
+                            remappedValues[key] = val; // High priority: Explicit ID match
+                        } else {
+                            legacyEntries.push([key, val]); // Low priority: Name match
+                        }
+                    });
+
+                    // Second pass: Process legacy name-based keys
+                    legacyEntries.forEach(([key, val]) => {
+                        const firstUnderscore = key.indexOf('_');
+                        const optId = key.substring(0, firstUnderscore);
+                        const suffix = key.substring(firstUnderscore + 1);
+
+                        const matchingJobs = data.jobs.filter(j => j.itemName === suffix);
+                        matchingJobs.forEach(mj => {
+                            const newKey = `${optId}_${mj.id}`;
+                            // Only set if not already defined (ID-based value takes precedence)
+                            if (!remappedValues[newKey]) {
+                                remappedValues[newKey] = val;
+                            }
+                        });
+                    });
+
+                    data.values = remappedValues;
+                }
+
+                // Cleanup: Filter out malformed customer names (containing commas) from display
+                if (data.customers) {
+                    data.customers = data.customers.filter(c => !c.includes(','));
+                }
+
                 setPricingData(data);
 
-                // Set selected customer (either requested or default from API)
-                if (customerName) {
+                // Set selected customer
+                if (customerName && !customerName.includes(',')) {
                     setSelectedCustomer(customerName);
                 } else {
                     setSelectedCustomer(data.activeCustomer || '');
                 }
 
-                // Initialize values - ONLY set values that exist in DB with non-zero prices
-                // Don't initialize empty entries - if a key doesn't exist in values state,
-                // it means the user hasn't touched it yet
+                // Initialize state values using ID-based keys
                 const initialValues = {};
                 if (data.options && data.jobs) {
                     data.options.forEach(opt => {
                         data.jobs.forEach(job => {
-                            const key = `${opt.id}_${job.itemName}`;
+                            const key = `${opt.id}_${job.id}`; // Use ID
                             const existing = data.values ? data.values[key] : null;
-                            // Only set value if it exists and is non-zero
                             if (existing && existing.Price && parseFloat(existing.Price) > 0) {
                                 initialValues[key] = existing.Price;
                             }
-                            // Don't set anything for zero/null values - leave key absent
                         });
                     });
                 }
                 setValues(initialValues);
+
+                // Auto-Select First VISIBLE Lead Job
+                if (data.jobs) {
+                    const visibleScope = data.access?.visibleJobs || [];
+                    const hasPrefix = data.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
+
+                    const roots = data.jobs.filter(j =>
+                        !j.parentId &&
+                        (visibleScope.length === 0 || visibleScope.includes(j.itemName)) &&
+                        (!hasPrefix || /^L\d+\s-\s/.test(j.itemName))
+                    );
+                    if (roots.length > 0) {
+                        setSelectedLeadId(roots[0].id);
+                    }
+                }
             }
         } catch (err) {
             console.error('Error loading pricing:', err);
@@ -297,11 +355,11 @@ const PricingForm = () => {
     };
 
     // Update cell value
-    const handleValueChange = (optionId, jobName, value) => {
-        const key = `${optionId}_${jobName}`;
+    const handleValueChange = (optionId, jobId, value) => {
+        // Allow numeric and empty check
+        const key = `${optionId}_${jobId}`;
         setValues(prev => ({
             ...prev,
-            // Keep as string to preserve empty state, parse only when saving
             [key]: value === '' ? '' : (parseFloat(value) || '')
         }));
     };
@@ -312,103 +370,77 @@ const PricingForm = () => {
 
         const requestNo = pricingData.enquiry.requestNo;
         const userName = currentUser?.name || currentUser?.FullName || 'Unknown';
-        const editableJobs = pricingData.access.editableJobs || [];
+        const editableJobs = pricingData.access.editableJobs || []; // Contains Names
 
-        // Helper to get target job for an option - must match the key logic in render!
-        const getTargetJob = (opt) => {
-            const leadJob = pricingData.jobs.find(j => j.isLead);
-            let targetJobName = opt.itemName;
+        // Determine all keys that have data (State + DB)
+        const allKeys = new Set([
+            ...Object.keys(values),
+            ...Object.keys(pricingData.values || {})
+        ]);
 
-            // Must match the same normalization logic used in render (lines 800-808)
-            if (!targetJobName) {
-                targetJobName = leadJob ? leadJob.itemName : pricingData.jobs[0]?.itemName;
-            } else if (leadJob && (targetJobName === `${leadJob.itemName} / Lead Job` || targetJobName === 'Lead Job')) {
-                // Fix for legacy/bugged options with display suffix
-                targetJobName = leadJob.itemName;
-            }
-
-            return targetJobName;
-        };
-
-        // First, validate that there are non-zero values to save
         let valuesToSave = [];
         let skippedCount = 0;
 
-        for (const opt of pricingData.options) {
-            const targetJobName = getTargetJob(opt);
+        allKeys.forEach(key => {
+            const parts = key.split('_');
+            if (parts.length < 2) return;
 
-            // Is this job editable?
-            if (!editableJobs.includes(targetJobName)) continue;
+            const optionId = parseInt(parts[0]);
+            const jobId = parseInt(parts[1]); // Assuming Job ID is int
 
-            const key = `${opt.id}_${targetJobName}`;
+            // Find Job and Option
+            const job = pricingData.jobs.find(j => j.id === jobId);
+            const opt = pricingData.options.find(o => o.id === optionId);
+
+            if (!job || !opt) return;
+
+            // Permission Check (based on Job Name still)
+            if (!editableJobs.includes(job.itemName)) return;
+
+            // Determine Price
             let price = 0;
-
-            // Logic for determining the price to save:
-            // 1. If key exists in values state -> user has interacted with this field
-            //    - Use their value (even if empty = means they cleared it = 0)
-            // 2. If key doesn't exist in values state -> user hasn't touched this field
-            //    - Fall back to DB value
             if (values.hasOwnProperty(key)) {
-                // User has interacted with this field
                 const userValue = values[key];
                 if (userValue !== '' && userValue !== undefined && userValue !== null) {
                     price = parseFloat(userValue) || 0;
-                } else {
-                    // User cleared the field - treat as 0
-                    price = 0;
                 }
-            } else {
-                // User hasn't touched this field - use DB value if exists
-                if (pricingData.values[key] && pricingData.values[key].Price) {
-                    price = parseFloat(pricingData.values[key].Price) || 0;
-                }
+            } else if (pricingData.values[key] && pricingData.values[key].Price) {
+                price = parseFloat(pricingData.values[key].Price) || 0;
             }
 
-            console.log('DEBUG SAVE CHECK:', { key, value: values[key], dbValue: pricingData.values[key]?.Price, finalPrice: price });
-
-            // Check if value is zero or empty
-            if (!price || price <= 0) {
-                console.log('Will skip zero/empty value for:', opt.name, targetJobName);
+            if (price <= 0) {
                 skippedCount++;
-                continue;
+                return;
             }
 
-            // This is a valid value to save
             valuesToSave.push({
-                optionId: opt.id,
+                optionId: optionId,
                 optionName: opt.name,
-                enquiryForItem: targetJobName,
-                price: price
+                enquiryForItem: job.itemName, // Send Name for legacy compat/logging
+                enquiryForId: job.id,         // Send ID for strict linking
+                price: price,
+                customerName: opt.customerName // Include Customer Name
             });
-        }
+        });
 
-        // If no valid values to save, show warning and reload to restore original values
         if (valuesToSave.length === 0) {
             alert('⚠️ Cannot save: All price values are empty or zero.\n\nPlease enter at least one valid price value greater than zero.');
-            // Reload to restore original values from database
             loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
             return;
         }
 
-        // If some values were skipped, confirm with user
         if (skippedCount > 0) {
-            const confirmSave = window.confirm(
-                `${skippedCount} option(s) have empty or zero values and will NOT be saved.\n\n` +
-                `Only ${valuesToSave.length} option(s) with valid prices will be saved.\n\n` +
-                `Do you want to continue?`
-            );
-            if (!confirmSave) {
-                // User cancelled - reload to restore original values
+            if (!window.confirm(`${skippedCount} items with zero values will be skipped. Save ${valuesToSave.length} valid items?`)) {
                 loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
                 return;
             }
         }
 
-        // Now actually save the valid values
         setSaving(true);
         const promises = [];
 
         try {
+            // Batch saving (Concurrent requests)
             for (const item of valuesToSave) {
                 const p = fetch(`${API_BASE}/api/pricing/value`, {
                     method: 'PUT',
@@ -417,9 +449,10 @@ const PricingForm = () => {
                         requestNo: requestNo,
                         optionId: item.optionId,
                         enquiryForItem: item.enquiryForItem,
+                        enquiryForId: item.enquiryForId, // NEW FIELD
                         price: item.price,
                         updatedBy: userName,
-                        customerName: selectedCustomer
+                        customerName: item.customerName // Use item-specific customer name
                     })
                 });
                 promises.push(p);
@@ -470,13 +503,18 @@ const PricingForm = () => {
 
     // Filter Options based on Custom Scope Logic
     const filteredOptions = pricingData ? pricingData.options.filter(o => {
-        // Lead sees everything: Global (null) and Scoped (any)
-        if (pricingData.access.hasLeadAccess) return true;
+
 
         // Sub-Job User:
         // Strictly show ONLY options scoped to their editable jobs.
         // Hide Global/Null options to provide "fresh" structure.
-        if (o.itemName && pricingData.access.editableJobs.includes(o.itemName)) return true;
+        const isScopeMatch = pricingData.access.hasLeadAccess || (o.itemName && pricingData.access.editableJobs.includes(o.itemName));
+
+        // Strict Customer Match (Option must belong to the active tab)
+        // Fallback: If option has no customerName (legacy), maybe show it? Better to hide to force cleanliness.
+        const isCustomerMatch = o.customerName === selectedCustomer;
+
+        if (isScopeMatch && isCustomerMatch) return true;
 
         return false;
     }) : [];
@@ -688,7 +726,7 @@ const PricingForm = () => {
                                 {pricingData.customers && pricingData.customers.map(cust => (
                                     <div
                                         key={cust}
-                                        onClick={() => loadPricing(pricingData.enquiry.requestNo, cust)}
+                                        onClick={() => setSelectedCustomer(cust)}
                                         style={{
                                             padding: '10px 16px',
                                             background: selectedCustomer === cust ? 'white' : 'transparent',
@@ -899,6 +937,69 @@ const PricingForm = () => {
                             </div>
                         </div>
 
+                        {/* Lead Job Selector (Filter by User Access) */}
+                        {(() => {
+                            if (!pricingData) return null;
+
+                            // Filter roots based on visible assignments (e.g., Department Scope)
+                            const visibleScope = pricingData.access?.visibleJobs || [];
+                            // Heuristic: If hierarchy uses "L# -" prefixes, only show those as roots (hide orphans)
+                            const hasPrefix = pricingData.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
+
+                            // Recursive check: Visible if Node is visible OR any Descendant is visible
+                            const isTreeVisible = (jobId) => {
+                                const job = pricingData.jobs.find(j => j.id == jobId); // Relaxed check
+                                if (!job) return false;
+                                // Strict scope check: item MUST be in visibleScope (no fallback for empty scope)
+                                if (visibleScope.includes(job.itemName)) return true;
+
+                                const children = pricingData.jobs.filter(j => j.parentId == jobId); // Relaxed check
+                                return children.some(c => isTreeVisible(c.id));
+                            };
+
+                            const roots = pricingData.jobs.filter(j => {
+                                // 1. Must be a Root
+                                if (j.parentId) return false;
+                                // 2. Must match Prefix Heuristic
+                                if (hasPrefix && !/^L\d+\s-\s/.test(j.itemName)) return false;
+                                // 3. Must be Visible (Strict Scope)
+                                if (!isTreeVisible(j.id)) return false;
+
+                                // 4. HEURISTIC: Hide Empty Roots (No visible children, No positive pricing values)
+                                const hasVisibleChildren = pricingData.jobs.some(c => c.parentId == j.id && isTreeVisible(c.id)); // Relaxed check
+                                const hasPositiveValues = Object.entries(pricingData.values || {}).some(([k, v]) =>
+                                    k.endsWith(`_${j.id}`) && v && parseFloat(v.Price) > 0
+                                );
+
+                                if (!hasVisibleChildren && !hasPositiveValues) return false;
+
+                                return true;
+                            });
+
+                            if (roots.length === 0) return null;
+
+                            return (
+                                <div style={{ padding: '12px 20px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <span style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Select Lead Job:</span>
+                                    <select
+                                        value={selectedLeadId || ''}
+                                        onChange={(e) => setSelectedLeadId(parseInt(e.target.value))}
+                                        style={{
+                                            padding: '6px 12px',
+                                            borderRadius: '4px',
+                                            border: '1px solid #cbd5e1',
+                                            fontSize: '13px',
+                                            minWidth: '200px'
+                                        }}
+                                    >
+                                        {roots.map(r => (
+                                            <option key={r.id} value={r.id}>{r.itemName}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            );
+                        })()}
+
                         {/* Pricing Table Content */}
                         {visibleJobs.length === 0 ? (
                             <div style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
@@ -910,155 +1011,133 @@ const PricingForm = () => {
 
                                     <tbody>
                                         {(() => {
-                                            // Grouping Logic
-                                            const groups = {};
-                                            const leadJob = visibleJobs.find(j => j.isLead);
-                                            // New Group Name: "ItemName / Lead Job"
-                                            const leadJobDisplayName = leadJob ? `${leadJob.itemName} / Lead Job` : 'Lead Job';
+                                            // Grouping Logic: Keyed by Job ID
+                                            const groupMap = {}; // { jobId: { job, options: [] } }
 
-                                            // Initialize groups for ALL visible jobs
-                                            if (leadJob) groups[leadJobDisplayName] = [];
+                                            // LEAD JOB FILTERING LOGIC
+                                            let targetJobs = visibleJobs;
+                                            if (selectedLeadId && pricingData && pricingData.jobs) {
+                                                const getDescendants = (rootId, all) => {
+                                                    const set = new Set([rootId]);
+                                                    let changed = true;
+                                                    while (changed) {
+                                                        changed = false;
+                                                        all.forEach(j => {
+                                                            if (!set.has(j.id) && set.has(j.parentId)) {
+                                                                set.add(j.id);
+                                                                changed = true;
+                                                            }
+                                                        });
+                                                    }
+                                                    return set;
+                                                };
+                                                const validIds = getDescendants(selectedLeadId, pricingData.jobs);
+                                                targetJobs = visibleJobs.filter(j => {
+                                                    // Map visibleJob (name) to ID. But wait, visibleJobs logic in 'PricingForm' relies on name filtering?
+                                                    // Actually 'visibleJobs' earlier in file uses pricingData.filter...
+                                                    // Wait, visibleJobs I defined earlier IS job objects.
+                                                    // So j is a Job Object.
+                                                    return validIds.has(j.id);
+                                                });
+                                            }
 
-                                            visibleJobs.forEach(j => {
-                                                if (!j.isLead) {
-                                                    groups[j.itemName] = [];
-                                                }
+                                            // Initialize Groups for Target Jobs
+                                            targetJobs.forEach(job => {
+                                                groupMap[job.id] = { job: job, options: [] };
                                             });
 
-                                            // Find max ID to identify the newest option
+                                            // Determine Lead Job for sorting
+                                            const activeLeadJob = pricingData.jobs.find(j => j.id === selectedLeadId) || targetJobs.find(j => j.isLead);
+
+                                            // Assign Options to Groups
                                             const maxId = filteredOptions.reduce((max, opt) => (opt.id > max ? opt.id : max), 0);
 
                                             filteredOptions.forEach(opt => {
-                                                let groupName = opt.itemName;
+                                                targetJobs.forEach(job => {
+                                                    let match = false;
+                                                    if (!opt.itemName) match = (job.isLead); // Null scope -> Lead Job
+                                                    else if (opt.itemName === 'Lead Job' && job.isLead) match = true;
+                                                    else if (opt.itemName === job.itemName) match = true;
+                                                    else if (opt.itemName === `${job.itemName} / Lead Job`) match = true; // Legacy
 
-                                                // Map null or matching item name to the Lead Job Header
-                                                if (!groupName || (leadJob && groupName === leadJob.itemName)) {
-                                                    groupName = leadJobDisplayName;
-                                                }
+                                                    if (match) {
+                                                        // Calculate Row Total (Visibility Check)
+                                                        const key = `${opt.id}_${job.id}`;
+                                                        let price = 0;
+                                                        if (values[key] !== undefined && values[key] !== '') {
+                                                            price = parseFloat(values[key]) || 0;
+                                                        } else if (pricingData.values[key] && pricingData.values[key].Price) {
+                                                            price = parseFloat(pricingData.values[key].Price) || 0;
+                                                        }
 
-                                                // Zero-Value Filter Logic
-                                                let rowTotal = 0;
-                                                // FIX: Check ALL jobs to prevent hiding valid sub-job values
-                                                pricingData.jobs.forEach(job => {
-                                                    const key = `${opt.id}_${job.itemName}`;
-                                                    let price = 0;
-                                                    // Check pending changes - properly handle empty strings
-                                                    if (values && values[key] !== undefined && values[key] !== '') {
-                                                        price = parseFloat(values[key]) || 0;
-                                                    }
-                                                    // Fallback to saved data
-                                                    else if (pricingData.values && pricingData.values[key] && pricingData.values[key].Price) {
-                                                        price = parseFloat(pricingData.values[key].Price) || 0;
-                                                    }
-                                                    if (!isNaN(price)) {
-                                                        rowTotal += price;
+                                                        // Hide if Empty, Not Newest, Not Base Price
+                                                        const isDefault = (opt.name === 'Price' || opt.name === 'Optional');
+                                                        const isEmpty = price <= 0.01;
+                                                        const isNotNewest = opt.id !== maxId;
+
+                                                        if (isDefault && isEmpty && isNotNewest) return;
+                                                        if (isEmpty && isNotNewest && opt.name !== 'Base Price') {
+                                                            // Check DB value existence strictly?
+                                                            // If DB has value, show it.
+                                                            if (!pricingData.values[key] || parseFloat(pricingData.values[key].Price) <= 0) {
+                                                                return;
+                                                            }
+                                                        }
+
+                                                        groupMap[job.id].options.push(opt);
                                                     }
                                                 });
-
-                                                // Filter out empty rows (rows with zero/empty values)
-                                                const isDefaultName = (opt.name === 'Price' || opt.name === 'Optional');
-                                                const isEmpty = rowTotal <= 0.01; // Allow for float errors, treat < 0.01 as 0
-                                                const isNotNewest = opt.id !== maxId;
-
-                                                // Hide default rows that are empty and not the newest
-                                                // BUT: Always show "Base Price" even if empty
-                                                if (isDefaultName && isEmpty && isNotNewest) {
-                                                    return; // Hide this row
-                                                }
-
-                                                // Also hide custom options with zero values from database (unless newest)
-                                                // This prevents showing "0.00" values that shouldn't exist
-                                                // EXCEPTION: Keep "Base Price" visible
-                                                if (isEmpty && isNotNewest && opt.name !== 'Base Price') {
-                                                    // Check if this row has any DB values (not just pending)
-                                                    let hasDBValue = false;
-                                                    pricingData.jobs.forEach(job => {
-                                                        const key = `${opt.id}_${job.itemName}`;
-                                                        if (pricingData.values[key] && parseFloat(pricingData.values[key].Price) > 0) {
-                                                            hasDBValue = true;
-                                                        }
-                                                    });
-                                                    // If no valid DB values and empty, hide it
-                                                    if (!hasDBValue) {
-                                                        return; // Hide this empty row
-                                                    }
-                                                }
-
-                                                if (!groups[groupName]) groups[groupName] = [];
-                                                groups[groupName].push(opt);
                                             });
 
-                                            // Sort Groups: Lead Job first
-                                            const sortedGroupNames = Object.keys(groups).sort((a, b) => {
-                                                if (a === leadJobDisplayName) return -1;
-                                                if (b === leadJobDisplayName) return 1;
-                                                return a.localeCompare(b);
+                                            // Sort Groups: Lead Job first, then Alphabetical
+                                            const sortedGroups = Object.values(groupMap).sort((a, b) => {
+                                                if (a.job.id === activeLeadJob?.id) return -1;
+                                                if (b.job.id === activeLeadJob?.id) return 1;
+                                                return a.job.itemName.localeCompare(b.job.itemName);
                                             });
 
-                                            return sortedGroupNames.map(groupName => {
-                                                // Resolve actual item name for permissions
-                                                let actualItemName = groupName;
-                                                if (groupName === leadJobDisplayName) {
-                                                    actualItemName = leadJob ? leadJob.itemName : null;
-                                                }
-
-                                                // Check if user can edit this section
-                                                const canEditSection = pricingData.access.editableJobs &&
-                                                    (actualItemName ? pricingData.access.editableJobs.includes(actualItemName) : true);
-                                                // If actualItemName is null (global), assume editable?
-                                                // Actually, global options should probably be editable by lead.
-                                                // If leadJob exists, actualItemName is leadJob.itemName.
+                                            return sortedGroups.map(group => {
+                                                const job = group.job;
+                                                // Group Display Name
+                                                const groupName = job.isLead ? `${job.itemName} / Lead Job` : job.itemName;
+                                                const canEditSection = pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
 
                                                 return (
-                                                    <React.Fragment key={groupName}>
+                                                    <React.Fragment key={job.id}>
                                                         {/* Group Header */}
                                                         <tr style={{ background: '#e2e8f0' }}>
-                                                            <td colSpan={2} style={{ padding: '8px 16px', fontWeight: 'bold', fontSize: '12px', color: '#475569', textTransform: 'uppercase' }}>
+                                                            <td colSpan={2} style={{ padding: '6px 12px', fontWeight: 'bold', fontSize: '11px', color: '#475569', textTransform: 'uppercase' }}>
                                                                 {groupName} Options
                                                             </td>
                                                         </tr>
-                                                        {groups[groupName].map(option => {
-                                                            // Resolve target job name correctly for permission checking
-                                                            let targetJobName = option.itemName;
-
-                                                            // Logic to handle both "BMS" and "BMS / Lead Job" stored values
-                                                            if (!targetJobName) {
-                                                                targetJobName = leadJob ? leadJob.itemName : visibleJobs[0]?.itemName;
-                                                            } else if (leadJob && (targetJobName === `${leadJob.itemName} / Lead Job` || targetJobName === 'Lead Job')) {
-                                                                // Fix for legacy/bugged options with display suffix
-                                                                targetJobName = leadJob.itemName;
-                                                            }
-
-                                                            const key = `${option.id}_${targetJobName}`;
-                                                            // Check permissions against the RAW job name
-                                                            const canEditRow = pricingData.access.editableJobs && pricingData.access.editableJobs.includes(targetJobName);
+                                                        {group.options.map(option => {
+                                                            const key = `${option.id}_${job.id}`;
+                                                            const canEditRow = canEditSection; // Simplified
 
                                                             return (
-                                                                <tr key={option.id} style={{ borderBottom: '1px solid #e2e8f0' }}>
-                                                                    <td style={{ padding: '12px 16px', fontWeight: '500', color: '#1e293b' }}>{option.name}</td>
-                                                                    <td style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                                                <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                                                                    <td style={{ padding: '6px 12px', fontWeight: '500', color: '#1e293b', fontSize: '13px' }}>{option.name}</td>
+                                                                    <td style={{ padding: '4px 8px', textAlign: 'center' }}>
                                                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                                                                             <input
                                                                                 type="number"
                                                                                 value={values[key] || ''}
-                                                                                onChange={(e) => handleValueChange(option.id, targetJobName, e.target.value)}
+                                                                                onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
                                                                                 disabled={!canEditRow}
                                                                                 placeholder="0.00"
                                                                                 step="0.01"
                                                                                 style={{
                                                                                     width: '100%',
                                                                                     maxWidth: '150px',
-                                                                                    padding: '8px 10px',
+                                                                                    padding: '4px 8px',
                                                                                     border: '1px solid #e2e8f0',
                                                                                     borderRadius: '4px',
-                                                                                    fontSize: '14px',
+                                                                                    fontSize: '13px',
                                                                                     textAlign: 'right',
                                                                                     background: canEditRow ? 'white' : '#f1f5f9',
                                                                                     cursor: canEditRow ? 'text' : 'not-allowed'
                                                                                 }}
                                                                             />
-                                                                            {/* Delete Button */}
-
                                                                             {canEditRow && (
                                                                                 <button
                                                                                     onClick={() => deleteOption(option.id)}
@@ -1067,16 +1146,15 @@ const PricingForm = () => {
                                                                                     <Trash2 size={16} />
                                                                                 </button>
                                                                             )}
-
                                                                         </div>
                                                                     </td>
                                                                 </tr>
                                                             );
                                                         })}
-                                                        {/* Add Option Row for this Group - Only if Editable */}
+                                                        {/* Add Option Row for this Group */}
                                                         {canEditSection && (
                                                             <tr style={{ background: '#f8fafc' }}>
-                                                                <td style={{ padding: '8px 16px' }}>
+                                                                <td style={{ padding: '4px 12px' }}>
                                                                     <input
                                                                         type="text"
                                                                         placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
@@ -1084,12 +1162,12 @@ const PricingForm = () => {
                                                                         onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
                                                                         onKeyDown={(e) => {
                                                                             if (e.key === 'Enter') {
-                                                                                addOption(groupName);
+                                                                                addOption(groupName); // addOption still uses Name
                                                                             }
                                                                         }}
                                                                         style={{
                                                                             width: '100%',
-                                                                            padding: '6px 12px',
+                                                                            padding: '4px 8px',
                                                                             border: '1px solid #cbd5e1',
                                                                             borderRadius: '4px',
                                                                             fontSize: '13px'
@@ -1126,14 +1204,36 @@ const PricingForm = () => {
 
                                         {/* Total Row */}
                                         {(() => {
+                                            // Recalculate Target Jobs for Total
+                                            let targetJobs = visibleJobs;
+                                            if (selectedLeadId && pricingData && pricingData.jobs) {
+                                                const getDescendants = (rootId, all) => {
+                                                    const set = new Set([rootId]);
+                                                    let changed = true;
+                                                    while (changed) {
+                                                        changed = false;
+                                                        all.forEach(j => {
+                                                            if (!set.has(j.id) && set.has(j.parentId)) {
+                                                                set.add(j.id);
+                                                                changed = true;
+                                                            }
+                                                        });
+                                                    }
+                                                    return set;
+                                                };
+                                                const validIds = getDescendants(selectedLeadId, pricingData.jobs);
+                                                targetJobs = visibleJobs.filter(j => validIds.has(j.id));
+                                            }
+
                                             // Calculate Total
                                             let grandTotal = 0;
                                             let hasPricedOptional = false;
 
                                             // Helper to get price
                                             const getPrice = (key) => {
-                                                if (values && values[key] && values[key].Price !== undefined && values[key].Price !== '') {
-                                                    return parseFloat(values[key].Price);
+                                                if (values && values.hasOwnProperty(key)) {
+                                                    const val = values[key];
+                                                    return (val === '' || val === null) ? 0 : (parseFloat(val) || 0);
                                                 }
                                                 if (pricingData.values && pricingData.values[key]) {
                                                     return parseFloat(pricingData.values[key].Price || 0);
@@ -1144,16 +1244,16 @@ const PricingForm = () => {
                                             filteredOptions.forEach(opt => {
                                                 if (opt.name === 'Optional') {
                                                     // Check if priced
-                                                    pricingData.jobs.forEach(job => {
-                                                        const key = `${opt.id}_${job.itemName}`;
+                                                    targetJobs.forEach(job => {
+                                                        const key = `${opt.id}_${job.id}`;
                                                         if (getPrice(key) > 0) hasPricedOptional = true;
                                                     });
                                                     return;
                                                 }
 
                                                 // Sum Non-Optional
-                                                pricingData.jobs.forEach(job => {
-                                                    const key = `${opt.id}_${job.itemName}`;
+                                                targetJobs.forEach(job => {
+                                                    const key = `${opt.id}_${job.id}`;
                                                     grandTotal += getPrice(key);
                                                 });
                                             });

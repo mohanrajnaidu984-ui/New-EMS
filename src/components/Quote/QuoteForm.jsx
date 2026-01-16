@@ -422,7 +422,7 @@ const QuoteForm = () => {
                 setSelectedJobs(allJobs);
 
                 // We need to calculate summary based on all jobs initially
-                calculateSummary(pData, allJobs);
+                calculateSummary(pData, allJobs, cxName);
             } else {
                 console.error('Pricing API Error:', pricingRes.status);
                 setPricingData(null);
@@ -447,7 +447,7 @@ const QuoteForm = () => {
 
 
     // Calculate Summary based on selected jobs
-    const calculateSummary = (data = pricingData, currentSelectedJobs = selectedJobs) => {
+    const calculateSummary = (data = pricingData, currentSelectedJobs = selectedJobs, activeCustomer = toName) => {
         if (!data || !data.options || !data.values) return;
 
         const summary = [];
@@ -461,6 +461,9 @@ const QuoteForm = () => {
         const groups = {};
 
         data.options.forEach(opt => {
+            // 0. Customer Filter
+            if (opt.customerName && activeCustomer && opt.customerName !== activeCustomer) return;
+
             // 1. Visibility Filter
             let isVisible = false;
             // Check if option is associated with a job, and if that job IS SELECTED
@@ -480,7 +483,7 @@ const QuoteForm = () => {
             let optionTotal = 0;
             if (data.jobs) {
                 data.jobs.forEach(job => {
-                    const key = `${opt.id}_${job.itemName}`;
+                    const key = `${opt.id}_${job.id}`;
                     const val = data.values[key];
                     const price = val ? parseFloat(val.Price || 0) : 0;
                     optionTotal += price;
@@ -634,7 +637,7 @@ const QuoteForm = () => {
         };
 
         try {
-            const res = await fetch(`${API_BASE} /api/quotes / config / templates`, {
+            const res = await fetch(`${API_BASE}/api/quotes/config/templates`, {
                 method: quoteId ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -648,7 +651,7 @@ const QuoteForm = () => {
                 alert('Template saved successfully!');
                 setSavedTemplateName('');
                 // Refresh list
-                const listRes = await fetch(`${API_BASE} /api/quotes / config / templates`);
+                const listRes = await fetch(`${API_BASE}/api/quotes/config/templates`);
                 if (listRes.ok) setTemplates(await listRes.json());
             } else {
                 alert('Failed to save template');
@@ -681,7 +684,7 @@ const QuoteForm = () => {
         if (!window.confirm('Are you sure you want to delete this template?')) return;
 
         try {
-            const res = await fetch(`${API_BASE} /api/quotes / config / templates / ${selectedTemplateId} `, {
+            const res = await fetch(`${API_BASE}/api/quotes/config/templates/${selectedTemplateId}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
@@ -811,7 +814,7 @@ const QuoteForm = () => {
         setSaving(true);
         try {
             const payload = getQuotePayload();
-            const res = await fetch(`${API_BASE} /api/quotes / ${quoteId}/revise`, {
+            const res = await fetch(`${API_BASE}/api/quotes/${quoteId}/revise`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -989,7 +992,9 @@ const QuoteForm = () => {
 
     const getQuotePayload = () => {
         return {
-            divisionCode: enquiryData.companyDetails?.code,
+            divisionCode: enquiryData.companyDetails?.divisionCode || 'AAC',
+            departmentCode: enquiryData.companyDetails?.departmentCode || '',
+            leadJobPrefix: enquiryData.leadJobPrefix || '',
             requestNo: enquiryData.enquiry.RequestNo,
             validityDays,
             preparedBy: preparedBy,

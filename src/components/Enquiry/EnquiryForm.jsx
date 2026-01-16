@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import ListBoxControl from './ListBoxControl';
+import HierarchyBuilder from './HierarchyBuilder';
 import SearchableSelectControl from './SearchableSelectControl';
 import SearchEnquiry from './SearchEnquiry';
 import CustomerModal from '../Modals/CustomerModal';
@@ -357,14 +358,25 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setter(true);
     };
 
-    const handleEditEnqFor = () => {
-        const selected = formData.EnquiryFor;
+    const handleEditEnqFor = (itemName) => {
+        let selected = itemName || formData.EnquiryFor;
+
+        // Handle "L1 - Name" format from HierarchyBuilder (strip prefix)
+        if (typeof selected === 'string') {
+            const prefixMatch = selected.match(/^L\d+\s-\s(.+)/);
+            if (prefixMatch) {
+                selected = prefixMatch[1];
+            }
+        }
+
         if (!selected) return alert("Select an item to edit");
         const itemData = masters.enqItems.find(i => i.ItemName === selected);
         if (itemData) {
             setEditData(itemData);
             setModalMode('Edit');
             setShowEnqItemModal(true);
+        } else {
+            console.warn('Item not found for edit:', selected);
         }
     };
 
@@ -1379,21 +1391,22 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 </div>
 
                                                 {/* Enquiry For */}
-                                                <div className="mb-3" style={{ width: 'calc(66.666667% - 5px)' }}>
-                                                    <ListBoxControl
-                                                        label={<span>Enquiry For<span className="text-danger">*</span></span>}
+                                                {/* Enquiry For / Hierarchy */}
+                                                <div className="mb-3" style={{ width: '100%' }}>
+                                                    <HierarchyBuilder
+                                                        label={<span>Enquiry For Structure<span className="text-danger">*</span></span>}
                                                         options={masters.enquiryFor}
-                                                        selectedOption={formData.EnquiryFor}
-                                                        onOptionChange={(val) => handleInputChange('EnquiryFor', val)}
-                                                        listBoxItems={enqForList}
-                                                        onAdd={handleAddEnqFor}
-                                                        onRemove={() => handleRemoveItem(enqForList, setEnqForList)}
-                                                        showNew={currentUser?.role === 'Admin'}
-                                                        showEdit={currentUser?.role === 'Admin'}
-                                                        canEdit={!!formData.EnquiryFor && currentUser?.role === 'Admin'}
-                                                        onNew={() => openNewModal(setShowEnqItemModal)}
-                                                        onEdit={handleEditEnqFor}
+                                                        value={enqForList}
+                                                        onChange={(newList) => {
+                                                            setEnqForList(newList);
+                                                            // Also update form data string for backward compatibility or validation
+                                                            setFormData(prev => ({ ...prev, EnquiryFor: newList.length > 0 ? newList[0].itemName : '' }));
+                                                        }}
                                                         error={errors.EnquiryFor}
+                                                        showNew={(currentUser?.role || currentUser?.Roles || '').toLowerCase().includes('admin')}
+                                                        onNew={() => openNewModal(setShowEnqItemModal)}
+                                                        showEdit={(currentUser?.role || currentUser?.Roles || '').toLowerCase().includes('admin')}
+                                                        onEditItem={(item) => handleEditEnqFor(item.itemName)}
                                                     />
                                                 </div>
 
@@ -1798,7 +1811,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                             </div>
                         )}
                     </>
-                )}
+                )
+                }
             </div >
         </div >
     );

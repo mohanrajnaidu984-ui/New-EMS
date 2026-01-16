@@ -64,7 +64,7 @@ router.get('/:requestNo', async (req, res) => {
         let jobs = [];
         try {
             const jobsResult = await sql.query`
-                SELECT ef.ItemName, mef.CommonMailIds, mef.CCMailIds
+                SELECT ef.ID, ef.ParentID, ef.ItemName, ef.ParentItemName, mef.CommonMailIds, mef.CCMailIds
                 FROM EnquiryFor ef
                 LEFT JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
                 WHERE ef.RequestNo = ${requestNo}
@@ -93,10 +93,15 @@ router.get('/:requestNo', async (req, res) => {
         // Identify Lead Job (First item)
         const leadJobItem = jobs.length > 0 ? jobs[0].ItemName : null;
 
-        // Determine active customer (default to enquiry customer if not provided)
-        const activeCustomerName = req.query.customerName || enquiry.CustomerName || '';
+        // Get active customer for initial selection only
+        let activeCustomerName = req.query.customerName;
+        // Logic to default (keep existing logic but use it just for frontend default)
+        if (!activeCustomerName) {
+            const rawCust = enquiry.CustomerName || '';
+            activeCustomerName = rawCust.split(',')[0].trim();
+        }
 
-        // Get list of customers who have pricing for this enquiry
+        // Get list of customers from DB (for tabs)
         let customers = [];
         try {
             const customerResult = await sql.query`
@@ -106,52 +111,36 @@ router.get('/:requestNo', async (req, res) => {
                 AND CustomerName IS NOT NULL
             `;
             customers = customerResult.recordset.map(row => row.CustomerName);
-
-            // Ensure the main enquiry customer is always in the list
-            // COMMENTED OUT: We want to allow deleting the main customer tab if needed.
-            // If the user deletes all data for the main customer, they should disappear from the active tab list.
-            // Frontend will handle auto-recreation if the list becomes completely empty.
-            /*
-            if (enquiry.CustomerName && !customers.includes(enquiry.CustomerName)) {
-                customers.unshift(enquiry.CustomerName);
-            }
-            */
         } catch (err) {
             console.error('Error fetching customers:', err);
         }
 
-        // Get pricing options (rows) - Filter by CustomerName
-        // Order by SortOrder. 
+        // Get pricing options (ALL customers)
         let options = [];
         try {
-            // Note: If activeCustomerName is null/empty, we might want to show nothing or default?
-            // Assuming activeCustomerName is set (defaulted above).
-
             const optionsResult = await sql.query`
-                SELECT ID, OptionName, SortOrder, ItemName
+                SELECT ID, OptionName, SortOrder, ItemName, CustomerName
                 FROM EnquiryPricingOptions 
                 WHERE RequestNo = ${requestNo}
-                AND (CustomerName = ${activeCustomerName} OR (CustomerName IS NULL AND ${activeCustomerName} = ''))
                 ORDER BY SortOrder ASC, ID ASC
             `;
             options = optionsResult.recordset;
-            console.log('Pricing API: Found', options.length, 'options for customer:', activeCustomerName);
+            console.log('Pricing API: Found', options.length, 'options (total)');
         } catch (err) {
             console.error('Error querying EnquiryPricingOptions:', err);
             throw err;
         }
 
-        // Get pricing values (cells) - Filter by CustomerName
+        // Get pricing values (ALL customers)
         let values = [];
         try {
             const valuesResult = await sql.query`
-                SELECT OptionID, EnquiryForItem, Price, UpdatedBy, UpdatedAt
+                SELECT OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, UpdatedAt, CustomerName
                 FROM EnquiryPricingValues 
                 WHERE RequestNo = ${requestNo}
-                AND (CustomerName = ${activeCustomerName} OR (CustomerName IS NULL AND ${activeCustomerName} = ''))
             `;
             values = valuesResult.recordset;
-            console.log('Pricing API: Found', values.length, 'values for customer:', activeCustomerName);
+            console.log('Pricing API: Found', values.length, 'values (total)');
         } catch (err) {
             console.error('Error querying EnquiryPricingValues:', err);
             throw err;
@@ -160,9 +149,11 @@ router.get('/:requestNo', async (req, res) => {
         // Create value lookup map
         const valueMap = {};
         values.forEach(v => {
-            const key = `${v.OptionID}_${v.EnquiryForItem}`;
+            const key = v.EnquiryForID ? `${v.OptionID}_${v.EnquiryForID}` : `${v.OptionID}_${v.EnquiryForItem}`;
             valueMap[key] = v;
         });
+
+
 
         // Determine user access
         // User has Lead Job access if:
@@ -214,44 +205,69 @@ router.get('/:requestNo', async (req, res) => {
         }
 
         // Determine visible and editable jobs
-        // Lead Job owner: sees all, edits only lead
-        // Sub Job owner: sees and edits only their own
+        // HIERARCHY LOGIC IMPLEMENTATION
+        const hasHierarchy = jobs.some(j => j.ParentItemName); // Check if hierarchy exists
+
         let visibleJobs = [];
         let editableJobs = [];
 
-        if (userHasLeadAccess) {
-            visibleJobs = jobs.map(j => j.ItemName); // Lead sees all
-            editableJobs = leadJobItem ? [leadJobItem] : []; // Lead edits only lead job
+        if (hasHierarchy) {
+            console.log('Pricing API: Using Strict Hierarchy Mode');
+            console.log('User Job Items (Self):', userJobItems);
+
+            // 1. User sees their own jobs (Self)
+            const selfJobs = userJobItems;
+
+            // 2. User sees DIRECT children of their own jobs
+            const directChildJobs = jobs
+                .filter(j => {
+                    const parentMatch = j.ParentItemName && selfJobs.includes(j.ParentItemName);
+                    return parentMatch;
+                })
+                .map(j => j.ItemName);
+
+            console.log('Direct Child Jobs:', directChildJobs);
+
+            // Combine and Dedup
+            visibleJobs = [...new Set([...selfJobs, ...directChildJobs])];
+
+            // Edit: Only Self
+            // FIX: If user is Creator (Lead Link), restrict edit strictly to Lead Job to prevent Civil editing Sub-jobs
+            if (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim() && leadJobItem) {
+                editableJobs = [leadJobItem];
+            } else {
+                editableJobs = selfJobs;
+            }
+            console.log('Final Visible:', visibleJobs);
+
         } else {
-            visibleJobs = userJobItems; // Sub sees only their own
-            editableJobs = userJobItems; // Sub edits only their own
+            console.log('Pricing API: Using Classic/Legacy Mode');
+            // Classic Logic
+            if (userHasLeadAccess) {
+                visibleJobs = jobs.map(j => j.ItemName); // Lead sees all
+                editableJobs = leadJobItem ? [leadJobItem] : []; // Lead edits only lead job
+            } else {
+                visibleJobs = userJobItems; // Sub sees only their own
+                editableJobs = userJobItems; // Sub edits only their own
+            }
         }
-
-        console.log('DEBUG EXTRA CUSTOMERS RAW:', extraCustomers);
-        const mappedExtras = extraCustomers.map(c => c.CustomerName);
-        console.log('DEBUG EXTRA CUSTOMERS MAPPED:', mappedExtras);
-
-        console.log('Pricing API Response Names:', {
-            cust: enquiry.CustomerName,
-            client: enquiry.ClientName,
-            consult: enquiry.ConsultantName,
-            extraArgs: mappedExtras
-        });
 
         res.json({
             enquiry: {
                 requestNo: enquiry.RequestNo,
                 projectName: enquiry.ProjectName,
                 createdBy: enquiry.CreatedBy,
-                customerName: enquiry.CustomerName, // Default customer
+                customerName: enquiry.CustomerName,
                 clientName: enquiry.ClientName,
                 consultantName: enquiry.ConsultantName
             },
-            extraCustomers: extraCustomers.map(c => c.CustomerName), // List of linked customers
-            customers: customers, // List of available customers
-            activeCustomer: activeCustomerName, // Currently loaded customer
+            extraCustomers: extraCustomers.map(c => c.CustomerName),
+            customers: customers,
+            activeCustomer: activeCustomerName,
             leadJob: leadJobItem,
             jobs: jobs.map(j => ({
+                id: j.ID,
+                parentId: j.ParentID,
                 itemName: j.ItemName,
                 isLead: j.ItemName === leadJobItem,
                 visible: visibleJobs.includes(j.ItemName),
@@ -261,7 +277,8 @@ router.get('/:requestNo', async (req, res) => {
                 id: o.ID,
                 name: o.OptionName,
                 sortOrder: o.SortOrder,
-                itemName: o.ItemName // Return scope
+                itemName: o.ItemName,
+                customerName: o.CustomerName // Expose CustomerName
             })),
             values: valueMap,
             access: {
@@ -286,12 +303,30 @@ router.post('/option', async (req, res) => {
             return res.status(400).json({ error: 'RequestNo and optionName are required' });
         }
 
+        // Existence Check: prevent duplicates for the same name+item+customer
+        const existingResult = await sql.query`
+            SELECT ID, OptionName, SortOrder, ItemName, CustomerName
+            FROM EnquiryPricingOptions
+            WHERE RequestNo = ${requestNo}
+            AND OptionName = ${optionName}
+            AND (ItemName = ${itemName || null} OR (ItemName IS NULL AND ${itemName || null} IS NULL))
+            AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
+        `;
+
+        if (existingResult.recordset.length > 0) {
+            return res.json({
+                success: true,
+                option: existingResult.recordset[0],
+                alreadyExisted: true
+            });
+        }
+
         // Get max sort order (Filter by CustomerName)
         const maxResult = await sql.query`
             SELECT ISNULL(MAX(SortOrder), 0) + 1 as NextOrder 
             FROM EnquiryPricingOptions 
             WHERE RequestNo = ${requestNo}
-            AND (CustomerName = ${customerName} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
+            AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
         `;
         const sortOrder = maxResult.recordset[0].NextOrder;
 
@@ -316,43 +351,58 @@ router.post('/option', async (req, res) => {
 // PUT /api/pricing/value - Update a pricing cell value
 router.put('/value', async (req, res) => {
     try {
-        const { requestNo, optionId, enquiryForItem, price, updatedBy, customerName } = req.body;
+        const { requestNo, optionId, enquiryForItem, enquiryForId, price, updatedBy, customerName } = req.body;
 
-        if (!requestNo || !optionId || !enquiryForItem) {
+        if (!requestNo || !optionId) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
         const priceValue = parseFloat(price) || 0;
 
-        // Reject zero or negative values - don't save them
+        // Reject zero or negative values
         if (priceValue <= 0) {
             return res.status(400).json({ error: 'Price must be greater than zero', skipped: true });
         }
 
-        // Upsert: Update if exists, insert if not
-        const existingResult = await sql.query`
-            SELECT ID FROM EnquiryPricingValues 
-            WHERE RequestNo = ${requestNo} 
-            AND OptionID = ${optionId} 
-            AND EnquiryForItem = ${enquiryForItem}
-            AND (CustomerName = ${customerName} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
-        `;
+        // --- UPSERT LOGIC WITH ID SUPPORT ---
 
-        if (existingResult.recordset.length > 0) {
-            // Update existing
-            await sql.query`
-                UPDATE EnquiryPricingValues 
-                SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = GETDATE()
+        let existingResult;
+
+        if (enquiryForId) {
+            // New strict check by ID
+            existingResult = await sql.query`
+                SELECT ID FROM EnquiryPricingValues 
+                WHERE RequestNo = ${requestNo} 
+                AND OptionID = ${optionId} 
+                AND EnquiryForID = ${enquiryForId}
+                AND (CustomerName = ${customerName} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
+            `;
+        } else {
+            // Legacy check by Name
+            existingResult = await sql.query`
+                SELECT ID FROM EnquiryPricingValues 
                 WHERE RequestNo = ${requestNo} 
                 AND OptionID = ${optionId} 
                 AND EnquiryForItem = ${enquiryForItem}
                 AND (CustomerName = ${customerName} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
             `;
-        } else {
-            // Insert new
+        }
+
+
+        if (existingResult.recordset.length > 0) {
+            // Update
+            const recordId = existingResult.recordset[0].ID;
             await sql.query`
-                INSERT INTO EnquiryPricingValues (RequestNo, OptionID, EnquiryForItem, Price, UpdatedBy, CustomerName)
-                VALUES (${requestNo}, ${optionId}, ${enquiryForItem}, ${priceValue}, ${updatedBy}, ${customerName || null})
+                UPDATE EnquiryPricingValues 
+                SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = GETDATE(),
+                    EnquiryForID = ${enquiryForId || null} -- Ensure ID is linked if we're upgrading legacy row logic?
+                WHERE ID = ${recordId}
+            `;
+        } else {
+            // Insert
+            await sql.query`
+                INSERT INTO EnquiryPricingValues (RequestNo, OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, CustomerName)
+                VALUES (${requestNo}, ${optionId}, ${enquiryForItem}, ${enquiryForId || null}, ${priceValue}, ${updatedBy}, ${customerName || null})
             `;
         }
 
