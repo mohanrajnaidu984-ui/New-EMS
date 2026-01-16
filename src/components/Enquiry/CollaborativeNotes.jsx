@@ -127,9 +127,8 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
 
     const formatTime = (dateStr) => {
         const date = new Date(dateStr);
-        // Desired format: DD/MM/YYYY hh:mm AM/PM
-        // e.g., 06/12/2025 07:14 PM
-        return date.toLocaleDateString('en-GB') + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        // Desired format: DD-MMM-YYYY hh:mm AM/PM
+        return format(date, 'dd-MMM-yyyy hh:mm a');
     };
 
     const [mentionQuery, setMentionQuery] = useState('');

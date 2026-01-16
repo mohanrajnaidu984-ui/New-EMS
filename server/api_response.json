@@ -1,0 +1,68 @@
+﻿{
+    "enquiry":  {
+                    "requestNo":  "97",
+                    "projectName":  "Price test",
+                    "createdBy":  "Mohan(personal)",
+                    "customerName":  "Almoayyed Air Conditioning",
+                    "clientName":  "Eagle Hills",
+                    "consultantName":  "MSCEB"
+                },
+    "customers":  [
+                      "Almoayyed Air Conditioning"
+                  ],
+    "activeCustomer":  "Almoayyed Air Conditioning",
+    "leadJob":  "BMS",
+    "jobs":  [
+                 {
+                     "itemName":  "BMS",
+                     "isLead":  true,
+                     "visible":  false,
+                     "editable":  false
+                 },
+                 {
+                     "itemName":  "Electrical",
+                     "isLead":  false,
+                     "visible":  false,
+                     "editable":  false
+                 }
+             ],
+    "options":  [
+                    {
+                        "id":  18,
+                        "name":  "Price",
+                        "sortOrder":  3,
+                        "itemName":  "Electrical"
+                    },
+                    {
+                        "id":  19,
+                        "name":  "Price",
+                        "sortOrder":  4,
+                        "itemName":  "BMS"
+                    }
+                ],
+    "values":  {
+                   "18_Electrical":  {
+                                         "OptionID":  18,
+                                         "EnquiryForItem":  "Electrical",
+                                         "Price":  678,
+                                         "UpdatedBy":  "mohan(work)",
+                                         "UpdatedAt":  "2026-01-13T18:09:55.697Z"
+                                     },
+                   "19_BMS":  {
+                                  "OptionID":  19,
+                                  "EnquiryForItem":  "BMS",
+                                  "Price":  2345,
+                                  "UpdatedBy":  "vignesh",
+                                  "UpdatedAt":  "2026-01-13T18:37:22.630Z"
+                              }
+               },
+    "access":  {
+                   "hasLeadAccess":  false,
+                   "visibleJobs":  [
+
+                                   ],
+                   "editableJobs":  [
+
+                                    ]
+               }
+}

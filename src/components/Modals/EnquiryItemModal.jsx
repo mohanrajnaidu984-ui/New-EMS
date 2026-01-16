@@ -9,7 +9,13 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
         DepartmentName: '',
         Status: 'Active',
         CommonMailIds: [],
-        CCMailIds: []
+        CCMailIds: [],
+        DivisionCode: '',
+        DepartmentCode: '',
+        Phone: '',
+        Address: '',
+        FaxNo: '',
+        CompanyLogo: ''
     });
 
     const [newCommonMail, setNewCommonMail] = useState('');
@@ -40,7 +46,13 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
                     DepartmentName: '',
                     Status: 'Active',
                     CommonMailIds: [],
-                    CCMailIds: []
+                    CCMailIds: [],
+                    DivisionCode: '',
+                    DepartmentCode: '',
+                    Phone: '',
+                    Address: '',
+                    FaxNo: '',
+                    CompanyLogo: ''
                 });
             }
             setNewCommonMail('');
@@ -88,6 +100,30 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
                 [field]: prev[field].filter(item => !selectedItems.includes(item))
             }));
             setSelectedItems([]);
+        }
+    };
+
+    const handleFileChange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const formDataObj = new FormData();
+        formDataObj.append('logo', file);
+
+        try {
+            const res = await fetch('/api/upload/logo', {
+                method: 'POST',
+                body: formDataObj
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setFormData(prev => ({ ...prev, CompanyLogo: data.filePath }));
+            } else {
+                alert('Failed to upload logo: ' + data.message);
+            }
+        } catch (err) {
+            console.error('Error uploading logo:', err);
+            alert('Error uploading logo');
         }
     };
 
@@ -154,6 +190,48 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
                             <option>Active</option>
                             <option>Inactive</option>
                         </select>
+                    </div>
+                </div>
+                <div className="row mb-2">
+                    <div className="col-md-3">
+                        <label className="form-label">Division Code</label>
+                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
+                            value={formData.DivisionCode || ''} onChange={(e) => handleChange('DivisionCode', e.target.value)} />
+                    </div>
+                    <div className="col-md-3">
+                        <label className="form-label">Department Code</label>
+                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
+                            value={formData.DepartmentCode || ''} onChange={(e) => handleChange('DepartmentCode', e.target.value)} />
+                    </div>
+                    <div className="col-md-3">
+                        <label className="form-label">Phone</label>
+                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
+                            value={formData.Phone || ''} onChange={(e) => handleChange('Phone', e.target.value)} />
+                    </div>
+                    <div className="col-md-3">
+                        <label className="form-label">Fax No</label>
+                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
+                            value={formData.FaxNo || ''} onChange={(e) => handleChange('FaxNo', e.target.value)} />
+                    </div>
+                </div>
+                <div className="row mb-2">
+                    <div className="col-md-12">
+                        <label className="form-label">Address</label>
+                        <textarea className="form-control" style={{ fontSize: '13px' }} rows="2"
+                            value={formData.Address || ''} onChange={(e) => handleChange('Address', e.target.value)}></textarea>
+                    </div>
+                </div>
+                <div className="row mb-2">
+                    <div className="col-md-6">
+                        <label className="form-label">Company Logo</label>
+                        <input type="file" className="form-control" style={{ fontSize: '13px' }} accept="image/*"
+                            onChange={handleFileChange} />
+                        {formData.CompanyLogo && (
+                            <div className="mt-1">
+                                <img src={`/${formData.CompanyLogo}`} alt="Logo Preview" style={{ height: '40px' }} />
+                                <small className="ms-2 text-muted">Uploaded</small>
+                            </div>
+                        )}
                     </div>
                 </div>
                 <div className="row mb-2">

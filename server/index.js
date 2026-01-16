@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-console.log('SERVER STARTING - ACK FIX APPLIED V2');
+console.log('SERVER STARTING - ACK');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -237,11 +237,44 @@ app.use((req, res, next) => {
 // Connect to Database
 connectDB();
 
+// Upload Logo (Defined early to avoid Router conflicts)
+app.post('/api/upload/logo', (req, res, next) => {
+    console.log('Hitting /api/upload/logo');
+    const uploadDir = path.join(__dirname, 'uploads', 'logos');
+    if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    next();
+}, upload.single('logo'), (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ message: 'No file uploaded' });
+        }
+        // Move file from uploads/ to uploads/logos/ because multer uploads to base dir
+        const oldPath = req.file.path;
+        const newPath = path.join(__dirname, 'uploads', 'logos', req.file.filename);
+        fs.renameSync(oldPath, newPath);
+
+        const relativePath = `uploads/logos/${req.file.filename}`;
+        res.json({ message: 'Logo uploaded', filePath: relativePath });
+    } catch (err) {
+        console.error('Error uploading logo:', err);
+        res.status(500).json({ message: 'Server error during upload' });
+    }
+});
+
 // New RAG & Chat API Routes
 const apiRoutes = require('./routes/api');
 const dashboardRoutes = require('./routes/dashboard'); // New Dashboard Routes
+const pricingRoutes = require('./routes/pricing'); // Pricing Module Routes
+const quotesRoutes = require('./routes/quotes'); // Quote Module Routes
 app.use('/api', apiRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/pricing', pricingRoutes);
+app.use('/api/quotes', quotesRoutes);
+const probabilityRoutes = require('./routes/probabilityRoutes');
+app.use('/api/probability', probabilityRoutes);
+
 
 // --- OCR Extraction Route ---
 app.post('/api/extract-contact-ocr', multerMemory.single('image'), async (req, res) => {
@@ -1335,6 +1368,8 @@ app.delete('/api/users/:id', async (req, res) => {
     }
 });
 
+
+
 // 4. Enquiry Items (Enquiry For)
 app.get('/api/enquiry-items', async (req, res) => {
     try {
@@ -1347,10 +1382,10 @@ app.get('/api/enquiry-items', async (req, res) => {
 });
 
 app.post('/api/enquiry-items', async (req, res) => {
-    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo } = req.body;
+    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo, DivisionCode, DepartmentCode, Phone, Address, FaxNo, CompanyLogo } = req.body;
     try {
-        const result = await sql.query`INSERT INTO Master_EnquiryFor (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo)
-                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${CommonMailIds}, ${CCMailIds}, ${RequestNo});
+        const result = await sql.query`INSERT INTO Master_EnquiryFor (ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo, DivisionCode, DepartmentCode, Phone, Address, FaxNo, CompanyLogo)
+                        VALUES (${ItemName}, ${CompanyName}, ${DepartmentName}, ${Status}, ${CommonMailIds}, ${CCMailIds}, ${RequestNo}, ${DivisionCode}, ${DepartmentCode}, ${Phone}, ${Address}, ${FaxNo}, ${CompanyLogo});
                         SELECT SCOPE_IDENTITY() AS ID;`;
         res.status(201).json({ message: 'Item added', id: result.recordset[0].ID });
     } catch (err) {
@@ -1361,9 +1396,9 @@ app.post('/api/enquiry-items', async (req, res) => {
 
 app.put('/api/enquiry-items/:id', async (req, res) => {
     const { id } = req.params;
-    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds } = req.body;
+    const { ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, DivisionCode, DepartmentCode, Phone, Address, FaxNo, CompanyLogo } = req.body;
     try {
-        await sql.query`UPDATE Master_EnquiryFor SET ItemName=${ItemName}, CompanyName=${CompanyName}, DepartmentName=${DepartmentName}, Status=${Status}, CommonMailIds=${CommonMailIds}, CCMailIds=${CCMailIds} WHERE ID=${id}`;
+        await sql.query`UPDATE Master_EnquiryFor SET ItemName=${ItemName}, CompanyName=${CompanyName}, DepartmentName=${DepartmentName}, Status=${Status}, CommonMailIds=${CommonMailIds}, CCMailIds=${CCMailIds}, DivisionCode=${DivisionCode}, DepartmentCode=${DepartmentCode}, Phone=${Phone}, Address=${Address}, FaxNo=${FaxNo}, CompanyLogo=${CompanyLogo} WHERE ID=${id}`;
         res.json({ message: 'Item updated' });
     } catch (err) {
         console.error(err);

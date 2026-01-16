@@ -3,6 +3,10 @@ import EnquiryForm from './Enquiry/EnquiryForm';
 import SearchEnquiry from './Enquiry/SearchEnquiry';
 import Dashboard from './Dashboard/Dashboard';
 import PricingForm from './Pricing/PricingForm';
+import QuoteForm from './Quote/QuoteForm';
+import ProbabilityForm from './Probability/ProbabilityForm';
+
+import SalesTarget from './SalesTarget/SalesTarget';
 
 const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
     return (
@@ -19,16 +23,13 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
                     <PricingForm />
                 )}
                 {activeTab === 'Quote' && (
-                    <div className="alert alert-info">
-                        <i className="bi bi-info-circle me-2"></i>
-                        Quote module coming soon...
-                    </div>
+                    <QuoteForm />
                 )}
                 {activeTab === 'Probability' && (
-                    <div className="alert alert-info">
-                        <i className="bi bi-info-circle me-2"></i>
-                        Probability module coming soon...
-                    </div>
+                    <ProbabilityForm />
+                )}
+                {activeTab === 'Sales Target' && (
+                    <SalesTarget />
                 )}
                 {activeTab === 'Reports' && (
                     <div className="alert alert-info">

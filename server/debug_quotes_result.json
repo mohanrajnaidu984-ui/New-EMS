@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-01-15T23:04:28.420Z",
+  "result": [
+    {
+      "RequestNo": "97",
+      "QuoteRefsStructured": "[{\"QuoteNumber\":\"AAC\\/97\\/1-R0\",\"ToName\":\"Almoayyed Air Conditioning\"},{\"QuoteNumber\":\"AAC\\/97\\/1-R1\",\"ToName\":\"Almoayyed Air Conditioning\"},{\"QuoteNumber\":\"AAC\\/97\\/2-R0\",\"ToName\":\"Genpact\"},{\"QuoteNumber\":\"AAC\\/97\\/2-R1\",\"ToName\":\"Genpact\"},{\"QuoteNumber\":\"AAC\\/97\\/1-R2\",\"ToName\":\"Almoayyed Air Conditioning\"}]"
+    }
+  ]
+}

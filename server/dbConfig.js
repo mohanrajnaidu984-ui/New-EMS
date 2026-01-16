@@ -26,4 +26,4 @@ const connectDB = async () => {
     }
 };
 
-module.exports = { sql, connectDB };
+module.exports = { sql, connectDB, dbConfig: config };

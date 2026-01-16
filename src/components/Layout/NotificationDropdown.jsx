@@ -70,7 +70,7 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
         if (diffInSeconds < 60) return 'Just now';
         if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
         if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
-        return date.toLocaleDateString();
+        return format(date, 'dd-MMM-yyyy');
     };
 
     const handleClearAll = async (e) => {

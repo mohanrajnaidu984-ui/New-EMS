@@ -13,6 +13,7 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^0.554.0",
     "react": "^19.2.0",
+    "react-datepicker": "^9.1.0",
     "react-dom": "^19.2.0",
     "react-draggable": "^4.5.0",
     "react-select": "^5.10.2",

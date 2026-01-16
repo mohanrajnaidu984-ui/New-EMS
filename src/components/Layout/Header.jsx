@@ -25,6 +25,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
     { id: 'Pricing', label: 'Pricing', icon: 'bi-calculator' },
     { id: 'Quote', label: 'Quote', icon: 'bi-file-earmark-text' },
     { id: 'Probability', label: 'Probability', icon: 'bi-graph-up' },
+    { id: 'Sales Target', label: 'Sales Target', icon: 'bi-bullseye' },
     { id: 'Reports', label: 'Reports', icon: 'bi-file-earmark-bar-graph' }
   ];
 
@@ -36,10 +37,15 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
 
   const visibleItems = navItems.filter(item => {
     if (item.id === 'Dashboard') return true;
+    // Grant Admin access to everything
+    // Note: Check if 'Sales Target' should be restricted
     if (userRoles.includes('admin')) return true;
+
     if (item.id === 'Enquiry' && userRoles.includes('enquiry')) return true;
     if (item.id === 'Quote' && userRoles.includes('quotation')) return true;
-    if ((item.id === 'Pricing' || item.id === 'Probability') && userRoles.includes('sales')) return true;
+    // Sales roles access Pricing, Probability and Sales Target
+    if ((item.id === 'Pricing' || item.id === 'Probability' || item.id === 'Sales Target') && userRoles.includes('sales')) return true;
+
     return false;
   });
 

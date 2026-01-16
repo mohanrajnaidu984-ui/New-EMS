@@ -1,0 +1,22 @@
+                                    </tr>
+                                                        {groups[groupName].map(option => (
+                                                            <tr key={option.id} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                                                                <td style={{ padding: '12px 16px', fontWeight: '500', color: '#1e293b' }}>{option.name}</td>
+                                                                {visibleJobs.map((job, idx) => {
+                                                                    // Column Consolidation Logic:
+                                                                    // If this group is a Sub-Job group (not 'Lead Job / General'),
+                                                                    // we want to display its value in the FIRST column (conceptually 'Lead Job' slot)
+                                                                    // to keep it aligned in a single vertical list.
+
+                                                                    const isGroupLead = groupName === 'Lead Job / General';
+                                                                    let targetJob = job;
+                                                                    let shouldRender = true;
+
+                                                                    if (!isGroupLead) {
+                                                                        // Sub-Job Group
+                                                                        if (idx === 0) {
+                                                                            // Hijack First Column to show this Group's Value
+                                                                            const groupJob = visibleJobs.find(j => j.itemName === groupName);
+                                                                            if (groupJob) {
+                                                                                targetJob = groupJob;
+                              

@@ -1,5 +1,7 @@
 import React, { useRef } from 'react';
 
+import { format, parse, isValid } from 'date-fns';
+
 const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) => {
     const datePickerRef = useRef(null);
 
@@ -8,11 +10,8 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
         if (!dateStr) return '';
         try {
             const date = new Date(dateStr);
-            const day = String(date.getDate()).padStart(2, '0');
-            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            const month = monthNames[date.getMonth()];
-            const year = date.getFullYear();
-            return `${day}-${month}-${year}`;
+            if (!isValid(date)) return '';
+            return format(date, 'dd-MMM-yyyy');
         } catch (e) {
             return '';
         }
@@ -22,18 +21,11 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
     const parseDateFromDisplay = (displayStr) => {
         if (!displayStr) return '';
         try {
-            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            const parts = displayStr.split('-');
-            if (parts.length !== 3) return '';
-
-            const day = parts[0];
-            const monthIndex = monthNames.indexOf(parts[1]);
-            const year = parts[2];
-
-            if (monthIndex === -1) return '';
-
-            const month = String(monthIndex + 1).padStart(2, '0');
-            return `${year}-${month}-${day}`;
+            const parsedDate = parse(displayStr, 'dd-MMM-yyyy', new Date());
+            if (isValid(parsedDate)) {
+                return format(parsedDate, 'yyyy-MM-dd');
+            }
+            return '';
         } catch (e) {
             return '';
         }

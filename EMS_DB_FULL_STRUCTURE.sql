@@ -1,4 +1,4 @@
--- Auto-generated Schema Export --
+cd C:\Users\Vignesh\Downloads\New-EMS\New-EMS-Updated-- Auto-generated Schema Export --
 -- WARNING: THIS SCRIPT WILL WIPE ALL DATA IN THE DATABASE --
 -- IT IS INTENDED FOR A CLEAN REBUILD --
 

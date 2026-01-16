@@ -1,0 +1,54 @@
+                        if (pData.options && pData.values) {
+                            // Grouping structure: { 'JobName': { total: 0, items: [] } }
+                            const groups = {};
+
+                            pData.options.forEach(opt => {
+                                // 1. Visibility Filter
+                                let isVisible = false;
+                                if (pData.access?.hasLeadAccess) {
+                                    isVisible = true; 
+                                } else if (opt.itemName && pData.access?.editableJobs?.includes(opt.itemName)) {
+                                    isVisible = true;
+                                }
+                                if (!isVisible) return;
+
+                                // 2. Calculate Total
+                                let optionTotal = 0;
+                                if (pData.jobs) {
+                                    pData.jobs.forEach(job => {
+                                        const key = `${opt.id}_${job.itemName}`;
+                                        const val = pData.values[key];
+                                        const price = val ? parseFloat(val.Price || 0) : 0;
+                                        optionTotal += price;
+                                    });
+                                }
+
+                                // 3. Zero Value Filter
+                                if (optionTotal <= 0) return;
+
+                                // 4. Grouping
+                                const groupName = opt.itemName || pData.leadJob || 'General';
+                                if (!groups[groupName]) {
+                                    groups[groupName] = { total: 0, items: [] };
+                                }
+                                groups[groupName].items.push({ name: opt.name, total: optionTotal });
+                                groups[groupName].total += optionTotal;
+
+                                userHasEnteredPrice = true;
+                            });
+
+                            // Convert to array
+                            const sortedSummary = [];
+                            const leadName = pData.leadJob || 'General';
+                            if (groups[leadName]) {
+                                sortedSummary.push({ name: leadName, ...groups[leadName] });
+                                delete groups[leadName];
+                            }
+                            Object.keys(groups).forEach(name => {
+                                sortedSummary.push({ name: name, ...groups[name] });
+                            });
+
+                            setPricingSummary(sortedSummary);
+                        } else {
+                            setPricingSummary([]);
+                        }
