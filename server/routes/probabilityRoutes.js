@@ -91,12 +91,18 @@ router.get('/list', async (req, res) => {
 
         // Filter Logic
         if (mode === 'Pending') {
-            // Logic: Include items that are NOT in final states OR are in 'Won'/'Lost'/'Follow-up' but missing probability details.
-            // AND ensure at least one quote was submitted 5 days ago or more.
+            // Show only enquiries that:
+            // 1. Have no status OR status is 'Pending' or 'Enquiry' OR
+            // 2. Have status Won/Lost/FollowUp but are missing probability details
+            // Exclude: Cancelled, OnHold, Retendered, and FollowUp/Won/Lost with probability set
             query += `
                 AND (
-                    E.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'Follow-up')
-                    OR (E.Status IN('Won', 'Lost', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
+                    (E.Status IS NULL OR E.Status = '' OR E.Status = 'Pending' OR E.Status = 'Enquiry')
+                    OR (E.Status IN('Won', 'Lost', 'FollowUp', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
+                )
+                AND NOT (
+                    E.Status IN('Cancelled', 'OnHold', 'Retendered')
+                    OR (E.Status IN('Won', 'Lost', 'FollowUp', 'Follow-up') AND E.ProbabilityOption IS NOT NULL AND E.ProbabilityOption <> '')
                 )
                 AND EXISTS(
                     SELECT 1 FROM EnquiryQuotes Q 
@@ -113,7 +119,7 @@ router.get('/list', async (req, res) => {
         } else if (mode === 'Cancelled') {
             query += ` AND E.Status = 'Cancelled'`; // Assuming 'Cancelled' is mapped
         } else if (mode === 'FollowUp') {
-            query += ` AND E.Status = 'Follow-up'`;
+            query += ` AND (E.Status = 'Follow-up' OR E.Status = 'FollowUp')`;
         } else if (mode === 'Retendered') {
             // Assuming 'Retendered' is tracked via RetenderDate or specific Status if exists?
             // Since user asked for "Retendered details", let's assume it's a status or we check RetenderDate existence

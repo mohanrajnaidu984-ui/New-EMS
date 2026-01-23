@@ -119,7 +119,7 @@ router.get('/:requestNo', async (req, res) => {
         let options = [];
         try {
             const optionsResult = await sql.query`
-                SELECT ID, OptionName, SortOrder, ItemName, CustomerName
+                SELECT ID, OptionName, SortOrder, ItemName, CustomerName, LeadJobName
                 FROM EnquiryPricingOptions 
                 WHERE RequestNo = ${requestNo}
                 ORDER BY SortOrder ASC, ID ASC
@@ -135,7 +135,7 @@ router.get('/:requestNo', async (req, res) => {
         let values = [];
         try {
             const valuesResult = await sql.query`
-                SELECT OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, UpdatedAt, CustomerName
+                SELECT OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, UpdatedAt, CustomerName, LeadJobName
                 FROM EnquiryPricingValues 
                 WHERE RequestNo = ${requestNo}
             `;
@@ -146,12 +146,12 @@ router.get('/:requestNo', async (req, res) => {
             throw err;
         }
 
-        // Create value lookup map
-        const valueMap = {};
-        values.forEach(v => {
-            const key = v.EnquiryForID ? `${v.OptionID}_${v.EnquiryForID}` : `${v.OptionID}_${v.EnquiryForItem}`;
-            valueMap[key] = v;
-        });
+        // Create value lookup map -> REMOVED (Sending raw array to frontend to handle multi-customer collision)
+        // const valueMap = {};
+        // values.forEach(v => {
+        //     const key = v.EnquiryForID ? `${v.OptionID}_${v.EnquiryForID}` : `${v.OptionID}_${v.EnquiryForItem}`;
+        //     valueMap[key] = v;
+        // });
 
 
 
@@ -202,6 +202,23 @@ router.get('/:requestNo', async (req, res) => {
                     }
                 }
             });
+
+            // SMART SCOPE EXPANSION:
+            // If user is assigned to "BMS" (Clean Name), they should also see "L2 - BMS" (Clean Name: BMS).
+            // This handles split scopes across multiple Lead Jobs.
+            const cleanUserScopes = new Set(userJobItems.map(name =>
+                name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            ));
+
+            jobs.forEach(job => {
+                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                if (cleanUserScopes.has(cleanName)) {
+                    if (!userJobItems.includes(job.ItemName)) {
+                        console.log(`Pricing API: Auto-granting access to '${job.ItemName}' based on matching scope '${cleanName}'`);
+                        userJobItems.push(job.ItemName);
+                    }
+                }
+            });
         }
 
         // Determine visible and editable jobs
@@ -218,18 +235,41 @@ router.get('/:requestNo', async (req, res) => {
             // 1. User sees their own jobs (Self)
             const selfJobs = userJobItems;
 
-            // 2. User sees DIRECT children of their own jobs
-            const directChildJobs = jobs
-                .filter(j => {
-                    const parentMatch = j.ParentItemName && selfJobs.includes(j.ParentItemName);
-                    return parentMatch;
-                })
-                .map(j => j.ItemName);
+            // 2. User sees ALL Descendants (Recursive)
+            const getAllDescendants = (parentNames, allJobs) => {
+                let descendants = [];
+                let queue = [...parentNames];
+                let processed = new Set();
 
-            console.log('Direct Child Jobs:', directChildJobs);
+                while (queue.length > 0) {
+                    const currentName = queue.pop();
+                    if (processed.has(currentName)) continue;
+                    processed.add(currentName);
+
+                    // Find children of current
+                    const children = allJobs.filter(j => j.ParentItemName === currentName);
+                    children.forEach(c => {
+                        descendants.push(c.ItemName);
+                        queue.push(c.ItemName);
+                    });
+                }
+                return descendants;
+            };
+
+            const descendantJobs = getAllDescendants(selfJobs, jobs);
+
+            console.log('Descendant Jobs:', descendantJobs);
 
             // Combine and Dedup
-            visibleJobs = [...new Set([...selfJobs, ...directChildJobs])];
+            visibleJobs = [...new Set([...selfJobs, ...descendantJobs])];
+
+            // FIX: If user is the Creator (Enquiry Owner), they should see EVERYTHING, including parallel roots (L1, L2, etc.)
+            // The previous logic restricted them to just selfJobs (LeadJob) + children, hiding L2.
+            const isCreator = enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim();
+            if (isCreator) {
+                console.log('User is Creator -> Granting Full Visibility');
+                visibleJobs = jobs.map(j => j.ItemName);
+            }
 
             // Edit: Only Self
             // FIX: If user is Creator (Lead Link), restrict edit strictly to Lead Job to prevent Civil editing Sub-jobs
@@ -278,9 +318,11 @@ router.get('/:requestNo', async (req, res) => {
                 name: o.OptionName,
                 sortOrder: o.SortOrder,
                 itemName: o.ItemName,
-                customerName: o.CustomerName // Expose CustomerName
+                itemName: o.ItemName,
+                customerName: o.CustomerName, // Expose CustomerName
+                leadJobName: o.LeadJobName    // Expose LeadJobName
             })),
-            values: valueMap,
+            values: values,
             access: {
                 hasLeadAccess: userHasLeadAccess,
                 visibleJobs: visibleJobs,
@@ -297,44 +339,41 @@ router.get('/:requestNo', async (req, res) => {
 // POST /api/pricing/option - Add a new pricing option (row)
 router.post('/option', async (req, res) => {
     try {
-        const { requestNo, optionName, itemName, customerName } = req.body; // Accept customerName
+        const { requestNo, optionName, itemName, customerName, leadJobName } = req.body; // Accept leadJobName (Step 1013)
 
         if (!requestNo || !optionName) {
             return res.status(400).json({ error: 'RequestNo and optionName are required' });
         }
 
-        // Existence Check: prevent duplicates for the same name+item+customer
-        const existingResult = await sql.query`
-            SELECT ID, OptionName, SortOrder, ItemName, CustomerName
-            FROM EnquiryPricingOptions
-            WHERE RequestNo = ${requestNo}
-            AND OptionName = ${optionName}
-            AND (ItemName = ${itemName || null} OR (ItemName IS NULL AND ${itemName || null} IS NULL))
-            AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
-        `;
-
-        if (existingResult.recordset.length > 0) {
-            return res.json({
-                success: true,
-                option: existingResult.recordset[0],
-                alreadyExisted: true
-            });
-        }
-
-        // Get max sort order (Filter by CustomerName)
-        const maxResult = await sql.query`
-            SELECT ISNULL(MAX(SortOrder), 0) + 1 as NextOrder 
-            FROM EnquiryPricingOptions 
-            WHERE RequestNo = ${requestNo}
-            AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
-        `;
-        const sortOrder = maxResult.recordset[0].NextOrder;
-
-        // Insert new option with ItemName and CustomerName
+        // Atomic Insert with LeadJob scoped uniqueness
         const result = await sql.query`
-            INSERT INTO EnquiryPricingOptions (RequestNo, OptionName, SortOrder, ItemName, CustomerName)
-            OUTPUT INSERTED.ID, INSERTED.OptionName, INSERTED.SortOrder, INSERTED.ItemName, INSERTED.CustomerName
-            VALUES (${requestNo}, ${optionName}, ${sortOrder}, ${itemName || null}, ${customerName || null})
+            IF NOT EXISTS (
+                SELECT 1 FROM EnquiryPricingOptions 
+                WHERE RequestNo = ${requestNo}
+                AND OptionName = ${optionName}
+                AND (ItemName = ${itemName || null} OR (ItemName IS NULL AND ${itemName || null} IS NULL))
+                AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
+                AND (LeadJobName = ${leadJobName || null} OR (LeadJobName IS NULL AND ${leadJobName || null} IS NULL))
+            )
+            BEGIN
+                INSERT INTO EnquiryPricingOptions (RequestNo, OptionName, SortOrder, ItemName, CustomerName, LeadJobName)
+                OUTPUT INSERTED.ID, INSERTED.OptionName, INSERTED.SortOrder, INSERTED.ItemName, INSERTED.CustomerName, INSERTED.LeadJobName
+                VALUES (${requestNo}, ${optionName}, 
+                        (SELECT ISNULL(MAX(SortOrder), 0) + 1 FROM EnquiryPricingOptions WHERE RequestNo = ${requestNo} AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))),
+                        ${itemName || null}, 
+                        ${customerName || null},
+                        ${leadJobName || null})
+            END
+            ELSE
+            BEGIN
+                SELECT ID, OptionName, SortOrder, ItemName, CustomerName, LeadJobName
+                FROM EnquiryPricingOptions 
+                WHERE RequestNo = ${requestNo}
+                AND OptionName = ${optionName}
+                AND (ItemName = ${itemName || null} OR (ItemName IS NULL AND ${itemName || null} IS NULL))
+                AND (CustomerName = ${customerName || null} OR (CustomerName IS NULL AND ${customerName || null} IS NULL))
+                AND (LeadJobName = ${leadJobName || null} OR (LeadJobName IS NULL AND ${leadJobName || null} IS NULL))
+            END
         `;
 
         res.json({
@@ -351,11 +390,12 @@ router.post('/option', async (req, res) => {
 // PUT /api/pricing/value - Update a pricing cell value
 router.put('/value', async (req, res) => {
     try {
-        const { requestNo, optionId, enquiryForItem, enquiryForId, price, updatedBy, customerName } = req.body;
+        const { requestNo, optionId, enquiryForItem, enquiryForId, price, updatedBy, customerName, leadJobName } = req.body;
 
         if (!requestNo || !optionId) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
+
 
         const priceValue = parseFloat(price) || 0;
 
@@ -395,14 +435,15 @@ router.put('/value', async (req, res) => {
             await sql.query`
                 UPDATE EnquiryPricingValues 
                 SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = GETDATE(),
-                    EnquiryForID = ${enquiryForId || null} -- Ensure ID is linked if we're upgrading legacy row logic?
+                    EnquiryForID = ${enquiryForId || null},
+                    LeadJobName = ${leadJobName || null} -- Update Lead Job Name (Step 1078)
                 WHERE ID = ${recordId}
             `;
         } else {
             // Insert
             await sql.query`
-                INSERT INTO EnquiryPricingValues (RequestNo, OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, CustomerName)
-                VALUES (${requestNo}, ${optionId}, ${enquiryForItem}, ${enquiryForId || null}, ${priceValue}, ${updatedBy}, ${customerName || null})
+                INSERT INTO EnquiryPricingValues (RequestNo, OptionID, EnquiryForItem, EnquiryForID, Price, UpdatedBy, CustomerName, LeadJobName)
+                VALUES (${requestNo}, ${optionId}, ${enquiryForItem}, ${enquiryForId || null}, ${priceValue}, ${updatedBy}, ${customerName || null}, ${leadJobName || null})
             `;
         }
 

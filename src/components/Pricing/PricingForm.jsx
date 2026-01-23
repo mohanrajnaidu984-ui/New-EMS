@@ -132,18 +132,43 @@ const PricingForm = () => {
             if (res.ok) {
                 const data = await res.json();
 
+                // SANITIZATION: Globally Trim Customer Names to prevent mismatch (Step 944)
+                if (data.customers) data.customers = data.customers.map(c => c.trim());
+                if (data.activeCustomer) data.activeCustomer = data.activeCustomer.trim();
+                // Note: data.enquiry.customerName might be CSV, don't trim internal commas here, handled by split logic
+                if (data.extraCustomers) data.extraCustomers = data.extraCustomers.map(c => c.trim());
+                if (data.options) data.options.forEach(o => { if (o.customerName) o.customerName = o.customerName.trim(); });
+                // Note: data.values Sanitization is redundant with line 240 logic but safe to keep for consistency
+                if (Array.isArray(data.values)) data.values.forEach(v => { if (v.CustomerName) v.CustomerName = v.CustomerName.trim(); });
+
                 // AUTO-PROVISION TABS (Pricing Sheets)
                 // Ensure ALL linked customers (Main + Extra) have pricing tabs.
                 // If they are missing, auto-create "Base Price" for them.
                 const linkedCustomers = [
                     ...(data.enquiry.customerName || '').split(','),
                     ...(data.extraCustomers || []).flatMap(c => (c || '').split(','))
-                ].map(s => s.trim()).filter(Boolean);
+                ].map(s => s.trim()).filter(s => s && s.length > 0); // Strict filter for empty strings
 
                 const existingPricingCustomers = data.customers || [];
 
-                // Find customers who need initialization
-                const customersToInit = linkedCustomers.filter(c => !existingPricingCustomers.includes(c));
+                // Find customers who need initialization (Either completely new, OR missing specific Job Options)
+                const customersToInit = linkedCustomers.filter(c => {
+                    // Check 1: Is customer fully missing?
+                    if (!existingPricingCustomers.includes(c)) return true;
+
+                    // Check 2: Does customer have 'Base Price' for ALL jobs?
+                    if (data.jobs && data.options) {
+                        const distinctItemNames = [...new Set(data.jobs.map(j => j.itemName))];
+                        const customerOptions = data.options.filter(o => o.customerName === c);
+
+                        // If any job is missing a 'Base Price' option for this customer, we need to init
+                        const missingJob = distinctItemNames.some(jobName =>
+                            !customerOptions.some(o => o.itemName === jobName && o.name === 'Base Price')
+                        );
+                        return missingJob;
+                    }
+                    return false;
+                });
 
                 if (customersToInit.length > 0) {
                     // Start Provisioning
@@ -155,7 +180,13 @@ const PricingForm = () => {
                         const distinctItemNames = [...new Set(allJobs.map(j => j.itemName))];
 
                         customersToInit.forEach(cName => {
-                            distinctItemNames.forEach(itemName => {
+                            // Filter to Find ONLY the jobs that are missing Base Price for this customer
+                            const existingOps = data.options.filter(o => o.customerName === cName && o.name === 'Base Price');
+                            const existingJobNames = existingOps.map(o => o.itemName);
+
+                            const missingItems = distinctItemNames.filter(jobName => !existingJobNames.includes(jobName));
+
+                            missingItems.forEach(itemName => {
                                 const payload = {
                                     requestNo: requestNo,
                                     optionName: 'Base Price',
@@ -203,43 +234,68 @@ const PricingForm = () => {
                     }
                 }
 
-                // --- KEY MIGRATION: Ensure all values use ID-based keys ---
-                const remappedValues = {};
-                const legacyEntries = [];
+                // --- KEY MIGRATION & CUSTOMER GROUPING ---
+                // Process Raw Array into Nested Map: [CustomerName][Key] = Value
+                const groupedValues = {}; // { 'Nass': { '204_280': ... }, 'Ahmed': { ... } }
 
-                if (data.values && data.jobs) {
-                    // First pass: Process strict ID-based keys
-                    Object.entries(data.values).forEach(([key, val]) => {
-                        const firstUnderscore = key.indexOf('_');
-                        if (firstUnderscore === -1) return;
+                if (Array.isArray(data.values) && data.jobs) {
+                    data.values.forEach(v => {
+                        const rawCust = v.CustomerName || data.enquiry.customerName || 'Main';
+                        const cust = rawCust.trim(); // Ensure clean customer name match (Step 937)
 
-                        const suffix = key.substring(firstUnderscore + 1);
-                        const jobById = data.jobs.find(j => String(j.id) === suffix);
+                        if (!groupedValues[cust]) groupedValues[cust] = {};
 
-                        if (jobById) {
-                            remappedValues[key] = val; // High priority: Explicit ID match
-                        } else {
-                            legacyEntries.push([key, val]); // Low priority: Name match
+                        // Derive Keys
+                        // 1. Strict ID Key
+                        if (v.EnquiryForID) {
+                            const idKey = `${v.OptionID}_${v.EnquiryForID}`;
+                            groupedValues[cust][idKey] = v;
+                        }
+
+                        // 2. Name / Legacy Keys (Backfill)
+                        if (v.EnquiryForItem) {
+                            // Try to find job by ID first if possible
+                            let job = null;
+                            if (v.EnquiryForID) job = data.jobs.find(j => j.id == v.EnquiryForID);
+
+                            if (job) {
+                                // We have Job Object, generate robustness keys
+                                const nameKey = `${v.OptionID}_${job.itemName}`;
+                                groupedValues[cust][nameKey] = v;
+
+                                const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                if (cleanName !== job.itemName) {
+                                    const cleanKey = `${v.OptionID}_${cleanName}`;
+                                    groupedValues[cust][cleanKey] = v;
+                                }
+                            } else {
+                                // Legacy/Orphan Value (No Job ID linked, or Job missing)
+                                // Just use stored ItemName
+                                const nameKey = `${v.OptionID}_${v.EnquiryForItem}`;
+                                groupedValues[cust][nameKey] = v;
+                            }
                         }
                     });
+                }
 
-                    // Second pass: Process legacy name-based keys
-                    legacyEntries.forEach(([key, val]) => {
-                        const firstUnderscore = key.indexOf('_');
-                        const optId = key.substring(0, firstUnderscore);
-                        const suffix = key.substring(firstUnderscore + 1);
+                // Store global map
+                data.allValues = groupedValues;
 
-                        const matchingJobs = data.jobs.filter(j => j.itemName === suffix);
-                        matchingJobs.forEach(mj => {
-                            const newKey = `${optId}_${mj.id}`;
-                            // Only set if not already defined (ID-based value takes precedence)
-                            if (!remappedValues[newKey]) {
-                                remappedValues[newKey] = val;
-                            }
-                        });
+                // Set active values for current view
+                const activeCust = data.activeCustomer || (data.customers && data.customers[0]);
+                data.values = groupedValues[activeCust] || {};
+
+
+
+                // Deduplicate Options (Backend sometimes sends duplicates due to joins)
+                if (data.options) {
+                    const seen = new Set();
+                    data.options = data.options.filter(o => {
+                        const key = `${o.name}|${o.itemName}|${o.customerName}`;
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
                     });
-
-                    data.values = remappedValues;
                 }
 
                 // Cleanup: Filter out malformed customer names (containing commas) from display
@@ -256,15 +312,33 @@ const PricingForm = () => {
                     setSelectedCustomer(data.activeCustomer || '');
                 }
 
-                // Initialize state values using ID-based keys
+                // Initialize state values using ID-based keys with Legacy Fallback
                 const initialValues = {};
                 if (data.options && data.jobs) {
                     data.options.forEach(opt => {
                         data.jobs.forEach(job => {
-                            const key = `${opt.id}_${job.id}`; // Use ID
-                            const existing = data.values ? data.values[key] : null;
+                            const idKey = `${opt.id}_${job.id}`; // Strict ID Key
+
+                            // Try strict match first
+                            let existing = data.values ? data.values[idKey] : null;
+
+                            // 4. Update initialValues to try Clean Name Match (Step 869)
+                            const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+
+                            // Try Name-based key (Legacy)
+                            if (!existing && data.values) {
+                                const nameKey = `${opt.id}_${job.itemName}`;
+                                existing = data.values[nameKey];
+                            }
+
+                            // Try Clean Name-based key (Fallback)
+                            if (!existing && data.values && cleanName !== job.itemName) {
+                                const cleanKey = `${opt.id}_${cleanName}`;
+                                existing = data.values[cleanKey];
+                            }
+
                             if (existing && existing.Price && parseFloat(existing.Price) > 0) {
-                                initialValues[key] = existing.Price;
+                                initialValues[idKey] = existing.Price;
                             }
                         });
                     });
@@ -282,7 +356,10 @@ const PricingForm = () => {
                         (!hasPrefix || /^L\d+\s-\s/.test(j.itemName))
                     );
                     if (roots.length > 0) {
-                        setSelectedLeadId(roots[0].id);
+                        // Only auto-select if not already set or invalid
+                        if (!selectedLeadId || !data.jobs.find(j => j.id === selectedLeadId)) {
+                            setSelectedLeadId(roots[0].id);
+                        }
                     }
                 }
             }
@@ -311,11 +388,16 @@ const PricingForm = () => {
         // Always send the active customer name to ensure specific binding
         const custName = explicitCustomer || selectedCustomer;
 
+        // Determine Lead Job Context (Step 1013)
+        const activeLeadJob = pricingData.jobs.find(j => j.id == selectedLeadId);
+        const leadJobName = activeLeadJob ? activeLeadJob.itemName : null;
+
         const payload = {
             requestNo: pricingData.enquiry.requestNo,
             optionName: optionName.trim(),
             itemName: targetItemName,
-            customerName: custName
+            customerName: custName,
+            leadJobName: leadJobName // Bind Option to current Lead Job Scope
         };
 
         try {
@@ -419,7 +501,8 @@ const PricingForm = () => {
                 enquiryForItem: job.itemName, // Send Name for legacy compat/logging
                 enquiryForId: job.id,         // Send ID for strict linking
                 price: price,
-                customerName: opt.customerName // Include Customer Name
+                customerName: opt.customerName, // Include Customer Name
+                leadJobName: opt.leadJobName    // Include Lead Job Name (Step 1078 - from Option)
             });
         });
 
@@ -452,7 +535,8 @@ const PricingForm = () => {
                         enquiryForId: item.enquiryForId, // NEW FIELD
                         price: item.price,
                         updatedBy: userName,
-                        customerName: item.customerName // Use item-specific customer name
+                        customerName: item.customerName, // Use item-specific customer name
+                        leadJobName: item.leadJobName    // Use item-specific lead job name (Step 1078)
                     })
                 });
                 promises.push(p);
@@ -502,22 +586,92 @@ const PricingForm = () => {
     const visibleJobs = pricingData ? pricingData.jobs.filter(j => j.visible !== false) : [];
 
     // Filter Options based on Custom Scope Logic
-    const filteredOptions = pricingData ? pricingData.options.filter(o => {
+    // Filter Options based on Custom Scope Logic
+    const filteredOptions = React.useMemo(() => {
+        if (!pricingData || !pricingData.options) return [];
 
+        const seenKeys = new Set();
+        const editable = pricingData.access.editableJobs || [];
 
-        // Sub-Job User:
-        // Strictly show ONLY options scoped to their editable jobs.
-        // Hide Global/Null options to provide "fresh" structure.
-        const isScopeMatch = pricingData.access.hasLeadAccess || (o.itemName && pricingData.access.editableJobs.includes(o.itemName));
+        // Calculate Scope of Active Lead Job (for Filtering)
+        let leadScope = new Set();
+        let activeLeadName = null;
 
-        // Strict Customer Match (Option must belong to the active tab)
-        // Fallback: If option has no customerName (legacy), maybe show it? Better to hide to force cleanliness.
-        const isCustomerMatch = o.customerName === selectedCustomer;
+        if (selectedLeadId && pricingData.jobs) {
+            const leadJob = pricingData.jobs.find(j => j.id == selectedLeadId);
+            if (leadJob) {
+                activeLeadName = leadJob.itemName;
 
-        if (isScopeMatch && isCustomerMatch) return true;
+                // Recurse to find all children keys
+                const getChildren = (pId) => {
+                    const children = pricingData.jobs.filter(j => j.parentId === pId);
+                    children.forEach(c => {
+                        leadScope.add(c.itemName);
+                        getChildren(c.id);
+                    });
+                };
+                leadScope.add(leadJob.itemName);
+                getChildren(leadJob.id);
+            }
+        }
 
-        return false;
-    }) : [];
+        // Helper to check if option belongs to a child of an editable job
+        const isRelatedToEditable = (optItemName) => {
+            if (!optItemName) return false;
+            // 1. Direct Match
+            if (editable.includes(optItemName)) return true;
+
+            // 2. Child Match (e.g. User has 'Electrical', Option is 'BMS')
+            // Find job object for the option's item name
+            const optJob = pricingData.jobs.find(j => j.itemName === optItemName);
+            if (!optJob) return false;
+
+            // Check if its parent is in editable list
+            if (optJob.parentId) {
+                const parentJob = pricingData.jobs.find(p => p.id === optJob.parentId);
+                if (parentJob && editable.includes(parentJob.itemName)) return true;
+            }
+
+            // 3. Special Case: Electrical <-> BMS
+            if (optItemName.includes('BMS') && editable.some(e => e.includes('Electrical'))) return true;
+
+            return false;
+        };
+
+        return pricingData.options.filter(o => {
+            // LEAD JOB SCOPING (Step 1013)
+            // Ensure option belongs to the currently viewed Lead Job logic
+            if (activeLeadName) {
+                if (o.leadJobName) {
+                    // Strict Match (New Data)
+                    if (o.leadJobName !== activeLeadName) return false;
+                } else {
+                    // Legacy Fallback: Tree Match
+                    // If option item is NOT in the current Lead Job's hierarchy, hide it
+                    // This prevents "BMS" from L1 appearing in L2 if L2 matches "BMS" 
+                    // (Actually, if Shared Sub-Job, it might legitimately appear? 
+                    //  User wants SEPARATION. So we enforce strict tree.)
+                    if (o.itemName && !leadScope.has(o.itemName)) return false;
+                }
+            }
+
+            // Sub-Job User: Strictly show ONLY options scoped to their editable jobs OR related children.
+            const isScopeMatch = pricingData.access.hasLeadAccess || isRelatedToEditable(o.itemName);
+
+            // Strict Customer Match (Option must belong to the active tab)
+            const isCustomerMatch = o.customerName === selectedCustomer;
+
+            if (isScopeMatch && isCustomerMatch) {
+                // Deduplicate for Display (Double safety)
+                const dedupKey = `${o.name}-${o.itemName}-${o.customerName}-${o.leadJobName || 'Legacy'}`;
+                if (seenKeys.has(dedupKey)) return false;
+                seenKeys.add(dedupKey);
+                return true;
+            }
+
+            return false;
+        });
+    }, [pricingData, selectedCustomer, selectedLeadId]);
 
     return (
         <div style={{ padding: '20px', background: '#f5f7fa', minHeight: 'calc(100vh - 80px)' }}>
@@ -965,13 +1119,7 @@ const PricingForm = () => {
                                 // 3. Must be Visible (Strict Scope)
                                 if (!isTreeVisible(j.id)) return false;
 
-                                // 4. HEURISTIC: Hide Empty Roots (No visible children, No positive pricing values)
-                                const hasVisibleChildren = pricingData.jobs.some(c => c.parentId == j.id && isTreeVisible(c.id)); // Relaxed check
-                                const hasPositiveValues = Object.entries(pricingData.values || {}).some(([k, v]) =>
-                                    k.endsWith(`_${j.id}`) && v && parseFloat(v.Price) > 0
-                                );
-
-                                if (!hasVisibleChildren && !hasPositiveValues) return false;
+                                // 4. HEURISTIC REMOVED: Show all visible roots regardless of content to allow data entry.
 
                                 return true;
                             });
@@ -1062,12 +1210,31 @@ const PricingForm = () => {
 
                                                     if (match) {
                                                         // Calculate Row Total (Visibility Check)
+                                                        // Calculate Row Total (Visibility Check)
                                                         const key = `${opt.id}_${job.id}`;
                                                         let price = 0;
                                                         if (values[key] !== undefined && values[key] !== '') {
                                                             price = parseFloat(values[key]) || 0;
-                                                        } else if (pricingData.values[key] && pricingData.values[key].Price) {
-                                                            price = parseFloat(pricingData.values[key].Price) || 0;
+                                                        } else {
+                                                            // Check Strict Key first
+                                                            if (pricingData.values[key] && pricingData.values[key].Price) {
+                                                                price = parseFloat(pricingData.values[key].Price) || 0;
+                                                            }
+                                                            // Fallback to Name Key if Strict Key is missing (Step 827 Fix)
+                                                            else {
+                                                                const nameKey = `${opt.id}_${job.itemName}`;
+                                                                if (pricingData.values[nameKey] && pricingData.values[nameKey].Price) {
+                                                                    price = parseFloat(pricingData.values[nameKey].Price) || 0;
+                                                                }
+                                                                // Fallback to Clean Name Key (Step 848 Fix)
+                                                                else {
+                                                                    const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                    const cleanKey = `${opt.id}_${cleanName}`;
+                                                                    if (pricingData.values[cleanKey] && pricingData.values[cleanKey].Price) {
+                                                                        price = parseFloat(pricingData.values[cleanKey].Price) || 0;
+                                                                    }
+                                                                }
+                                                            }
                                                         }
 
                                                         // Hide if Empty, Not Newest, Not Base Price
@@ -1121,7 +1288,23 @@ const PricingForm = () => {
                                                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                                                                             <input
                                                                                 type="number"
-                                                                                value={values[key] || ''}
+                                                                                // Use state value OR fallback to DB value (Clean/Legacy) if state is empty (Step 869)
+                                                                                value={values[key] !== undefined ? values[key] : (() => {
+                                                                                    // Resolution Logic for Display
+                                                                                    if (pricingData.values[key] && pricingData.values[key].Price) return pricingData.values[key].Price;
+
+                                                                                    const nameKey = `${option.id}_${job.itemName}`;
+                                                                                    if (pricingData.values[nameKey] && pricingData.values[nameKey].Price) return pricingData.values[nameKey].Price;
+
+                                                                                    // Case-Sensitive Clean Name (Must match loadPricing logic)
+                                                                                    const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                                    const cleanKey = `${option.id}_${cleanName}`;
+
+
+
+                                                                                    if (pricingData.values[cleanKey] && pricingData.values[cleanKey].Price) return pricingData.values[cleanKey].Price;
+                                                                                    return '';
+                                                                                })()}
                                                                                 onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
                                                                                 disabled={!canEditRow}
                                                                                 placeholder="0.00"
@@ -1253,8 +1436,17 @@ const PricingForm = () => {
 
                                                 // Sum Non-Optional
                                                 targetJobs.forEach(job => {
-                                                    const key = `${opt.id}_${job.id}`;
-                                                    grandTotal += getPrice(key);
+                                                    // VISIBILITY CHECK: Only match options that are actually rendered for this job (Step 904)
+                                                    let match = false;
+                                                    if (!opt.itemName) match = (job.isLead);
+                                                    else if (opt.itemName === 'Lead Job' && job.isLead) match = true;
+                                                    else if (opt.itemName === job.itemName) match = true;
+                                                    else if (opt.itemName === `${job.itemName} / Lead Job`) match = true;
+
+                                                    if (match) {
+                                                        const key = `${opt.id}_${job.id}`;
+                                                        grandTotal += getPrice(key);
+                                                    }
                                                 });
                                             });
 

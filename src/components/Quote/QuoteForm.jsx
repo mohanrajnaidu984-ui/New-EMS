@@ -172,6 +172,7 @@ const QuoteForm = () => {
     const [quoteLogo, setQuoteLogo] = useState(null);
     const [quoteCompanyName, setQuoteCompanyName] = useState('Almoayyed Air Conditioning');
     const [footerDetails, setFooterDetails] = useState(null);
+    const [companyProfiles, setCompanyProfiles] = useState([]);
 
     // Custom Clauses
     const [customClauses, setCustomClauses] = useState([]);
@@ -206,6 +207,10 @@ const QuoteForm = () => {
     // Lists
     const [usersList, setUsersList] = useState([]);
     const [customersList, setCustomersList] = useState([]);
+
+    // Tab States for Quote and Pricing Sections
+    const [activeQuoteTab, setActiveQuoteTab] = useState('self');
+    const [activePricingTab, setActivePricingTab] = useState('self');
 
     // Templates State
     const [templates, setTemplates] = useState([]);
@@ -342,14 +347,7 @@ const QuoteForm = () => {
             setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''} `.trim());
             setToEmail(cust.EmailId || '');
 
-            // Update Header/Footer details to match the selected Customer (as per user request)
-            setFooterDetails({
-                name: cust.CompanyName,
-                address: `${cust.Address1 || ''} \n${cust.Address2 || ''} `.trim(),
-                phone: cust.Phone1 || '',
-                fax: cust.FaxNo || '',
-                email: cust.EmailId || ''
-            });
+            // NOTE: Do not update footerDetails with customer info
         }
 
         // Reload pricing for selected customer
@@ -379,19 +377,33 @@ const QuoteForm = () => {
             setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''} `.trim());
             setToEmail(cust.EmailId || '');
 
-            setFooterDetails({
-                name: cust.CompanyName,
-                address: `${cust.Address1 || ''} \n${cust.Address2 || ''} `.trim(),
-                phone: cust.Phone1 || '',
-                fax: cust.FaxNo || '',
-                email: cust.EmailId || ''
-            });
+            // NOTE: We do NOT update footerDetails here. Footer should remain as the issuing Company (Division).
+            // The previous logic to update footerDetails with customer data was incorrect.
         }
 
         // Reload pricing for selected customer
         if (enquiryData) {
             console.log('Customer changed to:', selectedName, 'Reloading pricing...');
             loadPricingData(enquiryData.enquiry.RequestNo, selectedName);
+        }
+    };
+
+    const handleProfileChange = (e) => {
+        const code = e.target.value; // Using Department Code as unique identifier? Or DivisionCode?
+        // Ideally combination, but for now assuming unique Dept Code or we check both if needed.
+        // Let's assume the value is the index or a composite key.
+        const profile = companyProfiles.find(p => p.code === code || p.divisionCode === code);
+
+        if (profile) {
+            setQuoteCompanyName(profile.name);
+            setQuoteLogo(profile.logo);
+            setFooterDetails(profile);
+
+            // Update enquiryData references so getQuotePayload uses the correct codes
+            setEnquiryData(prev => ({
+                ...prev,
+                companyDetails: { ...profile }
+            }));
         }
     };
 
@@ -448,7 +460,19 @@ const QuoteForm = () => {
 
     // Calculate Summary based on selected jobs
     const calculateSummary = (data = pricingData, currentSelectedJobs = selectedJobs, activeCustomer = toName) => {
-        if (!data || !data.options || !data.values) return;
+        console.log('[calculateSummary] START');
+        console.log('[calculateSummary] Data:', data);
+        console.log('[calculateSummary] Active Customer:', activeCustomer);
+        console.log('[calculateSummary] Selected Jobs:', currentSelectedJobs);
+        console.log('[calculateSummary] Access:', data?.access);
+
+        if (!data || !data.options || !data.values) {
+            console.log('[calculateSummary] Missing data, options, or values');
+            return;
+        }
+
+        console.log('[calculateSummary] Options count:', data.options.length);
+        console.log('[calculateSummary] Options:', data.options);
 
         const summary = [];
         let userHasEnteredPrice = false;
@@ -461,19 +485,85 @@ const QuoteForm = () => {
         const groups = {};
 
         data.options.forEach(opt => {
+            console.log(`[calculateSummary] Processing option:`, opt.name, 'itemName:', opt.itemName, 'customerName:', opt.customerName);
+
             // 0. Customer Filter
-            if (opt.customerName && activeCustomer && opt.customerName !== activeCustomer) return;
+            // Only filter out if option has a customerName AND it doesn't match the active customer
+            // Options without customerName are visible to all customers
+            if (opt.customerName && activeCustomer && opt.customerName !== activeCustomer) {
+                console.log(`[calculateSummary] Filtered out (customer mismatch):`, opt.name, 'opt.customerName:', opt.customerName, 'activeCustomer:', activeCustomer);
+                return;
+            }
+            console.log(`[calculateSummary] Passed customer filter:`, opt.name);
 
             // 1. Visibility Filter
             let isVisible = false;
-            // Check if option is associated with a job, and if that job IS SELECTED
+            // Check if option is associated with a job, and if that job IS ACCESSIBLE (visible or editable)
             if (data.access?.hasLeadAccess) {
                 isVisible = true;
-            } else if (opt.itemName && data.access?.editableJobs?.includes(opt.itemName)) {
+                console.log(`[calculateSummary] Visible (lead access):`, opt.name);
+            } else if (opt.itemName) {
+                // Check if this option's itemName matches any accessible job (case-insensitive partial match)
+                const optItemNameLower = opt.itemName.toLowerCase();
+                console.log(`[calculateSummary] Checking visibility for "${opt.name}" with itemName "${opt.itemName}"`);
+                console.log(`[calculateSummary] editableJobs:`, data.access?.editableJobs);
+                console.log(`[calculateSummary] visibleJobs:`, data.access?.visibleJobs);
+
+                const isEditable = data.access?.editableJobs?.some(job => {
+                    const jobTrimmed = job.trim();
+                    const optItemNameTrimmed = opt.itemName.trim();
+                    const jobLower = jobTrimmed.toLowerCase();
+                    const optLower = optItemNameTrimmed.toLowerCase();
+
+                    // Try exact match first (case-sensitive)
+                    if (jobTrimmed === optItemNameTrimmed) {
+                        console.log(`[calculateSummary]   Checking editable job "${job}": true (exact match - case sensitive)`);
+                        return true;
+                    }
+                    // Try exact match (case-insensitive)
+                    if (jobLower === optLower) {
+                        console.log(`[calculateSummary]   Checking editable job "${job}": true (exact match - case insensitive)`);
+                        return true;
+                    }
+                    // Then try partial match
+                    const match = jobLower.includes(optLower) || optLower.includes(jobLower);
+                    console.log(`[calculateSummary]   Checking editable job "${job}" vs "${opt.itemName}": ${match} (jobLower: "${jobLower}", optLower: "${optLower}")`);
+                    return match;
+                });
+                const isVisibleJob = data.access?.visibleJobs?.some(job => {
+                    const jobTrimmed = job.trim();
+                    const optItemNameTrimmed = opt.itemName.trim();
+                    const jobLower = jobTrimmed.toLowerCase();
+                    const optLower = optItemNameTrimmed.toLowerCase();
+
+                    // Try exact match first (case-sensitive)
+                    if (jobTrimmed === optItemNameTrimmed) {
+                        console.log(`[calculateSummary]   Checking visible job "${job}": true (exact match - case sensitive)`);
+                        return true;
+                    }
+                    // Try exact match (case-insensitive)
+                    if (jobLower === optLower) {
+                        console.log(`[calculateSummary]   Checking visible job "${job}": true (exact match - case insensitive)`);
+                        return true;
+                    }
+                    // Then try partial match
+                    const match = jobLower.includes(optLower) || optLower.includes(jobLower);
+                    console.log(`[calculateSummary]   Checking visible job "${job}" vs "${opt.itemName}": ${match} (jobLower: "${jobLower}", optLower: "${optLower}")`);
+                    return match;
+                });
+                isVisible = isEditable || isVisibleJob;
+                console.log(`[calculateSummary] Visibility result for "${opt.name}": isEditable=${isEditable}, isVisibleJob=${isVisibleJob}, isVisible=${isVisible}`);
+            } else if (!opt.itemName && data.access?.editableJobs?.length > 0) {
+                // If option has no itemName but user has editable jobs, show it (it's their own pricing)
                 isVisible = true;
+                console.log(`[calculateSummary] Visible (no itemName, has editable jobs):`, opt.name);
             }
 
-            if (!isVisible) return;
+            if (!isVisible) {
+                console.log(`[calculateSummary] Filtered out (not visible):`, opt.name);
+                return;
+            }
+            console.log(`[calculateSummary] Passed visibility filter:`, opt.name);
 
             // Determine if this option's job is currently selected (for Total calculation)
             // If itemName is missing (General), we assume it is included unless specific logic says otherwise
@@ -486,12 +576,20 @@ const QuoteForm = () => {
                     const key = `${opt.id}_${job.id}`;
                     const val = data.values[key];
                     const price = val ? parseFloat(val.Price || 0) : 0;
+                    if (price > 0) {
+                        console.log(`[calculateSummary]   Job "${job.itemName}": ${price}`);
+                    }
                     optionTotal += price;
                 });
             }
+            console.log(`[calculateSummary] Total for "${opt.name}": ${optionTotal}`);
 
             // 3. Zero Value Filter
-            if (optionTotal <= 0) return;
+            if (optionTotal <= 0) {
+                console.log(`[calculateSummary] Filtered out (zero value):`, opt.name);
+                return;
+            }
+            console.log(`[calculateSummary] Passed zero value filter:`, opt.name);
 
             // Add to Total ONLY if included
             if (isJobIncluded) {
@@ -538,11 +636,51 @@ const QuoteForm = () => {
         setHasPricedOptional(foundPricedOptional);
         setPricingSummary(summary);
 
+        console.log('[calculateSummary] COMPLETE');
+        console.log('[calculateSummary] Summary:', summary);
+        console.log('[calculateSummary] Grand Total:', calculatedGrandTotal);
+        console.log('[calculateSummary] Has User Pricing:', userHasEnteredPrice);
+
         // Generate Pricing Terms Content with Table
         let tableHtml = '<table style="width:100%; border-collapse:collapse; margin-bottom:16px;">';
         tableHtml += '<thead><tr style="background:#f8fafc; border:1px solid #cbd5e1;"><th style="padding:10px; border:1px solid #cbd5e1; text-align:left;">Description</th><th style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Amount (BHD)</th></tr></thead>';
         tableHtml += '<tbody>';
+
+        let htmlGrandTotal = 0;
+
         summary.forEach(grp => {
+            // Filter 1: Check if group matches selected Lead Job Prefix (if active)
+            // Filter 1: Check if group matches selected Lead Job Prefix (if active)
+            if (enquiryData && enquiryData.leadJobPrefix) {
+                const prefix = enquiryData.leadJobPrefix;
+                // Direct match
+                if (!grp.name.startsWith(prefix)) {
+                    // Check hierarchy logic to see if this group (job) is a descendant of the selected Lead Job
+                    let isRelatedToLead = false;
+                    if (data.jobs) {
+                        const job = data.jobs.find(j => j.itemName === grp.name);
+                        if (job) {
+                            // Check ancestors
+                            let currentJob = job;
+                            while (currentJob && currentJob.parentId) {
+                                const parent = data.jobs.find(j => j.id === currentJob.parentId);
+                                if (parent) {
+                                    if (parent.itemName && parent.itemName.startsWith(prefix)) {
+                                        isRelatedToLead = true;
+                                        break;
+                                    }
+                                    currentJob = parent;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!isRelatedToLead) return;
+                }
+            }
+
             // Only add to Quote Table if Included
             // Check if group name corresponds to a selected job (or is General)
             // If grp.name is in activeJobs, we include it.
@@ -565,20 +703,25 @@ const QuoteForm = () => {
                 tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; padding-left: 20px;">${item.name}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
             });
 
-            // Add Group Total
-            tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">Total ${cleanedName}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">BD ${grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+            // Add Group Total ONLY if > 1 item
+            if (grp.items.length > 1) {
+                tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">Total ${cleanedName}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">BD ${grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+            }
+
+            // Accumulate filtered total
+            htmlGrandTotal += grp.total;
         });
 
-        if (!foundPricedOptional && calculatedGrandTotal > 0) {
-            tableHtml += `<tr style="background:#f8fafc; font-weight:700;"><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Grand Total</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${calculatedGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+        if (!foundPricedOptional && htmlGrandTotal > 0) {
+            tableHtml += `<tr style="background:#f8fafc; font-weight:700;"><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Grand Total</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
         }
         tableHtml += '</tbody></table>';
 
         // Update Pricing Terms Text with Dynamic Total
         let pricingText = defaultClauses.pricingTerms || '';
-        if (calculatedGrandTotal > 0 && !foundPricedOptional) {
-            const formattedTotal = calculatedGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-            const words = numberToWordsBHD(calculatedGrandTotal);
+        if (htmlGrandTotal > 0 && !foundPricedOptional) {
+            const formattedTotal = htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+            const words = numberToWordsBHD(htmlGrandTotal);
             const totalString = `BD ${formattedTotal} (${words})`;
 
             pricingText = pricingText.replace('[Amount in figures and words]', totalString);
@@ -741,21 +884,18 @@ const QuoteForm = () => {
         setToPhone(quote.ToPhone || '');
         setToEmail(quote.ToEmail || '');
 
-        if (quote.ToName) {
-            const cust = customersList.find(c => c.CompanyName === quote.ToName);
-            if (cust) {
-                setFooterDetails({
-                    name: cust.CompanyName,
-                    address: `${cust.Address1 || ''} \n${cust.Address2 || ''} `.trim(),
-                    phone: cust.Phone1 || '',
-                    fax: cust.FaxNo || '',
-                    email: cust.EmailId || ''
-                });
-            } else if (enquiryData?.companyDetails) {
-                setFooterDetails(enquiryData.companyDetails);
-            }
-        } else if (enquiryData?.companyDetails) {
+        // Always use Company Details for Footer, never the Customer (recipient) details
+        if (enquiryData?.companyDetails) {
             setFooterDetails(enquiryData.companyDetails);
+        } else {
+            // Fallback default
+            setFooterDetails({
+                name: 'Almoayyed Contracting',
+                address: 'P.O. Box 32232, Manama, Kingdom of Bahrain',
+                phone: '(+973) 17 400 407',
+                fax: '(+973) 17 400 396',
+                email: 'bms@almcg.com'
+            });
         }
 
         setClauses({
@@ -808,31 +948,54 @@ const QuoteForm = () => {
 
 
     const handleRevise = async () => {
-        if (!quoteId) return;
-        if (!window.confirm('Are you sure you want to create a new revision based on this quote?')) return;
+        console.log('[handleRevise] Starting revision process. QuoteId:', quoteId);
+        if (!quoteId) {
+            console.log('[handleRevise] No quoteId found, aborting');
+            return;
+        }
+        if (!window.confirm('Are you sure you want to create a new revision based on this quote?')) {
+            console.log('[handleRevise] User cancelled');
+            return;
+        }
 
         setSaving(true);
         try {
             const payload = getQuotePayload();
+            console.log('[handleRevise] Payload:', payload);
+            console.log('[handleRevise] Calling API:', `${API_BASE}/api/quotes/${quoteId}/revise`);
+
             const res = await fetch(`${API_BASE}/api/quotes/${quoteId}/revise`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
 
+            console.log('[handleRevise] Response status:', res.status);
+
             if (res.ok) {
                 const data = await res.json();
-                alert('Revision created successfully!');
-                // We keep the enquiry data same, but update quote ID and list
+                console.log('[handleRevise] Success! New revision data:', data);
+
+                // Update quote ID and number first
                 setQuoteId(data.id);
                 setQuoteNumber(data.quoteNumber);
-                fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+
+                // Wait a moment for DB commit, then refresh the quotes list
+                console.log('[handleRevise] Waiting 500ms for DB commit...');
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                console.log('[handleRevise] Refreshing quotes list...');
+                await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+
+                console.log('[handleRevise] All updates complete!');
+                alert('Revision created successfully!');
             } else {
                 const err = await res.json();
+                console.error('[handleRevise] Error response:', err);
                 alert('Error: ' + (err.error || 'Failed to revise quote'));
             }
         } catch (err) {
-            console.error('Error revising quote:', err);
+            console.error('[handleRevise] Fatal error:', err);
             alert('Fatal error revising quote');
         } finally {
             setSaving(false);
@@ -843,13 +1006,19 @@ const QuoteForm = () => {
 
     const fetchExistingQuotes = async (requestNo) => {
         try {
+            console.log('[fetchExistingQuotes] Fetching quotes for RequestNo:', requestNo);
             const res = await fetch(`${API_BASE}/api/quotes/${encodeURIComponent(requestNo)}`);
             if (res.ok) {
                 const quotes = await res.json();
+                console.log('[fetchExistingQuotes] Received quotes:', quotes.length, 'quotes');
+                quotes.forEach(q => console.log('  -', q.QuoteNumber, '| Status:', q.Status));
                 setExistingQuotes(quotes);
+                console.log('[fetchExistingQuotes] State updated with', quotes.length, 'quotes');
+            } else {
+                console.error('[fetchExistingQuotes] Failed to fetch, status:', res.status);
             }
         } catch (err) {
-            console.error('Error fetching existing quotes:', err);
+            console.error('[fetchExistingQuotes] Error:', err);
         }
     };
 
@@ -876,6 +1045,82 @@ const QuoteForm = () => {
                     setFooterDetails(data.companyDetails);
                 }
 
+                setCompanyProfiles(data.availableProfiles || []);
+
+                // ---------------------------------------------------------
+                // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
+                // ---------------------------------------------------------
+                let selectedProfile = null;
+                const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
+
+                if (userDept && data.availableProfiles?.length > 0) {
+                    if (userDept.toLowerCase() === 'civil') {
+                        // User is Civil -> Prefer 'Civil Project' or any 'ACC' code
+                        selectedProfile = data.availableProfiles.find(p =>
+                            p.itemName?.toLowerCase().includes('civil') ||
+                            p.code === 'ACC' ||
+                            p.divisionCode === 'CVLP'
+                        );
+                    } else if (userDept.toLowerCase() === 'mep' || userDept.toLowerCase().includes('bms')) {
+                        // User is MEP/BMS -> ROBUST Selection Strategy
+                        console.log('QuoteForm: User is MEP/BMS, searching for BMS profile...');
+
+                        // 1. Try Specific BMS Match
+                        const bmsMatches = data.availableProfiles.filter(p =>
+                            (p.itemName && p.itemName.toLowerCase().includes('bms')) ||
+                            p.divisionCode === 'BMS'
+                        );
+
+                        if (bmsMatches.length > 0) {
+                            selectedProfile = bmsMatches[0];
+                            console.log('QuoteForm: Found BMS Match:', selectedProfile.name);
+                        } else {
+                            // 2. Fallback to any AAC Match (Electrical, Plumbing)
+                            // We explicitly avoid PLFF if possible by checking divisionCode first? 
+                            // Actually, PLFF has divisionCode AAC. We just take the first one available.
+                            const aacMatches = data.availableProfiles.filter(p =>
+                                p.code === 'AAC' ||
+                                p.divisionCode === 'AAC'
+                            );
+                            if (aacMatches.length > 0) {
+                                selectedProfile = aacMatches[0];
+                                console.log('QuoteForm: Found General AAC Match:', selectedProfile.name);
+                            }
+                        }
+                    }
+                }
+
+                // If we found a user-specific match, override the default details
+                if (selectedProfile) {
+                    console.log('Auto-selecting profile for user:', userDept, '->', selectedProfile.name);
+                    setQuoteCompanyName(selectedProfile.name);
+                    setQuoteLogo(selectedProfile.logo);
+                    setFooterDetails(selectedProfile);
+                    // Update enquiryData so the Quote Payload uses this profile's codes (Ref No)
+                    data.companyDetails = { ...selectedProfile };
+                    // We also need to update the state so a re-render picks it up if needed
+                    setEnquiryData({ ...data });
+                } else {
+                } // End of else
+
+                // 3a. Auto-Select Lead Job
+                const leadJobs = (data.divisions || []).filter(d => d.trim().startsWith('L'));
+
+                if (leadJobs.length === 1) {
+                    // Only ONE Lead Job available - Auto Select
+                    const prefix = leadJobs[0].split('-')[0].trim();
+                    data.leadJobPrefix = prefix;
+                    console.log('Auto-selecting Single Lead Job:', prefix);
+                } else if (leadJobs.length > 1) {
+                    // Multiple Lead Jobs - Force User Selection
+                    data.leadJobPrefix = '';
+                    console.log('Multiple Lead Jobs found. User must select.');
+                } else {
+                    data.leadJobPrefix = '';
+                }
+
+                // ---------------------------------------------------------
+
                 setPreparedByOptions(data.preparedByOptions || []);
                 // Map customer options for CreatableSelect
                 setEnquiryCustomerOptions((data.customerOptions || []).map(c => ({ value: c, label: c })));
@@ -895,33 +1140,40 @@ const QuoteForm = () => {
                 setQuoteDate(new Date().toISOString().split('T')[0]);
                 setCustomerReference(data.enquiry.RequestNo || ''); // Default to Enquiry No
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
-                setToName(data.enquiry.CustomerName || '');
 
-                setCustomerReference(data.enquiry.RequestNo || ''); // Default to Enquiry No
-                setSubject(`Proposal for ${data.enquiry.ProjectName}`);
-                setToName(data.enquiry.CustomerName || '');
+                // 3b. Smart Default Customer Selection (Auto-select ONLY if single option)
+                let defaultCustomer = '';
+                const availableOptions = (data.customerOptions || []).map(c => c.trim());
 
-                if (data.enquiry.CustomerName) {
-                    const cust = customersList.find(c => c.CompanyName === data.enquiry.CustomerName);
+                if (availableOptions.length === 1) {
+                    defaultCustomer = availableOptions[0];
+                }
+
+                setToName(defaultCustomer);
+
+                // Final Data Update to Ensure all modifications (Lead Job Logic, etc.) are reflected in State
+                setEnquiryData({ ...data });
+
+                if (defaultCustomer) {
+                    const cust = customersList.find(c => c.CompanyName === defaultCustomer);
                     if (cust) {
                         setToAddress(data.customerDetails?.Address || `${cust.Address1 || ''}\n${cust.Address2 || ''}`.trim() || '');
                         setToPhone(`${data.customerDetails?.Phone1 || ''} ${data.customerDetails?.Phone2 ? '/ ' + data.customerDetails?.Phone2 : ''}`.trim() || `${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''}`.trim() || '');
                         setToEmail(data.customerDetails?.EmailId || cust.EmailId || '');
                     } else {
-                        // Even if not in master list, use fetched details
-                        setToAddress(data.customerDetails?.Address || '');
-                        setToPhone(`${data.customerDetails?.Phone1 || ''} ${data.customerDetails?.Phone2 ? '/ ' + data.customerDetails?.Phone2 : ''}`.trim());
-                        setToEmail(data.customerDetails?.EmailId || '');
+                        // Even if not in master list, allow it
+                        setToAddress('');
+                        setToPhone('');
+                        setToEmail('');
                     }
                 } else {
-                    setToAddress(data.customerDetails?.Address || '');
-                    setToPhone(`${data.customerDetails?.Phone1 || ''} ${data.customerDetails?.Phone2 ? '/ ' + data.customerDetails?.Phone2 : ''}`.trim());
-                    setToEmail(data.customerDetails?.EmailId || '');
+                    setToAddress('');
+                    setToPhone('');
+                    setToEmail('');
                 }
 
                 // Default to enquiry customer for pricing load
-                const initialCustomer = data.enquiry.CustomerName || '';
-                loadPricingData(data.enquiry.RequestNo, initialCustomer);
+                loadPricingData(data.enquiry.RequestNo, defaultCustomer);
 
 
                 // Default Prepared By to Current User
@@ -978,6 +1230,7 @@ const QuoteForm = () => {
         });
         setQuoteCompanyName('Almoayyed Air Conditioning');
         setQuoteLogo(null);
+        setCompanyProfiles([]);
     };
 
     // Toggle clause visibility
@@ -990,9 +1243,89 @@ const QuoteForm = () => {
         setClauseContent(prev => ({ ...prev, [key]: value }));
     };
 
-    const getQuotePayload = () => {
+    const getQuotePayload = (customDivisionCode = null) => {
+        // Calculate Effective Division Code
+        let effectiveDivisionCode = customDivisionCode;
+
+        // Base default from company details (usually follows Lead Job, e.g. CVLP/BMS)
+        let baseDiv = enquiryData.companyDetails?.divisionCode || 'AAC';
+
+        if (!effectiveDivisionCode) {
+            effectiveDivisionCode = baseDiv; // Start with base
+
+            // ---------------------------------------------------------
+            // AGGRESSIVE DIVISION OVERRIDE LOGIC
+            // ---------------------------------------------------------
+            let isPlumbing = false;
+            let isCivil = false;
+            let isBMS = false;
+
+            // 1. Check Selected Jobs (Explicit User Selection)
+            if (selectedJobs && selectedJobs.length > 0) {
+                selectedJobs.forEach(job => {
+                    const up = job.toUpperCase();
+                    if (up.includes('PLUMBING') || up.includes('PLFF')) isPlumbing = true;
+                    else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
+                    else if (up.includes('BMS')) isBMS = true;
+                });
+            }
+
+            // 2. Check Pricing Summary (Visible Groups on UI)
+            // This is critical because sometimes selectedJobs might be empty if items are auto-selected via hierarchy
+            if (pricingSummary && pricingSummary.length > 0) {
+                pricingSummary.forEach(grp => {
+                    const up = grp.name.toUpperCase();
+                    // Check common variations: "PLUMBING", "PLFF", "P&F", "P & F"
+                    if (up.includes('PLUMBING') || up.includes('PLFF') || up.includes('P&F') || up.includes('P & F')) isPlumbing = true;
+                    console.log(`[getQuotePayload] Inspecting Group: ${grp.name} -> Plumbing? ${isPlumbing}`);
+                });
+            }
+
+            // 3. User Department Hint & Access (Final Tie-Breaker)
+            const userDept = currentUser?.Department ? currentUser.Department.toUpperCase() : '';
+
+            // If I have access to "PLUMBING & FF", assume I am quoting it (unless I also have access to others and selected them)
+            if (!isPlumbing && pricingData && pricingData.jobs) {
+                const plumbingJob = pricingData.jobs.find(j => {
+                    const up = j.itemName.toUpperCase();
+                    return up.includes('PLUMBING') || up.includes('PLFF');
+                });
+                if (plumbingJob) {
+                    // Check if user has access to this job
+                    const visibleJobs = pricingData.access?.visibleJobs || [];
+                    const editableJobs = pricingData.access?.editableJobs || [];
+                    const hasAccess = visibleJobs.includes(plumbingJob.itemName) || editableJobs.includes(plumbingJob.itemName);
+
+                    // If I have access to Plumbing, and I DON'T have access to Civil (Lead), I MUST be quoting Plumbing.
+                    const canSeeLead = pricingData.access?.hasLeadAccess;
+
+                    if (hasAccess && !canSeeLead) {
+                        isPlumbing = true;
+                        console.log('[getQuotePayload] User has exclusive Plumbing access -> Forcing PLFF');
+                    }
+                }
+            }
+
+            if (userDept === 'PLFF' || (userDept === 'MEP' && isPlumbing)) {
+                // Reinforce plumbing
+                if (pricingSummary.length > 0) isPlumbing = true;
+            }
+
+            // APPLY OVERRIDE
+            // Priority: PLFF > BMS > CVLP (because PLFF/BMS are often sub-trades under a Civil L1)
+            if (isPlumbing) {
+                effectiveDivisionCode = 'PLFF';
+                console.log('[getQuotePayload] Detected Plumbing content -> Forcing PLFF Division');
+            } else if (isBMS) {
+                effectiveDivisionCode = 'BMS';
+            } else if (isCivil && effectiveDivisionCode !== 'CVLP') {
+                effectiveDivisionCode = 'CVLP';
+            }
+            // ---------------------------------------------------------
+        }
+
         return {
-            divisionCode: enquiryData.companyDetails?.divisionCode || 'AAC',
+            divisionCode: effectiveDivisionCode,
             departmentCode: enquiryData.companyDetails?.departmentCode || '',
             leadJobPrefix: enquiryData.leadJobPrefix || '',
             requestNo: enquiryData.enquiry.RequestNo,
@@ -1023,16 +1356,90 @@ const QuoteForm = () => {
 
         setSaving(true);
         try {
-            const savePayload = getQuotePayload();
+            // 1. Get Base Payload first
+            const basePayload = getQuotePayload();
+            let effectiveDivisionCode = basePayload.divisionCode;
+
+            // Logic to infer Code from Active Tab (Resolved via calculatedTabs)
+            let resolvedTabObj = null;
+            if (activePricingTab && calculatedTabs.length > 0) {
+                resolvedTabObj = calculatedTabs.find(t => t.id === activePricingTab) || calculatedTabs[0];
+            } else if (pricingData && pricingData.jobs) {
+                // Determine default if no tabs calculated yet (fallback)
+                // ... (Use existing logic or just safe default)
+            }
+
+            if (resolvedTabObj) {
+                const targetJobName = resolvedTabObj.label;
+                if (targetJobName) {
+                    const nameUpper = targetJobName.toUpperCase();
+                    if (nameUpper.includes('PLUMBING') || nameUpper.includes('PLFF')) effectiveDivisionCode = 'PLFF';
+                    else if (nameUpper.includes('BMS')) effectiveDivisionCode = 'BMS';
+                    else if (nameUpper.includes('CIVIL') || nameUpper.includes('CVLP')) effectiveDivisionCode = 'CVLP';
+                    else if (nameUpper.includes('ELECTRICAL') || nameUpper.includes('ELEC') || nameUpper.includes('ELEC PROJECT')) effectiveDivisionCode = 'ELE';
+                    else if (nameUpper.includes('FIRE')) effectiveDivisionCode = 'FPE';
+                    else if (nameUpper.includes('AIR CONDITIONING') || nameUpper.includes('AAC')) effectiveDivisionCode = 'AAC';
+
+                    console.log(`[saveQuote] Derived Division from Resolved Tab (${targetJobName}): ${effectiveDivisionCode}`);
+                }
+            } else if (selectedJobs && selectedJobs.length > 0 && pricingData && pricingData.jobs) {
+                // Fallback: Check if any selected job maps to a known division
+                const firstJobName = selectedJobs[0];
+                const jobInfo = pricingData.jobs.find(j => j.itemName === firstJobName);
+
+                if (firstJobName) {
+                    const nameUpper = firstJobName.toUpperCase();
+                    if (nameUpper.includes('PLUMBING') || nameUpper.includes('PLFF')) effectiveDivisionCode = 'PLFF';
+                    else if (nameUpper.includes('BMS')) effectiveDivisionCode = 'BMS';
+                    else if (nameUpper.includes('CIVIL')) effectiveDivisionCode = 'CVLP';
+                    else if (nameUpper.includes('ELECTRICAL')) effectiveDivisionCode = 'ELE';
+                    else if (nameUpper.includes('FIRE')) effectiveDivisionCode = 'FPE';
+                }
+            }
+
+            console.log('[saveQuote] Effective Division Code:', effectiveDivisionCode);
+
+            // Override division code in payload
+            const savePayload = {
+                ...basePayload,
+                divisionCode: effectiveDivisionCode
+            };
 
             if (!quoteId && existingQuotes.length > 0) {
-                // Check if any existing quote has the same customer
-                const sameCustomerQuote = existingQuotes.find(q => q.ToName === toName);
-                if (sameCustomerQuote) {
-                    if (!window.confirm(`A quote (${sameCustomerQuote.QuoteNumber}) already exists for this enquiry and customer. It is recommended to revise the existing quote instead of creating a new quote number. \n\nDo you still want to create a NEW quote number?`)) {
-                        setSaving(false);
-                        return;
+                // Check if any existing quote has the same customer AND same lead job AND same division
+                const sameCustomerQuote = existingQuotes.find(q => {
+                    const matchCustomer = q.ToName === toName;
+
+                    let matchLeadJob = true;
+                    if (enquiryData && enquiryData.leadJobPrefix) {
+                        const prefixPattern = `-${enquiryData.leadJobPrefix}`;
+                        matchLeadJob = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
                     }
+                    console.log(`[saveQuote-Debug] Checking Quote: ${q.QuoteNumber}, MatchCustomer=${matchCustomer}, MatchLead=${matchLeadJob}`);
+
+                    // STRICT DIVISION MATCH IS REQUIRED TO BLOCK
+                    // Strict Division matching (Step 762)
+                    // Only block if division codes are IDENTICAL.
+                    // Allows ELE and BMS to coexist for same customer/lead job.
+                    let matchDivision = false;
+                    if (q.QuoteNumber) {
+                        const quoteParts = q.QuoteNumber.split('/');
+                        if (quoteParts.length >= 2) {
+                            const existingQuoteDivision = quoteParts[1];
+                            matchDivision = existingQuoteDivision === effectiveDivisionCode;
+                            console.log(`[saveQuote] Check collision: Existing=${existingQuoteDivision} vs New=${effectiveDivisionCode} -> Match=${matchDivision}`);
+                        }
+                    }
+
+                    // BLOCK ONLY IF ALL 3 MATCH (Customer + Lead Job + Division)
+                    return matchCustomer && matchLeadJob && matchDivision;
+                });
+
+                if (sameCustomerQuote) {
+                    // Block creation of new quote - only allow revision
+                    alert(`A quote (${sameCustomerQuote.QuoteNumber}) already exists for this enquiry, customer and lead job. You must revise the existing quote instead of creating a new quote number.\n\nPlease select the existing quote from "Previous Quotes / Revisions" section to create a revision.`);
+                    setSaving(false);
+                    return;
                 }
             }
 
@@ -1138,6 +1545,19 @@ const QuoteForm = () => {
         { key: 'showAcceptance', contentKey: 'acceptance', title: 'Acceptance & Confirmation' }
     ];
 
+    // Helper: Check if job is descendant of ancestor (Recursive) - Scoped to Component
+    const isDescendantOf = (jobName, ancestorId) => {
+        if (!pricingData || !pricingData.jobs) return false;
+        const job = pricingData.jobs.find(j => j.itemName === jobName);
+        if (!job) return false;
+        if (job.parentId === ancestorId) return true;
+        if (job.parentId) {
+            const parent = pricingData.jobs.find(j => j.id === job.parentId);
+            if (parent) return isDescendantOf(parent.itemName, ancestorId);
+        }
+        return false;
+    };
+
     // Custom styles for CreatableSelect
     const customStyles = {
         control: (base) => ({
@@ -1180,6 +1600,100 @@ const QuoteForm = () => {
         }),
     };
 
+    // Memoized Tabs Calculation
+    const calculatedTabs = React.useMemo(() => {
+        if (!pricingData || !pricingData.jobs || !enquiryData || !enquiryData.leadJobPrefix) return [];
+
+        const leadPrefix = enquiryData.leadJobPrefix;
+        const leadJobNameFull = (enquiryData.divisions || []).find(d => d.startsWith(leadPrefix));
+        // Safe access
+        if (!leadJobNameFull) return [];
+        const leadJobObj = pricingData.jobs.find(j => j.itemName === leadJobNameFull) ||
+            pricingData.jobs.find(j => j.itemName.startsWith(leadPrefix));
+
+        if (!leadJobObj) return [];
+
+        const userAccess = pricingData.access || {};
+        const hasLeadAccess = userAccess.hasLeadAccess;
+
+        let finalTabs = [];
+
+        // Internal Helper for Descendants within Memo
+        const _isDescendant = (jobName, ancestorId) => {
+            const job = pricingData.jobs.find(j => j.itemName === jobName);
+            if (!job) return false;
+            if (job.parentId === ancestorId) return true;
+            if (job.parentId) {
+                const parent = pricingData.jobs.find(j => j.id === job.parentId);
+                if (parent) return _isDescendant(parent.itemName, ancestorId);
+            }
+            return false;
+        };
+
+        if (hasLeadAccess) {
+            const directChildren = pricingData.jobs.filter(j => j.parentId === leadJobObj.id);
+            finalTabs = [
+                { id: 'self', name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''), label: leadJobObj.itemName, isSelf: true, realId: leadJobObj.id },
+                ...directChildren.map(child => ({
+                    id: child.id,
+                    name: child.itemName,
+                    label: child.itemName,
+                    isSelf: false,
+                    realId: child.id
+                }))
+            ];
+        } else {
+            const accessibleNames = [...(userAccess.visibleJobs || []), ...(userAccess.editableJobs || [])];
+            const validTabs = pricingData.jobs.filter(j => {
+                const isSelf = j.id === leadJobObj.id;
+                const isDesc = _isDescendant(j.itemName, leadJobObj.id);
+                if (!isSelf && !isDesc) return false;
+
+                const jName = j.itemName.trim().toLowerCase();
+                return accessibleNames.some(acc => {
+                    const aName = acc.trim().toLowerCase();
+                    return jName === aName || jName.includes(aName) || aName.includes(jName);
+                });
+            });
+
+            if (validTabs.length > 0) {
+                finalTabs = validTabs.map(j => ({
+                    id: j.id,
+                    name: j.itemName.replace(leadPrefix + ' - ', ''),
+                    label: j.itemName,
+                    isSelf: j.id === leadJobObj.id,
+                    realId: j.id
+                }));
+            } else {
+                const directChildren = pricingData.jobs.filter(j => j.parentId === leadJobObj.id);
+                finalTabs = [
+                    { id: 'self', name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''), label: leadJobObj.itemName, isSelf: true, realId: leadJobObj.id },
+                    ...directChildren.map(child => ({ id: child.id, name: child.itemName, label: child.itemName, isSelf: false, realId: child.id }))
+                ];
+            }
+        }
+        return finalTabs;
+    }, [pricingData, enquiryData]);
+
+    // Auto-resolve active tabs based on calculated permissions
+    useEffect(() => {
+        if (calculatedTabs.length > 0) {
+            // Fix Quote Tab
+            const currentQuoteTabValid = calculatedTabs.find(t => t.id === activeQuoteTab);
+            if (!currentQuoteTabValid) {
+                console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
+                setActiveQuoteTab(calculatedTabs[0].id);
+            }
+
+            // Fix Pricing Tab
+            const currentPricingTabValid = calculatedTabs.find(t => t.id === activePricingTab);
+            if (!currentPricingTabValid) {
+                console.log('[AutoRes] Fixing Active Pricing Tab:', activePricingTab, '->', calculatedTabs[0].id);
+                setActivePricingTab(calculatedTabs[0].id);
+            }
+        }
+    }, [calculatedTabs, activeQuoteTab, activePricingTab]);
+
     return (
         <div style={{ display: 'flex', height: 'calc(100vh - 80px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
@@ -1187,66 +1701,206 @@ const QuoteForm = () => {
                 {/* Search Section */}
                 <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', position: 'relative', zIndex: 2000 }}>
                     <div style={{ position: 'relative' }} ref={searchRef}>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            <input
-                                type="text"
-                                placeholder="Search Enquiry..."
-                                value={searchTerm}
-                                onChange={(e) => handleSearchInput(e.target.value)}
-                                onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-                                style={{
-                                    flex: 1,
-                                    padding: '10px 12px',
-                                    border: '1px solid #e2e8f0',
-                                    borderRadius: '6px',
-                                    fontSize: '14px',
-                                    position: 'relative',
-                                    zIndex: 10,
-                                    backgroundColor: '#fff'
-                                }}
-                            />
+                        {/* Row 1: Enquiry No. and Lead Job */}
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+                            {/* 1. Enquiry Input */}
+                            <div style={{ flex: '0 0 50%', position: 'relative' }}>
+                                <input
+                                    type="text"
+                                    placeholder="Enquiry No."
+                                    value={searchTerm}
+                                    onChange={(e) => handleSearchInput(e.target.value)}
+                                    onFocus={() => setShowSuggestions(true)}
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: '6px',
+                                        fontSize: '14px',
+                                        backgroundColor: '#fff'
+                                    }}
+                                />
+                                {showSuggestions && suggestions.length > 0 && (
+                                    <div style={{
+                                        position: 'absolute', top: '100%', left: 0, right: 0,
+                                        background: 'white', border: '1px solid #e2e8f0', borderRadius: '6px',
+                                        boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 10000, marginTop: '4px',
+                                        maxHeight: '300px', overflowY: 'auto'
+                                    }}>
+                                        {suggestions.map((enq, idx) => (
+                                            <div
+                                                key={enq.RequestNo || idx}
+                                                onClick={() => handleSelectEnquiry(enq)}
+                                                style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: idx < suggestions.length - 1 ? '1px solid #f1f5f9' : 'none' }}
+                                                onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                                onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                            >
+                                                <div style={{ fontWeight: '600', fontSize: '13px' }}>{enq.RequestNo}</div>
+                                                <div style={{ fontSize: '11px', color: '#64748b' }}>{enq.ProjectName}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 2. Lead Job Selector */}
+                            <div style={{ flex: 1 }}>
+                                <div style={{ position: 'relative', width: '100%' }}>
+                                    <select
+                                        style={{
+                                            width: '100%',
+                                            padding: '8px 12px',
+                                            borderRadius: '6px',
+                                            border: '1px solid #e2e8f0',
+                                            background: enquiryData ? 'white' : '#f1f5f9',
+                                            color: '#334155',
+                                            fontWeight: '500',
+                                            fontSize: '13px',
+                                            appearance: 'none',
+                                            paddingRight: '30px',
+                                            cursor: enquiryData ? 'pointer' : 'not-allowed'
+                                        }}
+                                        disabled={!enquiryData || !enquiryData.divisions}
+                                        value={enquiryData && enquiryData.leadJobPrefix && enquiryData.divisions.find(d => d.startsWith(enquiryData.leadJobPrefix)) ? enquiryData.divisions.find(d => d.startsWith(enquiryData.leadJobPrefix)) : ''}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            const prefix = val.split('-')[0].trim();
+                                            setEnquiryData(prev => ({ ...prev, leadJobPrefix: prefix }));
+                                        }}
+                                    >
+                                        <option value="" disabled>Select Lead Job</option>
+                                        {/* Filter lead jobs based on user access from pricing data */}
+                                        {(() => {
+                                            if (!enquiryData || !enquiryData.divisions) return null;
+
+                                            // Get all lead jobs (starting with L)
+                                            const allLeadJobs = enquiryData.divisions.filter(d => d.trim().startsWith('L'));
+
+                                            // If no pricing data loaded yet, show all lead jobs
+                                            if (!pricingData || !pricingData.access) {
+                                                return allLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
+                                            }
+
+                                            // Filter based on user access
+                                            const visibleLeadJobs = allLeadJobs.filter(leadJob => {
+                                                // Extract lead job name (e.g., "L1 - Civil Project" -> "Civil Project")
+                                                const leadJobName = leadJob.replace(/^L\d+\s*-\s*/, '').trim();
+
+                                                // If user has lead access, show all lead jobs
+                                                if (pricingData.access.hasLeadAccess) return true;
+
+                                                // Check if user has access to this lead job or any of its sub-jobs
+                                                const visibleJobs = pricingData.access.visibleJobs || [];
+                                                const editableJobs = pricingData.access.editableJobs || [];
+
+                                                // Check if the lead job itself is in visible/editable jobs
+                                                if (visibleJobs.includes(leadJobName) || editableJobs.includes(leadJobName)) return true;
+                                                if (visibleJobs.includes(leadJob) || editableJobs.includes(leadJob)) return true;
+
+                                                // Check if any of user's accessible jobs are descendants of this lead job
+                                                // Use job hierarchy from pricing data if available
+                                                if (pricingData.jobs && pricingData.jobs.length > 0) {
+                                                    // Find the lead job in the jobs array
+                                                    const leadJobObj = pricingData.jobs.find(j =>
+                                                        j.itemName === leadJob || j.itemName === leadJobName
+                                                    );
+
+                                                    if (!leadJobObj) return false;
+
+                                                    // Get all accessible job names
+                                                    const accessibleJobs = [...new Set([...visibleJobs, ...editableJobs])];
+
+                                                    // Helper function to check if a job is a descendant of the lead job
+                                                    const isDescendantOf = (jobName, ancestorId) => {
+                                                        const job = pricingData.jobs.find(j => j.itemName === jobName);
+                                                        if (!job) return false;
+
+                                                        // Direct child
+                                                        if (job.parentId === ancestorId) return true;
+
+                                                        // Check if parent is a descendant (recursive)
+                                                        if (job.parentId) {
+                                                            const parent = pricingData.jobs.find(j => j.id === job.parentId);
+                                                            if (parent) {
+                                                                return isDescendantOf(parent.itemName, ancestorId);
+                                                            }
+                                                        }
+
+                                                        return false;
+                                                    };
+
+                                                    // Check if any accessible job is a descendant of this lead job
+                                                    return accessibleJobs.some(jobName => isDescendantOf(jobName, leadJobObj.id));
+                                                }
+
+                                                // Fallback: Check if any sub-jobs are accessible (less precise)
+                                                const hasAccessibleSubJobs = enquiryData.divisions.some(div => {
+                                                    if (div.trim().startsWith('L')) return false;
+                                                    return visibleJobs.includes(div) || editableJobs.includes(div);
+                                                });
+
+                                                return hasAccessibleSubJobs;
+                                            });
+
+                                            return visibleLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
+                                        })()}
+                                    </select>
+                                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
+                                        <ChevronDown size={14} />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Row 2: Customer Dropdown and Search Button */}
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <div style={{ flex: 1, position: 'relative' }}>
+                                <CreatableSelect
+                                    styles={{
+                                        control: (base, state) => ({
+                                            ...base,
+                                            minHeight: '38px',
+                                            fontSize: '13px',
+                                            borderColor: '#e2e8f0',
+                                            backgroundColor: state.isDisabled ? '#f1f5f9' : 'white'
+                                        }),
+                                        menu: (base) => ({ ...base, zIndex: 9999 })
+                                    }}
+                                    isDisabled={!enquiryData}
+                                    options={enquiryCustomerOptions}
+                                    value={enquiryCustomerOptions.find(opt => opt.value === toName)}
+                                    onChange={(selected) => handleCustomerChange(selected)}
+                                    placeholder="Select Customer..."
+                                    formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
+                                    isClearable
+                                />
+                            </div>
+
+                            {/* Search Button */}
                             <button
                                 onClick={() => searchTerm.trim() && handleSearchInput(searchTerm)}
                                 style={{
-                                    padding: '10px 16px',
-                                    background: 'white',
-                                    color: '#1e293b',
-                                    border: '1px solid #cbd5e1',
+                                    padding: '8px 16px',
+                                    background: '#1e293b',
+                                    color: 'white',
+                                    border: 'none',
                                     borderRadius: '6px',
                                     cursor: 'pointer',
-                                    fontWeight: '500'
+                                    fontWeight: '500',
+                                    fontSize: '13px',
+                                    whiteSpace: 'nowrap'
                                 }}
                             >
                                 Search
                             </button>
                         </div>
-                        {showSuggestions && suggestions.length > 0 && (
-                            <div style={{
-                                position: 'absolute', top: '100%', left: 0, right: 0,
-                                background: 'white', border: '1px solid #e2e8f0', borderRadius: '6px',
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 1002, marginTop: '4px',
-                                maxHeight: '300px', overflowY: 'auto'
-                            }}>
-                                {suggestions.map((enq, idx) => (
-                                    <div
-                                        key={enq.RequestNo || idx}
-                                        onClick={() => handleSelectEnquiry(enq)}
-                                        style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: idx < suggestions.length - 1 ? '1px solid #f1f5f9' : 'none' }}
-                                        onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                        onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                    >
-                                        <div style={{ fontWeight: '600', fontSize: '13px' }}>{enq.RequestNo}</div>
-                                        <div style={{ fontSize: '11px', color: '#64748b' }}>{enq.ProjectName}</div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
                     </div>
                 </div>
 
                 {/* Action Buttons & Clear Selection */}
-                {enquiryData && (
-                    <div style={{ padding: '6px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                {/* Visible ONLY when Enquiry Data AND Customer (toName) are selected */}
+                {enquiryData && toName && (
+                    <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
 
                         {/* Left Actions: Clear, Save, Revision */}
                         <div style={{ display: 'flex', gap: '6px' }}>
@@ -1298,201 +1952,361 @@ const QuoteForm = () => {
                 {/* Scrollable Content Area */}
                 {enquiryData && (
                     <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
-                        {/* Customer Selection Section - Standalone */}
-                        <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: 'white' }}>
-                            {/* <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Customer Selection:</h4> */}
-                            {/* Removed redundant label "To (Customer)" as per request */}
 
-                            <CreatableSelect
-                                styles={customStyles}
-                                options={enquiryCustomerOptions}
-                                value={enquiryCustomerOptions.find(opt => opt.value === toName)}
-                                onChange={(selected) => handleCustomerChange(selected)}
-                                placeholder="Select Customer..."
-                                formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
-                                isClearable
-                            />
-                        </div>
 
                         {/* Previous Quotes Section */}
-                        {toName && existingQuotes.filter(q => q.ToName === toName).length > 0 && (
-                            <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
-                                <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Previous Quotes / Revisions:</h4>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                    {(() => {
-                                        // Group by QuoteNo
-                                        const groups = existingQuotes.filter(q => q.ToName === toName).reduce((acc, q) => {
-                                            const key = q.QuoteNo;
-                                            if (!acc[key]) acc[key] = [];
-                                            acc[key].push(q);
-                                            return acc;
-                                        }, {});
+                        {toName && (
+                            // Simplified Visibility Logic: If matching quotes exist, show the section.
+                            existingQuotes.filter(q => {
+                                const matchCustomer = q.ToName === toName;
+                                let matchLeadJob = true;
+                                if (enquiryData && enquiryData.leadJobPrefix) {
+                                    const prefixPattern = `-${enquiryData.leadJobPrefix}`;
+                                    matchLeadJob = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
+                                }
+                                return matchCustomer && matchLeadJob;
+                            }).length > 0
+                        ) && (
+                                <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
+                                    <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
+                                        <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Previous Quotes / Revisions:</h4>
 
-                                        return Object.entries(groups)
-                                            .sort(([a], [b]) => b - a) // Latest quote sequence first
-                                            .map(([quoteNo, revisions]) => {
-                                                const sortedRevisions = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
-                                                const latest = sortedRevisions[0];
-                                                const isExpanded = expandedGroups[quoteNo];
+                                        {/* TABS for Lead Job + Direct Sub-Jobs */}
+                                        {(() => {
+                                            const tabs = calculatedTabs;
+                                            if (tabs.length === 0) return null;
 
-                                                return (
-                                                    <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                                        {/* Main Card (Latest) */}
-                                                        <div
-                                                            onClick={() => loadQuote(latest)}
-                                                            style={{
-                                                                padding: '8px',
-                                                                background: quoteId === latest.ID ? '#f0f9ff' : 'white',
-                                                                border: `1px solid ${quoteId === latest.ID ? '#0ea5e9' : '#e2e8f0'}`,
-                                                                borderRadius: '8px',
-                                                                cursor: 'pointer',
-                                                                transition: 'all 0.2s',
-                                                                boxShadow: quoteId === latest.ID ? '0 2px 4px rgba(14, 165, 233, 0.1)' : 'none'
-                                                            }}
-                                                            onMouseOver={(e) => { if (quoteId !== latest.ID) e.currentTarget.style.borderColor = '#0ea5e9'; }}
-                                                            onMouseOut={(e) => { if (quoteId !== latest.ID) e.currentTarget.style.borderColor = '#e2e8f0'; }}
-                                                        >
-                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                                <span style={{ fontWeight: '700', fontSize: '14px', color: '#0f172a' }}>{latest.QuoteNumber}</span>
-                                                                <span style={{
-                                                                    fontSize: '11px',
-                                                                    padding: '2px 8px',
-                                                                    borderRadius: '999px',
-                                                                    fontWeight: '600',
-                                                                    background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7',
-                                                                    color: latest.Status === 'Draft' ? '#64748b' : '#15803d',
-                                                                    border: `1px solid ${latest.Status === 'Draft' ? '#e2e8f0' : '#bbf7d0'}`
-                                                                }}>{latest.Status}</span>
-                                                            </div>
-
-
-
-                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: '8px' }}>
-                                                                <div style={{ fontSize: '11px', color: '#64748b' }}>
-                                                                    <div style={{ fontWeight: '500', color: '#475569' }}>{latest.PreparedBy}</div>
-                                                                    <div>{format(new Date(latest.QuoteDate), 'dd-MMM-yyyy')}</div>
-                                                                </div>
-                                                                {sortedRevisions.length > 1 && (
-                                                                    <div
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            setExpandedGroups(prev => ({ ...prev, [quoteNo]: !prev[quoteNo] }));
-                                                                        }}
-                                                                        style={{
-                                                                            fontSize: '10px',
-                                                                            color: '#0ea5e9',
-                                                                            fontWeight: '600',
-                                                                            background: '#f0f9ff',
-                                                                            padding: '2px 8px',
-                                                                            borderRadius: '4px',
-                                                                            display: 'flex',
-                                                                            alignItems: 'center',
-                                                                            gap: '4px',
-                                                                            border: '1px solid #bae6fd'
-                                                                        }}
-                                                                    >
-                                                                        {sortedRevisions.length - 1} More Revisions {isExpanded ? '▲' : '▼'}
-                                                                    </div>
-                                                                )}
-                                                            </div>
+                                            return (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                    {/* Tab Headers */}
+                                                    {tabs.length > 1 && (
+                                                        <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #e2e8f0', marginBottom: '4px' }}>
+                                                            {tabs.map(tab => (
+                                                                <button
+                                                                    key={tab.id}
+                                                                    onClick={() => setActiveQuoteTab(tab.id)}
+                                                                    style={{
+                                                                        padding: '4px 8px',
+                                                                        fontSize: '11px',
+                                                                        fontWeight: '600',
+                                                                        border: 'none',
+                                                                        background: activeQuoteTab === tab.id ? '#e0f2fe' : 'transparent',
+                                                                        color: activeQuoteTab === tab.id ? '#0284c7' : '#64748b',
+                                                                        borderBottom: activeQuoteTab === tab.id ? '2px solid #0284c7' : '2px solid transparent',
+                                                                        cursor: 'pointer',
+                                                                        borderRadius: '4px 4px 0 0'
+                                                                    }}
+                                                                >
+                                                                    {tab.isSelf ? 'My Quotes' : tab.name}
+                                                                </button>
+                                                            ))}
                                                         </div>
+                                                    )}
 
-                                                        {/* Expandable History Request - Show R0, R1 etc if expanded */}
-                                                        {isExpanded && sortedRevisions.slice(1).map(rev => (
-                                                            <div
-                                                                key={rev.ID}
-                                                                onClick={() => loadQuote(rev)}
-                                                                style={{
-                                                                    padding: '10px 12px 10px 24px',
-                                                                    background: quoteId === rev.ID ? '#f8fafc' : '#f1f5f9',
-                                                                    border: `1px solid ${quoteId === rev.ID ? '#334155' : '#e2e8f0'}`,
-                                                                    borderLeft: '4px solid #94a3b8',
-                                                                    borderRadius: '6px',
-                                                                    cursor: 'pointer',
-                                                                    fontSize: '13px',
-                                                                    marginLeft: '12px',
-                                                                    display: 'flex',
-                                                                    justifyContent: 'space-between',
-                                                                    alignItems: 'center'
-                                                                }}
-                                                            >
-                                                                <div>
-                                                                    <span style={{ fontWeight: '600' }}>{rev.QuoteNumber}</span>
-                                                                    <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '8px' }}>
-                                                                        {format(new Date(rev.QuoteDate), 'dd-MMM-yyyy')}
-                                                                    </span>
-                                                                </div>
-                                                                <span style={{ fontSize: '11px', color: '#64748b' }}>{rev.Status}</span>
-                                                            </div>
-                                                        ))}
+                                                    {/* Content for Active Tab */}
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                        {(() => {
+                                                            const activeTabObj = tabs.find(t => t.id === activeQuoteTab) || tabs[0];
+
+                                                            // Helper for Descendants
+                                                            const isDescendantOf = (jobName, ancestorId) => {
+                                                                const job = pricingData.jobs.find(j => j.itemName === jobName);
+                                                                if (!job) return false;
+                                                                if (job.parentId === ancestorId) return true;
+                                                                if (job.parentId) {
+                                                                    const parent = pricingData.jobs.find(j => j.id === job.parentId);
+                                                                    if (parent) return isDescendantOf(parent.itemName, ancestorId);
+                                                                }
+                                                                return false;
+                                                            };
+
+                                                            // Filter Logic
+                                                            const filteredQuotes = existingQuotes.filter(q => {
+                                                                // Basic Match
+                                                                const matchCustomer = (q.ToName || '').trim().toLowerCase() === (toName || '').trim().toLowerCase();
+                                                                if (!matchCustomer) return false;
+
+                                                                // Match Lead Job Context (Prefix Check) - CRITICAL FIX
+                                                                // Even if user has access to BMS quotes, they must match the selected Lead Job (L1 vs L2)
+                                                                if (enquiryData && enquiryData.leadJobPrefix) {
+                                                                    const prefixPattern = `-${enquiryData.leadJobPrefix}`;
+                                                                    const matchesPrefix = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
+                                                                    if (!matchesPrefix) return false;
+                                                                }
+
+                                                                // Match Tab Context
+                                                                // If Tab is Self (Lead Job): Show quotes that map to Lead Job Division (e.g. CVLP)
+                                                                // If Tab is Child (Sub Job): Show quotes that map to Child Job Division (e.g. ELE)
+
+                                                                // Heuristic to map Quote Division to Job Name
+                                                                const quoteParts = q.QuoteNumber && q.QuoteNumber.split('/');
+                                                                if (!quoteParts || quoteParts.length < 2) return false;
+                                                                const qDiv = quoteParts[1].toUpperCase(); // e.g., CVLP, PLFF, ELE
+
+                                                                const targetJobNameUpper = activeTabObj.label.toUpperCase();
+
+                                                                let matchesTab = false;
+
+                                                                if (activeTabObj.isSelf) {
+                                                                    // Matching Lead Job (Self)
+                                                                    // 1. Direct Division Checks (Legacy/Specific)
+                                                                    if (targetJobNameUpper.includes('CIVIL') && qDiv === 'CVLP') matchesTab = true;
+                                                                    else if (targetJobNameUpper.includes('BMS') && qDiv === 'BMS') matchesTab = true;
+                                                                    else if (qDiv === 'AAC') matchesTab = true;
+
+                                                                    // 2. Aggregation Check (Descendants) - DISABLED to enforce strict separation per User Request (Step 815)
+                                                                    // User wants 'My Quotes' (Civil) to ONLY show Civil quotes, not aggregated child quotes like BMS.
+                                                                    /*
+                                                                    if (!matchesTab) {
+                                                                        const jobForQuote = pricingData.jobs.find(j => {
+                                                                            const up = j.itemName.toUpperCase();
+                                                                            // Heuristic check again
+                                                                            if (qDiv === 'PLFF' && (up.includes('PLUMBING') || up.includes('PLFF'))) return true;
+                                                                            if (qDiv === 'BMS' && up.includes('BMS')) return true;
+                                                                            if (qDiv === 'CVLP' && up.includes('CIVIL')) return true;
+                                                                            if (qDiv === 'ELE' && up.includes('ELECTRICAL')) return true;
+                                                                            if (qDiv === 'AAC' && (up.includes('AC') || up.includes('AIR'))) return true;
+                                                                            return false;
+                                                                        });
+
+                                                                        if (jobForQuote) {
+                                                                            const leadId = activeTabObj.realId || (pricingData.leadJob ? pricingData.jobs.find(j => j.itemName === pricingData.leadJob)?.id : null);
+                                                                            if (leadId) {
+                                                                                if (jobForQuote.id === leadId) matchesTab = true;
+                                                                                else if (isDescendantOf(jobForQuote.itemName, leadId)) matchesTab = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    */
+                                                                } else {
+                                                                    // Matching Sub Job
+                                                                    // e.g. "Plumbing & FF" -> PLFF
+                                                                    if (targetJobNameUpper.includes('PLUMBING') || targetJobNameUpper.includes('PLFF')) {
+                                                                        if (qDiv === 'PLFF') matchesTab = true;
+                                                                    }
+                                                                    else if (targetJobNameUpper.includes('ELECTRICAL') || targetJobNameUpper.includes('ELEC')) {
+                                                                        if (qDiv === 'ELE') matchesTab = true;
+                                                                    }
+                                                                    else if (targetJobNameUpper.includes('BMS')) {
+                                                                        if (qDiv === 'BMS') matchesTab = true;
+                                                                    }
+                                                                }
+                                                                // REMOVED Aggregation Logic for Sub-Jobs to enforce strict separation as per user request (Step 745)
+                                                                // BMS quotes should separate from Electrical Tab even if BMS is a child job.
+
+                                                                return matchesTab;
+                                                            });
+
+                                                            if (filteredQuotes.length === 0) {
+                                                                return <div style={{ fontSize: '12px', color: '#94a3b8', fontStyle: 'italic', padding: '8px' }}>No quotes found for this section.</div>;
+                                                            }
+
+                                                            // Group and Render (Same as before)
+                                                            const groups = filteredQuotes.reduce((acc, q) => {
+                                                                const groupKey = q.QuoteNumber ? q.QuoteNumber.split('-R')[0] : 'Unknown';
+                                                                if (!acc[groupKey]) acc[groupKey] = [];
+                                                                acc[groupKey].push(q);
+                                                                return acc;
+                                                            }, {});
+
+                                                            return Object.entries(groups)
+                                                                .sort(([a], [b]) => b - a)
+                                                                .map(([quoteNo, revisions]) => {
+                                                                    const sortedRevisions = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
+                                                                    const latest = sortedRevisions[0];
+                                                                    const isExpanded = expandedGroups[quoteNo];
+
+                                                                    return (
+                                                                        <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                            {/* Main Card */}
+                                                                            <div
+                                                                                onClick={() => loadQuote(latest)}
+                                                                                style={{
+                                                                                    padding: '8px',
+                                                                                    background: quoteId === latest.ID ? '#f0f9ff' : 'white',
+                                                                                    border: `1px solid ${quoteId === latest.ID ? '#0ea5e9' : '#e2e8f0'}`,
+                                                                                    borderRadius: '8px',
+                                                                                    cursor: 'pointer',
+                                                                                    transition: 'all 0.2s'
+                                                                                }}
+                                                                            >
+                                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                                    <span style={{ fontWeight: '700', fontSize: '14px', color: '#0f172a' }}>{latest.QuoteNumber}</span>
+                                                                                    <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '999px', background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7', color: latest.Status === 'Draft' ? '#64748b' : '#15803d' }}>{latest.Status}</span>
+                                                                                </div>
+                                                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px', fontSize: '11px', color: '#64748b' }}>
+                                                                                    <div>{latest.PreparedBy} - {format(new Date(latest.QuoteDate), 'dd-MMM-yyyy')}</div>
+                                                                                    {sortedRevisions.length > 1 && (
+                                                                                        <div onClick={(e) => { e.stopPropagation(); setExpandedGroups(prev => ({ ...prev, [quoteNo]: !prev[quoteNo] })); }} style={{ color: '#0ea5e9', cursor: 'pointer' }}>
+                                                                                            {sortedRevisions.length - 1} More Revisions {isExpanded ? '▲' : '▼'}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
+                                                                            {isExpanded && sortedRevisions.slice(1).map(rev => (
+                                                                                <div key={rev.ID} onClick={() => loadQuote(rev)} style={{ padding: '8px', marginLeft: '12px', background: '#f1f5f9', borderLeft: '4px solid #94a3b8', fontSize: '12px', cursor: 'pointer' }}>
+                                                                                    <b>{rev.QuoteNumber}</b> - {rev.Status}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    );
+                                                                });
+
+                                                        })()}
                                                     </div>
-                                                );
-                                            });
-                                    })()}
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
                                 </div>
-                            </div>
-                        )}
+                            )}
 
-                        {/* Show rest ONLY if a quote is selected OR it's a completely new enquiry - AND customer is selected */}
-                        {toName && (quoteId || existingQuotes.filter(q => q.ToName === toName).length === 0) && (
+                        {/* Show rest ONLY if a customer is selected (New Quote or Edit Mode) */}
+                        {toName && (
                             <>
 
                                 {/* Pricing Summary */}
                                 <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f0fdf4' }}>
                                     <h4 style={{ margin: '0 0 4px 0', fontSize: '13px', color: '#166534' }}>Pricing Summary</h4>
 
-                                    {/* Pricing Checkboxes - MOVED to prefix division name below */}
-                                    {/* {pricingData && pricingData.jobs && pricingData.jobs.length > 0 && (
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
-                                            {pricingData.jobs.map(job => (
-                                                <label key={job.itemName} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', cursor: 'pointer', background: 'white', padding: '2px 6px', borderRadius: '4px', border: '1px solid #bbf7d0' }}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selectedJobs.includes(job.itemName)}
-                                                        onChange={() => handleJobToggle(job.itemName)}
-                                                        style={{ cursor: 'pointer' }}
-                                                    />
-                                                    {job.itemName}
-                                                </label>
-                                            ))}
-                                        </div>
-                                    )} */}
+                                    {/* Tabs for Pricing */}
+                                    {(() => {
+                                        const tabs = calculatedTabs;
+                                        if (tabs.length === 0) return null;
+
+                                        return (
+                                            <div style={{ marginBottom: '8px' }}>
+                                                <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #bbf7d0', marginBottom: '8px' }}>
+                                                    {tabs.map(tab => (
+                                                        <button
+                                                            key={tab.id}
+                                                            onClick={() => setActivePricingTab(tab.id)}
+                                                            style={{
+                                                                padding: '4px 8px',
+                                                                fontSize: '11px',
+                                                                fontWeight: '600',
+                                                                border: 'none',
+                                                                background: activePricingTab === tab.id ? '#dcfce7' : 'transparent',
+                                                                color: activePricingTab === tab.id ? '#166534' : '#64748b',
+                                                                borderBottom: activePricingTab === tab.id ? '2px solid #166534' : '2px solid transparent',
+                                                                cursor: 'pointer',
+                                                                borderRadius: '4px 4px 0 0'
+                                                            }}
+                                                        >
+                                                            {tab.isSelf ? 'My Pricing' : tab.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
 
                                     {pricingSummary.length > 0 ? (
                                         <div>
-                                            {pricingSummary.map((grp, i) => (
-                                                <div key={i} style={{ marginBottom: '8px' }}>
-                                                    <h5 style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#166534', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                        {((pricingData && pricingData.jobs && pricingData.jobs.some(j => j.itemName === grp.name)) || (pricingData && pricingData.leadJob && pricingData.leadJob === grp.name) || (pricingData && grp.name.includes(pricingData.leadJob))) && (
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={selectedJobs.includes(grp.name)}
-                                                                onChange={() => handleJobToggle(grp.name)}
-                                                                style={{ cursor: 'pointer' }}
-                                                            />
-                                                        )}
-                                                        {grp.name}
-                                                    </h5>
-                                                    <div style={{ opacity: selectedJobs.includes(grp.name) ? 1 : 0.5 }}>
-                                                        {grp.items.map((item, idx) => (
-                                                            <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#475569', padding: '2px 0' }}>
-                                                                <span>{item.name}:</span>
-                                                                <span>BD {item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                                            {(() => {
+                                                // Re-derive context for filtering
+                                                if (!pricingData || !pricingData.jobs) return null;
+                                                const leadPrefix = enquiryData.leadJobPrefix;
+                                                const leadJobNameFull = enquiryData.divisions.find(d => d.startsWith(leadPrefix));
+                                                const leadJobObj = pricingData.jobs.find(j => j.itemName === leadJobNameFull) ||
+                                                    pricingData.jobs.find(j => j.itemName.startsWith(leadPrefix));
+                                                if (!leadJobObj) return pricingSummary; // Fallback
+
+                                                const directChildren = pricingData.jobs.filter(j => j.parentId === leadJobObj.id);
+
+                                                // Helper for Descendants
+                                                const isDescendantOf = (jobName, ancestorId) => {
+                                                    const job = pricingData.jobs.find(j => j.itemName === jobName);
+                                                    if (!job) return false;
+                                                    if (job.parentId === ancestorId) return true;
+                                                    if (job.parentId) {
+                                                        const parent = pricingData.jobs.find(j => j.id === job.parentId);
+                                                        if (parent) return isDescendantOf(parent.itemName, ancestorId);
+                                                    }
+                                                    return false;
+                                                };
+
+                                                // Determine Active Tab
+                                                // We need to map 'self' back to real ID or logic
+                                                const activeTabId = activePricingTab; // 'self' or a UUID
+                                                const isSelfTab = activeTabId === 'self';
+                                                const activeChildId = isSelfTab ? null : activeTabId;
+
+                                                const filteredSummary = pricingSummary.filter(grp => {
+                                                    const job = pricingData.jobs.find(j => j.itemName === grp.name);
+
+                                                    if (isSelfTab) {
+                                                        if (!job) return true; // General items
+                                                        if (job.id === leadJobObj.id) return true; // Lead Job items
+
+                                                        // Exclude any belonging to a Child Branch
+                                                        const belongsToChild = directChildren.some(child =>
+                                                            job.id === child.id || isDescendantOf(job.itemName, child.id)
+                                                        );
+                                                        return !belongsToChild;
+                                                    } else {
+                                                        // Child Tab
+                                                        if (!job) return false;
+                                                        // Include if job IS the child or descendant
+                                                        return job.id === activeChildId || isDescendantOf(job.itemName, activeChildId);
+                                                    }
+                                                });
+
+                                                // Render Filtered Groups
+                                                return (
+                                                    <>
+                                                        {filteredSummary.length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', fontStyle: 'italic' }}>No pricing items in this section.</div>}
+                                                        {filteredSummary.map((grp, i) => (
+                                                            <div key={i} style={{ marginBottom: '8px' }}>
+                                                                <h5 style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#166534', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                    {/* Checkbox Logic - Allow toggling entire group if relevant */}
+                                                                    {((pricingData && pricingData.jobs && pricingData.jobs.some(j => j.itemName === grp.name)) || (pricingData && pricingData.leadJob && pricingData.leadJob === grp.name) || (pricingData && grp.name.includes(pricingData.leadJob))) && (
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={selectedJobs.includes(grp.name)}
+                                                                            onChange={() => handleJobToggle(grp.name)}
+                                                                            style={{ cursor: 'pointer' }}
+                                                                        />
+                                                                    )}
+                                                                    {grp.name}
+                                                                </h5>
+                                                                <div style={{ opacity: selectedJobs.includes(grp.name) ? 1 : 0.5 }}>
+                                                                    {grp.items.map((item, idx) => (
+                                                                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#475569', padding: '2px 0' }}>
+                                                                            <span>{item.name}:</span>
+                                                                            <span>BD {item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                                                                        </div>
+                                                                    ))}
+                                                                    {grp.items.length > 1 && (
+                                                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#1e293b', padding: '4px 0', borderTop: '1px dashed #bbf7d0', marginTop: '2px' }}>
+                                                                            <span style={{ fontWeight: '600' }}>Total:</span>
+                                                                            <span style={{ fontWeight: '600' }}>BD {grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
                                                             </div>
                                                         ))}
-                                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#1e293b', padding: '4px 0', borderTop: '1px dashed #bbf7d0', marginTop: '2px' }}>
-                                                            <span style={{ fontWeight: '600' }}>Total:</span>
-                                                            <span style={{ fontWeight: '600' }}>BD {grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                            {grandTotal > 0 && !hasPricedOptional && (
-                                                <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '2px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '14px', color: '#1e293b' }}>
-                                                    <span>Total:</span>
-                                                    <span>BD {grandTotal.toLocaleString()}</span>
-                                                </div>
-                                            )}
+
+                                                        {/* Recalculate Visible Total for this Tab */}
+                                                        {(() => {
+                                                            const tabTotal = filteredSummary.reduce((acc, grp) => {
+                                                                return acc + (selectedJobs.includes(grp.name) ? grp.total : 0);
+                                                            }, 0);
+
+                                                            if (tabTotal > 0 && !hasPricedOptional) {
+                                                                return (
+                                                                    <div style={{ marginTop: '12px', paddingTop: '8px', borderTop: '2px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '14px', color: '#1e293b' }}>
+                                                                        <span>Total ({isSelfTab ? 'My Pricing' : 'Section Total'}):</span>
+                                                                        <span>BD {tabTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                                                                    </div>
+                                                                );
+                                                            }
+                                                            return null;
+                                                        })()}
+                                                    </>
+                                                );
+                                            })()}
+
                                             {!hasUserPricing && (
                                                 <div style={{ marginTop: '8px', color: '#dc2626', fontSize: '12px', fontStyle: 'italic' }}>
                                                     * You must enter pricing for your division to proceed.
@@ -1508,6 +2322,8 @@ const QuoteForm = () => {
                                 <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fafafa' }}>
 
                                     <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
+
+                                    {/* Division is auto-selected based on user department - no manual selection needed */}
 
                                     <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Quote Date</label>
@@ -1534,7 +2350,6 @@ const QuoteForm = () => {
                                         <CreatableSelect
                                             isClearable
                                             onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
-                                            onInputChange={(inputValue) => setPreparedBy(inputValue)}
                                             options={preparedByOptions}
                                             value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
                                             placeholder="Select or Type Name..."
@@ -1557,7 +2372,6 @@ const QuoteForm = () => {
                                                     setSignatoryDesignation(newValue.designation);
                                                 }
                                             }}
-                                            onInputChange={(inputValue) => setSignatory(inputValue)}
                                             options={signatoryOptions}
                                             value={signatory ? { label: signatory, value: signatory } : null}
                                             placeholder="Select or Type Signatory..."
@@ -1755,14 +2569,14 @@ const QuoteForm = () => {
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }}>
                         Loading enquiry data...
                     </div>
-                ) : (!enquiryData || (existingQuotes.length > 0 && !quoteId)) ? (
+                ) : (!enquiryData || !toName) ? (
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }}>
                         <div style={{ textAlign: 'center' }}>
                             <FileText size={48} style={{ opacity: 0.3, marginBottom: '12px' }} />
                             <div>
                                 {!enquiryData
                                     ? "Search and select an enquiry to generate a quote"
-                                    : "Please select a quote revision from the left panel to preview"}
+                                    : "Please select a customer to preview the quote"}
                             </div>
                         </div>
                     </div>
@@ -1850,7 +2664,7 @@ const QuoteForm = () => {
 
                                     {/* Signature Section */}
                                     <div style={{ marginTop: '50px' }}>
-                                        <div style={{ marginBottom: '40px' }}>For {footerDetails?.name || enquiryData.companyDetails?.name || 'Almoayyed Contracting'},</div>
+                                        <div style={{ marginBottom: '40px' }}>For {quoteCompanyName || enquiryData.companyDetails?.name || 'Almoayyed Contracting'},</div>
                                         <div style={{ fontWeight: '600' }}>{signatory || 'N/A'}</div>
                                         <div style={{ fontSize: '13px', color: '#64748b' }}>{signatoryDesignation || ''}</div>
                                     </div>

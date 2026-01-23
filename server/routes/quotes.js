@@ -105,46 +105,79 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             logo: null,
             name: 'Almoayyed Air Conditioning'
         };
-        let enquiryForResult = { recordset: [] };
+        let availableProfiles = [];
 
         try {
-            // Fetch items and also join with Master to get Code and Logo and Address Details
-            enquiryForResult = await sql.query`
-                SELECT E.ItemName, M.DivisionCode, M.DepartmentCode, M.CompanyLogo, M.CompanyName, M.CommonMailIds, M.CCMailIds, M.Phone, M.Address, M.FaxNo
-                FROM EnquiryFor E
-                LEFT JOIN Master_EnquiryFor M ON E.ItemName = M.ItemName
-                WHERE E.RequestNo = ${requestNo}
-            `;
+            // 1. Fetch raw items
+            const rawItemsResult = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
+            const rawItems = rawItemsResult.recordset;
+            divisions = rawItems.map(r => r.ItemName);
 
-            divisions = enquiryForResult.recordset.map(r => r.ItemName);
+            // 2. Resolve Master Details for EACH item (handling prefixes)
+            const resolvedItems = [];
+            for (const item of rawItems) {
+                let itemName = item.ItemName;
+                let cleanName = itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim(); // Remove "L1 - ", "L2 - "
 
-            // Find the Lead Job (prioritize items starting with 'L1' or take the first one)
-            const leadItem = enquiryForResult.recordset.find(r => r.ItemName && r.ItemName.startsWith('L1')) ||
-                enquiryForResult.recordset[0];
+                // Try to find in Master
+                let masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${itemName} OR ItemName = ${cleanName}`;
+                let masterData = masterRes.recordset[0];
 
+                if (masterData) {
+                    // Prioritize Transaction Data (item) over Master Data for ItemName (to keep L1/L2 prefixes)
+                    resolvedItems.push({ ...masterData, ...item });
+
+                    // Add to available profiles if valid details exist
+                    if (masterData.DivisionCode || masterData.DepartmentCode) {
+                        const profile = {
+                            code: masterData.DepartmentCode || 'ACC',
+                            departmentCode: masterData.DepartmentCode || 'ACC',
+                            divisionCode: masterData.DivisionCode || 'GEN',
+                            name: masterData.CompanyName,
+                            logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
+                            address: masterData.Address,
+                            phone: masterData.Phone,
+                            fax: masterData.FaxNo,
+                            email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
+                            itemName: item.ItemName // Explicitly use the transaction item name
+                        };
+
+                        // Avoid duplicates in availableProfiles based on Div/Dept
+                        const exists = availableProfiles.find(p => p.divisionCode === profile.divisionCode && p.code === profile.code);
+                        if (!exists) {
+                            availableProfiles.push(profile);
+                        }
+                    }
+                } else {
+                    resolvedItems.push(item);
+                }
+            }
+
+            // 3. Find Lead Job Default (Prioritize L1, then first available)
+            let leadItem = resolvedItems.find(r => r.ItemName && r.ItemName.startsWith('L1')) || resolvedItems[0];
             leadJobPrefix = leadItem ? leadItem.ItemName.split('-')[0].trim() : '';
 
-            // Use the Lead Job for Company Details/Codes
-            const match = leadItem || enquiryForResult.recordset.find(r => r.DepartmentCode || r.CompanyLogo || r.Address);
-
-            if (match) {
-                if (match.DepartmentCode) companyDetails.code = match.DepartmentCode;
+            // 4. Set Initial Company Details from Lead Item
+            if (leadItem && leadItem.DepartmentCode) {
+                const match = leadItem;
+                companyDetails.code = match.DepartmentCode;
                 companyDetails.divisionCode = match.DivisionCode || 'AAC';
                 companyDetails.departmentCode = match.DepartmentCode || '';
-
-                if (match.CompanyLogo) companyDetails.logo = match.CompanyLogo.replace(/\\/g, '/');
                 if (match.CompanyName) companyDetails.name = match.CompanyName;
+                if (match.CompanyLogo) companyDetails.logo = match.CompanyLogo.replace(/\\/g, '/');
                 if (match.Address) companyDetails.address = match.Address;
                 if (match.Phone) companyDetails.phone = match.Phone;
                 if (match.FaxNo) companyDetails.fax = match.FaxNo;
-                // Use CommonMailIds as email source if available (first email)
                 if (match.CommonMailIds) {
                     const emails = match.CommonMailIds.split(',');
                     if (emails.length > 0) companyDetails.email = emails[0].trim();
                 }
+            } else if (availableProfiles.length > 0) {
+                // Fallback to first available profile if lead item has no details
+                companyDetails = availableProfiles[0];
             }
 
-            console.log(`[Quote API] Found ${divisions.length} divisions. Code: ${companyDetails.code}`);
+            console.log(`[Quote API] Found ${divisions.length} divisions. Default Profile: ${companyDetails.divisionCode}`);
         } catch (err) {
             console.error('[Quote API] Error fetching EnquiryFor:', err);
         }
@@ -157,27 +190,10 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 if (row.SEName) preparedByOptions.push({ value: row.SEName, label: row.SEName, type: 'SE' });
             });
 
-            if (enquiryForResult && enquiryForResult.recordset) {
-                enquiryForResult.recordset.forEach(row => {
-                    if (row.CommonMailIds) {
-                        row.CommonMailIds.split(',').forEach(email => {
-                            const e = email.trim();
-                            if (e) preparedByOptions.push({ value: e, label: e, type: 'Common' });
-                        });
-                    }
-                    if (row.CCMailIds) {
-                        row.CCMailIds.split(',').forEach(email => {
-                            const e = email.trim();
-                            if (e) preparedByOptions.push({ value: e, label: e, type: 'CC' });
-                        });
-                    }
-                });
-            }
-
             if (enquiry.CreatedBy) {
                 preparedByOptions.push({ value: enquiry.CreatedBy, label: enquiry.CreatedBy, type: 'Creator' });
             }
-
+            // Add emails from default list if needed, or rely on frontend
             preparedByOptions = preparedByOptions.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
         } catch (err) {
             console.error('[Quote API] Error fetching Prepared By options:', err);
@@ -188,31 +204,43 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         try {
             const customerResult = await sql.query`SELECT CustomerName FROM EnquiryCustomer WHERE RequestNo = ${requestNo}`;
             customerResult.recordset.forEach(row => {
-                if (row.CustomerName) customerOptions.push(row.CustomerName);
+                if (row.CustomerName) {
+                    // Split by comma in case of legacy data or combined strings
+                    row.CustomerName.split(',').forEach(c => {
+                        const trimmed = c.trim();
+                        if (trimmed) customerOptions.push(trimmed);
+                    });
+                }
             });
-            if (enquiry.CustomerName) customerOptions.push(enquiry.CustomerName);
+
+            if (enquiry.CustomerName) {
+                enquiry.CustomerName.split(',').forEach(c => {
+                    const trimmed = c.trim();
+                    if (trimmed) customerOptions.push(trimmed);
+                });
+            }
             customerOptions = [...new Set(customerOptions)];
         } catch (err) {
             console.error('[Quote API] Error fetching Customer options:', err);
-            if (enquiry.CustomerName) customerOptions.push(enquiry.CustomerName);
+            if (enquiry.CustomerName) {
+                enquiry.CustomerName.split(',').forEach(c => {
+                    const trimmed = c.trim();
+                    if (trimmed) customerOptions.push(trimmed);
+                });
+            }
         }
 
         res.json({
             enquiry,
             customerDetails,
             divisions,
-            divisionEmails: enquiryForResult.recordset.map(r => ({
-                itemName: r.ItemName,
-                commonMailIds: r.CommonMailIds,
-                ccMailIds: r.CCMailIds
-            })),
             companyDetails,
+            availableProfiles, // <--- New Field
             preparedByOptions,
             customerOptions,
             leadJobPrefix,
             quoteNumber: 'Draft'
         });
-
     } catch (err) {
         console.error('[Quote API] Fatal Error in enquiry-data route:', err);
         res.status(500).json({ error: 'Failed to fetch enquiry data', details: err.message });
@@ -294,6 +322,9 @@ router.post('/', async (req, res) => {
         }
 
         // Get next quote number
+        // We calculate the next QuoteNo for THIS RequestNo generally.
+        // NOTE: If the user wants separate counters for separate divisions, we'd need to filter by QuoteNumber LIKE pattern.
+        // Assuming global counter for the Enquiry is safer to avoid collisions if multiple people quote same enquiry.
         const quoteCountResult = await sql.query`
             SELECT ISNULL(MAX(QuoteNo), 0) + 1 AS NextQuoteNo 
             FROM EnquiryQuotes 
@@ -301,10 +332,15 @@ router.post('/', async (req, res) => {
         `;
         const quoteNo = quoteCountResult.recordset[0].NextQuoteNo;
         const revisionNo = 0;
+
+        // Use supplied codes (from frontend, based on user login/selection)
         const dept = departmentCode || "GEN";
         const division = divisionCode || "AAC";
+
+        // Revert to including Lead Job Prefix (e.g. 104-L1) as requested by user in Step 587
         const requestRef = leadJobPrefix ? `${requestNo}-${leadJobPrefix}` : requestNo;
 
+        // FORMAT: Dept/Div/EnquiryRef/QuoteNo-Revision
         const quoteNumber = `${dept}/${division}/${requestRef}/${quoteNo}-R${revisionNo}`;
 
         const result = await sql.query`
@@ -418,6 +454,8 @@ router.put('/:id', async (req, res) => {
 router.post('/:id/revise', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log(`[Revise] Starting revision for quote ID: ${id}`);
+
         const {
             preparedBy, preparedByEmail, validityDays,
             showScopeOfWork, showBasisOfOffer, showExclusions, showPricingTerms,
@@ -431,18 +469,36 @@ router.post('/:id/revise', async (req, res) => {
         const existingResult = await sql.query`SELECT * FROM EnquiryQuotes WHERE ID = ${id}`;
 
         if (existingResult.recordset.length === 0) {
+            console.log(`[Revise] Quote not found for ID: ${id}`);
             return res.status(404).json({ error: 'Quote not found' });
         }
         const existing = existingResult.recordset[0];
         const newRevisionNo = existing.RevisionNo + 1;
+        console.log(`[Revise] Existing quote: ${existing.QuoteNumber}, Current Revision: ${existing.RevisionNo}, New Revision: ${newRevisionNo}`);
 
         const existingParts = existing.QuoteNumber ? existing.QuoteNumber.split("/") : [];
-        // Preserve existing structure, just replace the last part (Quote-Rev)
-        if (existingParts.length > 0) {
-            existingParts.pop(); // Remove old Rev
+
+        // For revisions, preserve the existing quote's reference part (including lead job prefix)
+        // Don't recalculate - just use what's already in the quote number
+        let correctRefPart = existingParts.length > 2 ? existingParts[2] : existing.RequestNo;
+        console.log(`[Revise] Using existing reference part: ${correctRefPart}`);
+
+        // 2. Reconstruct Quote Number
+        // Expected Format: Dept/Div/Ref/QuoteNo-Rev
+        let newQuoteNumber;
+        if (existingParts.length >= 4) {
+            const dept = existingParts[0];
+            const div = existingParts[1];
+            // Part 2 is Ref (Updated)
+            // Part 3 is Quote-Rev
+            newQuoteNumber = `${dept}/${div}/${correctRefPart}/${existing.QuoteNo}-R${newRevisionNo}`;
+        } else {
+            // Fallback for non-standard formats
+            if (existingParts.length > 0) existingParts.pop();
+            const quoteRevPart = `${existing.QuoteNo}-R${newRevisionNo}`;
+            newQuoteNumber = existingParts.length > 0 ? `${existingParts.join('/')}/${quoteRevPart}` : `${existing.QuoteNumber}-R${newRevisionNo}`;
         }
-        const quoteRevPart = `${existing.QuoteNo}-R${newRevisionNo}`;
-        const newQuoteNumber = existingParts.length > 0 ? `${existingParts.join('/')}/${quoteRevPart}` : `${existing.QuoteNumber}-R${newRevisionNo}`;
+        console.log(`[Revise] New quote number: ${newQuoteNumber}`);
 
         const customClausesJson = customClauses ? JSON.stringify(customClauses) : existing.CustomClauses;
         const clauseOrderJson = clauseOrder ? JSON.stringify(clauseOrder) : existing.ClauseOrder;
@@ -498,6 +554,8 @@ router.post('/:id/revise', async (req, res) => {
             )
         `;
 
+        console.log(`[Revise] Revision created successfully! New ID: ${result.recordset[0].ID}, QuoteNumber: ${result.recordset[0].QuoteNumber}`);
+
         res.json({
             success: true,
             id: result.recordset[0].ID,
@@ -505,8 +563,8 @@ router.post('/:id/revise', async (req, res) => {
         });
 
     } catch (err) {
-        console.error('Error creating revision:', err);
-        res.status(500).json({ error: 'Failed to create revision' });
+        console.error('[Revise] Error creating revision:', err);
+        res.status(500).json({ error: 'Failed to create revision', details: err.message });
     }
 });
 

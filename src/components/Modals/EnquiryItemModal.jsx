@@ -172,14 +172,14 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
                         {errors.ItemName && <ValidationTooltip message={errors.ItemName} />}
                     </div>
                     <div className="col-md-6">
-                        <label className="form-label">Company Name (Dept)</label>
+                        <label className="form-label">Department Name</label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.CompanyName} onChange={(e) => handleChange('CompanyName', e.target.value)} />
                     </div>
                 </div>
                 <div className="row mb-2">
                     <div className="col-md-3">
-                        <label className="form-label">Department Name</label>
+                        <label className="form-label">Division Name</label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.DepartmentName} onChange={(e) => handleChange('DepartmentName', e.target.value)} />
                     </div>

@@ -697,16 +697,18 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm px-3 py-1"
-                                                                        onClick={() => persistUpdate(item)}
-                                                                        disabled={updatingReqNo === item.RequestNo}
-                                                                        style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                    >
-                                                                        {updatingReqNo === item.RequestNo ? (
-                                                                            <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : 'UPDATE'}
-                                                                    </button>
+                                                                    {(listMode === 'Pending' || listMode === 'Lost') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            onClick={() => persistUpdate(item)}
+                                                                            disabled={updatingReqNo === item.RequestNo}
+                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
+                                                                        >
+                                                                            {updatingReqNo === item.RequestNo ? (
+                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                                                            ) : 'UPDATE'}
+                                                                        </button>
+                                                                    )}
                                                                 </>
                                                             )}
                                                             {/* Follow Up UI in 7th Column */}
@@ -817,16 +819,18 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm px-3 py-1"
-                                                                        onClick={() => persistUpdate(item)}
-                                                                        disabled={updatingReqNo === item.RequestNo}
-                                                                        style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                    >
-                                                                        {updatingReqNo === item.RequestNo ? (
-                                                                            <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : 'UPDATE'}
-                                                                    </button>
+                                                                    {(listMode === 'Pending' || listMode === 'FollowUp') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            onClick={() => persistUpdate(item)}
+                                                                            disabled={updatingReqNo === item.RequestNo}
+                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
+                                                                        >
+                                                                            {updatingReqNo === item.RequestNo ? (
+                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                                                            ) : 'UPDATE'}
+                                                                        </button>
+                                                                    )}
                                                                 </>
                                                             )}                                                                      {/* Won UI in 7th Column */}
                                                             {item.Status === 'Won' && (
@@ -1006,21 +1010,23 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm px-3 py-1"
-                                                                        onClick={() => persistUpdate(item)}
-                                                                        disabled={updatingReqNo === item.RequestNo}
-                                                                        style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                    >
-                                                                        {updatingReqNo === item.RequestNo ? (
-                                                                            <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : 'UPDATE'}
-                                                                    </button>
+                                                                    {(listMode === 'Pending' || listMode === 'Won') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            onClick={() => persistUpdate(item)}
+                                                                            disabled={updatingReqNo === item.RequestNo}
+                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
+                                                                        >
+                                                                            {updatingReqNo === item.RequestNo ? (
+                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                                                                            ) : 'UPDATE'}
+                                                                        </button>
+                                                                    )}
                                                                 </>
                                                             )}
 
                                                             {/* Pending/Other UI in 7th Column - Still show update button if not Pending */}
-                                                            {(item.Status !== 'Won' && item.Status !== 'FollowUp' && item.Status !== 'Lost' && item.Status !== 'OnHold' && item.Status !== 'Cancelled' && item.Status !== 'Retendered' && item.Status !== 'Pending') && (
+                                                            {listMode === 'Pending' && (item.Status !== 'Won' && item.Status !== 'FollowUp' && item.Status !== 'Lost' && item.Status !== 'OnHold' && item.Status !== 'Cancelled' && item.Status !== 'Retendered' && item.Status !== 'Pending' && item.Status !== 'Enquiry') && (
                                                                 <>
                                                                     <button
                                                                         className="btn btn-primary btn-sm px-3 py-1"

@@ -476,6 +476,7 @@ app.post('/api/auth/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.LoginPassword);
         if (!isMatch) {
             console.log('Login failed: Password mismatch for', email);
+            console.log(`Debug: Input PW Len: ${password.length}, Hash: ${user.LoginPassword}`);
             return res.status(400).json({ message: 'Invalid email or password' });
         }
 
