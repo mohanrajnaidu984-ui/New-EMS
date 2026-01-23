@@ -1,0 +1,23 @@
+[
+  {
+    "id": 285,
+    "itemName": "L1 - Civil Project",
+    "companyLogo": "uploads/logos/1769097773799-Almoayyed Contracting.png",
+    "companyName": "Almoayyed Contracting",
+    "hasLogoInRaw": true
+  },
+  {
+    "id": 286,
+    "itemName": "Elec Project",
+    "companyLogo": "uploads/logos/1769097941308-Almoayyed-Air-Conditioning.png",
+    "companyName": "Almoayyed Air Conditioning",
+    "hasLogoInRaw": true
+  },
+  {
+    "id": 287,
+    "itemName": "BMS Project",
+    "companyLogo": "uploads/logos/1769098014094-Almoayyed-Air-Conditioning.png",
+    "companyName": "Almoayyed Air Conditioning",
+    "hasLogoInRaw": true
+  }
+]

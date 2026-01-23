@@ -16,6 +16,7 @@ const PricingForm = () => {
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [searchResults, setSearchResults] = useState([]);
     const [searching, setSearching] = useState(false);
+    const [pendingRequests, setPendingRequests] = useState([]); // Pending List State
     const searchRef = useRef(null);
 
     // Pricing state
@@ -44,8 +45,18 @@ const PricingForm = () => {
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
+
+        // Fetch Pending Requests
+        const userEmail = currentUser?.email || currentUser?.EmailId || '';
+        if (userEmail) {
+            fetch(`${API_BASE}/api/pricing/list/pending?userEmail=${encodeURIComponent(userEmail)}`)
+                .then(res => res.json())
+                .then(data => setPendingRequests(data || []))
+                .catch(err => console.error('Error fetching pending requests:', err));
+        }
+
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
+    }, [currentUser]);
 
 
 
@@ -824,7 +835,111 @@ const PricingForm = () => {
                 )
             }
 
-            {/* No Results */}
+            {/* Pending Requests List - Display when no search and no pricing loaded */}
+            {
+                !pricingData && searchResults.length === 0 && !searchTerm && pendingRequests.length > 0 && (
+                    <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
+                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <FileText size={16} /> Pending Updates ({pendingRequests.length})
+                            </h3>
+                            <span style={{ fontSize: '12px', color: '#64748b' }}>Sorted by Due Date</span>
+                        </div>
+                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                    <tr>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Project Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Customer Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Due Date</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {pendingRequests.map((enq, idx) => (
+                                        <tr
+                                            key={enq.RequestNo || idx}
+                                            style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
+                                            onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                            onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                            onClick={() => loadPricing(enq.RequestNo)}
+                                        >
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
+                                            <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
+                                                    const parts = s.split('|');
+                                                    const name = parts[0];
+                                                    const rawPrice = parts[1];
+                                                    const rawDate = parts[2]; // ISODate
+                                                    const rawLevel = parts[3]; // Level (Depth)
+
+                                                    const level = parseInt(rawLevel) || 0;
+                                                    const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+
+                                                    // Format price if numeric
+                                                    let displayPrice = rawPrice;
+                                                    if (isUpdated) {
+                                                        const num = parseFloat(rawPrice);
+                                                        if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                                    }
+
+                                                    // Format Date
+                                                    let displayDate = '';
+                                                    if (rawDate) {
+                                                        try {
+                                                            displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
+                                                        } catch (e) {
+                                                            console.error('Date parse error:', e);
+                                                        }
+                                                    }
+
+                                                    return (
+                                                        <div key={i} style={{
+                                                            fontSize: '12px',
+                                                            marginBottom: '4px',
+                                                            whiteSpace: 'nowrap',
+                                                            paddingLeft: `${level * 20}px`
+                                                        }}>
+                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '4px' }}>↳</span>}
+                                                            <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
+                                                            <span style={{
+                                                                color: isUpdated ? '#166534' : '#94a3b8',
+                                                                marginLeft: '6px',
+                                                                fontStyle: isUpdated ? 'normal' : 'italic',
+                                                                background: isUpdated ? '#dcfce7' : '#f1f5f9',
+                                                                padding: '1px 6px',
+                                                                borderRadius: '4px',
+                                                                fontSize: '11px'
+                                                            }}>
+                                                                {isUpdated ? displayPrice : 'Not Updated'}
+                                                            </span>
+                                                            {isUpdated && displayDate && (
+                                                                <span style={{ marginLeft: '8px', color: '#64748b', fontSize: '11px' }}>
+                                                                    ({displayDate})
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* No Results (Only show if truly no results and no pending list default) */}
             {
                 searchResults.length === 0 && searchTerm && !searching && !pricingData && !showSuggestions && (
                     <div style={{ background: 'white', padding: '40px', borderRadius: '8px', textAlign: 'center', color: '#64748b' }}>

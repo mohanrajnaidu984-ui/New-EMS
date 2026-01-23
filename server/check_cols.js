@@ -13,8 +13,12 @@ require('dotenv').config();
             options: { encrypt: false, trustServerCertificate: true }
         };
         const pool = await sql.connect(config);
-        const res = await pool.request().query("SELECT TOP 1 * FROM EnquiryCustomer");
+        const res = await pool.request().query("SELECT TOP 1 * FROM Master_EnquiryFor");
         const cols = res.recordset.length > 0 ? Object.keys(res.recordset[0]) : ['(empty)'];
+        console.log('Columns:', cols);
+
+        const data = await pool.request().query("SELECT ItemName, CompanyLogo FROM Master_EnquiryFor WHERE ItemName LIKE '%Civil%' OR ItemName LIKE '%Elec%' OR ItemName LIKE '%BMS%'");
+        console.log('Data:', JSON.stringify(data.recordset, null, 2));
 
         await fs.writeFile(path.join(__dirname, 'cols.txt'), 'Cols: ' + cols.join(', '));
         console.log('Done');

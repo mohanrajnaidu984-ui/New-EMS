@@ -1,1 +1,1 @@
-Cols: ID, RequestNo, CustomerName
+Cols: ID, ItemName, CompanyName, DepartmentName, Status, CommonMailIds, CCMailIds, RequestNo, DivisionCode, DepartmentCode, Phone, Address, FaxNo, CompanyLogo

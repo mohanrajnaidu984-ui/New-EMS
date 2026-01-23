@@ -17,6 +17,29 @@ router.get('/lists/metadata', async (req, res) => {
     }
 });
 
+// GET /api/quotes/list/pending
+router.get('/list/pending', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        const request = new sql.Request();
+
+        let query = `
+            SELECT 
+                E.RequestNo, E.ProjectName, E.CustomerName, E.EnquiryDate, E.DueDate, E.Status,
+                (SELECT STRING_AGG(ItemName, ', ') FROM EnquiryFor WHERE RequestNo = E.RequestNo) as Divisions
+            FROM EnquiryMaster E
+            WHERE (E.Status IN ('Open', 'Enquiry', 'FollowUp', 'Follow-up') OR E.Status IS NULL OR E.Status = '')
+            ORDER BY E.DueDate DESC, E.RequestNo DESC
+        `;
+
+        const result = await request.query(query);
+        res.json(result.recordset);
+    } catch (err) {
+        console.error('Error fetching pending quotes:', err);
+        res.status(500).json({ error: 'Failed to fetch pending quotes' });
+    }
+});
+
 // GET /api/quotes/config/templates - List all templates (moved here for route ordering)
 router.get('/config/templates', async (req, res) => {
     try {
@@ -107,6 +130,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         };
         let availableProfiles = [];
 
+        let resolvedItems = [];
         try {
             // 1. Fetch raw items
             const rawItemsResult = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
@@ -114,7 +138,6 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             divisions = rawItems.map(r => r.ItemName);
 
             // 2. Resolve Master Details for EACH item (handling prefixes)
-            const resolvedItems = [];
             for (const item of rawItems) {
                 let itemName = item.ItemName;
                 let cleanName = itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim(); // Remove "L1 - ", "L2 - "
@@ -235,10 +258,16 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             customerDetails,
             divisions,
             companyDetails,
-            availableProfiles, // <--- New Field
+            availableProfiles,
             preparedByOptions,
             customerOptions,
             leadJobPrefix,
+            divisionEmails: resolvedItems.map(item => ({
+                itemName: item.ItemName,
+                // Combine Common and CC for the frontend's ccMailIds check to ensure both groups have access
+                ccMailIds: [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(','),
+                commonMailIds: item.CommonMailIds || ''
+            })),
             quoteNumber: 'Draft'
         });
     } catch (err) {

@@ -92,22 +92,19 @@ router.get('/list', async (req, res) => {
         // Filter Logic
         if (mode === 'Pending') {
             // Show only enquiries that:
-            // 1. Have no status OR status is 'Pending' or 'Enquiry' OR
-            // 2. Have status Won/Lost/FollowUp but are missing probability details
-            // Exclude: Cancelled, OnHold, Retendered, and FollowUp/Won/Lost with probability set
+            // 1. Have no status OR status is 'Pending' or 'Enquiry'
+            // 2. OR have status 'Follow-up'/'FollowUp' but MISSING probability details
+            // Once a status like Won, Lost, Cancelled, etc. is set, it's no longer "pending update"
             query += `
                 AND (
                     (E.Status IS NULL OR E.Status = '' OR E.Status = 'Pending' OR E.Status = 'Enquiry')
-                    OR (E.Status IN('Won', 'Lost', 'FollowUp', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
+                    OR (E.Status IN('FollowUp', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
                 )
-                AND NOT (
-                    E.Status IN('Cancelled', 'OnHold', 'Retendered')
-                    OR (E.Status IN('Won', 'Lost', 'FollowUp', 'Follow-up') AND E.ProbabilityOption IS NOT NULL AND E.ProbabilityOption <> '')
-                )
+                AND (E.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR E.Status IS NULL OR E.Status = '')
                 AND EXISTS(
                     SELECT 1 FROM EnquiryQuotes Q 
                     WHERE Q.RequestNo = E.RequestNo 
-                    AND DATEDIFF(day, Q.QuoteDate, GETDATE()) >= 5
+                    AND DATEDIFF(day, Q.QuoteDate, GETDATE()) >= 0
                 )
             `;
         } else if (mode === 'Won') {
@@ -115,7 +112,7 @@ router.get('/list', async (req, res) => {
         } else if (mode === 'Lost') {
             query += ` AND E.Status = 'Lost'`;
         } else if (mode === 'OnHold') {
-            query += ` AND E.Status = 'OnHold'`; // Assuming 'OnHold' is a valid status string or mapped
+            query += ` AND (E.Status = 'OnHold' OR E.Status = 'On Hold')`;
         } else if (mode === 'Cancelled') {
             query += ` AND E.Status = 'Cancelled'`; // Assuming 'Cancelled' is mapped
         } else if (mode === 'FollowUp') {
@@ -167,6 +164,9 @@ router.get('/list', async (req, res) => {
             // Filter by Option string for exact match
             query += ` AND E.ProbabilityOption = @probability`;
         }
+
+        // Default Sorting: Newest Enquiry Date first, then highest Enquiry No.
+        query += ` ORDER BY E.EnquiryDate DESC, CASE WHEN ISNUMERIC(E.RequestNo)=1 THEN CAST(E.RequestNo AS INT) ELSE 0 END DESC`;
 
         const request = new sql.Request();
         if (fromDate) request.input('fromDate', sql.Date, fromDate);

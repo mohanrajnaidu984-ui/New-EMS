@@ -3,6 +3,176 @@ const express = require('express');
 const router = express.Router();
 const sql = require('mssql');
 
+// GET /api/pricing/list/pending
+router.get('/list/pending', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        if (!userEmail) return res.json([]);
+
+        // 1. Get User Details (FullName for CreatedBy check)
+        const userRes = await sql.query`SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
+        const user = userRes.recordset[0];
+        const userFullName = user ? user.FullName : '';
+        const isAdmin = user && user.Roles === 'Admin';
+
+        // 2. Fetch Pending Enquiries
+        const enquiriesRes = await sql.query`
+            SELECT 
+                E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.DueDate, E.Status, E.CreatedBy
+            FROM EnquiryMaster E
+            WHERE (E.Status IN ('Open', 'Enquiry') OR E.Status IS NULL OR E.Status = '')
+            ORDER BY E.DueDate DESC, E.RequestNo DESC
+        `;
+        const enquiries = enquiriesRes.recordset;
+
+        if (enquiries.length === 0) return res.json([]);
+
+        const requestNos = enquiries.map(e => e.RequestNo);
+
+        // 3. Fetch Jobs (EnquiryFor) with Hierarchy & Access Info
+        // Using IN clause for bulk fetch
+        const requestNosList = requestNos.map(r => `'${r}'`).join(',');
+
+        const jobsQuery = `
+            SELECT 
+                EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, 
+                MEF.CommonMailIds, MEF.CCMailIds
+            FROM EnquiryFor EF
+            LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
+            WHERE EF.RequestNo IN (${requestNosList})
+        `;
+        const jobsRes = await sql.query(jobsQuery);
+        const allJobs = jobsRes.recordset;
+
+        // 4. Fetch Pricing Values
+        const pricesQuery = `
+            SELECT RequestNo, EnquiryForID, EnquiryForItem, Price, UpdatedAt
+            FROM EnquiryPricingValues
+            WHERE RequestNo IN (${requestNosList})
+        `;
+        const pricesRes = await sql.query(pricesQuery);
+        const allPrices = pricesRes.recordset;
+
+        // 5. Process & Filter
+        const result = enquiries.map(enq => {
+            // Filter data for this enquiry
+            const enqJobs = allJobs.filter(j => j.RequestNo == enq.RequestNo);
+            const enqPrices = allPrices.filter(p => p.RequestNo == enq.RequestNo);
+
+            // Determine Scope
+            let myJobs = [];
+
+            // A. Check Lead Access (Creator)
+            const isCreator = userFullName && enq.CreatedBy && userFullName.toLowerCase().trim() === enq.CreatedBy.toLowerCase().trim();
+
+            // Find Lead Job (Root)
+            // Heuristic: First job or ParentID is null
+            let leadJob = enqJobs.find(j => j.ParentID == null) || enqJobs[0];
+
+            if (isAdmin) {
+                // Admin sees all
+                myJobs = enqJobs;
+            } else {
+                if (isCreator && leadJob) {
+                    myJobs.push(leadJob);
+                }
+
+                // B. Check Email Access (Assigned Jobs)
+                enqJobs.forEach(job => {
+                    const emails = [job.CommonMailIds, job.CCMailIds].filter(Boolean).join(',');
+                    if (emails.toLowerCase().includes(userEmail.toLowerCase())) {
+                        if (!myJobs.find(x => x.ID === job.ID)) {
+                            myJobs.push(job);
+                        }
+                    }
+                });
+            }
+
+            // Calculate 'Visible Jobs' = My Jobs + Direct Children of My Jobs
+            let visibleJobs = new Set();
+            myJobs.forEach(job => {
+                visibleJobs.add(job.ID); // Add Self
+
+                // Add Direct Children
+                const children = enqJobs.filter(child => child.ParentID === job.ID);
+                children.forEach(c => visibleJobs.add(c.ID));
+            });
+
+            // Construct Display String
+            // "Name|Price|UpdatedAt|Level"
+            const displayItems = [];
+            let hasPendingItems = false;
+
+            // Build Hierarchy for Display Sorting & Indentation
+            const childrenMap = {};
+            enqJobs.forEach(j => {
+                if (j.ParentID) {
+                    if (!childrenMap[j.ParentID]) childrenMap[j.ParentID] = [];
+                    childrenMap[j.ParentID].push(j);
+                }
+            });
+
+            // Identify Visual Roots (Visible nodes whose parent is NOT in the visible set or is null)
+            // Sort by ID to ensure stable initial order
+            const allVisibleJobs = enqJobs.filter(j => visibleJobs.has(j.ID)).sort((a, b) => a.ID - b.ID);
+            const visualRoots = allVisibleJobs.filter(j => !j.ParentID || !visibleJobs.has(j.ParentID));
+
+            // Flatten recursively
+            const flatList = [];
+            const traverse = (job, level) => {
+                flatList.push({ ...job, level });
+                const children = childrenMap[job.ID] || [];
+                children.sort((a, b) => a.ID - b.ID); // Sort children by creation order
+                children.forEach(child => {
+                    if (visibleJobs.has(child.ID)) {
+                        traverse(child, level + 1);
+                    }
+                });
+            };
+
+            visualRoots.forEach(root => traverse(root, 0));
+
+            flatList.forEach(job => {
+                // Find Price
+                const priceRow = enqPrices.find(p => p.EnquiryForID === job.ID || p.EnquiryForItem === job.ItemName);
+                const priceVal = priceRow ? priceRow.Price : 0;
+                const updatedAt = priceRow ? priceRow.UpdatedAt : null;
+
+                const priceStr = priceVal > 0 ? priceVal.toString() : 'Not Updated';
+                const dateStr = updatedAt ? new Date(updatedAt).toISOString() : '';
+                const level = job.level || 0;
+
+                // Check pending status
+                if (priceVal <= 0) {
+                    hasPendingItems = true;
+                }
+
+                displayItems.push(`${job.ItemName}|${priceStr}|${dateStr}|${level}`);
+            });
+
+            // STRICT FILTERING: If the user has assigned jobs, but they are ALL updated, remove from list.
+            if (!hasPendingItems && visibleJobs.size > 0) {
+                return null; // Skip this enquiry
+            }
+            // If user has NO visible jobs (e.g. random viewer), also skip
+            if (visibleJobs.size === 0) {
+                return null;
+            }
+
+            return {
+                ...enq,
+                SubJobPrices: displayItems.join(';;')
+            };
+        }).filter(Boolean); // Filter out nulls
+
+        res.json(result);
+
+    } catch (err) {
+        console.error('Error fetching pending pricing:', err);
+        res.status(500).json({ error: 'Failed to fetch pending pricing' });
+    }
+});
+
 // GET /api/pricing/search-customers?q=term
 router.get('/search-customers', async (req, res) => {
     try {
@@ -64,9 +234,12 @@ router.get('/:requestNo', async (req, res) => {
         let jobs = [];
         try {
             const jobsResult = await sql.query`
-                SELECT ef.ID, ef.ParentID, ef.ItemName, ef.ParentItemName, mef.CommonMailIds, mef.CCMailIds
+                SELECT 
+                    ef.ID, ef.ParentID, ef.ItemName, ef.ParentItemName, 
+                    mef.CommonMailIds, mef.CCMailIds, mef.CompanyLogo,
+                    mef.DepartmentName, mef.CompanyName, mef.Address, mef.Phone, mef.FaxNo
                 FROM EnquiryFor ef
-                LEFT JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
+                LEFT JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName)
                 WHERE ef.RequestNo = ${requestNo}
                 ORDER BY ef.ID ASC
             `;
@@ -161,16 +334,18 @@ router.get('/:requestNo', async (req, res) => {
         // 2. OR their email is in the Lead Job's CommonMailIds/CCMailIds
         let userHasLeadAccess = false;
         let userJobItems = [];
+        let userRole = '';
 
         // Get user's full name from email
         let userFullName = '';
         if (userEmail) {
             try {
                 const userResult = await sql.query`
-                    SELECT FullName FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
+                    SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
                 `;
                 if (userResult.recordset.length > 0) {
                     userFullName = userResult.recordset[0].FullName || '';
+                    userRole = userResult.recordset[0].Roles || '';
                 }
             } catch (err) {
                 console.error('Error getting user name:', err);
@@ -178,13 +353,19 @@ router.get('/:requestNo', async (req, res) => {
 
             console.log('Pricing API: User email:', userEmail, 'User name:', userFullName, 'Created by:', enquiry.CreatedBy);
 
-            // Check if user is the creator (Lead Job owner)
-            if (userFullName && enquiry.CreatedBy &&
-                userFullName.toLowerCase().trim() === enquiry.CreatedBy.toLowerCase().trim()) {
+            // Check if user is the creator (Lead Job owner) or Admin
+            const isAdmin = userRole === 'Admin';
+            if ((userFullName && enquiry.CreatedBy &&
+                userFullName.toLowerCase().trim() === enquiry.CreatedBy.toLowerCase().trim()) || isAdmin) {
                 userHasLeadAccess = true;
-                // Lead Job owner can SEE all jobs but EDIT only Lead Job
-                userJobItems = leadJobItem ? [leadJobItem] : [];
-                console.log('Pricing API: User is creator - granting Lead Job access');
+                // Lead Job owner or Admin can SEE all jobs
+                if (isAdmin) {
+                    userJobItems = jobs.map(j => j.ItemName);
+                    console.log('Pricing API: User is Admin - granting Full access');
+                } else {
+                    userJobItems = leadJobItem ? [leadJobItem] : [];
+                    console.log('Pricing API: User is creator - granting Lead Job access');
+                }
             }
 
             // Also check email-based access
@@ -265,9 +446,10 @@ router.get('/:requestNo', async (req, res) => {
 
             // FIX: If user is the Creator (Enquiry Owner), they should see EVERYTHING, including parallel roots (L1, L2, etc.)
             // The previous logic restricted them to just selfJobs (LeadJob) + children, hiding L2.
-            const isCreator = enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim();
+            // FIX: If user is the Creator (Enquiry Owner) or Admin, they should see EVERYTHING
+            const isCreator = (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim()) || userRole === 'Admin';
             if (isCreator) {
-                console.log('User is Creator -> Granting Full Visibility');
+                console.log('User is Creator/Admin -> Granting Full Visibility');
                 visibleJobs = jobs.map(j => j.ItemName);
             }
 
@@ -292,6 +474,7 @@ router.get('/:requestNo', async (req, res) => {
             }
         }
 
+        console.log('Pricing API: Sending Response with jobs:', JSON.stringify(jobs.map(j => ({ name: j.ItemName, logo: j.CompanyLogo })), null, 2));
         res.json({
             enquiry: {
                 requestNo: enquiry.RequestNo,
@@ -309,6 +492,13 @@ router.get('/:requestNo', async (req, res) => {
                 id: j.ID,
                 parentId: j.ParentID,
                 itemName: j.ItemName,
+                companyLogo: j.CompanyLogo ? j.CompanyLogo.replace(/\\/g, '/') : null,
+                departmentName: j.DepartmentName,
+                companyName: j.CompanyName,
+                address: j.Address,
+                phone: j.Phone,
+                fax: j.FaxNo,
+                email: j.CommonMailIds,
                 isLead: j.ItemName === leadJobItem,
                 visible: visibleJobs.includes(j.ItemName),
                 editable: editableJobs.includes(j.ItemName)
@@ -317,7 +507,6 @@ router.get('/:requestNo', async (req, res) => {
                 id: o.ID,
                 name: o.OptionName,
                 sortOrder: o.SortOrder,
-                itemName: o.ItemName,
                 itemName: o.ItemName,
                 customerName: o.CustomerName, // Expose CustomerName
                 leadJobName: o.LeadJobName    // Expose LeadJobName

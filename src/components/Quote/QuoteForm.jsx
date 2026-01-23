@@ -207,6 +207,7 @@ const QuoteForm = () => {
     // Lists
     const [usersList, setUsersList] = useState([]);
     const [customersList, setCustomersList] = useState([]);
+    const [pendingQuotes, setPendingQuotes] = useState([]); // Pending List State
 
     // Tab States for Quote and Pricing Sections
     const [activeQuoteTab, setActiveQuoteTab] = useState('self');
@@ -275,11 +276,15 @@ const QuoteForm = () => {
         // 2. Check if user is in CC list of any division for this enquiry
         if (enquiryData?.divisionEmails) {
             const isInCC = enquiryData.divisionEmails.some(div => {
-                const ccEmails = (div.ccMailIds || '').split(',').map(e => e.trim().toLowerCase());
-                return ccEmails.includes(userEmail);
+                const emails = [div.ccMailIds, div.commonMailIds].filter(Boolean).join(',');
+                const allEmails = emails.split(',').map(e => e.trim().toLowerCase());
+                return allEmails.includes(userEmail);
             });
             if (isInCC) return true;
         }
+
+        // 3. Lead Access (from Pricing Access)
+        if (pricingData?.access?.hasLeadAccess) return true;
 
         // 3. Admin check
         if (currentUser.Roles === 'Admin' || currentUser.role === 'Admin') return true;
@@ -297,6 +302,13 @@ const QuoteForm = () => {
             }
         };
         document.addEventListener('mousedown', handleClickOutside);
+
+        // Fetch Pending Quotes
+        fetch(`${API_BASE}/api/quotes/list/pending`)
+            .then(res => res.json())
+            .then(data => setPendingQuotes(data || []))
+            .catch(err => console.error('Error fetching pending quotes:', err));
+
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
@@ -419,6 +431,20 @@ const QuoteForm = () => {
             if (pricingRes.ok) {
                 const pData = await pricingRes.json();
                 console.log('Pricing Data Received:', pData);
+
+                // FIX: Transform values from Array to Map for O(1) lookup in calculateSummary
+                // The API now returns values as an array, but calculateSummary expects a Map.
+                const valueMap = {};
+                if (Array.isArray(pData.values)) {
+                    pData.values.forEach(v => {
+                        // Key format: OptionID_JobID
+                        if (v.EnquiryForID) {
+                            valueMap[`${v.OptionID}_${v.EnquiryForID}`] = v;
+                        }
+                    });
+                }
+                pData.values = valueMap;
+
                 setPricingData(pData);
 
                 // Calculate Summary
@@ -857,15 +883,19 @@ const QuoteForm = () => {
         let isInCC = false;
         if (enquiryData?.divisionEmails) {
             isInCC = enquiryData.divisionEmails.some(div => {
-                const ccEmails = (div.ccMailIds || '').split(',').map(e => e.trim().toLowerCase());
-                return ccEmails.includes(userEmail);
+                const emails = [div.ccMailIds, div.commonMailIds].filter(Boolean).join(',');
+                const allEmails = emails.split(',').map(e => e.trim().toLowerCase());
+                return allEmails.includes(userEmail);
             });
         }
 
         // 3. Admin check
         const isAdmin = currentUser.Roles === 'Admin' || currentUser.role === 'Admin';
 
-        if (!isCreator && !isInCC && !isAdmin) {
+        // 4. Lead Access (from Pricing Access)
+        const hasLeadAccess = pricingData?.access?.hasLeadAccess;
+
+        if (!isCreator && !isInCC && !isAdmin && !hasLeadAccess) {
             alert("Permission Denied: You are not authorized to edit or view this quote revision (Creator or CC list only).");
             return;
         }
@@ -1617,6 +1647,15 @@ const QuoteForm = () => {
         const hasLeadAccess = userAccess.hasLeadAccess;
 
         let finalTabs = [];
+        console.log('[CalcTabs] Jobs count:', pricingData?.jobs?.length);
+        if (pricingData?.jobs) {
+            const jobsWithLogos = pricingData.jobs.filter(j => j.companyLogo).length;
+            console.log('[CalcTabs] Jobs with logos:', jobsWithLogos);
+            if (jobsWithLogos === 0) {
+                console.warn('[CalcTabs] WARNING: No jobs found with companyLogo in pricingData. Check API response.');
+            }
+        }
+
 
         // Internal Helper for Descendants within Memo
         const _isDescendant = (jobName, ancestorId) => {
@@ -1633,11 +1672,31 @@ const QuoteForm = () => {
         if (hasLeadAccess) {
             const directChildren = pricingData.jobs.filter(j => j.parentId === leadJobObj.id);
             finalTabs = [
-                { id: 'self', name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''), label: leadJobObj.itemName, isSelf: true, realId: leadJobObj.id },
+                {
+                    id: 'self',
+                    name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''),
+                    label: leadJobObj.itemName,
+                    companyLogo: leadJobObj.companyLogo,
+                    companyName: leadJobObj.companyName,
+                    departmentName: leadJobObj.departmentName,
+                    address: leadJobObj.address,
+                    phone: leadJobObj.phone,
+                    fax: leadJobObj.fax,
+                    email: leadJobObj.email,
+                    isSelf: true,
+                    realId: leadJobObj.id
+                },
                 ...directChildren.map(child => ({
                     id: child.id,
                     name: child.itemName,
                     label: child.itemName,
+                    companyLogo: child.companyLogo,
+                    companyName: child.companyName,
+                    departmentName: child.departmentName,
+                    address: child.address,
+                    phone: child.phone,
+                    fax: child.fax,
+                    email: child.email,
                     isSelf: false,
                     realId: child.id
                 }))
@@ -1661,14 +1720,47 @@ const QuoteForm = () => {
                     id: j.id,
                     name: j.itemName.replace(leadPrefix + ' - ', ''),
                     label: j.itemName,
+                    companyLogo: j.companyLogo,
+                    companyName: j.companyName,
+                    departmentName: j.departmentName,
+                    address: j.address,
+                    phone: j.phone,
+                    fax: j.fax,
+                    email: j.email,
                     isSelf: j.id === leadJobObj.id,
                     realId: j.id
                 }));
             } else {
                 const directChildren = pricingData.jobs.filter(j => j.parentId === leadJobObj.id);
                 finalTabs = [
-                    { id: 'self', name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''), label: leadJobObj.itemName, isSelf: true, realId: leadJobObj.id },
-                    ...directChildren.map(child => ({ id: child.id, name: child.itemName, label: child.itemName, isSelf: false, realId: child.id }))
+                    {
+                        id: 'self',
+                        name: leadJobObj.itemName.replace(leadPrefix + ' - ', ''),
+                        label: leadJobObj.itemName,
+                        companyLogo: leadJobObj.companyLogo,
+                        companyName: leadJobObj.companyName,
+                        departmentName: leadJobObj.departmentName,
+                        address: leadJobObj.address,
+                        phone: leadJobObj.phone,
+                        fax: leadJobObj.fax,
+                        email: leadJobObj.email,
+                        isSelf: true,
+                        realId: leadJobObj.id
+                    },
+                    ...directChildren.map(child => ({
+                        id: child.id,
+                        name: child.itemName,
+                        label: child.itemName,
+                        companyLogo: child.companyLogo,
+                        companyName: child.companyName,
+                        departmentName: child.departmentName,
+                        address: child.address,
+                        phone: child.phone,
+                        fax: child.fax,
+                        email: child.email,
+                        isSelf: false,
+                        realId: child.id
+                    }))
                 ];
             }
         }
@@ -1693,6 +1785,35 @@ const QuoteForm = () => {
             }
         }
     }, [calculatedTabs, activeQuoteTab, activePricingTab]);
+
+    // Sync Company Logo and Details based on Active Pricing Tab
+    useEffect(() => {
+        if (calculatedTabs && activePricingTab) {
+            const activeTab = calculatedTabs.find(t => t.id === activePricingTab);
+            if (activeTab) {
+                console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
+                console.log('[QuoteForm]   - Company:', activeTab.companyName, 'Logo:', activeTab.companyLogo);
+
+                setQuoteLogo(activeTab.companyLogo || null);
+
+                // Prioritize CompanyName for the header (e.g., Almoayyed Contracting)
+                setQuoteCompanyName(activeTab.companyName || activeTab.departmentName || 'Almoayyed Contracting');
+
+                // Update Footer Details
+                if (activeTab.address || activeTab.phone || activeTab.fax) {
+                    setFooterDetails({
+                        name: activeTab.companyName || activeTab.departmentName,
+                        address: activeTab.address,
+                        phone: activeTab.phone,
+                        fax: activeTab.fax,
+                        email: activeTab.email
+                    });
+                } else {
+                    setFooterDetails(null);
+                }
+            }
+        }
+    }, [activePricingTab, calculatedTabs]);
 
     return (
         <div style={{ display: 'flex', height: 'calc(100vh - 80px)', background: '#f5f7fa' }}>
@@ -1786,8 +1907,23 @@ const QuoteForm = () => {
                                                 // Extract lead job name (e.g., "L1 - Civil Project" -> "Civil Project")
                                                 const leadJobName = leadJob.replace(/^L\d+\s*-\s*/, '').trim();
 
-                                                // If user has lead access, show all lead jobs
-                                                if (pricingData.access.hasLeadAccess) return true;
+                                                // If user is Admin, show all lead jobs. 
+                                                // otherwise, stricter filtering applies even if hasLeadAccess is true (as leads should only see their own scope)
+                                                if (currentUser?.role === 'Admin' || currentUser?.Roles === 'Admin') return true;
+
+                                                // STRICT DEPARTMENT CHECK:
+                                                // If User has a Department defined (e.g. "Civil", "MEP"), enforce it strictly against Lead Job Name.
+                                                // This prevents "Civil" users from seeing "BMS" or "Electrical" lead jobs even if backend logic accidentally grants visibility.
+                                                const userDept = (currentUser?.Department || '').trim().toLowerCase();
+                                                const jobNameLower = leadJobName.toLowerCase();
+
+                                                if (userDept) {
+                                                    if (userDept === 'civil' && !jobNameLower.includes('civil')) return false;
+                                                    // Add other department checks if needed, but Civil is the specific request.
+                                                    // Generally, if userDept exists and doesn't partially match the job name, we might want to hide it
+                                                    // UNLESS they are explicitly added to that job via granular permissions below.
+                                                    // But for LEAD JOB selection, strict alignment is preferred.
+                                                }
 
                                                 // Check if user has access to this lead job or any of its sub-jobs
                                                 const visibleJobs = pricingData.access.visibleJobs || [];
@@ -1948,6 +2084,54 @@ const QuoteForm = () => {
                 )}
 
 
+                {/* Pending Quotes List - Show when no enquiry selected */}
+                {!enquiryData && pendingQuotes.length > 0 && !searchTerm && (
+                    <div style={{ flex: 1, overflowY: 'auto', background: '#f8fafc' }}>
+                        <div style={{ padding: '12px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h4 style={{ margin: 0, fontSize: '13px', color: '#475569', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <FileText size={14} /> Pending Quotes ({pendingQuotes.length})
+                            </h4>
+                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>By Due Date</span>
+                        </div>
+                        <div>
+                            {pendingQuotes.map((enq, idx) => (
+                                <div
+                                    key={enq.RequestNo || idx}
+                                    onClick={() => handleSelectEnquiry(enq)}
+                                    style={{
+                                        padding: '12px 16px',
+                                        borderBottom: '1px solid #f1f5f9',
+                                        cursor: 'pointer',
+                                        background: 'white',
+                                        transition: 'background 0.15s'
+                                    }}
+                                    onMouseOver={(e) => e.currentTarget.style.background = '#f1f5f9'}
+                                    onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                >
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                        <span style={{ fontSize: '13px', fontWeight: '600', color: '#1e293b' }}>{enq.RequestNo}</span>
+                                        <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: '500' }}>
+                                            {enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM') : '-'}
+                                        </span>
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                        {enq.ProjectName || 'No Project Name'}
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span style={{ fontSize: '11px', color: '#94a3b8' }}>{enq.CustomerName ? enq.CustomerName.substring(0, 25) + (enq.CustomerName.length > 25 ? '...' : '') : '-'}</span>
+                                        <span style={{
+                                            padding: '2px 6px', borderRadius: '4px', fontSize: '10px',
+                                            background: enq.Status === 'FollowUp' ? '#fef3c7' : '#f1f5f9',
+                                            color: enq.Status === 'FollowUp' ? '#b45309' : '#64748b'
+                                        }}>
+                                            {enq.Status || 'Open'}
+                                        </span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
                 {/* Scrollable Content Area */}
                 {enquiryData && (
@@ -2606,7 +2790,8 @@ const QuoteForm = () => {
                                             <div className="print-logo-section" style={{ marginBottom: '24px', textAlign: 'right' }}>
                                                 {quoteLogo ? (
                                                     <img
-                                                        src={`${API_BASE}/${encodeURI(quoteLogo)}`}
+                                                        src={`/${quoteLogo.replace(/\\/g, '/')}`}
+                                                        onError={(e) => console.error('[QuoteForm] Logo load fail:', e.target.src)}
                                                         alt="Company Logo"
                                                         style={{ height: '80px', width: 'auto', maxWidth: '250px', objectFit: 'contain' }}
                                                     />

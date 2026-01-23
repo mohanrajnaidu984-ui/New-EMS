@@ -1,32 +1,27 @@
-const { connectDB, sql } = require('./dbConfig');
 
-async function checkSchema() {
+const { sql, connectDB } = require('./dbConfig');
+const fs = require('fs');
+const path = require('path');
+
+async function debugSchema() {
     try {
         await connectDB();
-        console.log('Connected to DB');
 
-        console.log('--- EnquiryMaster Columns ---');
-        const emCols = await sql.query`
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'EnquiryMaster'
-        `;
-        emCols.recordset.forEach(row => console.log(row.COLUMN_NAME));
-
-        console.log('\n--- Attachments Columns ---');
-        const attCols = await sql.query`
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'Attachments'
-        `;
-        attCols.recordset.forEach(row => console.log(row.COLUMN_NAME));
+        console.log('--- EnquiryFor Schema Sample ---');
+        // LIMIT 1 for MSSQL is TOP 1
+        const result = await sql.query("SELECT TOP 1 * FROM EnquiryFor");
+        const output = {
+            columns: Object.keys(result.recordset[0] || {}),
+            data: result.recordset
+        };
+        fs.writeFileSync(path.join(__dirname, 'schema.txt'), JSON.stringify(output, null, 2));
+        console.log('Written to schema.txt');
 
     } catch (err) {
         console.error('Error:', err);
     } finally {
-        // sql.close(); // Keep open or exit
-        process.exit(0);
+        process.exit();
     }
 }
 
-checkSchema();
+debugSchema();
