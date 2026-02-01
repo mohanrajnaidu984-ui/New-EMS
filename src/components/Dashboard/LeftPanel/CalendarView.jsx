@@ -34,10 +34,9 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
     // Helper to get day data
     const getDayData = (day) => {
         if (!day) return null;
-        // Construct date string YYYY-MM-DD
+        if (!Array.isArray(data)) return null; // Defensive check for crash prevention
+
         const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        // Find in data array
-        // data structure from API: [{ Date: '2025-01-01', Enquiries: 1, ... }] 
         return data.find(item => {
             if (!item.Date) return false;
             const itemDate = new Date(item.Date).toISOString().split('T')[0];
@@ -116,22 +115,42 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
                                         )}
                                         {info?.Due > 0 && (
                                             <div
-                                                className={`calendar-chip badge rounded-pill bg-danger bg-opacity-10 text-danger border border-danger border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'due' ? 'ring-2 ring-danger' : ''}`}
-                                                style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
+                                                className={`calendar-chip badge rounded-pill bg-warning bg-opacity-10 text-warning border border-warning border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'due' ? 'ring-2 ring-warning' : ''}`}
+                                                style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer', color: '#b45309', backgroundColor: '#fffbeb', borderColor: '#fcd34d' }}
                                                 onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'due'); }}
                                                 title="Show Enquiries Due"
                                             >
                                                 {info.Due} Due
                                             </div>
                                         )}
+                                        {info?.Lapsed > 0 && (
+                                            <div
+                                                className={`calendar-chip badge rounded-pill bg-danger bg-opacity-10 text-danger border border-danger border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'lapsed' ? 'ring-2 ring-danger' : ''}`}
+                                                style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
+                                                onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'lapsed'); }}
+                                                title="Show Lapsed Enquiries"
+                                            >
+                                                {info.Lapsed} Laps
+                                            </div>
+                                        )}
+                                        {info?.Quoted > 0 && (
+                                            <div
+                                                className={`calendar-chip badge rounded-pill bg-success bg-opacity-10 text-success border border-success border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'quote' ? 'ring-2 ring-success' : ''}`}
+                                                style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
+                                                onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'quote'); }}
+                                                title="Show Quoted Enquiries"
+                                            >
+                                                {info.Quoted} Quoted
+                                            </div>
+                                        )}
                                         {info?.SiteVisits > 0 && (
                                             <div
-                                                className={`calendar-chip badge rounded-pill bg-success bg-opacity-10 text-success border border-success border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'visit' ? 'ring-2 ring-success' : ''}`}
+                                                className={`calendar-chip badge rounded-pill bg-secondary bg-opacity-10 text-secondary border border-secondary border-opacity-10 d-flex align-items-center justify-content-center px-1 ${selected && selectedType === 'visit' ? 'ring-2 ring-secondary' : ''}`}
                                                 style={{ height: '18px', fontSize: '0.65rem', cursor: 'pointer' }}
                                                 onClick={(e) => { e.stopPropagation(); onDateClick(cellDateStr, 'visit'); }}
                                                 title="Show Site Visits"
                                             >
-                                                {info.SiteVisits} {info.SiteVisits > 1 ? 'Site Visits' : 'Site Visit'}
+                                                {info.SiteVisits} Visit
                                             </div>
                                         )}
                                     </div>

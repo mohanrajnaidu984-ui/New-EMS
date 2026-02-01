@@ -20,23 +20,31 @@ router.get('/lists/metadata', async (req, res) => {
 // GET /api/quotes/list/pending
 router.get('/list/pending', async (req, res) => {
     try {
-        const { userEmail } = req.query;
-        const request = new sql.Request();
-
-        let query = `
+        console.log('[API] Check Pending Quotes...');
+        const query = `
             SELECT 
                 E.RequestNo, E.ProjectName, E.CustomerName, E.EnquiryDate, E.DueDate, E.Status,
-                (SELECT STRING_AGG(ItemName, ', ') FROM EnquiryFor WHERE RequestNo = E.RequestNo) as Divisions
+                (
+                    SELECT STUFF((
+                        SELECT ', ' + ItemName 
+                        FROM EnquiryFor 
+                        WHERE RequestNo = E.RequestNo 
+                        FOR XML PATH('')
+                    ), 1, 2, '')
+                ) as Divisions
             FROM EnquiryMaster E
-            WHERE (E.Status IN ('Open', 'Enquiry', 'FollowUp', 'Follow-up') OR E.Status IS NULL OR E.Status = '')
+            LEFT JOIN EnquiryQuotes Q ON E.RequestNo = Q.RequestNo
+            WHERE (E.Status IN ('Open', 'Enquiry', 'FollowUp', 'Follow-up', 'Estimated', 'Priced') OR E.Status IS NULL OR E.Status = '')
+            AND Q.ID IS NULL
             ORDER BY E.DueDate DESC, E.RequestNo DESC
         `;
 
-        const result = await request.query(query);
+        const result = await sql.query(query);
+        console.log(`[API] Pending Quotes found: ${result.recordset.length}`);
         res.json(result.recordset);
     } catch (err) {
         console.error('Error fetching pending quotes:', err);
-        res.status(500).json({ error: 'Failed to fetch pending quotes' });
+        res.status(500).json({ error: 'Failed to fetch pending quotes', details: err.message });
     }
 });
 
@@ -82,7 +90,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         try {
             const enquiryResult = await sql.query`
                 SELECT RequestNo, ProjectName, CustomerName, ReceivedFrom,
-                       EnquiryDate, DueDate
+                       EnquiryDate, DueDate, CustomerRefNo
                 FROM EnquiryMaster 
                 WHERE RequestNo = ${requestNo}
             `;
@@ -394,6 +402,14 @@ router.post('/', async (req, res) => {
                 ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson},
                 ${quoteDate}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}
             )
+        `;
+
+        // Update Enquiry Status to 'Quote'
+        await sql.query`
+            UPDATE EnquiryMaster 
+            SET Status = 'Quote' 
+            WHERE RequestNo = ${requestNo} 
+            AND (Status IS NULL OR Status IN ('Enquiry', 'Open', 'Pricing', 'Pending'))
         `;
 
         res.json({

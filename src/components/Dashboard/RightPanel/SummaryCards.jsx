@@ -1,5 +1,5 @@
 import React from 'react';
-import { Target, AlertCircle, Clock } from 'lucide-react';
+import { Target, AlertCircle, Clock, CheckCircle } from 'lucide-react';
 
 const SummaryCards = ({ data }) => {
     return (
@@ -56,29 +56,29 @@ const SummaryCards = ({ data }) => {
                 </div>
             </div>
 
-            {/* Upcoming Metrics */}
+            {/* Quoted Metrics */}
             <div className="col-md-4">
                 <div className="card h-100 border-0 shadow-sm position-relative overflow-hidden"
-                    style={{ borderRadius: '16px', background: 'linear-gradient(145deg, #ffffff 0%, #fffdf5 100%)' }}>
+                    style={{ borderRadius: '16px', background: 'linear-gradient(145deg, #ffffff 0%, #f0fff4 100%)' }}>
                     <div className="card-body p-4 position-relative z-1">
                         <div className="d-flex justify-content-between align-items-center mb-2">
-                            <div className="text-secondary fw-semibold small text-uppercase" style={{ letterSpacing: '0.05em' }}>Upcoming Dues</div>
-                            <span className="badge bg-warning bg-opacity-10 text-warning rounded-pill px-2 py-1" style={{ fontSize: '0.6rem' }}>Pipeline</span>
+                            <div className="text-secondary fw-semibold small text-uppercase" style={{ letterSpacing: '0.05em' }}>Quoted</div>
+                            <span className="badge bg-success bg-opacity-10 text-success rounded-pill px-2 py-1" style={{ fontSize: '0.6rem' }}>Submitted</span>
                         </div>
                         <div className="d-flex align-items-baseline gap-2">
-                            <h1 className="display-4 fw-bold text-dark mb-0" style={{ letterSpacing: '-0.02em' }}>{data?.UpcomingDues || 0}</h1>
+                            <h1 className="display-4 fw-bold text-dark mb-0" style={{ letterSpacing: '-0.02em' }}>{data?.QuotedCount || 0}</h1>
                             <div className="d-flex flex-column">
-                                <span className="text-warning small fw-bold">Next 7 Days</span>
-                                <span className="text-muted" style={{ fontSize: '0.65rem' }}>scheduled</span>
+                                <span className="text-success small fw-bold">Total</span>
+                                <span className="text-muted" style={{ fontSize: '0.65rem' }}>submitted quotes</span>
                             </div>
                         </div>
                     </div>
                     {/* Watermark Icon */}
                     <div className="position-absolute end-0 bottom-0 opacity-10 p-3" style={{ transform: 'scale(1.5) translate(10%, 10%)' }}>
-                        <Clock size={64} color="#ffc107" />
+                        <CheckCircle size={64} color="#28a745" />
                     </div>
                     {/* Top Accent */}
-                    <div className="position-absolute top-0 start-0 w-100" style={{ height: '4px', background: 'linear-gradient(90deg, #f6d365, #fda085)' }}></div>
+                    <div className="position-absolute top-0 start-0 w-100" style={{ height: '4px', background: 'linear-gradient(90deg, #11998e, #38ef7d)' }}></div>
                 </div>
             </div>
         </div>

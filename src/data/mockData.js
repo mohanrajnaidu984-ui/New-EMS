@@ -16,7 +16,7 @@ export const allStatuses = [
     "Enquiry", "Pricing", "Quote", "Probability", "Reports"
 ];
 
-export const availableRoles = ["Enquiry", "Quotation", "Sales", "Admin"];
+export const availableRoles = ["Enquiry", "Pricing", "Quote", "Probability", "Sales Report", "Report", "Admin"];
 
 export const projectNames = ["Project Alpha", "Project Beta"];
 
@@ -27,8 +27,8 @@ export const concernedSEs = ["SE1 - John Doe", "SE2 - Jane Smith"];
 export const enquiryFor = ["Electrical", "Mechanical"];
 
 export const storedUsers = [
-    { FullName: "SE1 - John Doe", Designation: "Sales Engineer", MailId: "se1@comp.com", Status: "Active", Roles: ["Enquiry", "Quotation"] },
-    { FullName: "SE2 - Jane Smith", Designation: "Sales Manager", MailId: "se2@comp.com", Status: "Active", Roles: ["Enquiry", "Admin"] },
+    { FullName: "SE1 - John Doe", Designation: "Sales Engineer", MailId: "se1@comp.com", Status: "Active", Roles: ["Enquiry", "Quote"] },
+    { FullName: "SE2 - Jane Smith", Designation: "Sales Manager", MailId: "se2@comp.com", Status: "Active", Roles: ["Enquiry", "Admin", "Pricing", "Probability", "Sales Report", "Report"] },
 ];
 
 export const storedContacts = [

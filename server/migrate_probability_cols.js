@@ -49,6 +49,12 @@ const addColumns = async () => {
             `IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='EnquiryMaster' AND COLUMN_NAME='WonContactNo')
              ALTER TABLE EnquiryMaster ADD WonContactNo VARCHAR(50);`,
 
+            `IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='EnquiryMaster' AND COLUMN_NAME='WonQuoteRef')
+             ALTER TABLE EnquiryMaster ADD WonQuoteRef NVARCHAR(100);`,
+
+            `IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='EnquiryMaster' AND COLUMN_NAME='WonOption')
+             ALTER TABLE EnquiryMaster ADD WonOption NVARCHAR(255);`,
+
             // Lost Details
             `IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='EnquiryMaster' AND COLUMN_NAME='LostCompetitor')
              ALTER TABLE EnquiryMaster ADD LostCompetitor VARCHAR(255);`,

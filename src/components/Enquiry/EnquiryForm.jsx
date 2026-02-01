@@ -69,7 +69,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         AutoAck: false,
         ceosign: false,
         Status: 'Enquiry',
-        EnquiryStatus: 'Active'
+        EnquiryStatus: 'Active',
+        CustomerRefNo: ''
     };
 
     const [formData, setFormData] = useState(initialFormState);
@@ -93,11 +94,19 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     // Access Control State
     const [canEdit, setCanEdit] = useState(true);
+    const [isLimitedEdit, setIsLimitedEdit] = useState(false); // New state for limited editing
+
+    // Track original items when form loads (for selective removal by limited users)
+    const [originalEnqForList, setOriginalEnqForList] = useState([]);
+    const [originalSeList, setOriginalSeList] = useState([]);
+    const [originalCustomerList, setOriginalCustomerList] = useState([]);
+    const [originalReceivedFromList, setOriginalReceivedFromList] = useState([]);
 
     // Effect to determine edit permission
     useEffect(() => {
         if (activeTab === 'New') {
             setCanEdit(true);
+            setIsLimitedEdit(false);
         } else if (activeTab === 'Modify' && isModifyMode) {
             checkEditPermission();
         }
@@ -110,42 +119,56 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             ? roleString.split(',').map(r => r.trim().toLowerCase())
             : (Array.isArray(roleString) ? roleString.map(r => r.toLowerCase()) : []);
 
+        // Admin has full edit access
         if (userRoles.includes('admin') || userRoles.includes('system')) {
             setCanEdit(true);
+            setIsLimitedEdit(false);
             return;
         }
 
         const creatorName = (formData.CreatedBy || '').trim().toLowerCase();
         const currentUserName = (currentUser.name || '').trim().toLowerCase();
 
+        // Creator has full edit access
         if (creatorName === currentUserName) {
             setCanEdit(true);
+            setIsLimitedEdit(false);
             return;
         }
 
-        // 3. Division Member Access (Enquiry For items)
+        // Check if user has view access (Concerned SE or Division Member)
         const userEmail = (currentUser.email || currentUser.EmailId || '').trim().toLowerCase();
+        let hasViewAccess = false;
 
-        let isCCMember = false;
+        // Check if user is a Concerned SE
+        if (seList.includes(currentUser.name)) {
+            hasViewAccess = true;
+        }
 
+        // Check if user is a Division Member (CC or Common email in Enquiry For items)
         for (const itemName of enqForList) {
             const item = masters.enqItems.find(i => i.ItemName === itemName);
             if (!item) continue;
 
+            const commonEmails = (item.CommonMailIds ? (Array.isArray(item.CommonMailIds) ? item.CommonMailIds : item.CommonMailIds.split(/[,;]/)) : []).map(e => e.trim().toLowerCase());
             const ccEmails = (item.CCMailIds ? (Array.isArray(item.CCMailIds) ? item.CCMailIds : item.CCMailIds.split(/[,;]/)) : []).map(e => e.trim().toLowerCase());
 
-            if (ccEmails.includes(userEmail)) {
-                isCCMember = true;
+            if (commonEmails.includes(userEmail) || ccEmails.includes(userEmail)) {
+                hasViewAccess = true;
                 break;
             }
         }
 
-        if (isCCMember) {
+        // If user has view access, allow limited editing
+        if (hasViewAccess) {
             setCanEdit(true);
+            setIsLimitedEdit(true); // Limited edit: can only add to Enquiry For and Concerned SE
             return;
         }
 
+        // No access at all
         setCanEdit(false);
+        setIsLimitedEdit(false);
     };
 
     const handleInputChange = (field, value) => {
@@ -311,6 +334,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleRemoveCustomer = () => {
+        if (isLimitedEdit && customerList.length <= originalCustomerList.length) {
+            return;
+        }
         if (customerList.length > 0) {
             const removedCustomer = customerList[customerList.length - 1];
             setCustomerList(customerList.slice(0, -1));
@@ -325,6 +351,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleRemoveReceivedFrom = () => {
+        if (isLimitedEdit && receivedFromList.length <= originalReceivedFromList.length) {
+            return;
+        }
         if (receivedFromList.length > 0) {
             const removedItem = receivedFromList[receivedFromList.length - 1];
             const [, removedCompany] = removedItem.split('|');
@@ -339,12 +368,18 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             });
 
             if (!hasOtherContacts) {
-                setCustomerList(prev => prev.filter(c => c !== removedCompany));
+                // If limited edit, don't remove if it's an original customer
+                if (!isLimitedEdit || !originalCustomerList.includes(removedCompany)) {
+                    setCustomerList(prev => prev.filter(c => c !== removedCompany));
+                }
             }
         }
     };
 
-    const handleRemoveItem = (list, setList) => {
+    const handleRemoveItem = (list, setList, originalList = []) => {
+        if (isLimitedEdit && list.length <= originalList.length) {
+            return;
+        }
         if (list.length > 0) {
             setList(list.slice(0, -1));
         }
@@ -858,6 +893,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setPendingFiles([]);
         setProjectSuggestions([]);
         setShowProjectSuggestions(false);
+        setOriginalEnqForList([]);
+        setOriginalSeList([]);
+        setOriginalCustomerList([]);
+        setOriginalReceivedFromList([]);
         if (activeTab === 'New') {
             generateNewRequestNo();
         }
@@ -865,7 +904,21 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     // --- Modify Logic ---
     const loadEnquiry = async (requestNo) => {
-        const enq = getEnquiry(requestNo);
+        let enq = null;
+        try {
+            // Attempt to fetch fresh data from server
+            const res = await fetch(`/api/enquiries/${encodeURIComponent(requestNo)}`);
+            if (res.ok) {
+                enq = await res.json();
+            } else {
+                console.warn(`API fetch fail for ${requestNo}, falling back to context.`);
+                enq = getEnquiry(requestNo);
+            }
+        } catch (err) {
+            console.error('Error fetching fresh enquiry:', err);
+            enq = getEnquiry(requestNo);
+        }
+
         if (enq) {
             // Helper to format date for input (YYYY-MM-DD)
             const formatDate = (d) => {
@@ -896,11 +949,23 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
             setFormData(mappedData);
             setEnqTypeList(enq.SelectedEnquiryTypes || (enq.EnquiryType ? enq.EnquiryType.split(',').filter(Boolean) : []));
-            setEnqForList(enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []));
-            setCustomerList(enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []));
-            setReceivedFromList(enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []));
+
+            const loadedEnqForList = enq.SelectedEnquiryFor || (enq.EnquiryFor ? enq.EnquiryFor.split(',').filter(Boolean) : []);
+            setEnqForList(loadedEnqForList);
+            setOriginalEnqForList([...loadedEnqForList]); // Store original for comparison
+
+            const loadedCustomers = enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []);
+            setCustomerList(loadedCustomers);
+            setOriginalCustomerList([...loadedCustomers]);
+
+            const loadedReceivedFrom = enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []);
+            setReceivedFromList(loadedReceivedFrom);
+            setOriginalReceivedFromList([...loadedReceivedFrom]);
+
             const seList = enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []);
             setSeList(seList);
+            setOriginalSeList([...seList]); // Store original for comparison
+
             setAckSEList(seList);
             setIsModifyMode(true);
 
@@ -1166,13 +1231,14 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
                                                         // Determine current step number based on formData.Status
                                                         let currentStep = 1;
-                                                        const status = formData.Status || 'Enquiry';
+                                                        const status = (formData.Status || 'Enquiry').trim();
+                                                        const statusLower = status.toLowerCase();
 
-                                                        if (status === 'Enquiry') currentStep = 1;
-                                                        else if (status === 'Pricing') currentStep = 2;
-                                                        else if (status === 'Quote') currentStep = 3;
-                                                        else if (status === 'Follow-up') currentStep = 4;
-                                                        else if (status === 'Won' || status === 'Lost') currentStep = 5;
+                                                        if (statusLower === 'enquiry' || statusLower === 'open') currentStep = 1;
+                                                        else if (statusLower === 'pricing') currentStep = 2;
+                                                        else if (statusLower === 'quote') currentStep = 3;
+                                                        else if (statusLower === 'follow-up' || statusLower === 'followup') currentStep = 4;
+                                                        else if (statusLower === 'won' || statusLower === 'lost') currentStep = 5;
 
                                                         const isActive = stepNum === currentStep;
                                                         const isCompleted = stepNum < currentStep;
@@ -1338,6 +1404,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             value={formData.SourceOfInfo}
                                                             onChange={(e) => handleInputChange('SourceOfInfo', e.target.value)}
                                                             style={{ fontSize: '13px' }}
+                                                            disabled={isLimitedEdit}
                                                         >
                                                             <option value="">-- Select Source --</option>
                                                             {masters.sourceOfInfos?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
@@ -1354,6 +1421,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             value={formData.EnquiryDate}
                                                             onChange={(e) => handleInputChange('EnquiryDate', e.target.value)}
                                                             placeholder="DD-MMM-YYYY"
+                                                            disabled={isLimitedEdit}
                                                         />
                                                         {errors.EnquiryDate && <ValidationTooltip message={errors.EnquiryDate} />}
                                                     </div>
@@ -1363,6 +1431,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             value={formData.DueOn}
                                                             onChange={(e) => handleInputChange('DueOn', e.target.value)}
                                                             placeholder="DD-MMM-YYYY"
+                                                            disabled={isLimitedEdit}
                                                         />
                                                         {errors.DueOn && <ValidationTooltip message={errors.DueOn} />}
                                                     </div>
@@ -1372,22 +1441,41 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             value={formData.SiteVisitDate}
                                                             onChange={(e) => handleInputChange('SiteVisitDate', e.target.value)}
                                                             placeholder="DD-MMM-YYYY"
+                                                            disabled={isLimitedEdit}
                                                         />
                                                     </div>
                                                 </div>
 
-                                                {/* Enquiry Type */}
-                                                <div className="mb-3" style={{ width: 'calc(66.666667% - 5px)' }}>
-                                                    <ListBoxControl
-                                                        label={<span>Enquiry Type<span className="text-danger">*</span></span>}
-                                                        options={masters.enquiryType}
-                                                        selectedOption={formData.EnquiryType}
-                                                        onOptionChange={(val) => handleInputChange('EnquiryType', val)}
-                                                        listBoxItems={enqTypeList}
-                                                        onAdd={handleAddEnqType}
-                                                        onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
-                                                        error={errors.EnquiryType}
-                                                    />
+                                                {/* Content Row: Enquiry Type + Customer Ref No */}
+                                                <div className="d-flex mb-3 gap-3" style={{ width: '100%' }}>
+                                                    {/* Enquiry Type (Left - ~66%) */}
+                                                    <div style={{ flex: '0 0 calc(66.666667% - 10px)' }}>
+                                                        <ListBoxControl
+                                                            label={<span>Enquiry Type<span className="text-danger">*</span></span>}
+                                                            options={masters.enquiryType}
+                                                            selectedOption={formData.EnquiryType}
+                                                            onOptionChange={(val) => handleInputChange('EnquiryType', val)}
+                                                            listBoxItems={enqTypeList}
+                                                            onAdd={handleAddEnqType}
+                                                            onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
+                                                            error={errors.EnquiryType}
+                                                            disabled={isLimitedEdit}
+                                                        />
+                                                    </div>
+
+                                                    {/* Customer Ref No (Right - Remaining) */}
+                                                    <div className="form-group" style={{ flex: 1 }}>
+                                                        <label className="form-label" style={{ marginBottom: '8px' }}>Customer Ref. No</label>
+                                                        <input
+                                                            type="text"
+                                                            className="form-control"
+                                                            value={formData.CustomerRefNo}
+                                                            onChange={(e) => handleInputChange('CustomerRefNo', e.target.value)}
+                                                            placeholder="Enter Customer Reference"
+                                                            disabled={!canEdit || isLimitedEdit}
+                                                            style={{ height: '38px' }} // Match standard input height if needed
+                                                        />
+                                                    </div>
                                                 </div>
 
                                                 {/* Enquiry For */}
@@ -1407,6 +1495,20 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         onNew={() => openNewModal(setShowEnqItemModal)}
                                                         showEdit={(currentUser?.role || currentUser?.Roles || '').toLowerCase().includes('admin')}
                                                         onEditItem={(item) => handleEditEnqFor(item.itemName)}
+                                                        canRemove={true}
+                                                        canRemoveItem={(item) => {
+                                                            if (!isLimitedEdit) return true;
+                                                            const normalizedName = (item.itemName || '').trim().toLowerCase();
+                                                            return !originalEnqForList.some(orig => {
+                                                                if (typeof orig === 'object' && (orig.id || orig.ID) && item.id) {
+                                                                    const origId = String(orig.id || orig.ID);
+                                                                    return origId === String(item.id);
+                                                                }
+
+                                                                const origName = (typeof orig === 'string' ? orig : (orig?.itemName || '')).trim().toLowerCase();
+                                                                return origName === normalizedName;
+                                                            });
+                                                        }}
                                                     />
                                                 </div>
 
@@ -1414,10 +1516,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <div className="row mb-3">
                                                     <div className="col-md-12" style={{ position: 'relative' }}>
                                                         <label className="form-label">Enquiry details<span className="text-danger">*</span></label>
-                                                        <textarea className="form-control" rows="3"
+                                                        <textarea className="form-control" rows="3" placeholder="Enter Enquiry Details"
                                                             style={{ resize: 'none' }}
                                                             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
-                                                            value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} />
+                                                            value={formData.DetailsOfEnquiry} onChange={(e) => handleInputChange('DetailsOfEnquiry', e.target.value)} disabled={isLimitedEdit} />
                                                         {errors.DetailsOfEnquiry && <ValidationTooltip message={errors.DetailsOfEnquiry} />}
                                                     </div>
                                                 </div>
@@ -1446,6 +1548,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onEdit={handleEditCustomer}
                                                             selectedItemDetails={renderCustomerCard()}
                                                             error={errors.CustomerName}
+                                                            onAdd={onAddCustomerClick}
+                                                            onRemove={handleRemoveCustomer}
                                                         />
                                                     </div>
                                                     <div className="col-md-6">
@@ -1499,6 +1603,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         onNew={() => openNewModal(setShowCustomerModal, 'Client')}
                                                         onEdit={handleEditClient}
                                                         error={errors.ClientName}
+                                                        disabled={isLimitedEdit}
                                                     />
                                                 </div>
 
@@ -1514,6 +1619,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         canEdit={!!formData.ConsultantName}
                                                         onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
                                                         onEdit={handleEditConsultant}
+                                                        disabled={isLimitedEdit}
                                                     />
                                                 </div>
                                             </div>
@@ -1534,18 +1640,17 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onOptionChange={(val) => handleInputChange('ConcernedSE', val)}
                                                             listBoxItems={seList}
                                                             onAdd={handleAddSE}
-                                                            onRemove={() => handleRemoveItem(seList, setSeList)}
+                                                            onRemove={() => handleRemoveItem(seList, setSeList, originalSeList)}
                                                             showNew={(currentUser?.role || '').includes('Admin')}
                                                             showEdit={(currentUser?.role || '').includes('Admin')}
                                                             canEdit={!!formData.ConcernedSE}
                                                             onNew={() => openNewModal(setShowUserModal)}
                                                             onEdit={handleEditSE}
                                                             error={errors.ConcernedSE}
+                                                            canRemove={!isLimitedEdit || (seList.length > originalSeList.length)}
                                                         />
                                                     </div>
                                                 </div>
-
-
                                             </div>
                                         </div>
 
@@ -1562,7 +1667,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             {['hardcopy', 'drawing', 'dvd', 'spec', 'eqpschedule'].map(chk => (
                                                                 <div className="form-check form-check-inline" key={chk}>
                                                                     <input className="form-check-input" type="checkbox" id={chk}
-                                                                        checked={formData[chk]} onChange={(e) => handleInputChange(chk, e.target.checked)} />
+                                                                        checked={formData[chk]} onChange={(e) => handleInputChange(chk, e.target.checked)} disabled={isLimitedEdit} />
                                                                     <label className="form-check-label" htmlFor={chk}>
                                                                         {chk === 'hardcopy' ? 'Hard Copies' :
                                                                             chk === 'drawing' ? 'Drawing' :
@@ -1574,10 +1679,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         </div>
 
                                                         <label className="form-label">Others Specify</label>
-                                                        <textarea className="form-control mb-2" rows="2"
+                                                        <textarea className="form-control mb-2" rows="2" placeholder="Enter Documents Received"
                                                             style={{ resize: 'none' }}
                                                             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
-                                                            value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} />
+                                                            value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} disabled={isLimitedEdit} />
 
                                                         {/* File Upload UI */}
                                                         <div className="mb-2">
@@ -1589,11 +1694,13 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                     style={{ display: 'none' }}
                                                                     multiple
                                                                     onChange={handleFileUpload}
+                                                                    disabled={isLimitedEdit}
                                                                 />
                                                                 <button
                                                                     type="button"
                                                                     className="btn btn-outline-secondary btn-sm"
                                                                     onClick={() => document.getElementById('fileInput').click()}
+                                                                    disabled={isLimitedEdit}
                                                                 >
                                                                     Choose Files
                                                                 </button>
@@ -1633,6 +1740,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                                     style={{ width: '32px', height: '32px' }}
                                                                                     onClick={() => handleRemoveAttachment(file.id, true)}
                                                                                     title="Remove"
+                                                                                    disabled={isLimitedEdit}
                                                                                 >
                                                                                     <i className="bi bi-trash"></i>
                                                                                 </button>
@@ -1689,10 +1797,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <div className="row mb-3">
                                                     <div className="col-md-12">
                                                         <label className="form-label">Remarks</label>
-                                                        <textarea className="form-control" rows="2"
+                                                        <textarea className="form-control" rows="2" placeholder="Enter Remarks"
                                                             style={{ resize: 'none' }}
                                                             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
-                                                            value={formData.Remark} onChange={(e) => handleInputChange('Remark', e.target.value)} />
+                                                            value={formData.Remark} onChange={(e) => handleInputChange('Remark', e.target.value)} disabled={isLimitedEdit} />
                                                     </div>
                                                 </div>
                                             </div>
@@ -1718,7 +1826,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 {/* Send Acknowledgement Mail */}
                                                 <div className="form-check" style={{ fontSize: '13px' }}>
                                                     <input className="form-check-input" type="checkbox" id="autoAck"
-                                                        checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} />
+                                                        checked={formData.AutoAck} onChange={(e) => handleInputChange('AutoAck', e.target.checked)} disabled={isLimitedEdit} />
                                                     <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail</label>
                                                 </div>
 
@@ -1809,7 +1917,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     />
                                 </div>
                             </div>
-                        )}
+                        )
+                        }
                     </>
                 )
                 }

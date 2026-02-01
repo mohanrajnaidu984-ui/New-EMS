@@ -599,6 +599,13 @@ const QuoteForm = () => {
             let optionTotal = 0;
             if (data.jobs) {
                 data.jobs.forEach(job => {
+                    // STRICT SCOPING FIX (Step 716)
+                    // If the Option belongs to a specific Job Item (e.g. BMS), ONLY count the value for that Job ID.
+                    // This prevents "cross-pollinated" values (e.g. BMS Option having values for Electrical Job) from being summed.
+                    if (opt.itemName && opt.itemName !== job.itemName) {
+                        return;
+                    }
+
                     const key = `${opt.id}_${job.id}`;
                     const val = data.values[key];
                     const price = val ? parseFloat(val.Price || 0) : 0;
@@ -1168,7 +1175,7 @@ const QuoteForm = () => {
 
                 // Initialize Metadata
                 setQuoteDate(new Date().toISOString().split('T')[0]);
-                setCustomerReference(data.enquiry.RequestNo || ''); // Default to Enquiry No
+                setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
 
                 // 3b. Smart Default Customer Selection (Auto-select ONLY if single option)
@@ -2514,10 +2521,7 @@ const QuoteForm = () => {
                                         <DateInput value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
                                     </div>
 
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Your Ref (Customer Ref)</label>
-                                        <input type="text" value={customerReference} onChange={(e) => setCustomerReference(e.target.value)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
-                                    </div>
+
 
                                     <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Validity (Days)</label>
@@ -2793,12 +2797,12 @@ const QuoteForm = () => {
                                                         src={`/${quoteLogo.replace(/\\/g, '/')}`}
                                                         onError={(e) => console.error('[QuoteForm] Logo load fail:', e.target.src)}
                                                         alt="Company Logo"
-                                                        style={{ height: '80px', width: 'auto', maxWidth: '250px', objectFit: 'contain' }}
+                                                        style={{ height: '135px', width: 'auto', maxWidth: '425px', objectFit: 'contain' }}
                                                     />
                                                 ) : (
                                                     <>
-                                                        <div style={{ fontSize: '16px', color: '#94a3b8', marginBottom: '4px' }}>المؤيد للمقاولات</div>
-                                                        <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#0284c7', letterSpacing: '-0.5px' }}>{quoteCompanyName}</div>
+                                                        <div style={{ fontSize: '27px', color: '#94a3b8', marginBottom: '4px' }}>المؤيد للمقاولات</div>
+                                                        <div style={{ fontSize: '42px', fontWeight: 'bold', color: '#0284c7', letterSpacing: '-0.5px' }}>{quoteCompanyName}</div>
                                                     </>
                                                 )}
                                             </div>

@@ -6,7 +6,7 @@ import PricingForm from './Pricing/PricingForm';
 import QuoteForm from './Quote/QuoteForm';
 import ProbabilityForm from './Probability/ProbabilityForm';
 
-import SalesTarget from './SalesTarget/SalesTarget';
+import SalesReport from './SalesReport/SalesReport';
 
 const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
     return (
@@ -28,8 +28,8 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
                 {activeTab === 'Probability' && (
                     <ProbabilityForm />
                 )}
-                {activeTab === 'Sales Target' && (
-                    <SalesTarget />
+                {activeTab === 'Sales Report' && (
+                    <SalesReport />
                 )}
                 {activeTab === 'Reports' && (
                     <div className="alert alert-info">

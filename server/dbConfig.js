@@ -16,6 +16,8 @@ const config = {
     }
 };
 
+// console.log('DB Config User:', config.user);
+
 const connectDB = async () => {
     try {
         await sql.connect(config);

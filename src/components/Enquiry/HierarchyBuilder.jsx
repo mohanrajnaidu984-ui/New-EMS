@@ -10,7 +10,9 @@ const HierarchyBuilder = ({
     showNew = false,
     onNew,
     showEdit = false,
-    onEditItem
+    onEditItem,
+    canRemove = true,
+    canRemoveItem = null // Callback: (item) => boolean, determines if specific item can be removed
 }) => {
     // Value expected to be array of { id, itemName, parentId, parentName }
     // Legacy support: array of strings OR array of objects with parentName only.
@@ -168,13 +170,15 @@ const HierarchyBuilder = ({
                                 <Pencil size={14} />
                             </button>
                         )}
-                        <button
-                            onClick={() => handleRemoveItem(item)}
-                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', display: 'flex', padding: 0 }}
-                            title="Remove"
-                        >
-                            <X size={14} />
-                        </button>
+                        {(canRemove && (!canRemoveItem || canRemoveItem(item))) && (
+                            <button
+                                onClick={() => handleRemoveItem(item)}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', display: 'flex', padding: 0 }}
+                                title="Remove"
+                            >
+                                <X size={14} />
+                            </button>
+                        )}
                     </div>
 
                     {/* Add Child Button */}

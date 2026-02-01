@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../../../context/AuthContext';
 
-const DashboardFilters = ({ filters, setFilters, masters, viewMode = 'all' }) => {
+const DashboardFilters = ({ filters, setFilters, masters, viewMode = 'all', selectedDate }) => {
     const { currentUser } = useAuth();
 
     const roleString = currentUser?.role || currentUser?.Roles || '';
@@ -11,12 +11,21 @@ const DashboardFilters = ({ filters, setFilters, masters, viewMode = 'all' }) =>
     const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
     const userEmail = (currentUser?.email || currentUser?.EmailId || '').trim().toLowerCase();
     const isCCUser = masters.enqItems?.some(item => {
-        const ccEmails = (item.CCMailIds ? item.CCMailIds.split(/[,;]/) : [])
+        const val = item.CCMailIds;
+        const str = (typeof val === 'string') ? val : '';
+        const ccEmails = (str ? str.split(/[,;]/) : [])
             .map(e => e.trim().toLowerCase()).filter(Boolean);
         return ccEmails.includes(userEmail);
     });
 
     const [activeDateFilter, setActiveDateFilter] = React.useState('All');
+
+    // Clear active button when a specific date is selected (e.g. from calendar)
+    React.useEffect(() => {
+        if (selectedDate) {
+            setActiveDateFilter('');
+        }
+    }, [selectedDate]);
 
     const handleDateFilter = (filterType) => {
         setActiveDateFilter(filterType);
@@ -150,6 +159,8 @@ const DashboardFilters = ({ filters, setFilters, masters, viewMode = 'all' }) =>
                     >
                         <option value="Enquiry Date">Enquiry Date</option>
                         <option value="Due Date">Due Date</option>
+                        <option value="Quote Date">Quote Date</option>
+                        <option value="Lapsed">Lapsed</option>
                     </select>
                 </div>
 

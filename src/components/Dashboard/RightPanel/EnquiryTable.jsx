@@ -21,7 +21,7 @@ const DateShortcutBtn = ({ label, isActive, onClick }) => {
     );
 };
 
-const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) => {
+const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, selectedType }) => {
 
     // Helper to format date: DD-MMM-YY
     const formatDate = (dateStr) => {
@@ -230,6 +230,10 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
         col2: 180,
         col3: 200,
         col4: 300,
+        col4: 300,
+        colQuoteRef: 120,
+        colQuoteTotal: 120,
+        colQuoteNet: 120,
         col5: 120,
         col6: 120
     });
@@ -342,7 +346,7 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
 
 
             {/* Table Content */}
-            < div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>
+            <div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>
                 <table className="table table-hover mb-0" style={{ fontSize: '0.85rem', tableLayout: 'fixed', minWidth: '100%', width: 'max-content' }}>
                     <thead className="sticky-top" style={{ zIndex: 10, top: 0, backgroundColor: '#eff6ff' }}>
                         <tr className="border-bottom">
@@ -374,6 +378,23 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                                 <SortableHeader label="Enquiry Details" fieldKey="EnquiryDetails" />
                                 <Resizer col="col4" />
                             </th>
+
+                            {(selectedType === 'quote' || filters?.dateType === 'Quote Date') && (
+                                <>
+                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteRef || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                        <SortableHeader label="Quote Ref" fieldKey="QuoteRefNo" />
+                                        <Resizer col="colQuoteRef" />
+                                    </th>
+                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteTotal || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                        <SortableHeader label="Total Quoted" fieldKey="TotalQuotedPrice" />
+                                        <Resizer col="colQuoteTotal" />
+                                    </th>
+                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteNet || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                                        <SortableHeader label="Subjob prices" fieldKey="PricingBreakdown" />
+                                        <Resizer col="colQuoteNet" />
+                                    </th>
+                                </>
+                            )}
                             <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col5, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
                                 <SortableHeader label="Site Visit Date" fieldKey="SiteVisitDate" />
                                 <Resizer col="col5" />
@@ -466,6 +487,89 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                                             </div>
                                         </td>
 
+                                        {(selectedType === 'quote' || filters?.dateType === 'Quote Date') && (() => {
+                                            try {
+                                                const breakdown = row.PricingBreakdown ? JSON.parse(row.PricingBreakdown) : [];
+                                                // Validate breakdown is array
+                                                if (!Array.isArray(breakdown)) throw new Error("Invalid format");
+
+                                                const total = breakdown.reduce((sum, item) => sum + (Number(item?.Price) || 0), 0);
+                                                const displayTotal = breakdown.length > 0
+                                                    ? total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                                    : (row.TotalQuotedPrice ? Number(row.TotalQuotedPrice).toLocaleString() : '-');
+
+                                                // Sort: L1 (Civil) -> Electrical -> BMS -> Others
+                                                const sortedBreakdown = [...breakdown].sort((a, b) => {
+                                                    const nameA = (a?.EnquiryForItem || "").toLowerCase();
+                                                    const nameB = (b?.EnquiryForItem || "").toLowerCase();
+
+                                                    const getPriority = (n) => {
+                                                        if (n.includes('l1') || n.includes('civil')) return 1;
+                                                        if (n.includes('electrical')) return 2;
+                                                        if (n.includes('bms')) return 3;
+                                                        return 4;
+                                                    };
+
+                                                    const pA = getPriority(nameA);
+                                                    const pB = getPriority(nameB);
+                                                    if (pA !== pB) return pA - pB;
+                                                    return nameA.localeCompare(nameB);
+                                                });
+
+                                                return (
+                                                    <>
+                                                        <td className="p-2" style={cellStyle}>
+                                                            <div className="small text-dark fw-bold">{row.QuoteRefNo || '-'}</div>
+                                                        </td>
+                                                        <td className="p-2" style={cellStyle}>
+                                                            <div className="small text-dark">{displayTotal}</div>
+                                                        </td>
+                                                        <td className="p-2" style={cellStyle}>
+                                                            <div style={{ fontSize: '0.75rem' }}>
+                                                                {sortedBreakdown.length > 0 ? sortedBreakdown.map((item, i) => {
+                                                                    const itemName = item?.EnquiryForItem || "Unknown";
+                                                                    const isL1 = itemName.toLowerCase().includes('l1');
+                                                                    const isBMS = itemName.toLowerCase().includes('bms');
+                                                                    const price = Number(item?.Price || 0);
+
+                                                                    // Visual indents
+                                                                    const indent = isBMS ? '20px' : (isL1 ? '0px' : '0px');
+
+                                                                    return (
+                                                                        <div key={i} className="mb-1 text-nowrap" style={{ paddingLeft: indent }}>
+                                                                            {!isL1 && <span className="text-muted me-1">↳</span>}
+                                                                            <span className={`fw-bold ${isL1 ? 'text-dark' : 'text-secondary'}`}>{itemName}: </span>
+                                                                            {price > 0 ? (
+                                                                                <span className={`px-1 rounded ${isL1 ? 'bg-success bg-opacity-10 text-success' : 'bg-light text-dark border'}`}>
+                                                                                    {price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-muted fst-italic p-1 bg-light rounded">Not Updated</span>
+                                                                            )}
+                                                                            {item?.UpdatedAt && price > 0 && (
+                                                                                <span className="text-muted ms-2" style={{ fontSize: '0.65rem' }}>
+                                                                                    ({format(new Date(item.UpdatedAt), 'dd-MMM-yy hh:mm a')})
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                }) : <span className="text-muted">-</span>}
+                                                            </div>
+                                                        </td>
+                                                    </>
+                                                );
+                                            } catch (err) {
+                                                console.error("Error rendering quote breakdown:", err, row);
+                                                return (
+                                                    <>
+                                                        <td className="p-2" style={cellStyle}>-</td>
+                                                        <td className="p-2" style={cellStyle}>-</td>
+                                                        <td className="p-2" style={cellStyle}><span className="text-danger small">Error data</span></td>
+                                                    </>
+                                                );
+                                            }
+                                        })()}
+
                                         {/* Column 5: Site Visit */}
                                         <td className="p-2" style={cellStyle}>
                                             {row.SiteVisitDate ? (
@@ -489,7 +593,7 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate }) =
                             })
                         ) : (
                             <tr>
-                                <td colSpan="6" className="text-center py-5 text-muted">
+                                <td colSpan={selectedType === 'quote' ? "9" : "6"} className="text-center py-5 text-muted">
                                     <div className="py-2">No records found</div>
                                 </td>
                             </tr>

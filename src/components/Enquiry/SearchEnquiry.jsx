@@ -112,8 +112,8 @@ const SearchEnquiry = ({ onOpen }) => {
 
                 for (const item of relevantItems) {
                     const allEmails = [
-                        ...(item.CommonMailIds ? item.CommonMailIds.split(/[,;]/) : []),
-                        ...(item.CCMailIds ? item.CCMailIds.split(/[,;]/) : [])
+                        ...(String(item.CommonMailIds || '').split(/[,;]/)),
+                        ...(String(item.CCMailIds || '').split(/[,;]/))
                     ].map(e => e.trim().toLowerCase()).filter(Boolean);
 
                     if (userEmail && allEmails.includes(userEmail)) {
@@ -140,7 +140,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 );
 
                 for (const item of relevantItems) {
-                    const ccEmails = (item.CCMailIds ? item.CCMailIds.split(/[,;]/) : [])
+                    const ccEmails = String(item.CCMailIds || '').split(/[,;]/)
                         .map(e => e.trim().toLowerCase()).filter(Boolean);
 
                     if (userEmail && ccEmails.includes(userEmail)) return true;

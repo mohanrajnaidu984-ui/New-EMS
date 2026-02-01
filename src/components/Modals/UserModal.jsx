@@ -17,6 +17,16 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
     const [newRole, setNewRole] = useState('');
     const [errors, setErrors] = useState({});
 
+    const [divisions, setDivisions] = useState([]); // New state for divisions
+
+    // Fetch Divisions on mount
+    useEffect(() => {
+        fetch('http://localhost:5000/api/master/divisions')
+            .then(res => res.json())
+            .then(data => setDivisions(data))
+            .catch(err => console.error('Error fetching divisions:', err));
+    }, []);
+
     // Sync formData with initialData when it changes (for Edit mode)
     // Reset form when modal is closed
     useEffect(() => {
@@ -141,11 +151,13 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
                         </select>
                     </div>
                     <div className="col-md-3">
-                        <label className="form-label">Department</label>
+                        <label className="form-label">Division</label>
                         <select className="form-select" style={{ fontSize: '13px' }}
                             value={formData.Department} onChange={(e) => handleChange('Department', e.target.value)}>
-                            <option>MEP</option>
-                            <option>Civil</option>
+                            <option value="">-- Select Division --</option>
+                            {divisions.map((div, index) => (
+                                <option key={index} value={div}>{div}</option>
+                            ))}
                         </select>
                     </div>
                     <div className="col-md-6">

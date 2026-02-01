@@ -19,7 +19,8 @@ const ListBoxControl = ({
     showNew = false,
     showEdit = false,
     canEdit = false,
-    selectedItemDetails = null
+    selectedItemDetails = null,
+    canRemove = true
 }) => {
     return (
         <div className="mb-2">
@@ -66,7 +67,7 @@ const ListBoxControl = ({
                                 +
                             </button>
                         )}
-                        {onRemove && (
+                        {onRemove && canRemove && (
                             <button
                                 type="button"
                                 className="btn btn-outline-danger"

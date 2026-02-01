@@ -29,6 +29,17 @@ router.get('/list/pending', async (req, res) => {
 
         const requestNos = enquiries.map(e => e.RequestNo);
 
+        // Fetch ConcernedSE matches for this user to grant access
+        let concernedRequestNos = new Set();
+        try {
+            if (userFullName) {
+                const cseRes = await sql.query`SELECT RequestNo FROM ConcernedSE WHERE SEName = ${userFullName}`;
+                cseRes.recordset.forEach(row => concernedRequestNos.add(row.RequestNo));
+            }
+        } catch (err) {
+            console.error('Error fetching concerned SE requests:', err);
+        }
+
         // 3. Fetch Jobs (EnquiryFor) with Hierarchy & Access Info
         // Using IN clause for bulk fetch
         const requestNosList = requestNos.map(r => `'${r}'`).join(',');
@@ -56,7 +67,19 @@ router.get('/list/pending', async (req, res) => {
         // 5. Process & Filter
         const result = enquiries.map(enq => {
             // Filter data for this enquiry
-            const enqJobs = allJobs.filter(j => j.RequestNo == enq.RequestNo);
+            // Filter data for this enquiry
+            const enqJobsRaw = allJobs.filter(j => j.RequestNo == enq.RequestNo);
+
+            // Deduplicate by ID (Handle potential cartesian product from Master_EnquiryFor join)
+            const seenIds = new Set();
+            const enqJobs = [];
+            for (const job of enqJobsRaw) {
+                if (!seenIds.has(job.ID)) {
+                    seenIds.add(job.ID);
+                    enqJobs.push(job);
+                }
+            }
+
             const enqPrices = allPrices.filter(p => p.RequestNo == enq.RequestNo);
 
             // Determine Scope
@@ -64,6 +87,7 @@ router.get('/list/pending', async (req, res) => {
 
             // A. Check Lead Access (Creator)
             const isCreator = userFullName && enq.CreatedBy && userFullName.toLowerCase().trim() === enq.CreatedBy.toLowerCase().trim();
+            const isConcernedSE = concernedRequestNos.has(enq.RequestNo);
 
             // Find Lead Job (Root)
             // Heuristic: First job or ParentID is null
@@ -73,8 +97,17 @@ router.get('/list/pending', async (req, res) => {
                 // Admin sees all
                 myJobs = enqJobs;
             } else {
-                if (isCreator && leadJob) {
+                if ((isCreator || isConcernedSE) && leadJob) {
                     myJobs.push(leadJob);
+                    // For ConcernedSE/Creator, we might want to show EVERYTHING? 
+                    // Current logic for Creator only pushes leadJob, then relies on children.
+                    // If we want FULL visibility:
+                    if (isConcernedSE) {
+                        // Push ALL jobs if concerned SE (Access to whole enquiry)
+                        enqJobs.forEach(j => {
+                            if (!myJobs.includes(j)) myJobs.push(j);
+                        });
+                    }
                 }
 
                 // B. Check Email Access (Assigned Jobs)
@@ -235,7 +268,7 @@ router.get('/:requestNo', async (req, res) => {
         try {
             const jobsResult = await sql.query`
                 SELECT 
-                    ef.ID, ef.ParentID, ef.ItemName, ef.ParentItemName, 
+                    ef.ID, ef.ParentID, ef.ItemName, 
                     mef.CommonMailIds, mef.CCMailIds, mef.CompanyLogo,
                     mef.DepartmentName, mef.CompanyName, mef.Address, mef.Phone, mef.FaxNo
                 FROM EnquiryFor ef
@@ -243,7 +276,27 @@ router.get('/:requestNo', async (req, res) => {
                 WHERE ef.RequestNo = ${requestNo}
                 ORDER BY ef.ID ASC
             `;
-            jobs = jobsResult.recordset;
+
+            // Polyfill ParentItemName in JS since it's missing from DB
+            const rawJobsAll = jobsResult.recordset;
+            // Deduplicate (Fix for Join Cartesian Product)
+            const seenJobIds = new Set();
+            const rawJobs = [];
+            for (const j of rawJobsAll) {
+                if (!seenJobIds.has(j.ID)) {
+                    seenJobIds.add(j.ID);
+                    rawJobs.push(j);
+                }
+            }
+
+            jobs = rawJobs.map(job => {
+                const parent = rawJobs.find(p => p.ID === job.ParentID);
+                return {
+                    ...job,
+                    ParentItemName: parent ? parent.ItemName : null
+                };
+            });
+
             console.log('Pricing API: Found', jobs.length, 'jobs');
         } catch (err) {
             console.error('Error querying EnquiryFor:', err);
@@ -298,7 +351,18 @@ router.get('/:requestNo', async (req, res) => {
                 ORDER BY SortOrder ASC, ID ASC
             `;
             options = optionsResult.recordset;
-            console.log('Pricing API: Found', options.length, 'options (total)');
+
+            // Deduplicate Options (Backend Fix)
+            // Sometimes joins or legacy data cause duplicates.
+            const seenOptions = new Set();
+            options = options.filter(o => {
+                const key = `${o.OptionName}|${o.ItemName}|${o.CustomerName}`;
+                if (seenOptions.has(key)) return false;
+                seenOptions.add(key);
+                return true;
+            });
+
+            console.log('Pricing API: Found', options.length, 'options (unique)');
         } catch (err) {
             console.error('Error querying EnquiryPricingOptions:', err);
             throw err;
@@ -351,22 +415,23 @@ router.get('/:requestNo', async (req, res) => {
                 console.error('Error getting user name:', err);
             }
 
-            console.log('Pricing API: User email:', userEmail, 'User name:', userFullName, 'Created by:', enquiry.CreatedBy);
+            console.log('Pricing API DEBUG:');
+            console.log(' - RequestNo:', requestNo);
+            console.log(' - UserEmail (Token):', userEmail);
+            console.log(' - UserFullName (DB):', userFullName);
+            console.log(' - Enquiry CreatedBy:', enquiry.CreatedBy);
+            console.log(' - User Role:', userRole);
 
             // Check if user is the creator (Lead Job owner) or Admin
             const isAdmin = userRole === 'Admin';
-            if ((userFullName && enquiry.CreatedBy &&
-                userFullName.toLowerCase().trim() === enquiry.CreatedBy.toLowerCase().trim()) || isAdmin) {
+
+            if (isAdmin) {
                 userHasLeadAccess = true;
-                // Lead Job owner or Admin can SEE all jobs
-                if (isAdmin) {
-                    userJobItems = jobs.map(j => j.ItemName);
-                    console.log('Pricing API: User is Admin - granting Full access');
-                } else {
-                    userJobItems = leadJobItem ? [leadJobItem] : [];
-                    console.log('Pricing API: User is creator - granting Lead Job access');
-                }
+                userJobItems = jobs.map(j => j.ItemName);
+                console.log('Pricing API: User is Admin - granting Full access');
             }
+            // FIX: Removed implicit "Creator = View All" logic.
+            // Creators must rely on Email Assignments or explicit assignments.
 
             // Also check email-based access
             jobs.forEach(job => {
@@ -379,14 +444,29 @@ router.get('/:requestNo', async (req, res) => {
                         userJobItems.push(job.ItemName);
                     }
                     if (job.ItemName === leadJobItem) {
-                        userHasLeadAccess = true;
+                        // userHasLeadAccess = true; // DO NOT GRANT GLOBAL VIEW just because of Lead Job assignment? 
+                        // Actually, if assigned to Lead Job, they probably should see all descendants?
+                        // But for now, let's keep hierarchy lookup handle siblings.
                     }
                 }
             });
 
+            // CHECK CONCERNED SE ACCESS
+            let isConcernedSE = false;
+            try {
+                const cseRes = await sql.query`SELECT * FROM ConcernedSE WHERE RequestNo = ${requestNo} AND SEName = ${userFullName}`;
+                if (cseRes.recordset.length > 0) {
+                    console.log('Pricing API: User is Concerned SE -> Keeping strict scope (No implicit View All)');
+                    isConcernedSE = true;
+                    // FIX: Removed `userHasLeadAccess = true` for Concerned SEs.
+                    // They will only see what they are assigned to.
+                }
+            } catch (err) {
+                console.error('Error checking ConcernedSE:', err);
+            }
+
             // SMART SCOPE EXPANSION:
             // If user is assigned to "BMS" (Clean Name), they should also see "L2 - BMS" (Clean Name: BMS).
-            // This handles split scopes across multiple Lead Jobs.
             const cleanUserScopes = new Set(userJobItems.map(name =>
                 name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
             ));
@@ -404,19 +484,40 @@ router.get('/:requestNo', async (req, res) => {
 
         // Determine visible and editable jobs
         // HIERARCHY LOGIC IMPLEMENTATION
-        const hasHierarchy = jobs.some(j => j.ParentItemName); // Check if hierarchy exists
-
         let visibleJobs = [];
         let editableJobs = [];
 
-        if (hasHierarchy) {
-            console.log('Pricing API: Using Strict Hierarchy Mode');
-            console.log('User Job Items (Self):', userJobItems);
+        // 1. EDIT PERMISSIONS (Strict)
+        if (userRole === 'Admin') {
+            editableJobs = jobs.map(j => j.ItemName);
+        } else {
+            // Default: Edit what you are assigned (Email matched)
+            editableJobs = [...userJobItems];
 
-            // 1. User sees their own jobs (Self)
+            // NOTE: Creators do NOT get implicit edit access to Lead Job anymore.
+            // They must be explicitly assigned to the Lead Job (via Email/Master) to edit it.
+            // This prevents Generic Creators (e.g. 'BMS') from editing 'Civil' Lead Jobs inadvertently.
+        }
+
+        // 2. VIEW PERMISSIONS (Tree / Global)
+        const isCreator = (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim());
+
+        // FIX: Removed 'isCreator' from Manager Access. 
+        // Creators are no longer treated as Super Users for View. They see only their assigned hierarchy.
+        const isManager = userRole === 'Admin' || userHasLeadAccess;
+
+        if (isManager) {
+            console.log('Pricing API: Manager Access -> View All');
+            visibleJobs = jobs.map(j => j.ItemName);
+        } else {
+            // Standard User: View Assigned + Descendants
+            // Fallback: If Creator has NO assignments, should we show everything or nothing?
+            // Strict approach: Show nothing (or let them add themselves).
+            // But to avoid "Blank Screen" confusion for unassigned Creators, we can grant Lead access IF generic?
+            // User Request was explicit: "Access ONLY View BMS". This implies strictness.
+
             const selfJobs = userJobItems;
 
-            // 2. User sees ALL Descendants (Recursive)
             const getAllDescendants = (parentNames, allJobs) => {
                 let descendants = [];
                 let queue = [...parentNames];
@@ -427,7 +528,6 @@ router.get('/:requestNo', async (req, res) => {
                     if (processed.has(currentName)) continue;
                     processed.add(currentName);
 
-                    // Find children of current
                     const children = allJobs.filter(j => j.ParentItemName === currentName);
                     children.forEach(c => {
                         descendants.push(c.ItemName);
@@ -438,41 +538,11 @@ router.get('/:requestNo', async (req, res) => {
             };
 
             const descendantJobs = getAllDescendants(selfJobs, jobs);
-
-            console.log('Descendant Jobs:', descendantJobs);
-
-            // Combine and Dedup
             visibleJobs = [...new Set([...selfJobs, ...descendantJobs])];
-
-            // FIX: If user is the Creator (Enquiry Owner), they should see EVERYTHING, including parallel roots (L1, L2, etc.)
-            // The previous logic restricted them to just selfJobs (LeadJob) + children, hiding L2.
-            // FIX: If user is the Creator (Enquiry Owner) or Admin, they should see EVERYTHING
-            const isCreator = (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim()) || userRole === 'Admin';
-            if (isCreator) {
-                console.log('User is Creator/Admin -> Granting Full Visibility');
-                visibleJobs = jobs.map(j => j.ItemName);
-            }
-
-            // Edit: Only Self
-            // FIX: If user is Creator (Lead Link), restrict edit strictly to Lead Job to prevent Civil editing Sub-jobs
-            if (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim() && leadJobItem) {
-                editableJobs = [leadJobItem];
-            } else {
-                editableJobs = selfJobs;
-            }
-            console.log('Final Visible:', visibleJobs);
-
-        } else {
-            console.log('Pricing API: Using Classic/Legacy Mode');
-            // Classic Logic
-            if (userHasLeadAccess) {
-                visibleJobs = jobs.map(j => j.ItemName); // Lead sees all
-                editableJobs = leadJobItem ? [leadJobItem] : []; // Lead edits only lead job
-            } else {
-                visibleJobs = userJobItems; // Sub sees only their own
-                editableJobs = userJobItems; // Sub edits only their own
-            }
         }
+
+        console.log('Final Visible:', visibleJobs);
+        console.log('Final Editable:', editableJobs);
 
         console.log('Pricing API: Sending Response with jobs:', JSON.stringify(jobs.map(j => ({ name: j.ItemName, logo: j.CompanyLogo })), null, 2));
         res.json({

@@ -1,0 +1,70 @@
+/* Scoped Dark Mode for Sales Report Module Only */
+
+.sales-report-dark-theme {
+    /* Define dark theme variables locally */
+    --sr-bg-dark: #0f172a;
+    --sr-bg-card: #1e293b;
+    --sr-text-primary: #f8fafc;
+    --sr-text-secondary: #94a3b8;
+    --sr-border: #334155;
+
+    background-color: var(--sr-bg-dark);
+    color: var(--sr-text-primary);
+    min-height: calc(100vh - 100px);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    transition: background-color 0.3s ease;
+}
+
+/* Override standard Bootstrap/Utility classes narrowly within this scope */
+
+.sales-report-dark-theme .card {
+    background-color: var(--sr-bg-card);
+    border: 1px solid var(--sr-border);
+    color: var(--sr-text-primary);
+}
+
+.sales-report-dark-theme .text-muted {
+    color: var(--sr-text-secondary) !important;
+}
+
+.sales-report-dark-theme .text-dark {
+    color: #f1f5f9 !important;
+    /* Invert text-dark to be light */
+}
+
+/* Form Controls in Dark Theme */
+.sales-report-dark-theme .form-select,
+.sales-report-dark-theme .form-control {
+    background-color: var(--sr-bg-card);
+    border: 1px solid var(--sr-border);
+    color: var(--sr-text-primary);
+}
+
+.sales-report-dark-theme .form-select:focus,
+.sales-report-dark-theme .form-control:focus {
+    border-color: #60a5fa;
+    /* Light blue focus */
+    box-shadow: 0 0 0 0.2rem rgba(96, 165, 250, 0.25);
+    background-color: var(--sr-bg-card);
+    /* Ensure it stays dark on focus */
+    color: var(--sr-text-primary);
+}
+
+/* Scrollbar styling for this dark section if needed */
+.sales-report-dark-theme ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.sales-report-dark-theme ::-webkit-scrollbar-track {
+    background: #0f172a;
+}
+
+.sales-report-dark-theme ::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 4px;
+}
+
+.sales-report-dark-theme ::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+}

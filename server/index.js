@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-console.log('SERVER STARTING - ACK');
+console.log('SERVER STARTING - ACK V2');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -229,8 +229,29 @@ app.use('/uploads', express.static('uploads')); // Serve uploaded files
 // Request Logger
 app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    console.log('Body:', JSON.stringify(req.body, null, 2));
+    // console.log('Body:', JSON.stringify(req.body, null, 2)); // Reduce noise
     next();
+});
+
+// NEW ROUTE HERE - Moved to top to ensure availability
+app.get('/api/master/divisions', async (req, res) => {
+    try {
+        console.log('[API] /api/master/divisions HIT (Top Level)');
+        // Fetch unique DepartmentName from Master_EnquiryFor
+        const result = await sql.query`
+            SELECT DISTINCT DepartmentName 
+            FROM Master_EnquiryFor 
+            WHERE DepartmentName IS NOT NULL AND DepartmentName <> '' 
+            ORDER BY DepartmentName ASC
+        `;
+
+        const divisions = result.recordset.map(row => row.DepartmentName);
+        console.log(`[API] Found ${divisions.length} divisions:`, divisions);
+        res.json(divisions);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
 });
 
 // Connect to Database
@@ -274,6 +295,8 @@ app.use('/api/pricing', pricingRoutes);
 app.use('/api/quotes', quotesRoutes);
 const probabilityRoutes = require('./routes/probabilityRoutes');
 app.use('/api/probability', probabilityRoutes);
+const salesReportRoutes = require('./routes/salesReportRoutes');
+app.use('/api/sales-report', salesReportRoutes);
 
 
 // --- OCR Extraction Route ---
@@ -713,7 +736,26 @@ app.get('/api/enquiries', async (req, res) => {
                 DueOn: enq.DueDate
             };
         });
-        res.json(enquiries);
+
+        // Search Filter
+        const search = req.query.search ? req.query.search.toLowerCase() : null;
+        console.log(`[GET /api/enquiries] Search term: '${search}'`);
+
+        const filteredEnquiries = search
+            ? enquiries.filter(e => {
+                const reqNo = e.RequestNo ? String(e.RequestNo).toLowerCase() : '';
+                const projName = e.ProjectName ? e.ProjectName.toLowerCase() : '';
+                const custName = e.CustomerName ? e.CustomerName.toLowerCase() : '';
+                return reqNo.includes(search) || projName.includes(search) || custName.includes(search);
+            })
+            : enquiries;
+
+        console.log(`[GET /api/enquiries] Total filtered items: ${filteredEnquiries.length}`);
+        if (search && filteredEnquiries.length === 0) {
+            console.log('[GET /api/enquiries] No matches found. Sample IDs:', enquiries.slice(0, 3).map(e => e.RequestNo));
+        }
+
+        res.json(filteredEnquiries);
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -728,13 +770,14 @@ app.post('/api/enquiries', async (req, res) => {
     try {
         log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
 
+        let transaction;
         const {
             SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
             SelectedEnquiryTypes, SelectedEnquiryFor,
             SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
             ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
             DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-            AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails
+            AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, CustomerRefNo
         } = req.body;
 
         const RequestNo = req.body.RequestNo ? req.body.RequestNo.trim() : '';
@@ -752,7 +795,10 @@ app.post('/api/enquiries', async (req, res) => {
             });
         }
 
-        const request = new sql.Request();
+        transaction = new sql.Transaction();
+        await transaction.begin();
+
+        const request = new sql.Request(transaction);
         request.input('RequestNo', sql.NVarChar, RequestNo);
         request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo || null);
         request.input('EnquiryDate', sql.DateTime, EnquiryDate);
@@ -773,6 +819,7 @@ app.post('/api/enquiries', async (req, res) => {
         request.input('Doc_EquipmentSchedule', sql.Bit, eqpschedule ?? false);
         request.input('Remarks', sql.NVarChar, Remark || null);
         request.input('SendAcknowledgementMail', sql.Bit, AutoAck ?? false);
+        request.input('CustomerRefNo', sql.NVarChar, req.body.CustomerRefNo || null);
         request.input('ED_CEOSignatureRequired', sql.Bit, ceosign ?? false);
         request.input('Status', sql.NVarChar, Status || 'Open');
         request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE || null);
@@ -788,17 +835,17 @@ app.post('/api/enquiries', async (req, res) => {
                 RequestNo, SourceOfEnquiry, EnquiryDate, DueDate, SiteVisitDate,
                 CustomerName, ReceivedFrom, ProjectName, ClientName, ConsultantName,
                 EnquiryDetails, Doc_HardCopies, Doc_Drawing, Doc_CD_DVD,
-                Doc_Spec, Doc_EquipmentSchedule, Remarks, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
+                Doc_Spec, Doc_EquipmentSchedule, Remarks, CustomerRefNo, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
             ) VALUES (
                 @RequestNo, @SourceOfEnquiry, @EnquiryDate, @DueDate, @SiteVisitDate,
                 @CustomerName, @ReceivedFrom, @ProjectName, @ClientName, @ConsultantName,
                 @EnquiryDetails, @Doc_HardCopies, @Doc_Drawing, @Doc_CD_DVD,
-                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
+                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @CustomerRefNo, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
             )
         `);
 
         // Helper to insert related items
-        const insertRelated = async (table, col, items) => {
+        const insertRelated = async (table, col, items, txn) => {
             if (items && items.length > 0) {
                 if (table === 'EnquiryFor') {
                     const normalized = items.map(i => {
@@ -820,13 +867,12 @@ app.post('/api/enquiries', async (req, res) => {
                         for (const item of remaining) {
                             const ready = !item.parentId || idMap[item.parentId];
                             if (ready) {
-                                const r = new sql.Request();
+                                const r = new sql.Request(txn);
                                 r.input('reqNo', sql.NVarChar, RequestNo);
                                 r.input('val', sql.NVarChar, item.itemName);
-                                r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
 
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             } else {
                                 nextBatch.push(item);
@@ -834,12 +880,11 @@ app.post('/api/enquiries', async (req, res) => {
                         }
                         if (nextBatch.length === remaining.length) {
                             for (const item of nextBatch) {
-                                const r = new sql.Request();
+                                const r = new sql.Request(txn);
                                 r.input('reqNo', sql.NVarChar, RequestNo);
                                 r.input('val', sql.NVarChar, item.itemName);
-                                r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, null);
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             }
                             break;
@@ -849,7 +894,7 @@ app.post('/api/enquiries', async (req, res) => {
                     }
                 } else {
                     for (const item of items) {
-                        const r = new sql.Request();
+                        const r = new sql.Request(txn);
                         r.input('reqNo', sql.NVarChar, RequestNo);
                         r.input('val', sql.NVarChar, item);
                         await r.query(`INSERT INTO ${table} (RequestNo, ${col}) VALUES (@reqNo, @val)`);
@@ -858,15 +903,15 @@ app.post('/api/enquiries', async (req, res) => {
             }
         };
 
-        await insertRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers);
-        await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes);
-        await insertRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor);
-        await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs);
+        await insertRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers, transaction);
+        await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes, transaction);
+        await insertRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor, transaction);
+        await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs, transaction);
 
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');
-                const r = new sql.Request();
+                const r = new sql.Request(transaction);
                 r.input('reqNo', sql.NVarChar, RequestNo);
                 r.input('contact', sql.NVarChar, contact);
                 r.input('company', sql.NVarChar, company);
@@ -880,13 +925,13 @@ app.post('/api/enquiries', async (req, res) => {
         try {
             // 1. Source Of Enquiry
             if (SourceOfInfo) {
-                await sql.query`UPDATE Master_SourceOfEnquiry SET RequestNo = ${RequestNo} WHERE SourceName = ${SourceOfInfo}`;
+                await new sql.Request(transaction).query`UPDATE Master_SourceOfEnquiry SET RequestNo = ${RequestNo} WHERE SourceName = ${SourceOfInfo}`;
             }
 
             // 2. Enquiry Type
             if (SelectedEnquiryTypes && SelectedEnquiryTypes.length > 0) {
                 for (const type of SelectedEnquiryTypes) {
-                    await sql.query`UPDATE Master_EnquiryType SET RequestNo = ${RequestNo} WHERE TypeName = ${type}`;
+                    await new sql.Request(transaction).query`UPDATE Master_EnquiryType SET RequestNo = ${RequestNo} WHERE TypeName = ${type}`;
                 }
             }
 
@@ -894,7 +939,7 @@ app.post('/api/enquiries', async (req, res) => {
             if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
                 for (const item of SelectedEnquiryFor) {
                     const name = typeof item === 'object' ? item.itemName : item;
-                    await sql.query`UPDATE Master_EnquiryFor SET RequestNo = ${RequestNo} WHERE ItemName = ${name}`;
+                    await new sql.Request(transaction).query`UPDATE Master_EnquiryFor SET RequestNo = ${RequestNo} WHERE ItemName = ${name}`;
                 }
             }
 
@@ -902,14 +947,14 @@ app.post('/api/enquiries', async (req, res) => {
             if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
                 for (const item of SelectedReceivedFroms) {
                     const [contact, company] = item.split('|');
-                    await sql.query`UPDATE Master_ReceivedFrom SET RequestNo = ${RequestNo} WHERE ContactName = ${contact} AND CompanyName = ${company}`;
+                    await new sql.Request(transaction).query`UPDATE Master_ReceivedFrom SET RequestNo = ${RequestNo} WHERE ContactName = ${contact} AND CompanyName = ${company}`;
                 }
             }
 
             // 5. Concerned SE
             if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
                 for (const se of SelectedConcernedSEs) {
-                    await sql.query`UPDATE Master_ConcernedSE SET RequestNo = ${RequestNo} WHERE FullName = ${se}`;
+                    await new sql.Request(transaction).query`UPDATE Master_ConcernedSE SET RequestNo = ${RequestNo} WHERE FullName = ${se}`;
                 }
             }
 
@@ -917,7 +962,7 @@ app.post('/api/enquiries', async (req, res) => {
             if (SelectedCustomers && SelectedCustomers.length > 0) {
                 console.log('Updating Master_CustomerName for:', SelectedCustomers);
                 for (const cust of SelectedCustomers) {
-                    const result = await sql.query`UPDATE Master_CustomerName SET RequestNo = ${RequestNo} WHERE CompanyName = ${cust}`;
+                    const result = await new sql.Request(transaction).query`UPDATE Master_CustomerName SET RequestNo = ${RequestNo} WHERE CompanyName = ${cust}`;
                     console.log(`Updated Master_CustomerName for ${cust}. Rows affected: ${result.rowsAffected}`);
                 }
             } else {
@@ -927,18 +972,21 @@ app.post('/api/enquiries', async (req, res) => {
             // 7. Client Name
             if (ClientName) {
                 console.log('Updating Master_ClientName for:', ClientName);
-                await sql.query`UPDATE Master_ClientName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ClientName}`;
+                await new sql.Request(transaction).query`UPDATE Master_ClientName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ClientName}`;
             }
 
             // 8. Consultant Name
             if (ConsultantName) {
                 console.log('Updating Master_ConsultantName for:', ConsultantName);
-                await sql.query`UPDATE Master_ConsultantName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ConsultantName}`;
+                await new sql.Request(transaction).query`UPDATE Master_ConsultantName SET RequestNo = ${RequestNo} WHERE CompanyName = ${ConsultantName}`;
             }
 
         } catch (updateErr) {
             console.error('Error updating Master tables with RequestNo:', updateErr);
+            throw updateErr; // Re-throw to trigger rollback
         }
+
+        await transaction.commit();
 
         // --- Email Notification Logic ---
         try {
@@ -1115,14 +1163,85 @@ app.post('/api/enquiries', async (req, res) => {
 
         res.status(201).json({ message: 'Enquiry created' });
     } catch (err) {
+        if (transaction) {
+            try { await transaction.rollback(); } catch (rbErr) { console.error('Rollback error:', rbErr); }
+        }
+
         const logFile = path.join(__dirname, 'debug.log');
         fs.appendFileSync(logFile, `${new Date().toISOString()} - ERROR: ${err.message}\n${err.stack}\n`);
         console.error(err);
+
+        if (err.number === 2627) { // PK Violation
+            return res.status(400).json({
+                message: 'Duplicate Enquiry Number',
+                error: `Enquiry number ${req.body.RequestNo} already exists. Please refresh to try again.`
+            });
+        }
         res.status(500).send(err.message);
     }
 });
 
 // Update Enquiry
+// Update Enquiry
+// Get Single Enquiry
+app.get('/api/enquiries/:id', async (req, res) => {
+    try {
+        const reqNo = req.params.id;
+        console.log(`[GET /api/enquiries/${reqNo}] Fetching single enquiry...`);
+
+        const result = await sql.query`SELECT * FROM EnquiryMaster WHERE RequestNo = ${reqNo}`;
+        if (result.recordset.length === 0) {
+            return res.status(404).json({ message: 'Enquiry not found' });
+        }
+        const enq = result.recordset[0];
+
+        // Fetch related data
+        const customersResult = await sql.query`SELECT * FROM EnquiryCustomer WHERE RequestNo = ${reqNo}`;
+        const contactsResult = await sql.query`SELECT * FROM ReceivedFrom WHERE RequestNo = ${reqNo}`;
+        const typesResult = await sql.query`SELECT * FROM EnquiryType WHERE RequestNo = ${reqNo}`;
+        const itemsResult = await sql.query`SELECT * FROM EnquiryFor WHERE RequestNo = ${reqNo}`;
+        const seResult = await sql.query`SELECT * FROM ConcernedSE WHERE RequestNo = ${reqNo}`;
+
+        const relatedCustomers = customersResult.recordset.map(c => c.CustomerName);
+        const relatedContacts = contactsResult.recordset.map(c => `${c.ContactName}|${c.CompanyName || ''}`);
+        const relatedTypes = typesResult.recordset.map(t => t.TypeName);
+
+        const relatedItemsRaw = itemsResult.recordset;
+        const relatedItemsStructured = relatedItemsRaw.map(i => ({
+            id: i.ID,
+            parentId: i.ParentID,
+            itemName: i.ItemName,
+            parentName: i.ParentItemName
+        }));
+        const relatedItemsDisplay = relatedItemsRaw.map(i => i.ItemName);
+
+        const relatedSEs = seResult.recordset.map(s => s.SEName);
+
+        const fullEnquiry = {
+            ...enq,
+            SelectedEnquiryTypes: relatedTypes,
+            SelectedEnquiryFor: relatedItemsStructured,
+            SelectedCustomers: relatedCustomers,
+            SelectedReceivedFroms: relatedContacts,
+            SelectedConcernedSEs: relatedSEs,
+            EnquiryType: relatedTypes.join(', '),
+            EnquiryFor: relatedItemsDisplay.join(', '),
+            CustomerName: enq.CustomerName || relatedCustomers.join(', '),
+            ClientName: enq.ClientName,
+            ConsultantName: enq.ConsultantName,
+            ReceivedFrom: relatedContacts.map(c => c.split('|')[0]).join(', '),
+            ConcernedSE: relatedSEs.join(', '),
+            SourceOfInfo: enq.SourceOfEnquiry,
+            DueOn: enq.DueDate
+        };
+
+        res.json(fullEnquiry);
+    } catch (err) {
+        console.error('Error fetching single enquiry:', err);
+        res.status(500).send('Server Error');
+    }
+});
+
 // Update Enquiry
 app.put('/api/enquiries/:id', async (req, res) => {
     const id = req.params.id.trim();
@@ -1132,7 +1251,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
         ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
         DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
-        AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails
+        AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, CustomerRefNo
     } = req.body;
 
     try {
@@ -1160,6 +1279,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         request.input('Status', sql.NVarChar, Status);
         request.input('AcknowledgementSE', sql.NVarChar, AcknowledgementSE);
         request.input('AdditionalNotificationEmails', sql.NVarChar, AdditionalNotificationEmails);
+        request.input('CustomerRefNo', sql.NVarChar, CustomerRefNo || null);
         request.input('OthersSpecify', sql.NVarChar, DocumentsReceived);
 
         const updateResult = await request.query(`
@@ -1167,7 +1287,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 SourceOfEnquiry=@SourceOfEnquiry, EnquiryDate=@EnquiryDate, DueDate=@DueDate, SiteVisitDate=@SiteVisitDate,
                 ReceivedFrom=@ReceivedFrom, ProjectName=@ProjectName, ClientName=@ClientName, ConsultantName=@ConsultantName,
                 EnquiryDetails=@EnquiryDetails, Doc_HardCopies=@Doc_HardCopies, Doc_Drawing=@Doc_Drawing, Doc_CD_DVD=@Doc_CD_DVD,
-                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, AcknowledgementSE=@AcknowledgementSE, AdditionalNotificationEmails=@AdditionalNotificationEmails, OthersSpecify=@OthersSpecify
+                Doc_Spec=@Doc_Spec, Doc_EquipmentSchedule=@Doc_EquipmentSchedule, Remarks=@Remarks, CustomerRefNo=@CustomerRefNo, SendAcknowledgementMail=@SendAcknowledgementMail, ED_CEOSignatureRequired=@ED_CEOSignatureRequired, Status=@Status, AcknowledgementSE=@AcknowledgementSE, AdditionalNotificationEmails=@AdditionalNotificationEmails, OthersSpecify=@OthersSpecify
             WHERE RequestNo=@RequestNo
         `);
 
@@ -1208,7 +1328,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                                 r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
 
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             } else {
                                 nextBatch.push(item);
@@ -1221,7 +1341,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                                 r.input('val', sql.NVarChar, item.itemName);
                                 r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, null);
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentItemName, ParentID) VALUES (@reqNo, @val, @pName, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             }
                             break;
@@ -1480,6 +1600,8 @@ app.delete('/api/users/:id', async (req, res) => {
 
 
 // 4. Enquiry Items (Enquiry For)
+
+
 app.get('/api/enquiry-items', async (req, res) => {
     try {
         const result = await sql.query`SELECT * FROM Master_EnquiryFor ORDER BY ID DESC`;

@@ -1,6 +1,6 @@
 
-const ecommerce = require('express');
-const router = ecommerce.Router();
+const express = require('express');
+const router = express.Router();
 const { sql } = require('../dbConfig');
 
 // --- Helper: Format RequestNo for SQL LIKE if needed, or simple exact match ---
@@ -11,20 +11,21 @@ const { sql } = require('../dbConfig');
 router.get('/list', async (req, res) => {
     try {
         const { mode, fromDate, toDate, probability, userEmail } = req.query;
+        console.log(`[Probability API V5] Fetching list. Mode: ${mode}, User: ${userEmail}`);
         let query = `
             SELECT
-                TRIM(E.RequestNo) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
+                LTRIM(RTRIM(E.RequestNo)) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
                 E.Probability, E.ProbabilityOption, E.ExpectedOrderDate, E.ProbabilityRemarks,
                 E.WonOrderValue, E.WonJobNo, E.WonCustomerName, E.CustomerPreferredPrice, E.WonQuoteRef, E.WonOption,
-                (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE TRIM(Q.RequestNo) = TRIM(E.RequestNo) ORDER BY QuoteDate DESC) as LastQuoteDate,
+                (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) ORDER BY QuoteDate DESC) as LastQuoteDate,
                 (
                     SELECT 
                         CASE 
                             WHEN EXISTS (
                                 SELECT 1 FROM EnquiryPricingValues pv
                                 JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                WHERE TRIM(pv.RequestNo) = TRIM(E.RequestNo)
-                                AND (UPPER(TRIM(po.OptionName)) LIKE '%OPTION%' OR UPPER(TRIM(po.OptionName)) LIKE '%OPTIONAL%')
+                                WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                                AND (UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTION%' OR UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTIONAL%')
                                 AND ISNULL(pv.Price, 0) <> 0
                             ) THEN 'Refer quote'
                             ELSE CAST(ISNULL((
@@ -33,9 +34,41 @@ router.get('/list', async (req, res) => {
                                     SELECT MAX(pv.Price) as MaxItemPrice
                                     FROM EnquiryPricingValues pv
                                     JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                    WHERE TRIM(pv.RequestNo) = TRIM(E.RequestNo)
-                                    AND UPPER(TRIM(po.OptionName)) NOT LIKE '%OPTION%' 
-                                    AND UPPER(TRIM(po.OptionName)) NOT LIKE '%OPTIONAL%'
+                                    -- Fix JOIN to handle prefixes like "L1 - "
+                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '% - ' + mef.ItemName)
+                                    WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
+                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
+                                    AND (
+                                        -- Standard: User has access to this specific item
+                                        (
+                                            ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                            OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                        )
+                                        OR
+                                        -- Hierarchy: Electrical users can see BMS totals
+                                        (
+                                            pv.EnquiryForItem = 'BMS' 
+                                            AND EXISTS (
+                                                SELECT 1 FROM Master_EnquiryFor lead 
+                                                WHERE lead.ItemName = 'Electrical' 
+                                                AND (
+                                                    ',' + REPLACE(REPLACE(ISNULL(lead.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                    OR ',' + REPLACE(REPLACE(ISNULL(lead.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                )
+                                            )
+                                        )
+                                        OR
+                                        -- GLOBAL VISIBILITY FOR CIVIL USERS (e.g. they see everything in Total)
+                                        EXISTS (
+                                            SELECT 1 FROM Master_EnquiryFor civil
+                                            WHERE (civil.ItemName = 'Civil' OR civil.ItemName = 'Civil Project') 
+                                            AND (
+                                                ',' + REPLACE(REPLACE(ISNULL(civil.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                OR ',' + REPLACE(REPLACE(ISNULL(civil.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                            )
+                                        )
+                                    )
                                     GROUP BY pv.EnquiryForItem
                                 ) t
                             ), 0) AS NVARCHAR(50))
@@ -47,8 +80,8 @@ router.get('/list', async (req, res) => {
                             WHEN EXISTS (
                                 SELECT 1 FROM EnquiryPricingValues pv
                                 JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                WHERE TRIM(pv.RequestNo) = TRIM(E.RequestNo)
-                                AND (UPPER(TRIM(po.OptionName)) LIKE '%OPTION%' OR UPPER(TRIM(po.OptionName)) LIKE '%OPTIONAL%')
+                                WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                                AND (UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTION%' OR UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTIONAL%')
                                 AND ISNULL(pv.Price, 0) <> 0
                             ) THEN 'Refer quote'
                             ELSE CAST(ISNULL((
@@ -57,12 +90,14 @@ router.get('/list', async (req, res) => {
                                     SELECT MAX(pv.Price) as MaxItemPrice
                                     FROM EnquiryPricingValues pv
                                     JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                    JOIN Master_EnquiryFor mef ON pv.EnquiryForItem = mef.ItemName
-                                    WHERE TRIM(pv.RequestNo) = TRIM(E.RequestNo)
-                                    AND UPPER(TRIM(po.OptionName)) NOT LIKE '%OPTION%' 
-                                    AND UPPER(TRIM(po.OptionName)) NOT LIKE '%OPTIONAL%'
+                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '% - ' + mef.ItemName)
+                                    WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
+                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
                                     AND (
+                                        -- Net Quoted: ONLY strict user affiliation
                                         ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                        OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                         OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                     )
                                     GROUP BY pv.EnquiryForItem
@@ -71,19 +106,42 @@ router.get('/list', async (req, res) => {
                         END
                 ) as NetQuotedValue,
                 (
-                    SELECT STRING_AGG(CONCAT(CAST(Q.QuoteNumber AS NVARCHAR(MAX)), '|', CAST(ISNULL(Q.ToName, 'N/A') AS NVARCHAR(MAX))), ',') WITHIN GROUP (ORDER BY TRIM(Q.ToName) ASC, Q.RevisionNo DESC)
-                    FROM EnquiryQuotes Q 
-                    WHERE TRIM(Q.RequestNo) = TRIM(E.RequestNo)
-                ) as FinalQuoteRefsTarget,
+                    SELECT STUFF((
+                        SELECT ',' + CAST(Q.QuoteNumber AS NVARCHAR(MAX)) + '|' + CAST(ISNULL(Q.ToName, 'N/A') AS NVARCHAR(MAX))
+                        FROM EnquiryQuotes Q
+                        WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                        AND (
+                            /* 1. Creator Access */
+                            (Q.PreparedByEmail IS NOT NULL AND LTRIM(RTRIM(UPPER(Q.PreparedByEmail))) = LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))))
+                            OR
+                            /* 2. Division Access */
+                            EXISTS (
+                                SELECT 1 FROM Master_EnquiryFor mef
+                                WHERE (
+                                    ',' + REPLACE(REPLACE(ISNULL(UPPER(mef.CommonMailIds), ''), ' ', ''), ';', ',') + ',' LIKE '%,' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',%'
+                                    OR ',' + REPLACE(REPLACE(ISNULL(UPPER(mef.CCMailIds), ''), ' ', ''), ';', ',') + ',' LIKE '%,' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',%'
+                                )
+                                AND mef.DivisionCode IS NOT NULL
+                                AND LEN(LTRIM(RTRIM(mef.DivisionCode))) > 0
+                                AND CHARINDEX('/' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '/', UPPER(Q.QuoteNumber)) > 0
+                            )
+                            /* 3. Admin Fallback */
+                            OR EXISTS (SELECT 1 FROM Master_ConcernedSE u WHERE LTRIM(RTRIM(UPPER(u.EmailId))) = LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) AND UPPER(u.Roles) LIKE '%ADMIN%')
+                        )
+                        ORDER BY LTRIM(RTRIM(Q.ToName)) ASC, Q.RevisionNo DESC
+                        FOR XML PATH(''), TYPE
+                    ).value('.', 'NVARCHAR(MAX)'), 1, 1, '')
+                ) as FilteredQuoteRefs,
                 (
-                    SELECT po.OptionName as name, 
-                           (SELECT SUM(pv.Price) FROM EnquiryPricingValues pv WHERE pv.OptionID = po.ID AND pv.CustomerName = po.CustomerName) as price
-                    FROM EnquiryPricingOptions po
-                    JOIN EnquiryQuotes Q ON Q.QuoteNumber = E.WonQuoteRef
-                    WHERE TRIM(po.RequestNo) = TRIM(E.RequestNo)
-                    AND po.CustomerName = Q.ToName
-                    AND (po.OptionName LIKE '%Option%' OR po.OptionName LIKE '%Optional%')
-                    FOR JSON PATH
+                    SELECT STUFF((
+                        SELECT '##' + CAST(po.OptionName AS NVARCHAR(MAX)) + '::' + CAST(ISNULL((SELECT SUM(pv.Price) FROM EnquiryPricingValues pv WHERE pv.OptionID = po.ID AND pv.CustomerName = po.CustomerName), 0) AS NVARCHAR(MAX))
+                        FROM EnquiryPricingOptions po
+                        JOIN EnquiryQuotes Q ON Q.QuoteNumber = E.WonQuoteRef
+                        WHERE LTRIM(RTRIM(po.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                        AND po.CustomerName = Q.ToName
+                        AND (po.OptionName LIKE '%Option%' OR po.OptionName LIKE '%Optional%')
+                        FOR XML PATH(''), TYPE
+                    ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
                 ) as QuoteOptions
             FROM EnquiryMaster E
             WHERE 1 = 1
@@ -97,13 +155,13 @@ router.get('/list', async (req, res) => {
             // Once a status like Won, Lost, Cancelled, etc. is set, it's no longer "pending update"
             query += `
                 AND (
-                    (E.Status IS NULL OR E.Status = '' OR E.Status = 'Pending' OR E.Status = 'Enquiry')
+                    (E.Status IS NULL OR E.Status = '' OR E.Status IN ('Pending', 'Enquiry', 'Priced', 'Estimated', 'Quote', 'Quoted'))
                     OR (E.Status IN('FollowUp', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
                 )
                 AND (E.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR E.Status IS NULL OR E.Status = '')
                 AND EXISTS(
                     SELECT 1 FROM EnquiryQuotes Q 
-                    WHERE Q.RequestNo = E.RequestNo 
+                    WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) 
                     AND DATEDIFF(day, Q.QuoteDate, GETDATE()) >= 0
                 )
             `;
@@ -175,6 +233,9 @@ router.get('/list', async (req, res) => {
         request.input('userEmail', sql.NVarChar, userEmail || '');
 
         const result = await request.query(query);
+        if (result.recordset.length > 0) {
+            console.log(`[Probability API V5] First Item FilteredQuoteRefs:`, result.recordset[0].FilteredQuoteRefs);
+        }
         res.json(result.recordset);
 
     } catch (err) {

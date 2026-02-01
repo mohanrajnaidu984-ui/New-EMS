@@ -31,6 +31,7 @@ const ProbabilityForm = () => {
     // --- Fetch List ---
     useEffect(() => {
         if (currentUser) {
+            console.log('ProbabilityForm: Current User:', currentUser);
             fetchList();
         }
     }, [listMode, fromDate, toDate, filterProbability, currentUser]);
@@ -43,22 +44,39 @@ const ProbabilityForm = () => {
                 fromDate: fromDate || '',
                 toDate: toDate || '',
                 probability: filterProbability || '',
-                userEmail: currentUser?.email || ''
+                userEmail: currentUser?.EmailId || currentUser?.email || ''
             });
 
-            const res = await fetch(`${API_BASE}/api/probability/list?${queryParams}`);
+            const url = `${API_BASE}/api/probability/list?${queryParams}`;
+            console.log('ProbabilityForm: Fetching list from:', url);
+            const res = await fetch(url);
             if (res.ok) {
                 const data = (await res.json()).map((item, index) => {
                     if (item.QuoteOptions && typeof item.QuoteOptions === 'string') {
-                        try {
-                            item.QuoteOptions = JSON.parse(item.QuoteOptions);
-                        } catch (e) {
-                            item.QuoteOptions = [];
+                        if (item.QuoteOptions.includes('::')) {
+                            // Parse custom delimited string: OptionName::Price##OptionName2::Price2
+                            item.QuoteOptions = item.QuoteOptions.split('##').map(opt => {
+                                const parts = opt.split('::');
+                                // Handle potential multiple :: if name contains it, though unlikely. 
+                                // Better: last part is price, rest is name.
+                                const priceVal = parts.pop();
+                                const nameVal = parts.join('::');
+                                return { name: nameVal || '', price: parseFloat(priceVal) || 0 };
+                            });
+                        } else {
+                            try {
+                                item.QuoteOptions = JSON.parse(item.QuoteOptions);
+                            } catch (e) {
+                                item.QuoteOptions = [];
+                            }
                         }
+                    } else if (!Array.isArray(item.QuoteOptions)) {
+                        item.QuoteOptions = [];
                     }
 
-                    // Handle QuoteRefsData from STRING_AGG or any legacy QuoteRefs
-                    let qRefsRaw = item.FinalQuoteRefsTarget || item.FinalQuoteRefTarget || item.QuoteRefsData || item.quoterefsdata || item.QuoteRefsList || item.QuoteRefs || item.quoterefs;
+                    console.log(`Enquiry ${item.RequestNo} API Data:`, { FilteredQuoteRefs: item.FilteredQuoteRefs, FinalQuoteRefsTarget: item.FinalQuoteRefsTarget });
+                    // Handle QuoteRefsData from new FilteredQuoteRefs or legacy fields
+                    let qRefsRaw = item.FilteredQuoteRefs || item.FinalQuoteRefsTarget || item.FinalQuoteRefTarget || item.QuoteRefsData;
 
                     if (qRefsRaw) {
                         if (typeof qRefsRaw === 'string') {
@@ -94,6 +112,9 @@ const ProbabilityForm = () => {
                     item.TotalQuotedValue = item.TotalQuotedValue || item.totalquotedvalue;
                     item.NetQuotedValue = item.NetQuotedValue || item.netquotedvalue;
 
+                    if (item.QuoteRefs && item.QuoteRefs.length > 0) {
+                        console.log(`Enquiry ${item.RequestNo} QuoteRefs:`, item.QuoteRefs);
+                    }
                     return item;
                 });
                 setEnquiriesList(data);

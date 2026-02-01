@@ -22,6 +22,7 @@
     "msnodesqlv8": "^5.1.1",
     "mssql": "^12.1.0",
     "multer": "^2.0.2",
+    "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.10",
     "openai": "^6.10.0",
     "tesseract.js": "^7.0.0"
