@@ -1,8 +1,13 @@
 import React from 'react';
 
-const CalendarBarChart = ({ data, onBarClick }) => {
-    // Calculate totals from calendar data
-    const totals = data.reduce((acc, item) => {
+const CalendarBarChart = ({ data, monthlyTotals, onBarClick }) => {
+    // Generate totals (Prefer monthlyTotals from backend, fallback to manual sum)
+    const totals = monthlyTotals ? {
+        enquiries: monthlyTotals.enquiries || 0,
+        due: monthlyTotals.due || 0,
+        quoted: monthlyTotals.quoted || 0,
+        lapsed: monthlyTotals.lapsed || 0
+    } : data.reduce((acc, item) => {
         acc.enquiries += item.Enquiries || 0;
         acc.due += item.Due || 0;
         acc.quoted += item.Quoted || 0;
@@ -20,7 +25,7 @@ const CalendarBarChart = ({ data, onBarClick }) => {
     ];
 
     return (
-        <div className="p-3 bg-white border-top" style={{ borderColor: '#e5e7eb' }}>
+        <div className="p-3 bg-white border-bottom" style={{ borderColor: '#e5e7eb' }}>
             <div className="mb-2">
                 <h6 className="text-secondary mb-0" style={{ fontSize: '0.875rem', fontWeight: 600 }}>
                     Monthly Overview

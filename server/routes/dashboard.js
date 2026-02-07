@@ -72,7 +72,7 @@ router.get('/calendar', async (req, res) => {
         console.log('Calendar baseFilter:', baseFilter);
 
         // Input for Quote Filtering (Unique name to avoid conflict)
-        request.input('filterUserEmail', sql.NVarChar, userEmail || '');
+
 
         // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
         const query = `
@@ -86,7 +86,6 @@ router.get('/calendar', async (req, res) => {
                 FROM EnquiryQuotes eq
                 JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
                 WHERE 1=1 ${baseFilter}
-                AND (@filterUserEmail = '' OR eq.PreparedByEmail = @filterUserEmail)
             ),
             Dates AS (
                 SELECT EnquiryDate as DateVal, 'Enquiry' as Type FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year
@@ -120,7 +119,32 @@ router.get('/calendar', async (req, res) => {
         `;
 
         const result = await request.query(query);
-        res.json(result.recordset);
+
+        // --- Added: Calculate Unique Monthly Totals to match the list counts ---
+        const totalsQuery = `
+            WITH FilteredEnquiries AS (
+                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
+                FROM EnquiryMaster em
+                WHERE 1=1 ${baseFilter}
+            ),
+            FilteredQuotes AS (
+                SELECT eq.CreatedAt, eq.QuoteDate, eq.RequestNo
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter}
+            )
+            SELECT 
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year) as due,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year AND CAST(DueDate AS DATE) < CAST(GETDATE() AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))) as lapsed,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredQuotes WHERE MONTH(ISNULL(QuoteDate, CreatedAt)) = @month AND YEAR(ISNULL(QuoteDate, CreatedAt)) = @year) as quoted
+        `;
+        const totalsResult = await request.query(totalsQuery);
+
+        res.json({
+            daily: result.recordset,
+            totals: totalsResult.recordset[0]
+        });
 
     } catch (err) {
         console.error('Calendar API Error:', err);

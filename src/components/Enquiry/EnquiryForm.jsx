@@ -935,6 +935,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 DetailsOfEnquiry: enq.EnquiryDetails || enq.DetailsOfEnquiry,
                 Remark: enq.Remarks || enq.Remark,
                 DocumentsReceived: enq.OthersSpecify || enq.DocumentsReceived,
+                ClientName: enq.ClientName || '',
+                ConsultantName: enq.ConsultantName || '',
                 EnquiryDate: formatDate(enq.EnquiryDate),
                 DueOn: formatDate(enq.DueDate || enq.DueOn),
                 SiteVisitDate: formatDate(enq.SiteVisitDate),
@@ -1872,7 +1874,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                             </div>
 
                                             {/* Buttons Section (Left Aligned, Add then Cancel) */}
-                                            <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
+                                            <div className="d-flex justify-content-start gap-2 mt-4">
                                                 {(!isModifyMode || (isModifyMode && canEdit)) && (
                                                     <button type="submit" className="btn btn-outline-success">
                                                         {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
@@ -1882,6 +1884,30 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                     {isModifyMode && !canEdit ? 'Close' : 'Cancel'}
                                                 </button>
                                             </div>
+
+                                            {/* Validation Error Messages */}
+                                            {Object.keys(errors).length > 0 && (
+                                                <div className="alert alert-danger mt-2 mb-5" role="alert" style={{ fontSize: '13px' }}>
+                                                    <strong>Please fill in the following mandatory fields:</strong>
+                                                    <ul className="mb-0 mt-2" style={{ paddingLeft: '20px' }}>
+                                                        {Object.keys(errors).map(field => (
+                                                            <li key={field}>
+                                                                {field === 'SourceOfInfo' && 'Source of Information'}
+                                                                {field === 'EnquiryDate' && 'Enquiry Date'}
+                                                                {field === 'DueOn' && (errors[field] === 'Required' ? 'Due On' : errors[field])}
+                                                                {field === 'EnquiryType' && 'Enquiry Type'}
+                                                                {field === 'EnquiryFor' && 'Enquiry For Structure'}
+                                                                {field === 'CustomerName' && 'Customer Name'}
+                                                                {field === 'ReceivedFrom' && 'Received From'}
+                                                                {field === 'ProjectName' && 'Project Name'}
+                                                                {field === 'ClientName' && 'Client Name'}
+                                                                {field === 'ConcernedSE' && 'Concerned SE'}
+                                                                {field === 'DetailsOfEnquiry' && 'Details of Enquiry'}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </div>
+                                            )}
                                         </div>
                                     </form>
 

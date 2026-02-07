@@ -21,7 +21,7 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
 
     // Fetch Divisions on mount
     useEffect(() => {
-        fetch('http://localhost:5000/api/master/divisions')
+        fetch('http://localhost:5001/api/master/divisions')
             .then(res => res.json())
             .then(data => setDivisions(data))
             .catch(err => console.error('Error fetching divisions:', err));

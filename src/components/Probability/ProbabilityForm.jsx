@@ -7,7 +7,7 @@ import { format } from 'date-fns';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 
-const API_BASE = 'http://localhost:5000';
+const API_BASE = 'http://localhost:5001';
 
 const ProbabilityForm = () => {
     const { currentUser } = useAuth();
@@ -196,6 +196,12 @@ const ProbabilityForm = () => {
 
         setUpdatingReqNo(item.RequestNo);
         try {
+            // For Follow-up status, use NetQuotedValue as CustomerPreferredPrice if not explicitly set
+            let customerPreferredPrice = item.CustomerPreferredPrice;
+            if ((item.Status === 'FollowUp' || item.Status === 'Follow-up') && !customerPreferredPrice && item.NetQuotedValue) {
+                customerPreferredPrice = String(item.NetQuotedValue).replace(/,/g, '').replace(/BD/g, '').trim();
+            }
+
             const payload = {
                 enquiryNo: item.RequestNo,
                 status: item.Status,
@@ -208,12 +214,13 @@ const ProbabilityForm = () => {
                     wonQuoteRef: item.WonQuoteRef,
                     wonOption: item.WonOption,
                 },
-                customerPreferredPrice: item.CustomerPreferredPrice,
+                customerPreferredPrice: customerPreferredPrice,
                 expectedDate: item.ExpectedOrderDate,
                 lostDetails: {
                     customer: item.LostCompetitor,
                     reason: item.LostReason,
-                    competitorPrice: String(item.LostCompetitorPrice || '').replace(/,/g, '').replace(/BD/g, '').trim()
+                    competitorPrice: String(item.LostCompetitorPrice || '').replace(/,/g, '').replace(/BD/g, '').trim(),
+                    lostDate: item.LostDate
                 }
             };
 
@@ -425,6 +432,10 @@ const ProbabilityForm = () => {
                                             <div className="col-md-6">
                                                 <label className="small fw-bold">Competitor Price</label>
                                                 <input type="text" className="form-control" value={formData.lostDetails.competitorPrice} onChange={e => handleDetailsChange('lostDetails', 'competitorPrice', e.target.value)} />
+                                            </div>
+                                            <div className="col-md-6">
+                                                <label className="small fw-bold">Lost Date</label>
+                                                <input type="date" className="form-control" value={formData.lostDetails.lostDate ? formData.lostDetails.lostDate.split('T')[0] : ''} onChange={e => handleDetailsChange('lostDetails', 'lostDate', e.target.value)} />
                                             </div>
                                         </div>
                                     </div>
@@ -702,6 +713,19 @@ const ProbabilityForm = () => {
                                                                                 value={item.LostCompetitorPrice || ''}
                                                                                 onChange={(e) => handleInlineUpdate(item, 'LostCompetitorPrice', e.target.value)}
                                                                                 onClick={(e) => e.stopPropagation()}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="d-flex flex-column">
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Lost Date</span>
+                                                                        <div style={{ width: '130px' }}>
+                                                                            <input
+                                                                                type="date"
+                                                                                className="form-control form-control-sm"
+                                                                                value={item.LostDate ? (typeof item.LostDate === 'string' ? item.LostDate.split('T')[0] : format(new Date(item.LostDate), 'yyyy-MM-dd')) : ''}
+                                                                                onChange={(e) => handleInlineUpdate(item, 'LostDate', e.target.value)}
+                                                                                onClick={(e) => e.stopPropagation()}
+                                                                                style={{ fontSize: '12px', height: '31px' }}
                                                                             />
                                                                         </div>
                                                                     </div>

@@ -7,6 +7,7 @@ import QuoteForm from './Quote/QuoteForm';
 import ProbabilityForm from './Probability/ProbabilityForm';
 
 import SalesReport from './SalesReport/SalesReport';
+import SalesTarget from './SalesTarget/SalesTarget';
 
 const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
     return (
@@ -32,10 +33,7 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
                     <SalesReport />
                 )}
                 {activeTab === 'Reports' && (
-                    <div className="alert alert-info">
-                        <i className="bi bi-info-circle me-2"></i>
-                        Reports module coming soon...
-                    </div>
+                    <SalesTarget />
                 )}
             </div>
         </div>

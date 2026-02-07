@@ -23,8 +23,8 @@ export const DataProvider = ({ children }) => {
         availableRoles,
         projectNames,
         existingCustomers: [], // Will fetch from DB
-        clientNames,
-        consultantNames,
+        clientNames: [], // Will fetch from DB
+        consultantNames: [], // Will fetch from DB
         concernedSEs,
         enquiryFor,
         users: storedUsers,
@@ -39,13 +39,38 @@ export const DataProvider = ({ children }) => {
     useEffect(() => {
         const fetchData = async () => {
             try {
+                console.log('[DataContext] Starting data fetch...');
+
                 const [enqRes, custRes, contRes, userRes, itemRes] = await Promise.all([
-                    fetch(`${API_URL}/enquiries`),
-                    fetch(`${API_URL}/customers`),
-                    fetch(`${API_URL}/contacts`),
-                    fetch(`${API_URL}/users`),
-                    fetch(`${API_URL}/enquiry-items`)
+                    fetch(`${API_URL}/enquiries`).catch(err => {
+                        console.error('[DataContext] Enquiries fetch failed:', err);
+                        return { ok: false, json: () => [] };
+                    }),
+                    fetch(`${API_URL}/customers`).catch(err => {
+                        console.error('[DataContext] Customers fetch failed:', err);
+                        return { ok: false, json: () => [] };
+                    }),
+                    fetch(`${API_URL}/contacts`).catch(err => {
+                        console.error('[DataContext] Contacts fetch failed:', err);
+                        return { ok: false, json: () => [] };
+                    }),
+                    fetch(`${API_URL}/users`).catch(err => {
+                        console.error('[DataContext] Users fetch failed:', err);
+                        return { ok: false, json: () => [] };
+                    }),
+                    fetch(`${API_URL}/enquiry-items`).catch(err => {
+                        console.error('[DataContext] Enquiry items fetch failed:', err);
+                        return { ok: false, json: () => [] };
+                    })
                 ]);
+
+                console.log('[DataContext] Fetch responses:', {
+                    enquiries: enqRes.ok,
+                    customers: custRes.ok,
+                    contacts: contRes.ok,
+                    users: userRes.ok,
+                    items: itemRes.ok
+                });
 
                 const enqData = await enqRes.json();
                 const custData = await custRes.json();
@@ -57,11 +82,35 @@ export const DataProvider = ({ children }) => {
                 enqData.forEach(e => { enqMap[e.RequestNo] = e; });
                 setEnquiries(enqMap);
 
+                console.log('[DataContext] Customer data received:', custData.length, 'records');
+                console.log('[DataContext] Sample customer:', custData[0]);
+
+                // Check unique Category values
+                const uniqueCategories = [...new Set(custData.map(c => c.Category))];
+                console.log('[DataContext] Unique Category values:', uniqueCategories);
+
+                // Show samples of each category
+                const sampleContractor = custData.find(c => c.Category === 'Contractor');
+                const sampleClient = custData.find(c => c.Category === 'Client');
+                const sampleConsultant = custData.find(c => c.Category === 'Consultant');
+
+                console.log('[DataContext] Sample Contractor:', sampleContractor);
+                console.log('[DataContext] Sample Client:', sampleClient);
+                console.log('[DataContext] Sample Consultant:', sampleConsultant);
+
+                const contractors = custData.filter(c => c.Category === 'Contractor').map(c => c.CompanyName);
+                const clients = custData.filter(c => c.Category === 'Client').map(c => c.CompanyName);
+                const consultants = custData.filter(c => c.Category === 'Consultant').map(c => c.CompanyName);
+
+                console.log('[DataContext] Contractors:', contractors.length);
+                console.log('[DataContext] Clients:', clients.length, clients);
+                console.log('[DataContext] Consultants:', consultants.length, consultants);
+
                 setMasters(prev => ({
                     ...prev,
-                    existingCustomers: custData.filter(c => c.Category === 'Contractor').map(c => c.CompanyName),
-                    clientNames: custData.filter(c => c.Category === 'Client').map(c => c.CompanyName),
-                    consultantNames: custData.filter(c => c.Category === 'Consultant').map(c => c.CompanyName),
+                    existingCustomers: contractors,
+                    clientNames: clients,
+                    consultantNames: consultants,
                     customers: custData,
                     contacts: contData,
                     users: userData,
@@ -69,8 +118,11 @@ export const DataProvider = ({ children }) => {
                     enqItems: itemData,
                     enquiryFor: itemData.map(i => i.ItemName)
                 }));
+
+                console.log('[DataContext] Masters updated successfully');
             } catch (err) {
-                console.error("API Fetch Error:", err);
+                console.error("[DataContext] API Fetch Error:", err);
+                console.error("[DataContext] Error stack:", err.stack);
             }
         };
         fetchData();

@@ -17,6 +17,7 @@ router.get('/list', async (req, res) => {
                 LTRIM(RTRIM(E.RequestNo)) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
                 E.Probability, E.ProbabilityOption, E.ExpectedOrderDate, E.ProbabilityRemarks,
                 E.WonOrderValue, E.WonJobNo, E.WonCustomerName, E.CustomerPreferredPrice, E.WonQuoteRef, E.WonOption,
+                E.LostCompetitor, E.LostReason, E.LostCompetitorPrice, E.LostDate,
                 (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) ORDER BY QuoteDate DESC) as LastQuoteDate,
                 (
                     SELECT 
@@ -202,6 +203,7 @@ router.get('/list', async (req, res) => {
             if (mode === 'Retendered') dateCol = 'E.RetenderDate';
             if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
             if (mode === 'Cancelled') dateCol = 'E.CancelDate';
+            if (mode === 'Lost') dateCol = 'E.LostDate';
 
             query += ` AND ${dateCol} >= @fromDate`;
         }
@@ -211,6 +213,7 @@ router.get('/list', async (req, res) => {
             if (mode === 'Retendered') dateCol = 'E.RetenderDate';
             if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
             if (mode === 'Cancelled') dateCol = 'E.CancelDate';
+            if (mode === 'Lost') dateCol = 'E.LostDate';
 
             query += ` AND ${dateCol} <= @toDate`;
         }
@@ -252,7 +255,7 @@ router.get('/:requestNo', async (req, res) => {
         request.input('reqNo', sql.NVarChar, requestNo);
 
         const q = `
-SELECT * FROM EnquiryMaster WHERE TRIM(RequestNo) = TRIM(@reqNo)
+SELECT * FROM EnquiryMaster WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(@reqNo))
     `;
         const result = await request.query(q);
         if (result.recordset.length > 0) {
@@ -271,43 +274,49 @@ router.post('/update', async (req, res) => {
     try {
         const {
             enquiryNo,
-            status, // The Status string (e.g. 'Won', 'Lost', 'Follow-up')
-
-            // Probability Fields
-            probabilityOption, probability,
-            aacQuotedContractor, customerPreferredPrice,
-            preferredPrices, // Object { option1, option2, option3 }
-            expectedDate, cancellationDate, onHoldDate, retenderDate,
+            status,
+            probabilityOption,
+            probability: probInput,
+            aacQuotedContractor,
+            customerPreferredPrice,
+            preferredPrices,
+            expectedDate,
+            cancellationDate,
+            onHoldDate,
+            retenderDate,
             remarks,
-
-            // Won Details
-            wonDetails, // { orderValue, jobNo, customerName, contactName, contactNo, wonQuoteRef }
-
-            // Lost Details
-            lostDetails // { customer, reason, competitorPrice }
+            wonDetails,
+            lostDetails
         } = req.body;
 
-        const request = new sql.Request();
-        request.input('reqNo', sql.NVarChar, enquiryNo);
+        console.log(`[Probability Update] Processing ReqNo: ${enquiryNo}, Status: ${status}`);
+        console.log(`[Probability Update] Lost Details:`, lostDetails);
 
-        request.input('Status', sql.NVarChar, status);
-        request.input('ProbabilityOption', sql.VarChar, probabilityOption);
+        // Calculate probability int from option string if not provided (e.g. "High Chance (90%)" -> 90)
+        let probability = probInput;
+        if (probability === undefined || probability === null) {
+            const match = probabilityOption?.match(/\d+/);
+            probability = match ? parseInt(match[0]) : 0;
+        }
+
+        const request = new sql.Request();
+        request.input('reqNo', sql.NVarChar, String(enquiryNo || ''));
+        request.input('Status', sql.NVarChar, status || '');
+        request.input('ProbabilityOption', sql.VarChar, probabilityOption || '');
         request.input('Probability', sql.Int, probability);
-        request.input('AACQuotedContractor', sql.VarChar, aacQuotedContractor);
-        request.input('CustomerPreferredPrice', sql.VarChar, customerPreferredPrice);
+        request.input('AACQuotedContractor', sql.VarChar, aacQuotedContractor || '');
+        request.input('CustomerPreferredPrice', sql.VarChar, customerPreferredPrice || '');
         request.input('PreferredPriceOption1', sql.VarChar, preferredPrices?.option1 || '');
         request.input('PreferredPriceOption2', sql.VarChar, preferredPrices?.option2 || '');
         request.input('PreferredPriceOption3', sql.VarChar, preferredPrices?.option3 || '');
         request.input('ExpectedOrderDate', sql.DateTime, expectedDate ? new Date(expectedDate) : null);
-        request.input('ProbabilityRemarks', sql.NVarChar, remarks);
+        request.input('ProbabilityRemarks', sql.NVarChar, remarks || '');
 
-        // Date fields for specific statuses
         request.input('RetenderDate', sql.DateTime, retenderDate ? new Date(retenderDate) : null);
         request.input('OnHoldDate', sql.DateTime, onHoldDate ? new Date(onHoldDate) : null);
         request.input('CancelDate', sql.DateTime, cancellationDate ? new Date(cancellationDate) : null);
 
-        // Won Details
-        request.input('WonOrderValue', sql.VarChar, wonDetails?.orderValue || null);
+        request.input('WonOrderValue', sql.VarChar, String(wonDetails?.orderValue || '').replace(/,/g, '').trim() || null);
         request.input('WonJobNo', sql.VarChar, wonDetails?.jobNo || null);
         request.input('WonCustomerName', sql.VarChar, wonDetails?.customerName || null);
         request.input('WonContactName', sql.VarChar, wonDetails?.contactName || null);
@@ -315,10 +324,10 @@ router.post('/update', async (req, res) => {
         request.input('WonQuoteRef', sql.NVarChar, wonDetails?.wonQuoteRef || null);
         request.input('WonOption', sql.NVarChar, wonDetails?.wonOption || null);
 
-        // Lost Details
-        request.input('LostCompetitor', sql.VarChar, lostDetails?.customer || null); // Note: variable name mismatch in UI 'customer' vs DB 'LostCompetitor' -> Assuming 'customer' in UI means Competitor Name
+        request.input('LostCompetitor', sql.VarChar, lostDetails?.customer || null);
         request.input('LostReason', sql.VarChar, lostDetails?.reason || null);
-        request.input('LostCompetitorPrice', sql.VarChar, lostDetails?.competitorPrice || null);
+        request.input('LostCompetitorPrice', sql.VarChar, String(lostDetails?.competitorPrice || '').replace(/,/g, '').trim() || null);
+        request.input('LostDate', sql.DateTime, lostDetails?.lostDate ? new Date(lostDetails.lostDate) : null);
 
         const updateQuery = `
             UPDATE EnquiryMaster
@@ -344,11 +353,12 @@ Status = @Status,
                 LostCompetitor = @LostCompetitor,
     LostReason = @LostReason,
     LostCompetitorPrice = @LostCompetitorPrice,
+    LostDate = @LostDate,
 
     RetenderDate = @RetenderDate,
     OnHoldDate = @OnHoldDate,
     CancelDate = @CancelDate
-            WHERE TRIM(RequestNo) = TRIM(@reqNo)
+            WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(@reqNo))
     `;
 
         await request.query(updateQuery);

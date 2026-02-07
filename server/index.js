@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-console.log('SERVER STARTING - ACK V2');
+console.log('SERVER STARTING - ACK V2 - Registering Sales Target Routes');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -219,7 +219,7 @@ const upload = multer({ storage: storage });
 
 const { sendAcknowledgementEmail } = require('./emailService');
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // Middleware
 app.use(cors());
@@ -297,6 +297,8 @@ const probabilityRoutes = require('./routes/probabilityRoutes');
 app.use('/api/probability', probabilityRoutes);
 const salesReportRoutes = require('./routes/salesReportRoutes');
 app.use('/api/sales-report', salesReportRoutes);
+const salesTargetRoutes = require('./routes/salesTargetRoutes');
+app.use('/api/sales-targets', salesTargetRoutes);
 
 
 // --- OCR Extraction Route ---
@@ -1403,9 +1405,36 @@ app.put('/api/enquiries/:id', async (req, res) => {
 // 1. Customers (Contractors, Clients, Consultants)
 app.get('/api/customers', async (req, res) => {
     try {
-        const customers = await sql.query`SELECT * FROM Master_CustomerName ORDER BY ID DESC`;
-        const clients = await sql.query`SELECT * FROM Master_ClientName ORDER BY ID DESC`;
-        const consultants = await sql.query`SELECT * FROM Master_ConsultantName ORDER BY ID DESC`;
+        // Use plain SQL strings to avoid template literal issues
+        const customersQuery = `
+            SELECT ID, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo,
+                   'Contractor' as Category
+            FROM Master_CustomerName 
+            ORDER BY ID DESC
+        `;
+        const clientsQuery = `
+            SELECT ID, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo,
+                   'Client' as Category
+            FROM Master_ClientName 
+            ORDER BY ID DESC
+        `;
+        const consultantsQuery = `
+            SELECT ID, CompanyName, Address1, Address2, Rating, Type, FaxNo, Phone1, Phone2, EmailId, Website, Status, RequestNo,
+                   'Consultant' as Category
+            FROM Master_ConsultantName 
+            ORDER BY ID DESC
+        `;
+
+        const customers = await new sql.Request().query(customersQuery);
+        const clients = await new sql.Request().query(clientsQuery);
+        const consultants = await new sql.Request().query(consultantsQuery);
+
+        console.log('[/api/customers] Contractors:', customers.recordset.length);
+        console.log('[/api/customers] Clients:', clients.recordset.length);
+        console.log('[/api/customers] Consultants:', consultants.recordset.length);
+        if (clients.recordset.length > 0) {
+            console.log('[/api/customers] Sample client:', clients.recordset[0]);
+        }
 
         // Combine all
         const all = [...customers.recordset, ...clients.recordset, ...consultants.recordset];
@@ -1921,6 +1950,18 @@ const initApp = async () => {
                 console.log('Adding ParentID column to EnquiryFor...');
                 await sql.query`ALTER TABLE EnquiryFor ADD ParentID INT NULL`;
                 console.log('ParentID column added.');
+            }
+
+            // Check LostDate in EnquiryMaster
+            const checkLostDate = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'EnquiryMaster' AND COLUMN_NAME = 'LostDate'
+            `;
+            if (checkLostDate.recordset.length === 0) {
+                console.log('Adding LostDate column to EnquiryMaster...');
+                await sql.query`ALTER TABLE EnquiryMaster ADD LostDate DATETIME NULL`;
+                console.log('LostDate column added.');
             }
 
             // Check if EnquiryNotes table exists

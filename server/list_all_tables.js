@@ -1,22 +1,14 @@
 const { sql, connectDB } = require('./dbConfig');
 
-async function listTables() {
+const run = async () => {
     try {
         await connectDB();
-        const result = await sql.query`
-            SELECT TABLE_NAME 
-            FROM INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_TYPE = 'BASE TABLE'
-        `;
-        console.log('Database Tables:');
-        result.recordset.forEach(t => {
-            console.log(t.TABLE_NAME);
-        });
-        process.exit(0);
+        const res = await new sql.Request().query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'");
+        res.recordset.forEach(t => console.log("TABLE:" + t.TABLE_NAME));
     } catch (err) {
         console.error(err);
-        process.exit(1);
     }
-}
+    process.exit(0);
+};
 
-listTables();
+run();

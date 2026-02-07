@@ -165,7 +165,8 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
             }
 
             setData({
-                calendar: Array.isArray(calData) ? calData : [],
+                calendar: Array.isArray(calData) ? calData : (calData.daily || []),
+                calendarTotals: !Array.isArray(calData) ? calData.totals : null,
                 summary: sumData || {},
                 table: Array.isArray(listData) ? listData : []
             });
@@ -339,6 +340,11 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                         />
                     </div>
                     <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+                        <CalendarBarChart
+                            data={data.calendar}
+                            monthlyTotals={data.calendarTotals}
+                            onBarClick={handleBarClick}
+                        />
                         <div className="p-2" style={{ flex: 1 }}>
                             <CalendarView
                                 month={dateState.month}
@@ -350,10 +356,6 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                                 onDateClick={handleDateClick}
                             />
                         </div>
-                        <CalendarBarChart
-                            data={data.calendar}
-                            onBarClick={handleBarClick}
-                        />
                     </div>
                 </div>
 

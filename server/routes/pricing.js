@@ -7,6 +7,7 @@ const sql = require('mssql');
 router.get('/list/pending', async (req, res) => {
     try {
         const { userEmail } = req.query;
+        console.log('Pending Pricing requested for:', userEmail);
         if (!userEmail) return res.json([]);
 
         // 1. Get User Details (FullName for CreatedBy check)
@@ -28,6 +29,7 @@ router.get('/list/pending', async (req, res) => {
         if (enquiries.length === 0) return res.json([]);
 
         const requestNos = enquiries.map(e => e.RequestNo);
+        console.log(`Found ${enquiries.length} enquiries in pending status. RequestNos: ${requestNos.join(', ')}`);
 
         // Fetch ConcernedSE matches for this user to grant access
         let concernedRequestNos = new Set();
@@ -121,6 +123,8 @@ router.get('/list/pending', async (req, res) => {
                 });
             }
 
+            console.log(`Enquiry ${enq.RequestNo}: myJobs=${myJobs.length}, creator=${isCreator}, concerned=${isConcernedSE}`);
+
             // Calculate 'Visible Jobs' = My Jobs + Direct Children of My Jobs
             let visibleJobs = new Set();
             myJobs.forEach(job => {
@@ -198,6 +202,7 @@ router.get('/list/pending', async (req, res) => {
             };
         }).filter(Boolean); // Filter out nulls
 
+        console.log(`Returning ${result.length} pending enquiries to user ${userEmail}`);
         res.json(result);
 
     } catch (err) {

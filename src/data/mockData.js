@@ -16,7 +16,7 @@ export const allStatuses = [
     "Enquiry", "Pricing", "Quote", "Probability", "Reports"
 ];
 
-export const availableRoles = ["Enquiry", "Pricing", "Quote", "Probability", "Sales Report", "Report", "Admin"];
+export const availableRoles = ["Enquiry", "Pricing", "Quote", "Probability", "Sales Report", "Sales Target", "Admin"];
 
 export const projectNames = ["Project Alpha", "Project Beta"];
 

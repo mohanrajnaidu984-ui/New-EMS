@@ -25,8 +25,8 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
     { id: 'Pricing', label: 'Pricing', icon: 'bi-calculator' },
     { id: 'Quote', label: 'Quote', icon: 'bi-file-earmark-text' },
     { id: 'Probability', label: 'Probability', icon: 'bi-graph-up' },
-    { id: 'Sales Report', label: 'Sales Report', icon: 'bi-bullseye' },
-    { id: 'Reports', label: 'Reports', icon: 'bi-file-earmark-bar-graph' }
+    { id: 'Sales Report', label: 'Sales Report', icon: 'bi-file-earmark-bar-graph' },
+    { id: 'Reports', label: 'Sales Target', icon: 'bi-bullseye' }
   ];
 
   // Role Based Access
@@ -47,7 +47,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
     if (item.id === 'Quote' && userRoles.includes('quote')) return true;
     if (item.id === 'Probability' && userRoles.includes('probability')) return true;
     if (item.id === 'Sales Report' && (userRoles.includes('sales target') || userRoles.includes('sales report'))) return true;
-    if (item.id === 'Reports' && userRoles.includes('report')) return true;
+    if (item.id === 'Reports' && (userRoles.includes('report') || userRoles.includes('sales target'))) return true;
 
     return false;
   });

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
 import ValidationTooltip from '../Common/ValidationTooltip';
+import { useData } from '../../context/DataContext';
 
 const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
     const [formData, setFormData] = useState({
@@ -63,10 +64,44 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
         }
     }, [show, mode, initialData]);
 
+    const { masters } = useData();
+
     const handleChange = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
         if (errors[field]) {
             setErrors(prev => ({ ...prev, [field]: null }));
+        }
+
+        // Auto-fill logic for ItemName in Add mode
+        if (mode === 'Add' && field === 'ItemName' && value.trim()) {
+            const match = masters.enqItems.find(i =>
+                (i.ItemName || '').toLowerCase() === value.trim().toLowerCase()
+            );
+
+            if (match) {
+                console.log('Match found for auto-fill:', match);
+                const common = Array.isArray(match.CommonMailIds)
+                    ? match.CommonMailIds
+                    : (match.CommonMailIds ? match.CommonMailIds.split(',') : []);
+                const cc = Array.isArray(match.CCMailIds)
+                    ? match.CCMailIds
+                    : (match.CCMailIds ? match.CCMailIds.split(',') : []);
+
+                setFormData(prev => ({
+                    ...prev,
+                    CompanyName: match.CompanyName || '',
+                    DepartmentName: match.DepartmentName || '',
+                    Status: match.Status || 'Active',
+                    CommonMailIds: common,
+                    CCMailIds: cc,
+                    DivisionCode: match.DivisionCode || '',
+                    DepartmentCode: match.DepartmentCode || '',
+                    Phone: match.Phone || '',
+                    Address: match.Address || '',
+                    FaxNo: match.FaxNo || '',
+                    CompanyLogo: match.CompanyLogo || ''
+                }));
+            }
         }
     };
 
