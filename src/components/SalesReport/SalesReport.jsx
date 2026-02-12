@@ -4,6 +4,7 @@ import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
     PieChart, Pie, Cell, FunnelChart, Funnel, LabelList
 } from 'recharts';
+import { Printer, Mail } from 'lucide-react';
 import Modal from '../Modals/Modal';
 import './SalesReport.css'; // Import the dark theme styles
 
@@ -13,6 +14,7 @@ const SalesReport = () => {
     const [isRestricted, setIsRestricted] = useState(false);
 
     const [year, setYear] = useState('2026');
+    const [quarter, setQuarter] = useState('All');
     const [company, setCompany] = useState('All');
     const [division, setDivision] = useState('All');
     const [role, setRole] = useState('All');
@@ -34,6 +36,8 @@ const SalesReport = () => {
     });
 
     const [pieMetric, setPieMetric] = useState('Won');
+    const [itemWiseQuarter, setItemWiseQuarter] = useState('All');
+    const [itemWiseData, setItemWiseData] = useState([]);
 
     const [filterOptions, setFilterOptions] = useState({
         years: [],
@@ -122,6 +126,7 @@ const SalesReport = () => {
         try {
             const params = new URLSearchParams();
             params.append('year', year);
+            if (quarter && quarter !== 'All') params.append('quarter', quarter);
             if (company && company !== 'All') params.append('company', company);
             if (division && division !== 'All') params.append('division', division);
             if (role && role !== 'All') params.append('role', role);
@@ -138,9 +143,44 @@ const SalesReport = () => {
         }
     };
 
+    const fetchItemWiseStats = async () => {
+        try {
+            const params = new URLSearchParams();
+            params.append('year', year);
+            if (itemWiseQuarter && itemWiseQuarter !== 'All') params.append('quarter', itemWiseQuarter);
+            if (company && company !== 'All') params.append('company', company);
+            if (division && division !== 'All') params.append('division', division);
+            if (role && role !== 'All') params.append('role', role);
+
+            // Re-use summary endpoint? No, summary is heavy.
+            // Let's assume we use summary but we only care about itemWiseStats.
+            // A better way is to update summary route to return only itemWiseStats if requested?
+            // OR we can just use the existing summary data if 'All' (default) and re-fetch if specific?
+            // Actually, the summary endpoint filters EVERYTHING by the 'quarter' param.
+            // So if we want to filter JUST this chart, we can call summary with specific quarter.
+            // But that fetches everything.
+            // Let's create a dedicated endpoint later if needed. For now, let's call summary.
+            // Wait, calling summary will be slow.
+            // Let's try to filter client side? No, we don't have the data.
+            // We'll add a new endpoint /item-wise-stats to the backend.
+
+            const res = await fetch(`http://localhost:5001/api/sales-report/item-wise-stats?${params.toString()}`);
+            if (res.ok) {
+                const data = await res.json();
+                setItemWiseData(data);
+            }
+        } catch (error) {
+            console.error("Failed to fetch item wise stats", error);
+        }
+    };
+
+    useEffect(() => {
+        if (year) fetchItemWiseStats();
+    }, [year, itemWiseQuarter, company, division, role]);
+
     useEffect(() => {
         if (year) fetchSummary();
-    }, [year, company, division, role]);
+    }, [year, quarter, company, division, role]);
 
     // Access Control Logic
     useEffect(() => {
@@ -313,6 +353,8 @@ const SalesReport = () => {
             params.append('label', label);
             if (extraParam) params.append('status', extraParam);
 
+            if (quarter && quarter !== 'All') params.append('quarter', quarter);
+
             const res = await fetch(`http://localhost:5001/api/sales-report/drilldown-details?${params.toString()}`);
             if (res.ok) {
                 const details = await res.json();
@@ -343,6 +385,8 @@ const SalesReport = () => {
             if (division && division !== 'All') params.append('division', division);
             if (role && role !== 'All') params.append('role', role);
             params.append('probabilityName', probabilityName);
+
+            if (quarter && quarter !== 'All') params.append('quarter', quarter);
 
             const res = await fetch(`http://localhost:5001/api/sales-report/funnel-details?${params.toString()}`);
             if (res.ok) {
@@ -484,6 +528,39 @@ const SalesReport = () => {
         );
     };
 
+    const handlePrint = () => {
+        const container = document.querySelector('.sales-report-dark-theme');
+        if (container) {
+            container.classList.add('printing');
+            // Allow time for Recharts to update its size based on the new CSS class
+            setTimeout(() => {
+                window.print();
+            }, 500);
+        } else {
+            window.print();
+        }
+    };
+
+    useEffect(() => {
+        const handleAfterPrint = () => {
+            const container = document.querySelector('.sales-report-dark-theme');
+            if (container) {
+                container.classList.remove('printing');
+            }
+        };
+
+        window.addEventListener('afterprint', handleAfterPrint);
+        return () => {
+            window.removeEventListener('afterprint', handleAfterPrint);
+        };
+    }, []);
+
+    const handleEmail = () => {
+        const subject = "Sales Report";
+        const body = "Please find the Sales Report attached. (Note: Please save the report as PDF using the Print option before attaching)";
+        window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    };
+
     return (
         <div
             className="container-fluid d-flex flex-column sales-report-dark-theme"
@@ -536,6 +613,13 @@ const SalesReport = () => {
             {/* Top Toolbar */}
             <div className="d-flex align-items-center justify-content-between mb-2 flex-shrink-0">
                 <div className="d-flex gap-2">
+                    <select className="form-select form-select-sm" style={{ width: 110 }} value={quarter} onChange={(e) => setQuarter(e.target.value)}>
+                        <option value="All">All Quarters</option>
+                        <option value="Q1">Q1</option>
+                        <option value="Q2">Q2</option>
+                        <option value="Q3">Q3</option>
+                        <option value="Q4">Q4</option>
+                    </select>
                     <select className="form-select form-select-sm" style={{ width: 100 }} value={year} onChange={(e) => setYear(e.target.value)}>
                         {filterOptions.years.map(y => (
                             <option key={y} value={y}>{y}</option>
@@ -560,8 +644,18 @@ const SalesReport = () => {
                         ))}
                     </select>
                 </div>
-                <div className="text-muted small" style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                    * All the values are in BHD
+                <div className="d-flex align-items-center gap-3">
+                    <div className="text-muted small" style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                        * All the values are in BHD
+                    </div>
+                    <div className="d-flex gap-2 no-print">
+                        <button className="btn btn-sm btn-outline-light d-flex align-items-center gap-1" onClick={handlePrint} title="Print / Save as PDF" style={{ borderColor: '#334155', color: '#e2e8f0' }}>
+                            <Printer size={14} /> <span className="d-none d-md-inline">Print</span>
+                        </button>
+                        <button className="btn btn-sm btn-outline-light d-flex align-items-center gap-1" onClick={handleEmail} title="Email Report" style={{ borderColor: '#334155', color: '#e2e8f0' }}>
+                            <Mail size={14} /> <span className="d-none d-md-inline">Email</span>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -748,9 +842,21 @@ const SalesReport = () => {
                                 <div className="d-flex justify-content-between align-items-center mb-1">
                                     <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Item wise Target Vs Job Booked</h6>
                                 </div>
+                                <div className="d-flex gap-1 justify-content-center mb-2">
+                                    {['All', 'Q1', 'Q2', 'Q3', 'Q4'].map(q => (
+                                        <button
+                                            key={q}
+                                            className={`btn btn-sm px-2 py-0 ${itemWiseQuarter === q ? 'btn-primary' : 'btn-outline-secondary'}`}
+                                            style={{ fontSize: '0.65rem', borderColor: itemWiseQuarter === q ? '' : '#334155', color: itemWiseQuarter === q ? '#fff' : '#94a3b8' }}
+                                            onClick={() => setItemWiseQuarter(q)}
+                                        >
+                                            {q}
+                                        </button>
+                                    ))}
+                                </div>
                                 <div className="flex-grow-1" style={{ width: '100%', minHeight: 0 }}>
                                     <ResponsiveContainer width="100%" height="100%">
-                                        <BarChart data={reportData.itemWiseStats || []} margin={{ top: 50, right: 5, left: 10, bottom: 0 }}>
+                                        <BarChart data={itemWiseData.length > 0 ? itemWiseData : []} margin={{ top: 50, right: 5, left: 10, bottom: 0 }}>
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                             <XAxis dataKey="name" angle={-45} textAnchor="end" height={60} interval={0} tick={{ fontSize: 8, fill: '#E0E0E0' }} axisLine={false} tickLine={false} />
                                             <YAxis width={40} tickFormatter={formatNumber} tick={{ fontSize: 8, fill: '#E0E0E0' }} axisLine={false} tickLine={false} />
@@ -772,7 +878,7 @@ const SalesReport = () => {
                                                         </div>
                                                         <div className="d-flex align-items-center gap-1">
                                                             <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#0D47A1' }}></div>
-                                                            <span>Actual Won</span>
+                                                            <span>Job Booked</span>
                                                         </div>
                                                     </div>
                                                 )}
@@ -780,7 +886,7 @@ const SalesReport = () => {
                                             <Bar dataKey="target" name="Target" fill="url(#gradTarget)" radius={[2, 2, 0, 0]} barSize={15}>
                                                 <LabelList dataKey="target" position="top" offset={18} formatter={formatBarLabel} style={{ fill: '#E0E0E0', fontSize: '8px', fontWeight: 'normal' }} />
                                             </Bar>
-                                            <Bar dataKey="won" name="Actual Won" fill="url(#gradActual)" radius={[2, 2, 0, 0]} barSize={15} style={{ cursor: 'pointer' }} onClick={(data) => handleChartClick(data, 'item-stats', 'Won')}>
+                                            <Bar dataKey="won" name="Job Booked" fill="url(#gradActual)" radius={[2, 2, 0, 0]} barSize={15} style={{ cursor: 'pointer' }} onClick={(data) => handleChartClick(data, 'item-stats', 'Won')}>
                                                 <LabelList dataKey="won" position="top" offset={2} formatter={formatBarLabel} style={{ fill: '#E0E0E0', fontSize: '8px', fontWeight: 'normal' }} />
                                             </Bar>
                                         </BarChart>
@@ -1047,8 +1153,19 @@ const SalesReport = () => {
                         <div className="text-center py-5 text-muted">No details found for this section.</div>
                     ) : (
                         <div className="table-responsive">
+                            <div className="d-flex justify-content-between align-items-center mb-2 px-1">
+                                <span className="text-muted small">Showing {funnelDetails.length} items</span>
+                            </div>
                             <table className="table table-hover table-striped table-bordered table-sm mb-0" style={{ fontSize: '13.5px' }}>
                                 <thead className="table-light">
+                                    {/* Summary Row aligned with columns */}
+                                    <tr style={{ borderTop: 'none' }}>
+                                        <th colSpan="4" style={{ backgroundColor: '#fff', border: 'none' }}></th>
+                                        <th className="text-end" style={{ backgroundColor: '#fff', border: 'none', color: '#059669', fontSize: '15px' }}>
+                                            {formatFullNumber(funnelDetails.reduce((sum, item) => sum + (Number(item.TotalPrice) || 0), 0))}
+                                        </th>
+                                        <th style={{ backgroundColor: '#fff', border: 'none' }}></th>
+                                    </tr>
                                     <tr style={{ color: '#1e293b' }}>
                                         <th style={{ backgroundColor: '#f8f9fa' }}>Enquiry No.</th>
                                         <th style={{ backgroundColor: '#f8f9fa' }}>Project Name</th>
@@ -1090,10 +1207,10 @@ const SalesReport = () => {
                                     ))}
                                 </tbody>
                             </table>
-                        </div>
+                        </div >
                     )}
-                </div>
-            </Modal>
+                </div >
+            </Modal >
         </div >
     );
 };

@@ -170,10 +170,22 @@ router.get('/summary', async (req, res) => {
         const safeCompany = company ? String(company).trim() : null;
         const safeDivision = division ? String(division).trim() : null;
         const safeRole = role ? String(role).trim() : null;
+        const safeQuarter = (req.query.quarter && req.query.quarter !== 'All') ? String(req.query.quarter).trim() : null;
+        let quarterNum = null;
+        if (safeQuarter) quarterNum = parseInt(safeQuarter.replace('Q', ''));
+
+        console.log("!!! EXECUTING SUMMARY ROUTE - NEW CODE !!!");
+        console.log(`[DEBUG] safeDivision: '${safeDivision}' (Type: ${typeof safeDivision})`);
+        if (safeDivision === 'All') console.log("[DEBUG] safeDivision is 'All'");
+
 
         console.log('[DEBUG-SUMMARY] Sanitized Params:', { safeYear, safeCompany, safeDivision, safeRole });
 
         request.input('year', sql.Int, safeYear);
+        if (safeQuarter) {
+            request.input('quarterNums', sql.Int, quarterNum);
+            request.input('quarterStrs', sql.NVarChar, safeQuarter);
+        }
 
         let filterClause = '';
         if (safeDivision && safeDivision !== 'All') {
@@ -194,6 +206,7 @@ router.get('/summary', async (req, res) => {
         let targetFilter = ' WHERE FinancialYear = @year ';
         if (safeDivision && safeDivision !== 'All') targetFilter += ' AND Division = @division ';
         if (safeRole && safeRole !== 'All') targetFilter += ' AND SalesEngineer = @se ';
+        if (safeQuarter) targetFilter += ' AND Quarter = @quarterStrs ';
 
         const targetRes = await request.query(`
             SELECT Quarter, SUM(ISNULL(TargetValue, 0)) as TotalTarget
@@ -207,35 +220,48 @@ router.get('/summary', async (req, res) => {
         // NOTE: If no division filter, we use the global WonOrderValue from EnquiryMaster as it is the official record.
         // Attempting to sum items dynamically for everything resulted in 0s where granular data was missing/mismatched.
 
-        let valueExpression = `ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)`;
-        let lostValueExpression = `ISNULL(TRY_CAST(REPLACE(REPLACE(E.LostCompetitorPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)`;
-        let followUpValueExpression = `ISNULL(TRY_CAST(REPLACE(REPLACE(E.CustomerPreferredPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)`;
-
-        console.log('SUMMARY REQUEST QUERY:', req.query);
+        // Unified Item Value Logic (Global vs Division)
+        let itemValueApply = '';
+        let itemValueCol = '';
 
         if (safeDivision && safeDivision !== 'All') {
-            // DIVISION VIEW: Sum ALL items in this division.
+            // Division View: Sum all items belonging to division
             // Using LTRIM/RTRIM to fix whitespace issues in DepartmentName matching.
-            // Removed hierarchy check (NOT EXISTS) to ensure we capture relevant items even if hierarchy is complex.
-            const subQueryWhere = ` AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division `;
-            const itemSumQuery = `
-                (SELECT SUM(ISNULL(EPV.Price, 0))
-                 FROM EnquiryFor EF_Inner
-                 JOIN Master_EnquiryFor MEF_Inner ON (EF_Inner.ItemName = MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '% - ' + MEF_Inner.ItemName)
+            itemValueApply = `
                  OUTER APPLY (
-                     SELECT TOP 1 Price 
-                     FROM EnquiryPricingValues 
-                     WHERE RequestNo = EF_Inner.RequestNo 
-                       AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
-                     ORDER BY OptionID DESC
-                 ) EPV
-                 WHERE EF_Inner.RequestNo = E.RequestNo
-                 ${subQueryWhere}
-                )
-            `;
-            valueExpression = `ISNULL(${itemSumQuery}, 0)`;
-            lostValueExpression = `ISNULL(${itemSumQuery}, 0)`;
-            followUpValueExpression = `ISNULL(${itemSumQuery}, 0)`;
+                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                     FROM EnquiryFor EF_Inner
+                     JOIN Master_EnquiryFor MEF_Inner ON (EF_Inner.ItemName = MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '% - ' + MEF_Inner.ItemName)
+                     OUTER APPLY (
+                         SELECT TOP 1 Price 
+                         FROM EnquiryPricingValues 
+                         WHERE RequestNo = EF_Inner.RequestNo 
+                           AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
+                         ORDER BY OptionID DESC
+                     ) EPV
+                     WHERE EF_Inner.RequestNo = E.RequestNo
+                       AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division
+                 ) ItemValue
+             `;
+            itemValueCol = 'ISNULL(ItemValue.Total, 0)';
+        } else {
+            // Global View: Sum Root Items (ParentID IS NULL or 0)
+            itemValueApply = `
+                 OUTER APPLY (
+                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                     FROM EnquiryFor EF_Inner
+                     OUTER APPLY (
+                         SELECT TOP 1 Price 
+                         FROM EnquiryPricingValues 
+                         WHERE RequestNo = EF_Inner.RequestNo 
+                           AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
+                         ORDER BY OptionID DESC
+                     ) EPV
+                     WHERE EF_Inner.RequestNo = E.RequestNo
+                       AND (EF_Inner.ParentID IS NULL OR EF_Inner.ParentID = 0)
+                 ) ItemValue
+             `;
+            itemValueCol = 'ISNULL(ItemValue.Total, 0)';
         }
         // GLOBAL VIEW: Default (WonOrderValue) applies. Do NOT override with potentially incomplete item sums.
 
@@ -262,14 +288,17 @@ router.get('/summary', async (req, res) => {
                       AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division
                 ) DivValue
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
+                ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY DATEPART(QUARTER, ExpectedOrderDate)
             `;
         } else {
-            // Global view: Use WonOrderValue
+            // Global view: Use ItemValue (Root Sum)
             actualQuery = `
-                SELECT DATEPART(QUARTER, ExpectedOrderDate) as Q, SUM(ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)) as TotalActual
+                SELECT DATEPART(QUARTER, ExpectedOrderDate) as Q, SUM(${itemValueCol}) as TotalActual
                 FROM EnquiryMaster E
+                ${itemValueApply}
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
+                ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY DATEPART(QUARTER, ExpectedOrderDate)
             `;
         }
@@ -300,6 +329,7 @@ router.get('/summary', async (req, res) => {
                 ) DivValue
                 WHERE YEAR(EnquiryDate) = @year ${filterClause}
                   AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
                 GROUP BY Status
             `;
         } else {
@@ -307,15 +337,12 @@ router.get('/summary', async (req, res) => {
                 SELECT 
                     Status, 
                     COUNT(*) as Count,
-                    SUM(CASE 
-                        WHEN UPPER(Status) = 'WON' THEN ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)
-                        WHEN UPPER(Status) = 'LOST' THEN ISNULL(TRY_CAST(REPLACE(REPLACE(E.LostCompetitorPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)
-                        WHEN UPPER(Status) IN ('FOLLOWUP', 'FOLLOW-UP') THEN ISNULL(TRY_CAST(REPLACE(REPLACE(E.CustomerPreferredPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)
-                        ELSE 0 
-                    END) as TotalValue
+                    SUM(${itemValueCol}) as TotalValue
                 FROM EnquiryMaster E
+                ${itemValueApply}
                 WHERE YEAR(EnquiryDate) = @year ${filterClause}
                   AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
                 GROUP BY Status
             `;
         }
@@ -343,15 +370,30 @@ router.get('/summary', async (req, res) => {
                 ) DivValue
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
                   AND WonCustomerName IS NOT NULL AND WonCustomerName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY WonCustomerName
                 ORDER BY value DESC
             `;
         } else {
             topCustomersQuery = `
-                SELECT TOP 10 WonCustomerName as name, SUM(ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)) as value
+                SELECT TOP 10 WonCustomerName as name, SUM(ISNULL(ItemValue.Total, 0)) as value
                 FROM EnquiryMaster E
+                OUTER APPLY (
+                    SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                    FROM EnquiryFor EF_Inner
+                    OUTER APPLY (
+                        SELECT TOP 1 Price 
+                        FROM EnquiryPricingValues 
+                        WHERE RequestNo = EF_Inner.RequestNo 
+                          AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
+                        ORDER BY OptionID DESC
+                    ) EPV
+                    WHERE EF_Inner.RequestNo = E.RequestNo
+                      AND EF_Inner.ParentID IS NULL
+                ) ItemValue
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
                   AND WonCustomerName IS NOT NULL AND WonCustomerName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY WonCustomerName
                 ORDER BY value DESC
             `;
@@ -380,15 +422,30 @@ router.get('/summary', async (req, res) => {
                 ) DivValue
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
                   AND ProjectName IS NOT NULL AND ProjectName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY ProjectName
                 ORDER BY value DESC
             `;
         } else {
             topProjectsQuery = `
-                SELECT TOP 10 ProjectName as name, SUM(ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)) as value
+                SELECT TOP 10 ProjectName as name, SUM(ISNULL(ItemValue.Total, 0)) as value
                 FROM EnquiryMaster E
+                OUTER APPLY (
+                    SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                    FROM EnquiryFor EF_Inner
+                    OUTER APPLY (
+                        SELECT TOP 1 Price 
+                        FROM EnquiryPricingValues 
+                        WHERE RequestNo = EF_Inner.RequestNo 
+                          AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
+                        ORDER BY OptionID DESC
+                    ) EPV
+                    WHERE EF_Inner.RequestNo = E.RequestNo
+                      AND EF_Inner.ParentID IS NULL
+                ) ItemValue
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
                   AND ProjectName IS NOT NULL AND ProjectName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY ProjectName
                 ORDER BY value DESC
             `;
@@ -417,15 +474,30 @@ router.get('/summary', async (req, res) => {
                 ) DivValue
                 WHERE E.Status = 'Won' AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
                   AND E.ClientName IS NOT NULL AND E.ClientName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY E.ClientName
                 ORDER BY value DESC
             `;
         } else {
             topClientsQuery = `
-                SELECT TOP 10 E.ClientName as name, SUM(ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0)) as value
+                SELECT TOP 10 E.ClientName as name, SUM(ISNULL(ItemValue.Total, 0)) as value
                 FROM EnquiryMaster E
+                OUTER APPLY (
+                    SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                    FROM EnquiryFor EF_Inner
+                    OUTER APPLY (
+                        SELECT TOP 1 Price 
+                        FROM EnquiryPricingValues 
+                        WHERE RequestNo = EF_Inner.RequestNo 
+                          AND (EnquiryForID = EF_Inner.ID OR EnquiryForItem = EF_Inner.ItemName)
+                        ORDER BY OptionID DESC
+                    ) EPV
+                    WHERE EF_Inner.RequestNo = E.RequestNo
+                      AND EF_Inner.ParentID IS NULL
+                ) ItemValue
                 WHERE E.Status = 'Won' AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
                   AND E.ClientName IS NOT NULL AND E.ClientName <> ''
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY E.ClientName
                 ORDER BY value DESC
             `;
@@ -437,11 +509,13 @@ router.get('/summary', async (req, res) => {
             SELECT 
                 ProbabilityOption as ProbabilityName,
                 MAX(Probability) as ProbabilityPercentage,
-                SUM(${followUpValueExpression}) as TotalValue,
+                SUM(${itemValueCol}) as TotalValue,
                 COUNT(*) as Count
             FROM EnquiryMaster E
+            ${itemValueApply}
             WHERE YEAR(EnquiryDate) = @year ${filterClause}
               AND Status NOT IN ('Won', 'Lost')
+              ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
               AND ProbabilityOption IS NOT NULL AND ProbabilityOption <> ''
             GROUP BY ProbabilityOption
             ORDER BY MAX(Probability) ASC
@@ -521,12 +595,16 @@ router.get('/summary', async (req, res) => {
                  ORDER BY OptionID DESC
             ) EPV
             WHERE YEAR(E.EnquiryDate) = @year ${filterClause} ${itemWiseWhere}
+            ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNums' : ''}
             GROUP BY ${itemWiseGroupBy}
         `);
 
         // Get Targets by ItemName (instead of just Division) to support granular breakdown logic
         const requestTarget = new sql.Request();
         requestTarget.input('year', sql.Int, year);
+        if (safeQuarter) {
+            requestTarget.input('quarterStr', sql.NVarChar, safeQuarter);
+        }
 
         let targetQuery = '';
 
@@ -536,6 +614,7 @@ router.get('/summary', async (req, res) => {
                 SELECT ItemName as Name, SUM(ISNULL(TargetValue, 0)) as Target
                 FROM SalesTargets
                 WHERE FinancialYear = @year AND SalesEngineer = @se
+                ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
                 GROUP BY ItemName
             `;
         } else {
@@ -543,6 +622,7 @@ router.get('/summary', async (req, res) => {
                 SELECT Division as Name, SUM(ISNULL(TargetValue, 0)) as Target
                 FROM SalesTargets
                 WHERE FinancialYear = @year
+                ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
                 GROUP BY Division
             `;
         }
@@ -587,14 +667,147 @@ router.get('/summary', async (req, res) => {
 });
 
 
+router.get('/item-wise-stats', async (req, res) => {
+    try {
+        const { year, company, division, role, quarter } = req.query;
+        if (!year) return res.status(400).json({ error: 'Year is required' });
+
+        const request = new sql.Request();
+
+        // Sanitize inputs
+        const safeYear = parseInt(year);
+        const safeCompany = company ? String(company).trim() : null;
+        const safeDivision = division ? String(division).trim() : null;
+        const safeRole = role ? String(role).trim() : null;
+        const safeQuarter = (quarter && quarter !== 'All') ? String(quarter).trim() : null;
+        let quarterNums = null;
+        if (safeQuarter) quarterNums = parseInt(safeQuarter.replace('Q', ''));
+
+        request.input('year', sql.Int, safeYear);
+        if (safeQuarter) {
+            request.input('quarterNums', sql.Int, quarterNums);
+            request.input('quarterStrs', sql.NVarChar, safeQuarter);
+        }
+
+        let filterClause = '';
+        if (safeDivision && safeDivision !== 'All') {
+            request.input('division', sql.NVarChar, safeDivision);
+            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.DepartmentName = @division) `;
+        } else if (safeCompany && safeCompany !== 'All') {
+            request.input('company', sql.NVarChar, safeCompany);
+            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.CompanyName = @company) `;
+        }
+
+        if (safeRole && safeRole !== 'All') {
+            request.input('se', sql.NVarChar, safeRole);
+            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND cse.SEName = @se) `;
+        }
+
+        // Determine Grouping
+        let itemWiseGroupBy = 'mef.DepartmentName';
+        let itemWiseSelect = 'mef.DepartmentName as ItemName';
+        let itemWiseWhere = '';
+
+        if (safeRole && safeRole !== 'All') {
+            itemWiseGroupBy = 'mef.ItemName';
+            itemWiseSelect = 'mef.ItemName as ItemName';
+        }
+
+        if (safeDivision && safeDivision !== 'All') {
+            itemWiseWhere += ` AND mef.DepartmentName = @division `;
+        }
+
+        const itemWiseRes = await request.query(`
+            SELECT 
+                ${itemWiseSelect},
+                SUM(CASE WHEN E.Status = 'Won' THEN ISNULL(EPV.Price, 0) ELSE 0 END) as WonValue,
+                SUM(CASE WHEN E.Status = 'Lost' THEN ISNULL(EPV.Price, 0) ELSE 0 END) as LostValue,
+                SUM(CASE WHEN E.Status IN ('Follow-up', 'FollowUp') THEN ISNULL(EPV.Price, 0) ELSE 0 END) as FollowUpValue
+            FROM EnquiryMaster E
+            JOIN EnquiryFor EF ON E.RequestNo = EF.RequestNo
+            JOIN Master_EnquiryFor mef ON (EF.ItemName = mef.ItemName OR EF.ItemName LIKE '% - ' + mef.ItemName)
+            OUTER APPLY (
+                 SELECT TOP 1 Price 
+                 FROM EnquiryPricingValues 
+                 WHERE RequestNo = EF.RequestNo 
+                   AND (EnquiryForID = EF.ID OR EnquiryForItem = EF.ItemName)
+                 ORDER BY OptionID DESC
+            ) EPV
+            WHERE YEAR(E.EnquiryDate) = @year ${filterClause} ${itemWiseWhere}
+            ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNums' : ''}
+            GROUP BY ${itemWiseGroupBy}
+        `);
+
+        // Targets
+        const requestTarget = new sql.Request();
+        requestTarget.input('year', sql.Int, safeYear);
+        if (safeQuarter) {
+            requestTarget.input('quarterStr', sql.NVarChar, safeQuarter);
+        }
+        if (safeRole && safeRole !== 'All') requestTarget.input('se', sql.NVarChar, safeRole);
+
+        let targetQuery = '';
+        if (safeRole && safeRole !== 'All') {
+            targetQuery = `
+                SELECT ItemName as Name, SUM(ISNULL(TargetValue, 0)) as Target
+                FROM SalesTargets
+                WHERE FinancialYear = @year AND SalesEngineer = @se
+                ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
+                GROUP BY ItemName
+            `;
+        } else {
+            targetQuery = `
+                SELECT Division as Name, SUM(ISNULL(TargetValue, 0)) as Target
+                FROM SalesTargets
+                WHERE FinancialYear = @year
+                ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
+                GROUP BY Division
+            `;
+        }
+
+        const targetByDivRes = await requestTarget.query(targetQuery);
+
+        // Merge
+        const itemWiseMap = {};
+        itemWiseRes.recordset.forEach(r => {
+            const name = r.ItemName || 'Unknown';
+            if (!itemWiseMap[name]) itemWiseMap[name] = { name, won: 0, lost: 0, followUp: 0, target: 0 };
+            itemWiseMap[name].won = r.WonValue;
+            itemWiseMap[name].lost = r.LostValue;
+            itemWiseMap[name].followUp = r.FollowUpValue;
+        });
+
+        targetByDivRes.recordset.forEach(r => {
+            const name = r.Name || 'Unknown';
+            if (!itemWiseMap[name]) itemWiseMap[name] = { name, won: 0, lost: 0, followUp: 0, target: 0 };
+            itemWiseMap[name].target += r.Target;
+        });
+
+        const itemWiseStats = Object.values(itemWiseMap).filter(i => i.name !== 'Unknown');
+        res.json(itemWiseStats);
+
+    } catch (err) {
+        console.error('Error fetching item wise stats:', err);
+        res.json([]);
+    }
+});
+
+
 router.get('/funnel-details', async (req, res) => {
     try {
-        const { year, company, division, role, probabilityName } = req.query;
+        const { year, company, division, role, probabilityName, quarter } = req.query;
         if (!year || !probabilityName) return res.status(400).json({ error: 'Year and Probability Name are required' });
 
         const request = new sql.Request();
         request.input('year', sql.Int, year);
         request.input('probName', sql.NVarChar, probabilityName);
+
+        const safeQuarter = (quarter && quarter !== 'All') ? String(quarter).trim() : null;
+        let quarterNum = null;
+        if (safeQuarter) {
+            quarterNum = parseInt(safeQuarter.replace('Q', ''));
+            request.input('quarterNum', sql.Int, quarterNum);
+        }
 
         let filterClause = '';
         if (division && division !== 'All') {
@@ -615,7 +828,7 @@ router.get('/funnel-details', async (req, res) => {
             SELECT 
                 E.RequestNo, 
                 E.ProjectName, 
-                E.ClientName as CustomerName, 
+                E.CustomerName, 
                 ISNULL(TRY_CAST(REPLACE(REPLACE(E.CustomerPreferredPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0) as TotalPrice,
                 Q.QuoteRef,
                 Q.QuoteDate
@@ -627,6 +840,7 @@ router.get('/funnel-details', async (req, res) => {
                 ORDER BY QuoteDate DESC
             ) Q
             WHERE YEAR(E.EnquiryDate) = @year 
+              ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''}
               AND E.ProbabilityOption LIKE @probName + '%'
               AND E.Status NOT IN ('Won', 'Lost')
               ${filterClause}
@@ -728,7 +942,7 @@ router.get('/funnel-details', async (req, res) => {
 
 router.get('/drilldown-details', async (req, res) => {
     try {
-        const { year, company, division, role, metric, label, status } = req.query;
+        const { year, company, division, role, metric, label, status, quarter } = req.query;
         if (!year || !metric) return res.status(400).json({ error: 'Year and Metric are required' });
 
         // Sanitize inputs
@@ -742,6 +956,13 @@ router.get('/drilldown-details', async (req, res) => {
         request.input('year', sql.Int, safeYear);
         if (safeLabel) request.input('label', sql.NVarChar, safeLabel);
         if (status) request.input('status', sql.NVarChar, status);
+
+        const safeQuarter = (quarter && quarter !== 'All') ? String(quarter).trim() : null;
+        let quarterNum = null;
+        if (safeQuarter) {
+            quarterNum = parseInt(safeQuarter.replace('Q', ''));
+            request.input('quarterNum', sql.Int, quarterNum);
+        }
 
         let filterClause = '';
         if (safeDivision && safeDivision !== 'All') {
@@ -761,7 +982,7 @@ router.get('/drilldown-details', async (req, res) => {
             SELECT 
                 E.RequestNo, 
                 E.ProjectName, 
-                E.ClientName as CustomerName, 
+                E.CustomerName, 
                 E.Status,
                 ISNULL(TRY_CAST(REPLACE(REPLACE(E.CustomerPreferredPrice, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0) as PreferredPrice,
                 ISNULL(TRY_CAST(REPLACE(REPLACE(E.WonOrderValue, 'BD', ''), ',', '') AS DECIMAL(18,2)), 0) as WonValue,
@@ -792,7 +1013,7 @@ router.get('/drilldown-details', async (req, res) => {
             // Map label to Status
             // 'Won' -> Status 'Won', Year(EnquiryDate) = @year (Note: Summary uses EnquiryDate for WinLoss, ExpectedOrderDate for Quarterly. Sticking to Summary logic)
             // Wait, Win-Loss loop in Summary uses YEAR(EnquiryDate).
-            baseQuery += ` AND YEAR(E.EnquiryDate) = @year ${filterClause} `;
+            baseQuery += ` AND YEAR(E.EnquiryDate) = @year ${filterClause} ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''} `;
             if (label === 'Won') baseQuery += ` AND E.Status = 'Won' `;
             else if (label === 'Lost') baseQuery += ` AND E.Status = 'Lost' `;
             else if (label === 'Follow Up') baseQuery += ` AND E.Status IN ('Follow-up', 'FollowUp') `;
@@ -802,6 +1023,7 @@ router.get('/drilldown-details', async (req, res) => {
                 AND E.Status = 'Won' 
                 AND YEAR(E.ExpectedOrderDate) = @year 
                 AND E.WonCustomerName = @label
+                ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNum' : ''}
                 ${filterClause}
             `;
         } else if (metric === 'project') {
@@ -809,6 +1031,7 @@ router.get('/drilldown-details', async (req, res) => {
                 AND E.Status = 'Won' 
                 AND YEAR(E.ExpectedOrderDate) = @year 
                 AND E.ProjectName = @label
+                ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNum' : ''}
                 ${filterClause}
             `;
         } else if (metric === 'client') {
@@ -816,6 +1039,7 @@ router.get('/drilldown-details', async (req, res) => {
                AND E.Status = 'Won' 
                AND YEAR(E.ExpectedOrderDate) = @year 
                AND E.ClientName = @label
+               ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNum' : ''}
                ${filterClause}
            `;
         } else if (metric === 'item-stats') {
@@ -829,6 +1053,7 @@ router.get('/drilldown-details', async (req, res) => {
 
             baseQuery += `
                 AND YEAR(E.EnquiryDate) = @year ${filterClause}
+                ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''}
                 AND EXISTS (
                     SELECT 1 FROM EnquiryFor EF
                     JOIN Master_EnquiryFor mef ON (EF.ItemName = mef.ItemName OR EF.ItemName LIKE '% - ' + mef.ItemName)

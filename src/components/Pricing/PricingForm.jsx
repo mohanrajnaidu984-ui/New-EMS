@@ -132,7 +132,7 @@ const PricingForm = () => {
     };
 
     // Load pricing for selected enquiry
-    const loadPricing = async (requestNo, customerName = null) => {
+    const loadPricing = async (requestNo, customerName = null, preserveValues = null) => {
         setLoading(true);
         setSelectedEnquiry(requestNo);
 
@@ -150,16 +150,54 @@ const PricingForm = () => {
                 // Note: data.enquiry.customerName might be CSV, don't trim internal commas here, handled by split logic
                 if (data.extraCustomers) data.extraCustomers = data.extraCustomers.map(c => c.trim());
                 if (data.options) data.options.forEach(o => { if (o.customerName) o.customerName = o.customerName.trim(); });
-                // Note: data.values Sanitization is redundant with line 240 logic but safe to keep for consistency
+                // NOTE: data.values Sanitization is redundant with line 240 logic but safe to keep for consistency
                 if (Array.isArray(data.values)) data.values.forEach(v => { if (v.CustomerName) v.CustomerName = v.CustomerName.trim(); });
 
+                // ---------------------------------------------------------
+                // HIERARCHY LOGIC: Treat Parent Jobs as Customers
+                // ---------------------------------------------------------
+                const internalParentCustomers = [];
+                if (data.jobs && data.access && data.access.editableJobs) {
+                    data.access.editableJobs.forEach(jobName => {
+                        const job = data.jobs.find(j => j.itemName === jobName);
+                        if (job && job.parentId) {
+                            const parent = data.jobs.find(p => p.id === job.parentId);
+                            if (parent) {
+                                // Clean the parent name (remove L1/L2 prefixes) to use as Customer Name
+                                const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                if (!internalParentCustomers.includes(cleanParent)) {
+                                    internalParentCustomers.push(cleanParent);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Add these internal customers to the main list immediately for display
+                if (data.customers) {
+                    internalParentCustomers.forEach(pc => {
+                        if (!data.customers.includes(pc)) data.customers.push(pc);
+                    });
+                }
+                // ---------------------------------------------------------
+
                 // AUTO-PROVISION TABS (Pricing Sheets)
-                // Ensure ALL linked customers (Main + Extra) have pricing tabs.
+                // Ensure ALL linked customers (Main + Extra + Internal Parents) have pricing tabs.
                 // If they are missing, auto-create "Base Price" for them.
                 const linkedCustomers = [
                     ...(data.enquiry.customerName || '').split(','),
-                    ...(data.extraCustomers || []).flatMap(c => (c || '').split(','))
-                ].map(s => s.trim()).filter(s => s && s.length > 0); // Strict filter for empty strings
+                    ...(data.extraCustomers || []).flatMap(c => (c || '').split(',')),
+                    ...internalParentCustomers // Include internal parents
+                ].map(s => s.trim())
+                    .filter(s => s && s.length > 0)
+                    .filter(s => {
+                        // STRICT FILTER: Only include if explicitly in Master/Extra OR is an Internal Parent
+                        const isMaster = (data.enquiry.customerName || '').includes(s);
+                        const isExtra = (data.extraCustomers || []).some(ec => ec.includes(s));
+                        const isInternal = internalParentCustomers.includes(s);
+                        return isMaster || isExtra || isInternal;
+                    });
+
 
                 const existingPricingCustomers = data.customers || [];
 
@@ -313,16 +351,72 @@ const PricingForm = () => {
                 // Cleanup: Filter out malformed customer names (containing commas) from display
                 if (data.customers) {
                     data.customers = data.customers.filter(c => !c.includes(','));
+
+                    // STRICT DISPLAY FILTER: 
+                    // Ensure displayed customers are ONLY those currently valid in Enquiry or Internal Parents
+                    // This hides stale customers that might still exist in the options table
+                    data.customers = data.customers.filter(s => {
+                        const isMaster = (data.enquiry.customerName || '').includes(s);
+                        const isExtra = (data.extraCustomers || []).some(ec => ec.includes(s));
+                        const isInternal = internalParentCustomers.includes(s);
+                        return isMaster || isExtra || isInternal;
+                    });
                 }
+
+                // ---------------------------------------------------------
+                // VISIBILITY FILTER: Restrict Tabs based on User Scope
+                // ---------------------------------------------------------
+                // Rule: Users see a Customer Tab ONLY if:
+                // 1. It is the Main Enquiry Customer.
+                // 2. The Tab Name matches their own Job Name (Internal Customer).
+                // 3. They have a Pricing Option (Row) explicitly assigned to their Job in that Tab.
+                // 4. They are an Admin/Manager (canEditAll).
+
+                if (data.customers && data.access && !data.access.canEditAll) { // Assuming !canEditAll means restricted user
+                    const myJobs = data.access.editableJobs || [];
+                    const mainCustomer = (data.enquiry.customerName || '').trim();
+
+                    data.customers = data.customers.filter(cName => {
+                        const cleanCName = cName.trim();
+
+                        // 1. Always show Main Customer
+                        if (cleanCName === mainCustomer) return true;
+
+                        // 2. Show if Tab Name matches one of My Jobs (e.g. I am "Electrical", viewing "Electrical" tab)
+                        //    (We compare against Clean Scope Names)
+                        const matchesMyJob = myJobs.some(jobName => {
+                            const cleanJob = jobName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            return cleanJob === cleanCName;
+                        });
+                        if (matchesMyJob) return true;
+
+                        // 3. Show if I have a Pricing Option in this Tab
+                        //    (e.g. I am "BMS", "Electrical" tab has a "BMS" option -> I see it)
+                        if (data.options) {
+                            const hasMyOption = data.options.some(opt =>
+                                opt.customerName === cleanCName &&
+                                myJobs.includes(opt.itemName) // Verify exact job name match
+                            );
+                            if (hasMyOption) return true;
+                        }
+
+                        // Otherwise Hide
+                        return false;
+                    });
+                }
+                // ---------------------------------------------------------
 
                 setPricingData(data);
 
-                // Set selected customer
-                if (customerName && !customerName.includes(',')) {
-                    setSelectedCustomer(customerName);
-                } else {
-                    setSelectedCustomer(data.activeCustomer || '');
+                // Set selected customer (Ensure it's valid after filtering)
+                let validCustomer = customerName;
+                if (!validCustomer || validCustomer.includes(',') || !data.customers.includes(validCustomer)) {
+                    validCustomer = data.activeCustomer;
+                    if (!data.customers.includes(validCustomer)) {
+                        validCustomer = data.customers[0] || '';
+                    }
                 }
+                setSelectedCustomer(validCustomer);
 
                 // Initialize state values using ID-based keys with Legacy Fallback
                 const initialValues = {};
@@ -435,18 +529,34 @@ const PricingForm = () => {
                         });
                     });
                 }
-                setValues(initialValues);
+                if (preserveValues) {
+                    setValues({ ...initialValues, ...preserveValues });
+                } else {
+                    setValues(initialValues);
+                }
 
                 // Auto-Select First VISIBLE Lead Job
                 if (data.jobs) {
                     const visibleScope = data.access?.visibleJobs || [];
                     const hasPrefix = data.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
 
+                    // Helper for tree visibility (recursive check matching render logic)
+                    const isTreeVisible = (jobId) => {
+                        const job = data.jobs.find(j => j.id == jobId);
+                        if (!job) return false;
+                        // Strict scope check: item MUST be in visibleScope
+                        if (visibleScope.includes(job.itemName)) return true;
+
+                        const children = data.jobs.filter(j => j.parentId == jobId);
+                        return children.some(c => isTreeVisible(c.id));
+                    };
+
                     const roots = data.jobs.filter(j =>
                         !j.parentId &&
-                        (visibleScope.length === 0 || visibleScope.includes(j.itemName)) &&
+                        (visibleScope.length === 0 || isTreeVisible(j.id)) &&
                         (!hasPrefix || /^L\d+\s-\s/.test(j.itemName))
                     );
+
                     if (roots.length > 0) {
                         // Only auto-select if not already set or invalid
                         if (!selectedLeadId || !data.jobs.find(j => j.id === selectedLeadId)) {
@@ -464,6 +574,7 @@ const PricingForm = () => {
 
     // Add new option row
     const addOption = async (targetScope, explicitName = null, explicitCustomer = null) => {
+        const currentValues = { ...values }; // Capture current state
         const optionName = explicitName || newOptionNames[targetScope] || '';
         if (!optionName.trim() || !pricingData) return;
 
@@ -502,7 +613,7 @@ const PricingForm = () => {
             if (res.ok) {
                 setNewOptionNames(prev => ({ ...prev, [targetScope]: '' }));
                 // Reload with the newly active customer
-                loadPricing(pricingData.enquiry.requestNo, explicitCustomer || selectedCustomer);
+                loadPricing(pricingData.enquiry.requestNo, explicitCustomer || selectedCustomer, currentValues);
             } else {
                 console.error('Add Option: Failed', res.status, res.statusText);
             }
@@ -515,13 +626,23 @@ const PricingForm = () => {
     const deleteOption = async (optionId) => {
         if (!window.confirm('Delete this option row?')) return;
 
+        const currentValues = { ...values }; // Capture current state
+
         try {
             const res = await fetch(`${API_BASE}/api/pricing/option/${optionId}`, {
                 method: 'DELETE'
             });
 
             if (res.ok) {
-                loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
+                // Remove the deleted option's values from currentValues to prevent stale keys
+                const cleanedValues = Object.keys(currentValues).reduce((acc, key) => {
+                    if (!key.startsWith(`${optionId}_`)) {
+                        acc[key] = currentValues[key];
+                    }
+                    return acc;
+                }, {});
+
+                loadPricing(pricingData.enquiry.requestNo, selectedCustomer, cleanedValues);
             }
         } catch (err) {
             console.error('Error deleting option:', err);
@@ -1230,7 +1351,13 @@ const PricingForm = () => {
                                 {pricingData.customers && pricingData.customers.map(cust => (
                                     <div
                                         key={cust}
-                                        onClick={() => setSelectedCustomer(cust)}
+                                        onClick={() => {
+                                            // FIX: Reload pricing data for the selected customer while PRESERVING current edits.
+                                            // This ensures 'pricingData.values' updates to the new customer's DB values,
+                                            // preventing headers/footers from showing 0s visually.
+                                            // Passing 'values' ensures unsaved changes from the previous tab are kept in state.
+                                            loadPricing(pricingData.enquiry.requestNo, cust, values);
+                                        }}
                                         style={{
                                             padding: '10px 16px',
                                             background: selectedCustomer === cust ? 'white' : 'transparent',
@@ -1250,28 +1377,6 @@ const PricingForm = () => {
                                         }}
                                     >
                                         <span>{cust || 'Default Customer'}</span>
-                                        {/* Show delete for ALL customers */}
-                                        {cust && (
-                                            <span
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    deleteCustomer(cust);
-                                                }}
-                                                title="Remove this Customer"
-                                                style={{
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    color: selectedCustomer === cust ? '#0284c7' : '#94a3b8',
-                                                    opacity: 0.6,
-                                                    transition: 'opacity 0.2s',
-                                                }}
-                                                onMouseOver={(e) => e.currentTarget.style.opacity = '1'}
-                                                onMouseOut={(e) => e.currentTarget.style.opacity = '0.6'}
-                                            >
-                                                <X size={14} />
-                                            </span>
-                                        )}
                                     </div>
                                 ))}
 
@@ -1312,25 +1417,36 @@ const PricingForm = () => {
                                 return true;
                             });
 
+                            console.log(`Pricing Render: ${roots.length} Lead Jobs identified.`);
+
                             if (roots.length === 0) return null;
 
                             return (
                                 <div style={{ padding: '12px 20px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '10px' }}>
                                     <span style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Select Lead Job:</span>
                                     <select
+                                        disabled={false}
                                         value={selectedLeadId || ''}
-                                        onChange={(e) => setSelectedLeadId(parseInt(e.target.value))}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            console.log('Lead Job Selected (Change):', val);
+                                            setSelectedLeadId(val ? parseInt(val) : null);
+                                        }}
                                         style={{
                                             padding: '6px 12px',
                                             borderRadius: '4px',
                                             border: '1px solid #cbd5e1',
                                             fontSize: '13px',
-                                            minWidth: '200px'
+                                            minWidth: '200px',
+                                            backgroundColor: 'white',
+                                            cursor: 'pointer'
                                         }}
                                     >
+                                        <option value="">Select Lead Job...</option>
                                         {roots.map(r => {
-                                            const cleanName = r.itemName.replace(/^(L\d+\s-\s)+/, '$1');
-                                            return <option key={r.id} value={r.id}>{cleanName}</option>;
+                                            // Fix regex to remove prefix (replace with empty string)
+                                            const cleanName = r.itemName.replace(/^(L\d+\s-\s)+/, '');
+                                            return <option key={r.id} value={r.id}>{cleanName || r.itemName}</option>;
                                         })}
                                     </select>
                                 </div>
@@ -1375,7 +1491,71 @@ const PricingForm = () => {
                                             }
 
                                             // Initialize Groups for Target Jobs
-                                            targetJobs.forEach(job => {
+                                            // LOGIC UPDATE: Context-Aware Visibility
+                                            // If User is viewing an External Tab (Not their own Internal Tab), hide Descendants.
+                                            // Only show Editable Jobs in External/Parent Tabs.
+                                            // Admin/Manager (hasLeadAccess) sees all.
+
+                                            let contextFilteredJobs = targetJobs;
+                                            let isMyInternalTab = false;
+
+                                            if (pricingData && pricingData.access && !pricingData.access.hasLeadAccess) {
+                                                const myEditableScopes = pricingData.access.editableJobs || [];
+
+                                                // Check if current tab is "My Internal Tab"
+                                                isMyInternalTab = myEditableScopes.some(scope => {
+                                                    const cleanScope = scope.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                    return cleanScope === selectedCustomer;
+                                                });
+
+                                                // NEW VISIBILITY LOGIC (Strict Hierarchy)
+                                                // 1. Identify Context Job from Tab Name
+                                                const cleanTabName = (name) => name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                const contextJob = pricingData.jobs.find(j =>
+                                                    cleanTabName(j.itemName) === selectedCustomer || j.itemName === selectedCustomer
+                                                );
+
+                                                if (contextJob) {
+                                                    // INTERNAL CONTEXT (Civil, Electrical, BMS Tabs)
+                                                    // Rule: Show Context Job AND All Descendants (Sub-Tree).
+                                                    const allowedIds = new Set([contextJob.id]);
+
+                                                    let changed = true;
+                                                    while (changed) {
+                                                        changed = false;
+                                                        pricingData.jobs.forEach(j => {
+                                                            if (!allowedIds.has(j.id) && allowedIds.has(j.parentId)) {
+                                                                allowedIds.add(j.id);
+                                                                changed = true;
+                                                            }
+                                                        });
+                                                    }
+
+                                                    contextFilteredJobs = targetJobs.filter(j => allowedIds.has(j.id));
+                                                } else {
+                                                    // EXTERNAL CONTEXT (Kartec, etc.)
+                                                    // Rule: Show Lead Job + All Descendants (Full Chain visibility for reference).
+                                                    const leadJob = pricingData.jobs.find(j => j.isLead);
+                                                    if (leadJob) {
+                                                        const allowedIds = new Set([leadJob.id]);
+                                                        let changed = true;
+                                                        while (changed) {
+                                                            changed = false;
+                                                            pricingData.jobs.forEach(j => {
+                                                                if (!allowedIds.has(j.id) && allowedIds.has(j.parentId)) {
+                                                                    allowedIds.add(j.id);
+                                                                    changed = true;
+                                                                }
+                                                            });
+                                                        }
+                                                        contextFilteredJobs = targetJobs.filter(j => allowedIds.has(j.id));
+                                                    } else {
+                                                        contextFilteredJobs = [];
+                                                    }
+                                                }
+                                            }
+
+                                            contextFilteredJobs.forEach(job => {
                                                 groupMap[job.id] = { job: job, options: [] };
                                             });
 
@@ -1386,7 +1566,7 @@ const PricingForm = () => {
                                             const maxId = filteredOptions.reduce((max, opt) => (opt.id > max ? opt.id : max), 0);
 
                                             filteredOptions.forEach(opt => {
-                                                targetJobs.forEach(job => {
+                                                contextFilteredJobs.forEach(job => {
                                                     let match = false;
                                                     if (!opt.itemName) match = (job.isLead); // Null scope -> Lead Job
                                                     else if (opt.itemName === 'Lead Job' && job.isLead) match = true;
@@ -1401,22 +1581,71 @@ const PricingForm = () => {
                                                         if (values[key] !== undefined && values[key] !== '') {
                                                             price = parseFloat(values[key]) || 0;
                                                         } else {
-                                                            // Check Strict Key first
-                                                            if (pricingData.values[key] && pricingData.values[key].Price) {
-                                                                price = parseFloat(pricingData.values[key].Price) || 0;
-                                                            }
-                                                            // Fallback to Name Key if Strict Key is missing (Step 827 Fix)
-                                                            else {
+                                                            // Standard Lookup (Current Tab)
+                                                            const lookupValue = (dataSet) => {
+                                                                if (!dataSet) return 0;
+                                                                if (dataSet[key] && dataSet[key].Price) return parseFloat(dataSet[key].Price);
+
                                                                 const nameKey = `${opt.id}_${job.itemName}`;
-                                                                if (pricingData.values[nameKey] && pricingData.values[nameKey].Price) {
-                                                                    price = parseFloat(pricingData.values[nameKey].Price) || 0;
-                                                                }
-                                                                // Fallback to Clean Name Key (Step 848 Fix)
-                                                                else {
-                                                                    const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                                                    const cleanKey = `${opt.id}_${cleanName}`;
-                                                                    if (pricingData.values[cleanKey] && pricingData.values[cleanKey].Price) {
-                                                                        price = parseFloat(pricingData.values[cleanKey].Price) || 0;
+                                                                if (dataSet[nameKey] && dataSet[nameKey].Price) return parseFloat(dataSet[nameKey].Price);
+
+                                                                const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                const cleanKey = `${opt.id}_${cleanName}`;
+                                                                if (dataSet[cleanKey] && dataSet[cleanKey].Price) return parseFloat(dataSet[cleanKey].Price);
+
+                                                                return 0;
+                                                            };
+
+                                                            price = lookupValue(pricingData.values);
+                                                        }
+
+                                                        // FALLBACK / OVERRIDE: Cross-Tab Lookup for Descendants in External Tabs
+                                                        // MOVED OUTSIDE if/else to ensure it runs even if direct value exists (Override behavior)
+                                                        const contextJob = pricingData.jobs.find(j =>
+                                                            j.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedCustomer ||
+                                                            j.itemName === selectedCustomer
+                                                        );
+                                                        const isExternalContext = !contextJob;
+
+                                                        // If External Tab && Sub-Job (Not Lead) && NOT MY SCOPE, we FORCE internal price (VIEW ONLY mode for Parent).
+                                                        // If it IS my scope, I must be able to edit the Direct Quote to the External Customer.
+                                                        const isMyScope = pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
+                                                        const shouldForceInternal = isExternalContext && !job.isLead && !isMyScope;
+
+                                                        if ((price <= 0.01 || shouldForceInternal) && !isMyInternalTab && pricingData.allValues) {
+                                                            // Check if this job is a child of one of my scopes
+                                                            const parentJob = pricingData.jobs.find(j => j.id === job.parentId);
+                                                            if (parentJob) {
+                                                                const parentName = parentJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                const rawParentName = parentJob.itemName.trim();
+
+                                                                const internalOption = pricingData.options.find(o =>
+                                                                    o.name === opt.name &&
+                                                                    o.itemName === job.itemName &&
+                                                                    (o.customerName === parentName || o.customerName === rawParentName)
+                                                                );
+
+                                                                if (internalOption) {
+                                                                    let internalValues = pricingData.allValues[parentName];
+                                                                    if (!internalValues) internalValues = pricingData.allValues[rawParentName];
+
+                                                                    if (internalValues) {
+                                                                        const lookupInternal = (dataSet, optionId) => {
+                                                                            if (!dataSet) return 0;
+                                                                            const iKey = `${optionId}_${job.id}`;
+                                                                            if (dataSet[iKey] && dataSet[iKey].Price) return parseFloat(dataSet[iKey].Price);
+                                                                            const iNameKey = `${optionId}_${job.itemName}`;
+                                                                            if (dataSet[iNameKey] && dataSet[iNameKey].Price) return parseFloat(dataSet[iNameKey].Price);
+                                                                            const iCleanKey = `${optionId}_${job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim()}`;
+                                                                            if (dataSet[iCleanKey] && dataSet[iCleanKey].Price) return parseFloat(dataSet[iCleanKey].Price);
+                                                                            return 0;
+                                                                        };
+
+                                                                        const internalPrice = lookupInternal(internalValues, internalOption.id);
+
+                                                                        if (internalPrice > 0) {
+                                                                            price = internalPrice;
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -1436,7 +1665,8 @@ const PricingForm = () => {
                                                             }
                                                         }
 
-                                                        groupMap[job.id].options.push(opt);
+                                                        // Push cloned option with effective Price for display
+                                                        groupMap[job.id].options.push({ ...opt, effectivePrice: price });
                                                     }
                                                 });
                                             });
@@ -1446,55 +1676,42 @@ const PricingForm = () => {
                                             const processedIds = new Set();
                                             const groupList = Object.values(groupMap);
 
-                                            // 1. Map Children
-                                            const childrenLookup = {};
-                                            groupList.forEach(g => {
-                                                // Handle case-sensitivity or variable naming differences for ParentID
-                                                const pid = g.job.ParentID || g.job.parentId;
-                                                if (pid) {
-                                                    if (!childrenLookup[pid]) childrenLookup[pid] = [];
-                                                    childrenLookup[pid].push(g);
+                                            // Identify Roots (Jobs with no parent in the filtered set)
+                                            // The filtered set is `contextFilteredJobs`
+                                            // We build a map of ID -> Children
+                                            const idMap = new Map();
+                                            contextFilteredJobs.forEach(j => idMap.set(j.id, j));
+
+                                            const childrenMap = new Map();
+                                            contextFilteredJobs.forEach(j => {
+                                                if (j.parentId && idMap.has(j.parentId)) {
+                                                    if (!childrenMap.has(j.parentId)) childrenMap.set(j.parentId, []);
+                                                    childrenMap.get(j.parentId).push(j);
                                                 }
                                             });
 
-                                            // 2. Identify Roots
-                                            // A job is a root if it has no parent, OR its parent is not in the current visible set.
-                                            // Always prioritize the Lead Job as the primary root if it exists.
-                                            const roots = groupList.filter(g => {
-                                                const pid = g.job.ParentID || g.job.parentId;
-                                                return !pid || !groupMap[pid];
-                                            });
+                                            // Recursive function to build hierarchy list
+                                            const buildList = (job, level) => {
+                                                if (processedIds.has(job.id)) return;
+                                                processedIds.add(job.id);
 
-                                            // Sort Roots: Lead Job first
-                                            roots.sort((a, b) => {
-                                                // Check for "Lead Job" flag or name match
-                                                const aIsLead = a.job.id === selectedLeadId || a.job.isLead;
-                                                const bIsLead = b.job.id === selectedLeadId || b.job.isLead;
-                                                if (aIsLead && !bIsLead) return -1;
-                                                if (!aIsLead && bIsLead) return 1;
-                                                return a.job.itemName.localeCompare(b.job.itemName);
-                                            });
+                                                const group = groupMap[job.id];
+                                                if (group) {
+                                                    group.level = level;
+                                                    hierarchyResults.push(group);
+                                                }
 
-                                            // 3. Recursive Flattening
-                                            const traverse = (nodes, level) => {
-                                                nodes.forEach(node => {
-                                                    if (processedIds.has(node.job.id)) return; // Prevent loops
-                                                    processedIds.add(node.job.id);
-
-                                                    node.level = level; // Assign depth level
-                                                    hierarchyResults.push(node);
-
-                                                    // Process Children
-                                                    const kids = childrenLookup[node.job.id];
-                                                    if (kids) {
-                                                        // Sort kids by ID or Name (keeping creation order usually better for sub-jobs)
-                                                        kids.sort((a, b) => a.job.id - b.job.id);
-                                                        traverse(kids, level + 1);
-                                                    }
-                                                });
+                                                const children = childrenMap.get(job.id) || [];
+                                                children.sort((a, b) => a.id - b.id); // Stable sort by ID
+                                                children.forEach(c => buildList(c, level + 1));
                                             };
 
-                                            traverse(roots, 0);
+                                            // Start with Roots
+                                            contextFilteredJobs.forEach(j => {
+                                                if (!j.parentId || !idMap.has(j.parentId)) {
+                                                    buildList(j, 0);
+                                                }
+                                            });
 
                                             // Handle any orphans (loops or disconnected parts not found by roots?)
                                             if (hierarchyResults.length < groupList.length) {
@@ -1508,14 +1725,17 @@ const PricingForm = () => {
 
                                             return hierarchyResults.map(group => {
                                                 const job = group.job;
-                                                // Group Display Name
+                                                // Group Display (Job Header)
+
+                                                // Determine Heading Name (Show "Lead Job" if it is the Lead, else ItemName)
                                                 let groupName = job.itemName;
                                                 if (job.isLead) {
-                                                    // Clean existing prefixes first (Handle "L1 - L1 - " scenario)
-                                                    const cleanName = job.itemName.replace(/^(L\d+\s-\s)+/, '$1');
-                                                    groupName = `${cleanName} / Lead Job`;
+                                                    groupName = `${job.itemName} (Lead Job)`;
                                                 }
-                                                const canEditSection = pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
+
+                                                // Determine Editable Status
+                                                const isEditableScope = pricingData.access.editableJobs.includes(job.itemName);
+                                                const canEditSection = pricingData.access.hasLeadAccess || isEditableScope;
 
                                                 return (
                                                     <React.Fragment key={job.id}>
@@ -1529,13 +1749,21 @@ const PricingForm = () => {
                                                                 textTransform: 'uppercase',
                                                                 paddingLeft: `${(group.level || 0) * 20 + 12}px`
                                                             }}>
-                                                                {group.level > 0 && <span style={{ marginRight: '6px', color: '#94a3b8' }}>↳</span>}
+                                                                {group.level > 0 && <span style={{ marginRight: '6px', color: '#dc2626', fontWeight: 'bold', fontSize: '16px' }}>↳</span>}
                                                                 {groupName} Options
                                                             </td>
                                                         </tr>
                                                         {group.options.map(option => {
                                                             const key = `${option.id}_${job.id}`;
                                                             const canEditRow = canEditSection; // Simplified
+
+                                                            // Determine Display Value: Use Effective Price if Calculated (Fallback), else State
+                                                            let displayValue = '';
+                                                            if (option.effectivePrice && option.effectivePrice > 0.01) {
+                                                                displayValue = option.effectivePrice;
+                                                            } else {
+                                                                displayValue = values[key] !== undefined ? values[key] : '';
+                                                            }
 
                                                             return (
                                                                 <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
@@ -1545,7 +1773,7 @@ const PricingForm = () => {
                                                                             <input
                                                                                 type="number"
                                                                                 // Use state value OR fallback to DB value (Clean/Legacy) if state is empty (Step 869)
-                                                                                value={values[key] !== undefined ? values[key] : ''}
+                                                                                value={displayValue}
                                                                                 onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
                                                                                 disabled={!canEditRow}
                                                                                 placeholder="0.00"
@@ -1558,7 +1786,9 @@ const PricingForm = () => {
                                                                                     borderRadius: '4px',
                                                                                     fontSize: '13px',
                                                                                     textAlign: 'right',
-                                                                                    background: canEditRow ? 'white' : '#f1f5f9',
+                                                                                    backgroundColor: canEditRow ? '#fff' : '#f1f5f9', // Slightly darker background for read-only
+                                                                                    color: '#1e293b', // Force dark text
+                                                                                    opacity: 1, // Prevent browser fading
                                                                                     cursor: canEditRow ? 'text' : 'not-allowed'
                                                                                 }}
                                                                             />
@@ -1626,92 +1856,7 @@ const PricingForm = () => {
                                         })()
                                         }
 
-                                        {/* Total Row */}
-                                        {(() => {
-                                            // Recalculate Target Jobs for Total
-                                            let targetJobs = visibleJobs;
-                                            if (selectedLeadId && pricingData && pricingData.jobs) {
-                                                const getDescendants = (rootId, all) => {
-                                                    const set = new Set([rootId]);
-                                                    let changed = true;
-                                                    while (changed) {
-                                                        changed = false;
-                                                        all.forEach(j => {
-                                                            if (!set.has(j.id) && set.has(j.parentId)) {
-                                                                set.add(j.id);
-                                                                changed = true;
-                                                            }
-                                                        });
-                                                    }
-                                                    return set;
-                                                };
-                                                const validIds = getDescendants(selectedLeadId, pricingData.jobs);
-                                                targetJobs = visibleJobs.filter(j => validIds.has(j.id));
-                                            }
 
-                                            // Calculate Total
-                                            let grandTotal = 0;
-                                            let hasPricedOptional = false;
-
-                                            // Helper to get price
-                                            const getPrice = (key) => {
-                                                if (values && values.hasOwnProperty(key)) {
-                                                    const val = values[key];
-                                                    return (val === '' || val === null) ? 0 : (parseFloat(val) || 0);
-                                                }
-                                                if (pricingData.values && pricingData.values[key]) {
-                                                    return parseFloat(pricingData.values[key].Price || 0);
-                                                }
-                                                return 0;
-                                            };
-
-                                            filteredOptions.forEach(opt => {
-                                                if (opt.name === 'Optional') {
-                                                    // Check if priced
-                                                    targetJobs.forEach(job => {
-                                                        const key = `${opt.id}_${job.id}`;
-                                                        if (getPrice(key) > 0) hasPricedOptional = true;
-                                                    });
-                                                    return;
-                                                }
-
-                                                // Sum Non-Optional
-                                                // Hybrid Aggregation: Sum ALL Visible Jobs (targetJobs)
-                                                // Since Parents now EXCLUDE Visible Children from their price, we can simply sum everything.
-                                                targetJobs.forEach(job => {
-                                                    // VISIBILITY CHECK: Only match options that are actually rendered for this job (Step 904)
-                                                    let match = false;
-                                                    if (!opt.itemName) match = (job.isLead);
-                                                    else if (opt.itemName === 'Lead Job' && job.isLead) match = true;
-                                                    else if (opt.itemName === job.itemName) match = true;
-                                                    else if (opt.itemName === `${job.itemName} / Lead Job`) match = true;
-
-                                                    if (match) {
-                                                        const key = `${opt.id}_${job.id}`;
-                                                        grandTotal += getPrice(key);
-                                                    }
-                                                });
-                                            });
-
-                                            // Render Total Row
-                                            if (grandTotal > 0 && !hasPricedOptional) {
-                                                return (
-                                                    <tr style={{ background: '#f8fafc', borderTop: '2px solid #e2e8f0' }}>
-                                                        <td style={{ padding: '12px 16px', fontWeight: 'bold', color: '#1e293b', textAlign: 'left' }}>Total</td>
-                                                        <td style={{ padding: '8px 12px', textAlign: 'center' }}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                                                                <div style={{ width: '100%', maxWidth: '150px', textAlign: 'right', fontWeight: 'bold', color: '#1e293b' }}>
-                                                                    {grandTotal.toFixed(2)}
-                                                                </div>
-                                                                {/* Spacer to match Delete Button width */}
-                                                                <div style={{ width: '16px' }}></div>
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            }
-                                            return null;
-                                        })()}
                                     </tbody>
                                 </table>
 

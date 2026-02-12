@@ -13,7 +13,7 @@ const MainLayout = ({ children, activeTab, onNavigate, onOpenEnquiry }) => {
                     maxWidth: activeTab === 'Dashboard' ? '100%' : '100%',
                     width: '100%',
                     margin: '0 auto',
-                    paddingTop: '100px' // Perfect flush fit
+                    marginTop: '100px' // Exact header height for flush fit
                 }}
             >
                 {children}

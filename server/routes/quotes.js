@@ -1,6 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const sql = require('mssql');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+
+// Configure Multer Storage for Quote Attachments
+const uploadDir = path.join(__dirname, '..', 'uploads', 'quotes');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+const upload = multer({ storage: storage });
 
 // NOTE: Static routes MUST be defined BEFORE dynamic parameter routes
 // to prevent Express from interpreting path segments like 'lists' as parameter values
@@ -100,7 +119,9 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             }
             enquiry = enquiryResult.recordset[0];
             // Polyfill missing columns
-            enquiry.EnquiryType = 'Tender';
+            // Fetch Enquiry Types
+            const typesResult = await sql.query`SELECT TypeName FROM EnquiryType WHERE RequestNo = ${requestNo}`;
+            enquiry.EnquiryType = typesResult.recordset.map(t => t.TypeName).join(', ');
             console.log('[Quote API] Enquiry found:', enquiry.ProjectName);
         } catch (err) {
             console.error('[Quote API] Error fetching EnquiryMaster:', err);
@@ -137,13 +158,60 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             name: 'Almoayyed Air Conditioning'
         };
         let availableProfiles = [];
+        let divisionsHierarchy = []; // Declare at top level for response
 
         let resolvedItems = [];
         try {
-            // 1. Fetch raw items
-            const rawItemsResult = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
+            // 1. Fetch raw items with Hierarchy (Join Master to get Default Assignments)
+            const rawItemsResult = await sql.query`
+                SELECT EF.ID, EF.ParentID, EF.ItemName, MEF.CommonMailIds, MEF.CCMailIds 
+                FROM EnquiryFor EF
+                LEFT JOIN Master_EnquiryFor MEF ON EF.ItemName = MEF.ItemName
+                WHERE EF.RequestNo = ${requestNo}`;
             const rawItems = rawItemsResult.recordset;
-            divisions = rawItems.map(r => r.ItemName);
+
+            // Helper to get Parent
+            const getParent = (id) => rawItems.find(i => i.ID === id);
+
+            // Filter Divisions based on User Access (Scope)
+            const userEmail = req.query.userEmail || '';
+            let divisions = rawItems.map(r => r.ItemName); // Default all
+
+            if (userEmail) {
+                // Find items explicitly assigned to user
+                const userScopeItems = rawItems.filter(item => {
+                    const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
+                    return mails.includes(userEmail.toLowerCase());
+                });
+
+                if (userScopeItems.length > 0) {
+                    // Logic: Return the LEAD JOBS (Roots) that contain these scope items
+                    // "Only lead jobs where user is having subjob"
+                    const accessRoots = new Set();
+
+                    userScopeItems.forEach(scopeItem => {
+                        let curr = scopeItem;
+                        // Traverse up to Root
+                        while (curr.ParentID) {
+                            const p = getParent(curr.ParentID);
+                            if (p) curr = p;
+                            else break;
+                        }
+                        accessRoots.add(curr.ItemName);
+                    });
+
+                    divisions = Array.from(accessRoots);
+                }
+            }
+
+            // Hierarchy Structure for Frontend Logic
+            divisionsHierarchy = rawItems.map(r => ({
+                id: r.ID,
+                parentId: r.ParentID,
+                itemName: r.ItemName,
+                commonMailIds: r.CommonMailIds,
+                ccMailIds: r.CCMailIds
+            }));
 
             // 2. Resolve Master Details for EACH item (handling prefixes)
             for (const item of rawItems) {
@@ -276,7 +344,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 ccMailIds: [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(','),
                 commonMailIds: item.CommonMailIds || ''
             })),
-            quoteNumber: 'Draft'
+            quoteNumber: 'Draft',
+            divisionsHierarchy  // Return full hierarchy for dynamic customer options
         });
     } catch (err) {
         console.error('[Quote API] Fatal Error in enquiry-data route:', err);
@@ -359,14 +428,12 @@ router.post('/', async (req, res) => {
         }
 
         // Get next quote number
-        // We calculate the next QuoteNo for THIS RequestNo generally.
-        // NOTE: If the user wants separate counters for separate divisions, we'd need to filter by QuoteNumber LIKE pattern.
-        // Assuming global counter for the Enquiry is safer to avoid collisions if multiple people quote same enquiry.
-        const quoteCountResult = await sql.query`
+        // User requested Global Serial Number (Step 675) - "next serial continuation number available in the database"
+        // This ensures unique running numbers across all enquiries/divisions
+        const quoteCountResult = await sql.query(`
             SELECT ISNULL(MAX(QuoteNo), 0) + 1 AS NextQuoteNo 
             FROM EnquiryQuotes 
-            WHERE RequestNo = ${requestNo}
-        `;
+        `);
         const quoteNo = quoteCountResult.recordset[0].NextQuoteNo;
         const revisionNo = 0;
 
@@ -666,6 +733,103 @@ router.delete('/config/templates/:id', async (req, res) => {
     } catch (err) {
         console.error('Error deleting template:', err);
         res.status(500).json({ error: 'Failed to delete template', details: err.message });
+    }
+});
+
+
+// --- Quote Attachments ---
+
+// GET /api/quotes/attachments/:quoteId - List all attachments for a quote
+router.get('/attachments/:quoteId', async (req, res) => {
+    try {
+        const { quoteId } = req.params;
+        const result = await sql.query`
+            SELECT ID, QuoteID, FileName, UploadedAt 
+            FROM QuoteAttachments 
+            WHERE QuoteID = ${quoteId}
+            ORDER BY UploadedAt DESC
+        `;
+        res.json(result.recordset);
+    } catch (err) {
+        console.error('Error fetching quote attachments:', err);
+        res.status(500).json({ error: 'Failed to fetch attachments' });
+    }
+});
+
+// POST /api/quotes/attachments/:quoteId - Upload attachments for a quote
+router.post('/attachments/:quoteId', upload.array('files'), async (req, res) => {
+    try {
+        const { quoteId } = req.params;
+        const files = req.files;
+
+        if (!files || files.length === 0) {
+            return res.status(400).json({ error: 'No files uploaded' });
+        }
+
+        const uploadedResults = [];
+        for (const file of files) {
+            const fileName = file.originalname;
+            const filePath = file.path;
+
+            const result = await sql.query`
+                INSERT INTO QuoteAttachments (QuoteID, FileName, FilePath)
+                VALUES (${quoteId}, ${fileName}, ${filePath});
+                SELECT SCOPE_IDENTITY() AS ID;
+            `;
+            uploadedResults.push({ id: result.recordset[0].ID, fileName });
+        }
+
+        res.status(201).json({ message: 'Files uploaded successfully', files: uploadedResults });
+    } catch (err) {
+        console.error('Error uploading quote attachments:', err);
+        res.status(500).json({ error: 'Failed to upload attachments' });
+    }
+});
+
+// GET /api/quotes/attachments/download/:id - Download a quote attachment
+router.get('/attachments/download/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await sql.query`
+            SELECT FileName, FilePath FROM QuoteAttachments WHERE ID = ${id}
+        `;
+        const attachment = result.recordset[0];
+
+        if (!attachment) {
+            return res.status(404).json({ error: 'Attachment not found' });
+        }
+
+        if (fs.existsSync(attachment.FilePath)) {
+            const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
+            res.setHeader('Content-Disposition', `${disposition}; filename="${attachment.FileName}"`);
+            res.sendFile(path.resolve(attachment.FilePath));
+        } else {
+            res.status(404).json({ error: 'File not found on server' });
+        }
+    } catch (err) {
+        console.error('Error downloading quote attachment:', err);
+        res.status(500).json({ error: 'Failed to download attachment' });
+    }
+});
+
+// DELETE /api/quotes/attachments/:id - Delete a quote attachment
+router.delete('/attachments/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await sql.query`
+            SELECT FilePath FROM QuoteAttachments WHERE ID = ${id}
+        `;
+        const attachment = result.recordset[0];
+
+        if (attachment && fs.existsSync(attachment.FilePath)) {
+            fs.unlinkSync(attachment.FilePath);
+        }
+
+        await sql.query`DELETE FROM QuoteAttachments WHERE ID = ${id}`;
+        res.json({ message: 'Attachment deleted successfully' });
+    } catch (err) {
+        console.error('Error deleting quote attachment:', err);
+        res.status(500).json({ error: 'Failed to delete attachment' });
     }
 });
 

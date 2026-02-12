@@ -521,29 +521,33 @@ router.get('/:requestNo', async (req, res) => {
             // But to avoid "Blank Screen" confusion for unassigned Creators, we can grant Lead access IF generic?
             // User Request was explicit: "Access ONLY View BMS". This implies strictness.
 
-            const selfJobs = userJobItems;
+            // ID-Based Traversal for Robustness
+            const selfJobIds = jobs.filter(j => userJobItems.includes(j.ItemName)).map(j => j.ID);
 
-            const getAllDescendants = (parentNames, allJobs) => {
-                let descendants = [];
-                let queue = [...parentNames];
+            const getAllDescendantIds = (parentIds, allJobs) => {
+                let descendantIds = [];
+                let queue = [...parentIds];
                 let processed = new Set();
 
                 while (queue.length > 0) {
-                    const currentName = queue.pop();
-                    if (processed.has(currentName)) continue;
-                    processed.add(currentName);
+                    const currentId = queue.pop();
+                    if (processed.has(currentId)) continue;
+                    processed.add(currentId);
 
-                    const children = allJobs.filter(j => j.ParentItemName === currentName);
+                    const children = allJobs.filter(j => j.ParentID === currentId);
                     children.forEach(c => {
-                        descendants.push(c.ItemName);
-                        queue.push(c.ItemName);
+                        descendantIds.push(c.ID);
+                        queue.push(c.ID);
                     });
                 }
-                return descendants;
+                return descendantIds;
             };
 
-            const descendantJobs = getAllDescendants(selfJobs, jobs);
-            visibleJobs = [...new Set([...selfJobs, ...descendantJobs])];
+            const descendantIds = getAllDescendantIds(selfJobIds, jobs);
+            const allVisibleIds = new Set([...selfJobIds, ...descendantIds]);
+
+            visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
+
         }
 
         console.log('Final Visible:', visibleJobs);

@@ -6,16 +6,16 @@ async function run() {
     try {
         await connectDB();
 
-        console.log('--- Fetching Column Info ---');
+        console.log('--- Fetching Master_EnquiryFor Columns ---');
         const res = await sql.query`
             SELECT COLUMN_NAME 
             FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'EnquiryFor'
+            WHERE TABLE_NAME = 'Master_EnquiryFor'
         `;
         console.log(res.recordset.map(r => r.COLUMN_NAME));
 
-        console.log('--- Fetching Data Sample ---');
-        const sample = await sql.query`SELECT TOP 1 * FROM EnquiryFor`;
+        console.log('--- Fetching Master_EnquiryFor Sample ---');
+        const sample = await sql.query`SELECT TOP 1 * FROM Master_EnquiryFor`;
         console.log(sample.recordset[0]);
 
         process.exit(0);

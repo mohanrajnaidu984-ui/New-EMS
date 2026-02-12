@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import ListBoxControl from './ListBoxControl';
@@ -101,6 +101,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const [originalSeList, setOriginalSeList] = useState([]);
     const [originalCustomerList, setOriginalCustomerList] = useState([]);
     const [originalReceivedFromList, setOriginalReceivedFromList] = useState([]);
+
+    // Ref for error section to scroll to it when validation fails
+    const errorSectionRef = useRef(null);
 
     // Effect to determine edit permission
     useEffect(() => {
@@ -297,13 +300,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
             setReceivedFromList([...receivedFromList, formData.ReceivedFrom]);
 
-            // Auto-add customer if not present
-            const parts = formData.ReceivedFrom.split('|');
-            if (parts.length >= 2) {
-                const company = parts[1];
-                if (company && !customerList.includes(company)) {
-                    setCustomerList(prev => [...prev, company]);
-                }
+            // Auto-add customer if not present (Enforce paired insertion)
+            // We use formData.CustomerName directly as the source of truth
+            if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
+                setCustomerList(prev => [...prev, formData.CustomerName]);
             }
 
             handleInputChange('ReceivedFrom', '');
@@ -344,7 +344,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             // Sync: Remove contacts belonging to this customer
             const newReceivedFromList = receivedFromList.filter(item => {
                 const [, company] = item.split('|');
-                return company !== removedCustomer;
+                // Robust comparison: Trim and ignore trailing commas/spaces
+                const cleanCompany = (company || '').replace(/,\s*$/, '').trim();
+                const cleanRemoved = (removedCustomer || '').replace(/,\s*$/, '').trim();
+                return cleanCompany !== cleanRemoved;
             });
             setReceivedFromList(newReceivedFromList);
         }
@@ -358,19 +361,23 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             const removedItem = receivedFromList[receivedFromList.length - 1];
             const [, removedCompany] = removedItem.split('|');
 
+            // CLEANUP: Handle cases where company name in contact has trailing comma (e.g. from bad concatenation)
+            const cleanRemovedCompany = (removedCompany || '').replace(/,\s*$/, '').trim();
+
             const newReceivedFromList = receivedFromList.slice(0, -1);
             setReceivedFromList(newReceivedFromList);
 
             // Sync: Only remove the company if NO other contacts from that company remain
             const hasOtherContacts = newReceivedFromList.some(item => {
                 const [, company] = item.split('|');
-                return company === removedCompany;
+                const cleanCompany = (company || '').replace(/,\s*$/, '').trim();
+                return cleanCompany === cleanRemovedCompany;
             });
 
             if (!hasOtherContacts) {
                 // If limited edit, don't remove if it's an original customer
-                if (!isLimitedEdit || !originalCustomerList.includes(removedCompany)) {
-                    setCustomerList(prev => prev.filter(c => c !== removedCompany));
+                if (!isLimitedEdit || !originalCustomerList.some(c => (c || '').replace(/,\s*$/, '').trim() === cleanRemovedCompany)) {
+                    setCustomerList(prev => prev.filter(c => (c || '').replace(/,\s*$/, '').trim() !== cleanRemovedCompany));
                 }
             }
         }
@@ -755,7 +762,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             'ProjectName': formData.ProjectName,
             'ClientName': formData.ClientName,
             'ConcernedSE': seList.length > 0,
-            'DetailsOfEnquiry': formData.DetailsOfEnquiry
+            'DetailsOfEnquiry': formData.DetailsOfEnquiry,
+            'CustomerRefNo': formData.CustomerRefNo
         };
 
         Object.keys(requiredFields).forEach(field => {
@@ -769,6 +777,15 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
+            // Scroll to error message section after a brief delay to ensure it's rendered
+            setTimeout(() => {
+                if (errorSectionRef.current) {
+                    errorSectionRef.current.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'center'
+                    });
+                }
+            }, 100);
             return;
         }
 
@@ -946,7 +963,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 spec: enq.Doc_Spec !== undefined ? !!enq.Doc_Spec : !!enq.spec,
                 eqpschedule: enq.Doc_EquipmentSchedule !== undefined ? !!enq.Doc_EquipmentSchedule : !!enq.eqpschedule,
                 ceosign: enq.ED_CEOSignatureRequired !== undefined ? !!enq.ED_CEOSignatureRequired : !!enq.ceosign,
-                AutoAck: enq.SendAcknowledgementMail !== undefined ? !!enq.SendAcknowledgementMail : !!enq.AutoAck
+                AutoAck: enq.SendAcknowledgementMail !== undefined ? !!enq.SendAcknowledgementMail : !!enq.AutoAck,
+                // FIX: inputs should be empty on load, lists are populated separately
+                CustomerName: '',
+                ReceivedFrom: ''
             };
 
             setFormData(mappedData);
@@ -1224,10 +1244,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                 <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
                                     <form onSubmit={handleSubmit}>
                                         {/* Enquiry Status Tracker */}
-                                        <div className="card mb-4 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
-                                            <div className="card-body p-4">
-                                                <h6 className="card-title fw-bold mb-4" style={{ color: '#2d3748' }}>Enquiry Status Tracker</h6>
-                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', marginTop: '10px', marginBottom: '10px' }}>
+                                        <div className="card mb-2 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
+                                            <div className="card-body p-2">
+                                                <h6 className="card-title fw-bold mb-2" style={{ color: '#2d3748', fontSize: '14px' }}>Enquiry Status Tracker</h6>
+                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', marginTop: '5px', marginBottom: '5px' }}>
                                                     {['Enquiry', 'Pricing', 'Quote', 'Follow-up', 'Won'].map((step, index) => {
                                                         const stepNum = index + 1;
 
@@ -1257,8 +1277,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             <React.Fragment key={step}>
                                                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', zIndex: 2 }}>
                                                                     <div style={{
-                                                                        width: '35px',
-                                                                        height: '35px',
+                                                                        width: '20px',
+                                                                        height: '20px',
                                                                         borderRadius: '50%',
                                                                         backgroundColor: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#e2e8f0', // Blue generally, Red if Lost and active/completed
                                                                         color: isActive || isCompleted ? '#ffffff' : '#718096',
@@ -1266,15 +1286,15 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                         alignItems: 'center',
                                                                         justifyContent: 'center',
                                                                         fontWeight: 'bold',
-                                                                        fontSize: '14px',
-                                                                        border: isActive ? `2px solid ${status === 'Lost' && isLast ? '#fca5a5' : '#ebf8ff'}` : 'none',
-                                                                        boxShadow: isActive ? `0 0 0 4px ${status === 'Lost' && isLast ? '#fecaca' : '#bfdbfe'}` : 'none'
+                                                                        fontSize: '10px',
+                                                                        border: isActive ? `1px solid ${status === 'Lost' && isLast ? '#fca5a5' : '#ebf8ff'}` : 'none',
+                                                                        boxShadow: isActive ? `0 0 0 2px ${status === 'Lost' && isLast ? '#fecaca' : '#bfdbfe'}` : 'none'
                                                                     }}>
                                                                         {isCompleted ? '✓' : stepNum}
                                                                     </div>
                                                                     <span style={{
-                                                                        marginTop: '8px',
-                                                                        fontSize: '12px',
+                                                                        marginTop: '4px',
+                                                                        fontSize: '10px',
                                                                         color: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#a0aec0',
                                                                         fontWeight: isActive ? '600' : '400'
                                                                     }}>
@@ -1284,11 +1304,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 {!isLast && (
                                                                     <div style={{
                                                                         flex: 1,
-                                                                        height: '2px',
+                                                                        height: '1px',
                                                                         backgroundColor: isCompleted ? '#3b82f6' : '#e2e8f0',
-                                                                        marginLeft: '10px',
-                                                                        marginRight: '10px',
-                                                                        marginTop: '-25px' // Align with circle center
+                                                                        marginLeft: '5px',
+                                                                        marginRight: '5px',
+                                                                        marginTop: '-14px' // Align with circle center
                                                                     }} />
                                                                 )}
                                                             </React.Fragment>
@@ -1466,8 +1486,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                     </div>
 
                                                     {/* Customer Ref No (Right - Remaining) */}
-                                                    <div className="form-group" style={{ flex: 1 }}>
-                                                        <label className="form-label" style={{ marginBottom: '8px' }}>Customer Ref. No</label>
+                                                    <div className="form-group" style={{ flex: 1, position: 'relative' }}>
+                                                        <label className="form-label" style={{ marginBottom: '8px' }}>Customer Ref. No<span className="text-danger">*</span></label>
                                                         <input
                                                             type="text"
                                                             className="form-control"
@@ -1477,6 +1497,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             disabled={!canEdit || isLimitedEdit}
                                                             style={{ height: '38px' }} // Match standard input height if needed
                                                         />
+                                                        {errors.CustomerRefNo && <ValidationTooltip message={errors.CustomerRefNo} />}
                                                     </div>
                                                 </div>
 
@@ -1540,7 +1561,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             label={<span>Customer Name<span className="text-danger">*</span></span>}
                                                             options={masters.existingCustomers}
                                                             selectedOption={formData.CustomerName}
-                                                            onOptionChange={(val) => handleInputChange('CustomerName', val)}
+                                                            onOptionChange={(val) => {
+                                                                handleInputChange('CustomerName', val);
+                                                                handleInputChange('ReceivedFrom', '');
+                                                            }}
                                                             listBoxItems={customerList}
                                                             showNew={true}
                                                             showEdit={true}
@@ -1550,8 +1574,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onEdit={handleEditCustomer}
                                                             selectedItemDetails={renderCustomerCard()}
                                                             error={errors.CustomerName}
-                                                            onAdd={onAddCustomerClick}
-                                                            onRemove={handleRemoveCustomer}
+                                                        /* Buttons removed to enforce paired insertion via Received From */
                                                         />
                                                     </div>
                                                     <div className="col-md-6">
@@ -1874,7 +1897,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                             </div>
 
                                             {/* Buttons Section (Left Aligned, Add then Cancel) */}
-                                            <div className="d-flex justify-content-start gap-2 mt-4">
+                                            <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
                                                 {(!isModifyMode || (isModifyMode && canEdit)) && (
                                                     <button type="submit" className="btn btn-outline-success">
                                                         {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
@@ -1887,7 +1910,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
                                             {/* Validation Error Messages */}
                                             {Object.keys(errors).length > 0 && (
-                                                <div className="alert alert-danger mt-2 mb-5" role="alert" style={{ fontSize: '13px' }}>
+                                                <div ref={errorSectionRef} className="alert alert-danger mt-2 mb-5" role="alert" style={{ fontSize: '13px' }}>
                                                     <strong>Please fill in the following mandatory fields:</strong>
                                                     <ul className="mb-0 mt-2" style={{ paddingLeft: '20px' }}>
                                                         {Object.keys(errors).map(field => (
@@ -1903,6 +1926,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 {field === 'ClientName' && 'Client Name'}
                                                                 {field === 'ConcernedSE' && 'Concerned SE'}
                                                                 {field === 'DetailsOfEnquiry' && 'Details of Enquiry'}
+                                                                {field === 'CustomerRefNo' && 'Customer Ref. No'}
                                                             </li>
                                                         ))}
                                                     </ul>

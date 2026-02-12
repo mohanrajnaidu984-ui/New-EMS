@@ -23,6 +23,7 @@ const ProbabilityForm = () => {
 
     const [loadingList, setLoadingList] = useState(false);
     const [updatingReqNo, setUpdatingReqNo] = useState(null); // Track which row is being updated
+    const [updatedItems, setUpdatedItems] = useState({});
     const [enquiriesList, setEnquiriesList] = useState([]);
     // Removed viewMode and detail states as per request
 
@@ -142,6 +143,14 @@ const ProbabilityForm = () => {
         setEnquiriesList(prev => prev.map(e =>
             e.RequestNo === item.RequestNo ? updatedItem : e
         ));
+        // Reset updated status on edit
+        if (updatedItems && updatedItems[item.RequestNo]) {
+            setUpdatedItems(prev => {
+                const newState = { ...prev };
+                delete newState[item.RequestNo];
+                return newState;
+            });
+        }
     };
 
     // PERSISTence handler called by Update button
@@ -231,7 +240,9 @@ const ProbabilityForm = () => {
             });
 
             if (res.ok) {
-                alert(`Enquiry ${item.RequestNo} updated successfully. Saved Date: ${item.ExpectedOrderDate || 'None'}`);
+                // alert(`Enquiry ${item.RequestNo} updated successfully. Saved Date: ${item.ExpectedOrderDate || 'None'}`);
+                setUpdatedItems(prev => ({ ...prev, [item.RequestNo]: true }));
+
                 // Optionally refresh list if it moves out of current mode (e.g. Pending -> Won)
                 if (listMode === 'Pending') {
                     fetchList();
@@ -744,14 +755,14 @@ const ProbabilityForm = () => {
                                                                     </div>
                                                                     {(listMode === 'Pending' || listMode === 'Lost') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
                                                                         <button
-                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                                             onClick={() => persistUpdate(item)}
                                                                             disabled={updatingReqNo === item.RequestNo}
                                                                             style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
                                                                         >
                                                                             {updatingReqNo === item.RequestNo ? (
                                                                                 <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : 'UPDATE'}
+                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                                         </button>
                                                                     )}
                                                                 </>
@@ -866,14 +877,14 @@ const ProbabilityForm = () => {
                                                                     </div>
                                                                     {(listMode === 'Pending' || listMode === 'FollowUp') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
                                                                         <button
-                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                                             onClick={() => persistUpdate(item)}
                                                                             disabled={updatingReqNo === item.RequestNo}
                                                                             style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
                                                                         >
                                                                             {updatingReqNo === item.RequestNo ? (
                                                                                 <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : 'UPDATE'}
+                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                                         </button>
                                                                     )}
                                                                 </>
@@ -1014,14 +1025,14 @@ const ProbabilityForm = () => {
                                                                         </div>
                                                                     </div>
                                                                     <button
-                                                                        className="btn btn-primary btn-sm px-3 py-1"
+                                                                        className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                                         onClick={() => persistUpdate(item)}
                                                                         disabled={updatingReqNo === item.RequestNo}
                                                                         style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
                                                                     >
                                                                         {updatingReqNo === item.RequestNo ? (
                                                                             <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : 'UPDATE'}
+                                                                        ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                                     </button>
                                                                 </>
                                                             )}
@@ -1057,14 +1068,14 @@ const ProbabilityForm = () => {
                                                                     </div>
                                                                     {(listMode === 'Pending' || listMode === 'Won') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
                                                                         <button
-                                                                            className="btn btn-primary btn-sm px-3 py-1"
+                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                                             onClick={() => persistUpdate(item)}
                                                                             disabled={updatingReqNo === item.RequestNo}
                                                                             style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
                                                                         >
                                                                             {updatingReqNo === item.RequestNo ? (
                                                                                 <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : 'UPDATE'}
+                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                                         </button>
                                                                     )}
                                                                 </>
@@ -1074,14 +1085,14 @@ const ProbabilityForm = () => {
                                                             {listMode === 'Pending' && (item.Status !== 'Won' && item.Status !== 'FollowUp' && item.Status !== 'Lost' && item.Status !== 'OnHold' && item.Status !== 'Cancelled' && item.Status !== 'Retendered' && item.Status !== 'Pending' && item.Status !== 'Enquiry') && (
                                                                 <>
                                                                     <button
-                                                                        className="btn btn-primary btn-sm px-3 py-1"
+                                                                        className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                                         onClick={() => persistUpdate(item)}
                                                                         disabled={updatingReqNo === item.RequestNo}
                                                                         style={{ fontSize: '11px', fontWeight: 'bold', height: '31px' }}
                                                                     >
                                                                         {updatingReqNo === item.RequestNo ? (
                                                                             <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : 'UPDATE'}
+                                                                        ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                                     </button>
                                                                 </>
                                                             )}
