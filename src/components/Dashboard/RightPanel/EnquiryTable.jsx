@@ -230,7 +230,6 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
         col2: 180,
         col3: 200,
         col4: 300,
-        col4: 300,
         colQuoteRef: 120,
         colQuoteTotal: 120,
         colQuoteNet: 120,

@@ -72,18 +72,12 @@ const PricingForm = () => {
         if (value.trim().length >= 2) {
             debounceRef.current = setTimeout(async () => {
                 try {
-                    const res = await fetch(`${API_BASE}/api/enquiries?search=${encodeURIComponent(value.trim())}`);
+                    const userEmail = currentUser?.email || currentUser?.EmailId || '';
+                    const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(value.trim())}&userEmail=${encodeURIComponent(userEmail)}`);
                     if (res.ok) {
                         const data = await res.json();
-                        // Filter to show only matching results
-                        const filtered = data.filter(enq => {
-                            const searchLower = value.toLowerCase().trim();
-                            return (enq.RequestNo || '').toLowerCase().includes(searchLower) ||
-                                (enq.ProjectName || '').toLowerCase().includes(searchLower) ||
-                                (enq.CustomerName || '').toLowerCase().includes(searchLower);
-                        });
-                        setSuggestions(filtered.slice(0, 8));
-                        setShowSuggestions(filtered.length > 0);
+                        setSuggestions(data.slice(0, 8));
+                        setShowSuggestions(data.length > 0);
                     }
                 } catch (err) {
                     console.error('Suggestion error:', err);
@@ -1137,56 +1131,105 @@ const PricingForm = () => {
             {
                 searchResults.length > 0 && !pricingData && (
                     <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
-                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-
-                            <tbody>
-                                {searchResults.map((enq, idx) => (
-                                    <tr
-                                        key={enq.RequestNo || idx}
-                                        style={{ borderBottom: '1px solid #e2e8f0', cursor: 'pointer' }}
-                                        onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                        onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                    >
-                                        <td style={{ padding: '12px 16px' }}>
-                                            <button
-                                                onClick={() => loadPricing(enq.RequestNo)}
-                                                style={{
-                                                    padding: '6px 12px',
-                                                    background: 'white',
-                                                    color: '#1e293b',
-                                                    border: '1px solid #cbd5e1',
-                                                    borderRadius: '4px',
-                                                    fontSize: '12px',
-                                                    cursor: 'pointer',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px'
-                                                }}
-                                            >
-                                                <FileSpreadsheet size={14} /> Pricing
-                                            </button>
-                                        </td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b' }}>{enq.RequestNo}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b' }}>{enq.CustomerName || '-'}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b' }}>{enq.ProjectName || '-'}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '13px' }}>
-                                            <span style={{
-                                                padding: '4px 8px',
-                                                borderRadius: '4px',
-                                                fontSize: '11px',
-                                                fontWeight: '600',
-                                                background: enq.EnquiryStatus === 'Completed' ? '#dcfce7' : '#fef3c7',
-                                                color: enq.EnquiryStatus === 'Completed' ? '#166534' : '#92400e'
-                                            }}>
-                                                {enq.EnquiryStatus || 'Pending'}
-                                            </span>
-                                        </td>
+                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Search size={16} /> Search Results ({searchResults.length})
+                            </h3>
+                            <button onClick={() => setSearchResults([])} style={{ fontSize: '12px', color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>Close Results</button>
+                        </div>
+                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                    <tr>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Project Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Customer Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Enquiry Date</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
+                                </thead>
+                                <tbody>
+                                    {searchResults.map((enq, idx) => (
+                                        <tr
+                                            key={enq.RequestNo || idx}
+                                            style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
+                                            onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                            onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                            onClick={() => loadPricing(enq.RequestNo)}
+                                        >
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
+                                            <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
+                                                    const parts = s.split('|');
+                                                    const name = parts[0];
+                                                    const rawPrice = parts[1];
+                                                    const rawDate = parts[2];
+                                                    const rawLevel = parts[3];
+
+                                                    const level = parseInt(rawLevel) || 0;
+                                                    const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+
+                                                    let displayPrice = rawPrice;
+                                                    if (isUpdated) {
+                                                        const num = parseFloat(rawPrice);
+                                                        if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                                    }
+
+                                                    // Format Date
+                                                    let displayDate = '';
+                                                    if (rawDate) {
+                                                        try {
+                                                            displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
+                                                        } catch (e) {
+                                                            console.error('Date parse error:', e);
+                                                        }
+                                                    }
+
+                                                    return (
+                                                        <div key={i} style={{
+                                                            fontSize: '11px',
+                                                            marginBottom: '4px',
+                                                            marginLeft: `${level * 20}px`,
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '4px',
+                                                            whiteSpace: 'nowrap'
+                                                        }}>
+                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
+                                                            <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
+                                                            <span style={{
+                                                                color: isUpdated ? '#166534' : '#94a3b8',
+                                                                marginLeft: '4px',
+                                                                fontStyle: isUpdated ? 'normal' : 'italic',
+                                                                background: isUpdated ? '#dcfce7' : '#f1f5f9',
+                                                                padding: '1px 6px',
+                                                                borderRadius: '4px',
+                                                                fontSize: '10px'
+                                                            }}>
+                                                                {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
+                                                            </span>
+                                                            {isUpdated && displayDate && (
+                                                                <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
+                                                                    ({displayDate})
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                                {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8 italic' }}>No assigned jobs</span>}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 )
             }
@@ -1259,26 +1302,29 @@ const PricingForm = () => {
 
                                                     return (
                                                         <div key={i} style={{
-                                                            fontSize: '12px',
+                                                            fontSize: '11px',
                                                             marginBottom: '4px',
                                                             whiteSpace: 'nowrap',
-                                                            paddingLeft: `${level * 20}px`
+                                                            marginLeft: `${level * 20}px`,
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '4px'
                                                         }}>
-                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '4px' }}>↳</span>}
+                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
                                                             <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
                                                             <span style={{
                                                                 color: isUpdated ? '#166534' : '#94a3b8',
-                                                                marginLeft: '6px',
+                                                                marginLeft: '4px',
                                                                 fontStyle: isUpdated ? 'normal' : 'italic',
                                                                 background: isUpdated ? '#dcfce7' : '#f1f5f9',
                                                                 padding: '1px 6px',
                                                                 borderRadius: '4px',
-                                                                fontSize: '11px'
+                                                                fontSize: '10px'
                                                             }}>
-                                                                {isUpdated ? displayPrice : 'Not Updated'}
+                                                                {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
                                                             </span>
                                                             {isUpdated && displayDate && (
-                                                                <span style={{ marginLeft: '8px', color: '#64748b', fontSize: '11px' }}>
+                                                                <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
                                                                     ({displayDate})
                                                                 </span>
                                                             )}

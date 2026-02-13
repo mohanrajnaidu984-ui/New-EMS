@@ -184,9 +184,10 @@ const createNotifications = async (requestNo, type, message, triggerUserEmail, t
             const u = await sql.query`SELECT ID FROM Master_ConcernedSE WHERE EmailId = ${email}`;
             if (u.recordset.length > 0) {
                 const userId = u.recordset[0].ID;
+                const now = new Date();
                 await sql.query`
-                    INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy)
-                    VALUES (${userId}, ${type}, ${message}, ${requestNo}, ${triggerUserName})
+                    INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy, CreatedAt)
+                    VALUES (${userId}, ${type}, ${message}, ${requestNo}, ${triggerUserName}, ${now})
                  `;
                 console.log(`Notification inserted for UserID: ${userId} (${email})`);
             } else {
@@ -832,17 +833,19 @@ app.post('/api/enquiries', async (req, res) => {
         log(`DEBUG - AcknowledgementSE value: '${AcknowledgementSE}', Type: ${typeof AcknowledgementSE}`);
         log(`DEBUG - AdditionalNotificationEmails value: '${AdditionalNotificationEmails}', Type: ${typeof AdditionalNotificationEmails}`);
 
+        const now = new Date();
+        request.input('now', sql.DateTime, now);
         await request.query(`
             INSERT INTO EnquiryMaster (
                 RequestNo, SourceOfEnquiry, EnquiryDate, DueDate, SiteVisitDate,
                 CustomerName, ReceivedFrom, ProjectName, ClientName, ConsultantName,
                 EnquiryDetails, Doc_HardCopies, Doc_Drawing, Doc_CD_DVD,
-                Doc_Spec, Doc_EquipmentSchedule, Remarks, CustomerRefNo, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy
+                Doc_Spec, Doc_EquipmentSchedule, Remarks, CustomerRefNo, SendAcknowledgementMail, ED_CEOSignatureRequired, Status, AcknowledgementSE, AdditionalNotificationEmails, OthersSpecify, CreatedBy, CreatedAt
             ) VALUES (
                 @RequestNo, @SourceOfEnquiry, @EnquiryDate, @DueDate, @SiteVisitDate,
                 @CustomerName, @ReceivedFrom, @ProjectName, @ClientName, @ConsultantName,
                 @EnquiryDetails, @Doc_HardCopies, @Doc_Drawing, @Doc_CD_DVD,
-                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @CustomerRefNo, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy
+                @Doc_Spec, @Doc_EquipmentSchedule, @Remarks, @CustomerRefNo, @SendAcknowledgementMail, @ED_CEOSignatureRequired, @Status, @AcknowledgementSE, @AdditionalNotificationEmails, @OthersSpecify, @CreatedBy, @now
             )
         `);
 
@@ -1000,7 +1003,10 @@ app.post('/api/enquiries', async (req, res) => {
             let itemTo = [];
             let itemCC = [];
             if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
-                const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
+                const itemsStr = SelectedEnquiryFor.map(i => {
+                    const name = (typeof i === 'string') ? i : (i.itemName || '');
+                    return `'${name.replace(/'/g, "''")}'`;
+                }).join(',');
                 const itemsRes = await sql.query(`SELECT CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
                 itemsRes.recordset.forEach(row => {
                     if (row.CommonMailIds) itemTo.push(...row.CommonMailIds.split(',').map(e => e.trim()));
@@ -1706,9 +1712,10 @@ app.post('/api/attachments/upload', (req, res, next) => {
                 throw new Error(`RequestNo ${requestNo} not found in EnquiryMaster`);
             }
 
+            const now = new Date();
             // Insert into DB with FilePath
-            await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath) 
-            VALUES(${requestNo}, ${fileName}, ${filePath})`;
+            await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath, UploadedAt) 
+            VALUES(${requestNo}, ${fileName}, ${filePath}, ${now})`;
 
             uploadedFiles.push({ fileName });
         }
@@ -1886,9 +1893,10 @@ app.post('/api/enquiries/:id/notes', async (req, res) => {
         request.input('UserProfileImage', sql.NVarChar, userProfileImage);
         request.input('NoteContent', sql.NVarChar, content);
 
+        const now = new Date();
         await request.query`
-            INSERT INTO EnquiryNotes(EnquiryID, UserID, UserName, UserProfileImage, NoteContent)
-            VALUES(@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent)
+            INSERT INTO EnquiryNotes(EnquiryID, UserID, UserName, UserProfileImage, NoteContent, CreatedAt)
+            VALUES(@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent, ${now})
         `;
 
         // Notify Group
@@ -1904,7 +1912,8 @@ app.post('/api/enquiries/:id/notes', async (req, res) => {
                 const mentionRegex = new RegExp(`@${u.FullName} `, 'i');
                 if (mentionRegex.test(content)) {
                     if (u.ID !== userId) {
-                        await sql.query`INSERT INTO Notifications(UserID, Type, Message, LinkID, CreatedBy) VALUES(${u.ID}, 'Mention', ${userName + ' mentioned you in a note'}, ${enquiryId}, ${userName})`;
+                        const now = new Date();
+                        await sql.query`INSERT INTO Notifications(UserID, Type, Message, LinkID, CreatedBy, CreatedAt) VALUES(${u.ID}, 'Mention', ${userName + ' mentioned you in a note'}, ${enquiryId}, ${userName}, ${now})`;
                     }
                 }
             }

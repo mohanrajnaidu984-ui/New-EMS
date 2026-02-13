@@ -75,6 +75,9 @@ router.get('/calendar', async (req, res) => {
 
 
         // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
+        const today = new Date();
+        request.input('today', sql.Date, today);
+
         const query = `
             WITH FilteredEnquiries AS (
                 SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
@@ -95,7 +98,7 @@ router.get('/calendar', async (req, res) => {
                 SELECT DueDate as DateVal, 'Lapsed' as Type 
                 FROM FilteredEnquiries 
                 WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year
-                AND CAST(DueDate AS DATE) < CAST(GETDATE() AS DATE)
+                AND CAST(DueDate AS DATE) < CAST(@today AS DATE)
                 AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
                 UNION ALL
                 SELECT SiteVisitDate as DateVal, 'SiteVisit' as Type FROM FilteredEnquiries WHERE MONTH(SiteVisitDate) = @month AND YEAR(SiteVisitDate) = @year
@@ -136,7 +139,7 @@ router.get('/calendar', async (req, res) => {
             SELECT 
                 (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
                 (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year) as due,
-                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year AND CAST(DueDate AS DATE) < CAST(GETDATE() AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))) as lapsed,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year AND CAST(DueDate AS DATE) < CAST(@today AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))) as lapsed,
                 (SELECT COUNT(DISTINCT RequestNo) FROM FilteredQuotes WHERE MONTH(ISNULL(QuoteDate, CreatedAt)) = @month AND YEAR(ISNULL(QuoteDate, CreatedAt)) = @year) as quoted
         `;
         const totalsResult = await request.query(totalsQuery);
@@ -171,15 +174,17 @@ router.get('/summary', async (req, res) => {
         // Apply Access Control
         baseFilter += applyAccessControl(request, { userRole, userName, userEmail });
 
+        const today = new Date();
         const query = `
             SELECT
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(EnquiryDate AS DATE) = CAST(GETDATE() AS DATE) ${baseFilter}) as EnquiriesToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) = CAST(GETDATE() AS DATE) ${baseFilter}) as DueToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) > CAST(GETDATE() AS DATE) ${baseFilter}) as UpcomingDues,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(EnquiryDate AS DATE) = CAST(@today AS DATE) ${baseFilter}) as EnquiriesToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) = CAST(@today AS DATE) ${baseFilter}) as DueToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) > CAST(@today AS DATE) ${baseFilter}) as UpcomingDues,
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE Status IN ('Quoted', 'Quote', 'Submitted') ${baseFilter}) as QuotedCount,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) < CAST(GETDATE() AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) < CAST(@today AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
         `;
 
+        request.input('today', sql.Date, today);
         const result = await request.query(query);
         res.json(result.recordset[0]);
 
@@ -225,8 +230,11 @@ router.get('/enquiries', async (req, res) => {
             whereClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
             request.input('salesEngineer', sql.NVarChar, salesEngineer);
         }
+        const today = new Date();
+        request.input('today', sql.Date, today);
+
         if (status === 'Lapsed') {
-            whereClause += ` AND CAST(em.DueDate AS DATE) < CAST(GETDATE() AS DATE) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
+            whereClause += ` AND CAST(em.DueDate AS DATE) < CAST(@today AS DATE) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
         } else if (status && status !== 'All') {
             whereClause += ` AND em.Status = @status `;
             request.input('status', sql.NVarChar, status);
@@ -278,11 +286,11 @@ router.get('/enquiries', async (req, res) => {
 
                 if (currentMode === 'today') {
                     whereClause += ` AND (
-                        CAST(em.DueDate AS DATE) = CAST(GETDATE() AS DATE) OR
-                        CAST(em.SiteVisitDate AS DATE) = CAST(GETDATE() AS DATE)
+                        CAST(em.DueDate AS DATE) = CAST(@today AS DATE) OR
+                        CAST(em.SiteVisitDate AS DATE) = CAST(@today AS DATE)
                     ) `;
                 } else if (currentMode === 'future') {
-                    whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(GETDATE() AS DATE) `;
+                    whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(@today AS DATE) `;
                 }
             } else {
                 console.log('Path: Search Active (Skipping Default Mode)');

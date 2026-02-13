@@ -229,13 +229,15 @@ router.get('/list', async (req, res) => {
         // Default Sorting: Newest Enquiry Date first, then highest Enquiry No.
         query += ` ORDER BY E.EnquiryDate DESC, CASE WHEN ISNUMERIC(E.RequestNo)=1 THEN CAST(E.RequestNo AS INT) ELSE 0 END DESC`;
 
+        const now = new Date();
         const request = new sql.Request();
         if (fromDate) request.input('fromDate', sql.Date, fromDate);
         if (toDate) request.input('toDate', sql.Date, toDate);
         if (probability) request.input('probability', sql.VarChar, probability);
         request.input('userEmail', sql.NVarChar, userEmail || '');
+        request.input('now', sql.DateTime, now);
 
-        const result = await request.query(query);
+        const result = await request.query(query.replace(/GETDATE\(\)/g, '@now'));
         if (result.recordset.length > 0) {
             console.log(`[Probability API V5] First Item FilteredQuoteRefs:`, result.recordset[0].FilteredQuoteRefs);
         }

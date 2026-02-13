@@ -12,11 +12,10 @@ const config = {
         trustServerCertificate: true,
         connectionTimeout: 30000,
         requestTimeout: 30000,
-        enableArithAbort: true
+        enableArithAbort: true,
+        useUTC: false
     }
 };
-
-// console.log('DB Config User:', config.user);
 
 const connectDB = async () => {
     try {
@@ -24,7 +23,6 @@ const connectDB = async () => {
         console.log('Connected to MSSQL Database');
     } catch (err) {
         console.error('Database connection failed:', err);
-        // process.exit(1); // Don't exit, allow server to run for static files/mock mode
     }
 };
 

@@ -228,6 +228,8 @@ const QuoteForm = () => {
     const [toAddress, setToAddress] = useState('');
     const [toPhone, setToPhone] = useState('');
     const [toEmail, setToEmail] = useState('');
+    const [toAttention, setToAttention] = useState(''); // ReceivedFrom contact for selected customer
+
 
     // Prepared By
     const [preparedBy, setPreparedBy] = useState('');
@@ -447,6 +449,41 @@ const QuoteForm = () => {
         }
     }, [activePricingTab, calculatedTabs]);
 
+    // NEW: Sync Attention Of (toAttention) whenever toName or enquiryData changes
+    useEffect(() => {
+        if (!toName || !enquiryData) return;
+
+        // Skip if toAttention is already set (don't override manual edits, 
+        // though currently there is no input for it, it might be set by loadQuote/handleCustomerChange)
+        // Since there's no manual input for this, we should always try to resolve it if it's currently empty or N/A
+        if (!toAttention || toAttention === 'N/A') {
+            const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const target = normalize(toName);
+
+            // 1. Try Exact Match
+            if (enquiryData.customerContacts && enquiryData.customerContacts[toName.trim()]) {
+                const contact = enquiryData.customerContacts[toName.trim()];
+                setToAttention(contact);
+            }
+            // 2. Try Normalized Match
+            else if (enquiryData.customerContacts) {
+                const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === target);
+                if (match) {
+                    const contact = enquiryData.customerContacts[match];
+                    setToAttention(contact);
+                }
+                // 3. Fallback to global enquiry ReceivedFrom
+                else if (enquiryData.enquiry?.ReceivedFrom) {
+                    setToAttention(enquiryData.enquiry.ReceivedFrom);
+                }
+            }
+            else if (enquiryData.enquiry?.ReceivedFrom) {
+                setToAttention(enquiryData.enquiry.ReceivedFrom);
+            }
+        }
+
+    }, [toName, enquiryData, toAttention]);
+
     const addCustomClause = () => {
         if (!newClauseTitle.trim()) return;
         const newClause = {
@@ -571,17 +608,45 @@ const QuoteForm = () => {
 
         if (!enquiryData) return;
 
-        // Base Options (Enquiry Customers)
-        const baseOpts = (enquiryData.customerOptions || []).map(c => ({ value: c, label: c, type: 'Linked' }));
+        // Get user's accessible divisions to exclude from customer list
+        const userEmail = (currentUser?.EmailId || '').toLowerCase();
+        const normalizedUser = userEmail.replace(/@almcg\.com/g, '@almoayyedcg.com');
+        const userPrefix = normalizedUser.split('@')[0];
+
+        // Find all divisions the user has access to
+        const userAccessDivisions = new Set();
+        if (enquiryData.divisionsHierarchy) {
+            enquiryData.divisionsHierarchy.forEach(d => {
+                const mails = [d.commonMailIds, d.ccMailIds].filter(Boolean).join(',').toLowerCase();
+                const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
+                if (normalizedMails.includes(normalizedUser) || (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@')))) {
+                    // Add both the full name and the cleaned name (without L1/L2 prefix)
+                    const cleanName = d.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                    userAccessDivisions.add(d.itemName.toLowerCase());
+                    userAccessDivisions.add(cleanName.toLowerCase());
+                }
+            });
+        }
+
+        console.log('[Customer Options] User access divisions:', Array.from(userAccessDivisions));
+
+        // Base Options (Enquiry Customers) - EXCLUDE user's own divisions
+        const baseOpts = (enquiryData.customerOptions || [])
+            .filter(c => {
+                const cleanName = c.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                const isUserDivision = userAccessDivisions.has(c.toLowerCase()) || userAccessDivisions.has(cleanName);
+                if (isUserDivision) {
+                    console.log('[Customer Options] Excluding user division:', c);
+                }
+                return !isUserDivision;
+            })
+            .map(c => ({ value: c, label: c, type: 'Linked' }));
+
         let internalOpts = [];
 
         // Determine Internal Customers based on Hierarchy
         if (enquiryData.divisionsHierarchy) {
             console.log('[Customer Options] Checking for internal customers...');
-
-            const userEmail = (currentUser?.EmailId || '').toLowerCase();
-            const normalizedUser = userEmail.replace(/@almcg\.com/g, '@almoayyedcg.com');
-            const userPrefix = normalizedUser.split('@')[0];
 
             // 1. Identify all nodes where the user has access
             // Check both divisionsHierarchy (via email) and availableProfiles (provided by backend)
@@ -598,16 +663,31 @@ const QuoteForm = () => {
             // Combine and get unique nodes
             const allAccessNodes = Array.from(new Map([...userNodesFromHierarchy, ...profileNodes].map(n => [n.id, n])).values());
 
+            // Get names of all nodes user has access to (normalized)
+            const myAccessNames = allAccessNodes.map(n =>
+                n.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            );
+
             // 2. Only add the IMMEDIATE PARENT of these nodes as potential internal customers
-            // EXCLUDING the root project itself.
             allAccessNodes.forEach(node => {
                 if (node.parentId) {
                     const parent = enquiryData.divisionsHierarchy.find(p => p.id === node.parentId);
-                    // Only add the parent if it itself has a parent (i.e. it's not the root Lead Job)
-                    if (parent && parent.parentId) {
+                    if (parent) {
                         const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                        if (cleanParent) {
+                        const isRootJob = !parent.parentId;
+                        const isUserAccessNode = myAccessNames.includes(cleanParent.toLowerCase());
+
+                        // Also check if parent is in userAccessDivisions (from base filtering)
+                        const isUserDivision = userAccessDivisions.has(parent.itemName.toLowerCase()) ||
+                            userAccessDivisions.has(cleanParent.toLowerCase());
+
+                        // Include the parent as an internal customer ONLY IF:
+                        // 1. User does NOT have access to it as their own division
+                        // 2. It's a Root Job BUT user doesn't have direct access to it
+                        if (cleanParent && !isUserAccessNode && !isUserDivision) {
                             internalOpts.push({ value: cleanParent, label: cleanParent, type: 'Internal Division' });
+                        } else if (isUserDivision) {
+                            console.log('[Customer Options] Excluding parent (user division):', cleanParent);
                         }
                     }
                 }
@@ -651,32 +731,105 @@ const QuoteForm = () => {
     // New handler for CreatableSelect
     const handleCustomerChange = (selectedOption) => {
         const selectedName = selectedOption ? selectedOption.value : '';
+        console.log('[handleCustomerChange] Selected:', selectedName);
+        console.log('[handleCustomerChange] Customers List Size:', customersList.length);
+
         setToName(selectedName);
 
         if (!selectedName) {
             setToAddress('');
             setToPhone('');
             setToEmail('');
+            setToAttention('');
             if (enquiryData) {
                 loadPricingData(enquiryData.enquiry.RequestNo, '');
             }
             return;
         }
 
-        const cust = customersList.find(c => c.CompanyName === selectedName);
+        // Set Attention of (ReceivedFrom) for the selected customer
+        console.log('[handleCustomerChange] Looking up customer:', selectedName);
+        console.log('[handleCustomerChange] customerContacts available:', enquiryData?.customerContacts);
+
+        const normalizeName = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const targetNorm = normalizeName(selectedName);
+
+        if (enquiryData?.customerContacts) {
+            // 1. Try exact match
+            if (enquiryData.customerContacts[selectedName]) {
+                setToAttention(enquiryData.customerContacts[selectedName]);
+                console.log('[handleCustomerChange] ✓ Found via exact match:', enquiryData.customerContacts[selectedName]);
+            }
+            // 2. Try normalized match
+            else {
+                const match = Object.keys(enquiryData.customerContacts).find(k => normalizeName(k) === targetNorm);
+                if (match) {
+                    setToAttention(enquiryData.customerContacts[match]);
+                    console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
+                } else {
+                    // 3. Fallback to main enquiry ReceivedFrom if no specific contact
+                    const fallback = enquiryData?.enquiry?.ReceivedFrom || '';
+                    setToAttention(fallback);
+                    console.log('[handleCustomerChange] ✗ Not found, using fallback:', fallback);
+                }
+            }
+        } else {
+            setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+        }
+
+
+
+        // Helper for fuzzy matching (ignore case, whitespace, special chars like commas/dots)
+        const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const target = normalize(selectedName);
+
+        // Try exact match first, then robust normalized match
+        let cust = customersList.find(c => c.CompanyName === selectedName);
+        if (!cust) {
+            cust = customersList.find(c => normalize(c.CompanyName) === target);
+        }
+
         if (cust) {
-            setToAddress(`${cust.Address1 || ''} \n${cust.Address2 || ''} `.trim());
+            console.log('[handleCustomerChange] Found customer in Master list:', cust.CompanyName);
+            const addr = [cust.Address1, cust.Address2].filter(Boolean).join('\n').trim();
+            setToAddress(addr);
             setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''} `.trim());
             setToEmail(cust.EmailId || '');
-        } else if (enquiryData?.availableProfiles) {
-            // Check in internal division profiles
-            const profile = enquiryData.availableProfiles.find(p =>
-                p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedName
-            );
-            if (profile) {
-                setToAddress(profile.address || '');
-                setToPhone(profile.phone || '');
-                setToEmail(profile.email || '');
+        } else {
+            console.log('[handleCustomerChange] Customer NOT found in Master list');
+
+            // Check if it matches the parsed Enquiry Customer (could be inactive)
+            let foundInEnquiry = false;
+            if (enquiryData?.customerDetails) {
+                const enqCustName = enquiryData.enquiry?.CustomerName || enquiryData.CustomerName;
+                // Use same normalized check for fallback validity
+                if (enqCustName && normalize(enqCustName) === target) {
+                    console.log('[handleCustomerChange] Using Enquiry Customer Details fallback (possibly inactive)');
+                    const details = enquiryData.customerDetails;
+                    const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+                    setToAddress(addr);
+                    setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
+                    setToEmail(details.EmailId || '');
+                    foundInEnquiry = true;
+                }
+            }
+
+            // STRICT CHECK: Only check Internal Profiles if type is explicitly 'Internal Division' 
+            // OR if it's a generic/custom entry (no type or __isNew__) to avoid accidental matches.
+            // BUT NEVER check if type is 'Linked' (Customer from Enquiry).
+            const isLinkedCustomer = selectedOption?.type === 'Linked';
+
+            if (!foundInEnquiry && !isLinkedCustomer && enquiryData?.availableProfiles) {
+                // Check in internal division profiles
+                const profile = enquiryData.availableProfiles.find(p =>
+                    p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedName
+                );
+                if (profile) {
+                    console.log('[handleCustomerChange] Found internal profile:', profile);
+                    setToAddress(profile.address || '');
+                    setToPhone(profile.phone || '');
+                    setToEmail(profile.email || '');
+                }
             }
         }
 
@@ -719,18 +872,24 @@ const QuoteForm = () => {
                 const pData = await pricingRes.json();
                 console.log('Pricing Data Received:', pData);
 
-                // FIX: Transform values from Array to Map for O(1) lookup in calculateSummary
-                // The API now returns values as an array, but calculateSummary expects a Map.
-                const valueMap = {};
+                // --- KEY MIGRATION & CUSTOMER GROUPING ---
+                // Process Raw Array into Nested Map: [CustomerName][Key] = Value
+                const groupedValues = {};
                 if (Array.isArray(pData.values)) {
                     pData.values.forEach(v => {
-                        // Key format: OptionID_JobID
+                        const rawCust = v.CustomerName || pData.activeCustomer || 'Main';
+                        const cust = rawCust.trim();
+                        if (!groupedValues[cust]) groupedValues[cust] = {};
+
                         if (v.EnquiryForID) {
-                            valueMap[`${v.OptionID}_${v.EnquiryForID}`] = v;
+                            groupedValues[cust][`${v.OptionID}_${v.EnquiryForID}`] = v;
                         }
                     });
                 }
-                pData.values = valueMap;
+                pData.allValues = groupedValues;
+
+                // Set active values for current view customer
+                pData.values = groupedValues[cxName.trim()] || {};
 
                 setPricingData(pData);
 
@@ -919,8 +1078,6 @@ const QuoteForm = () => {
                     }
 
                     // STRICT SCOPING FIX (Step 716)
-                    // If the Option belongs to a specific Job Item (e.g. BMS), ONLY count the value for that Job ID.
-                    // This prevents "cross-pollinated" values (e.g. BMS Option having values for Electrical Job) from being summed.
                     const optItem = (opt.itemName || '').trim().toLowerCase();
                     const jobItem = (job.itemName || '').trim().toLowerCase();
                     if (optItem && optItem !== jobItem && !optItem.includes(jobItem) && !jobItem.includes(optItem)) {
@@ -928,8 +1085,32 @@ const QuoteForm = () => {
                     }
 
                     const key = `${opt.id}_${job.id}`;
-                    const val = data.values[key];
-                    const price = val ? parseFloat(val.Price || 0) : 0;
+                    let val = data.values[key];
+                    let price = val ? parseFloat(val.Price || 0) : 0;
+
+                    // Fallback to Internal Parent Price if 0 and we have allValues
+                    if (price <= 0 && data.allValues && job.parentId) {
+                        const parentJob = data.jobs.find(j => j.id === job.parentId);
+                        if (parentJob) {
+                            const parentName = parentJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            const internalValues = data.allValues[parentName];
+                            if (internalValues) {
+                                // Find the option for this item under the parent customer
+                                const internalOpt = data.options.find(o =>
+                                    o.name === opt.name &&
+                                    o.itemName === job.itemName &&
+                                    o.customerName === parentName
+                                );
+                                if (internalOpt) {
+                                    const internalVal = internalValues[`${internalOpt.id}_${job.id}`];
+                                    if (internalVal && parseFloat(internalVal.Price) > 0) {
+                                        price = parseFloat(internalVal.Price);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if (price > 0) {
                         console.log(`[calculateSummary]   Job "${job.itemName}": ${price}`);
                     }
@@ -1242,6 +1423,19 @@ const QuoteForm = () => {
         setToPhone(quote.ToPhone || '');
         setToEmail(quote.ToEmail || '');
 
+        // Set Attention Of (ReceivedFrom) for the loaded quote
+        if (quote.ToName && enquiryData?.customerContacts) {
+            const contact = enquiryData.customerContacts[quote.ToName.trim()];
+            if (contact) {
+                setToAttention(contact);
+            } else {
+                // Fallback to enquiry global ReceivedFrom
+                setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+            }
+        } else {
+            setToAttention('');
+        }
+
         // Always use Company Details for Footer, never the Customer (recipient) details
         if (enquiryData?.companyDetails) {
             setFooterDetails(enquiryData.companyDetails);
@@ -1426,6 +1620,7 @@ const QuoteForm = () => {
         setShowSuggestions(false);
         setLoading(true);
         setExistingQuotes([]);
+        setToAttention('');
 
         try {
             const userEmail = currentUser?.EmailId || '';
@@ -1576,27 +1771,66 @@ const QuoteForm = () => {
                 }
 
                 setToName(defaultCustomer);
-
                 // Final Data Update to Ensure all modifications (Lead Job Logic, etc.) are reflected in State
                 setEnquiryData({ ...data });
 
                 if (defaultCustomer) {
-                    const cust = customersList.find(c => c.CompanyName === defaultCustomer);
+                    const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    const target = normalize(defaultCustomer);
+
+                    // Try exact match first, then robust normalized match
+                    let cust = customersList.find(c => c.CompanyName === defaultCustomer);
+                    if (!cust) {
+                        cust = customersList.find(c => normalize(c.CompanyName) === target);
+                    }
+
                     if (cust) {
-                        setToAddress(data.customerDetails?.Address || `${cust.Address1 || ''}\n${cust.Address2 || ''}`.trim() || '');
-                        setToPhone(`${data.customerDetails?.Phone1 || ''} ${data.customerDetails?.Phone2 ? '/ ' + data.customerDetails?.Phone2 : ''}`.trim() || `${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''}`.trim() || '');
-                        setToEmail(data.customerDetails?.EmailId || cust.EmailId || '');
+                        // NOTE: We prioritize MASTER LIST address over enquiry data default.
+                        const addr = [cust.Address1, cust.Address2].filter(Boolean).join('\n').trim();
+                        setToAddress(addr);
+                        setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''}`.trim());
+                        setToEmail(cust.EmailId || ''); // Prioritize Master Email
                     } else {
-                        // Even if not in master list, allow it
-                        setToAddress('');
-                        setToPhone('');
-                        setToEmail('');
+                        // Customer NOT in Master List.
+                        const enqCustName = data.enquiry?.CustomerName || '';
+
+                        // Strict check on normalized name
+                        if (enqCustName && normalize(enqCustName) === target && data.customerDetails) {
+                            const details = data.customerDetails;
+                            const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+                            setToAddress(addr);
+                            setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
+                            setToEmail(details.EmailId || '');
+                        } else {
+                            // Even if not in master list, allow it but CLEAR details to avoid internal division leak
+                            setToAddress('');
+                            setToPhone('');
+                            setToEmail('');
+                        }
                     }
                 } else {
                     setToAddress('');
                     setToPhone('');
                     setToEmail('');
+                    setToAttention('');
                 }
+
+                // Set Attention of (ReceivedFrom) for the default customer
+                if (defaultCustomer && data.customerContacts) {
+                    console.log('[handleSelectEnquiry] Setting Attention for default customer:', defaultCustomer);
+                    console.log('[handleSelectEnquiry] customerContacts:', data.customerContacts);
+
+                    if (data.customerContacts[defaultCustomer]) {
+                        setToAttention(data.customerContacts[defaultCustomer]);
+                        console.log('[handleSelectEnquiry] ✓ Set Attention to:', data.customerContacts[defaultCustomer]);
+                    } else {
+                        // Fallback to main enquiry ReceivedFrom if no specific contact
+                        const fallback = data.enquiry?.ReceivedFrom || '';
+                        setToAttention(fallback);
+                        console.log('[handleSelectEnquiry] ✗ Not found in customerContacts, using fallback:', fallback);
+                    }
+                }
+
 
                 // Default to enquiry customer for pricing load
                 loadPricingData(data.enquiry.RequestNo, defaultCustomer);
@@ -1719,6 +1953,7 @@ const QuoteForm = () => {
         setHasUserPricing(false);
         setQuoteContextScope(null); // Clear Scope Context
         setSelectedJobs([]); // Clear selected jobs
+        setToAttention('');
         setClauses({
             showScopeOfWork: true, showBasisOfOffer: true, showExclusions: true,
             showPricingTerms: true, showSchedule: true, showWarranty: true,
@@ -1770,29 +2005,60 @@ const QuoteForm = () => {
             let isElec = false;
             let isFire = false;
 
-            // 1. Check Selected Jobs (Explicit User Selection)
-            if (selectedJobs && selectedJobs.length > 0) {
-                selectedJobs.forEach(job => {
-                    const up = job.toUpperCase();
-                    if (up.includes('PLUMBING') || up.includes('PLFF')) isPlumbing = true;
-                    else if (up.includes('BMS')) isBMS = true;
-                    else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
-                    else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
-                    else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
-                });
+            // 0. PRIORITY: Check User's Primary Editable Scope (Prevents Sub-Job Override)
+            // If user is "Electrical" with BMS as sub-job, we want "ELE" not "BMS"
+            const userEditableJobs = pricingData?.access?.editableJobs || [];
+            if (userEditableJobs.length > 0) {
+                // Find the user's PRIMARY scope (typically the first or parent job they can edit)
+                const primaryScope = userEditableJobs[0]; // First editable job is usually the primary
+                const up = primaryScope.toUpperCase();
+                if (up.includes('ELECTRICAL') || up.includes('ELE')) {
+                    isElec = true;
+                    console.log('[getQuotePayload] User Primary Scope: Electrical');
+                } else if (up.includes('PLUMBING') || up.includes('PLFF')) {
+                    isPlumbing = true;
+                    console.log('[getQuotePayload] User Primary Scope: Plumbing');
+                } else if (up.includes('CIVIL') || up.includes('CVLP')) {
+                    isCivil = true;
+                    console.log('[getQuotePayload] User Primary Scope: Civil');
+                } else if (up.includes('FIRE') || up.includes('FPE')) {
+                    isFire = true;
+                    console.log('[getQuotePayload] User Primary Scope: Fire');
+                } else if (up.includes('BMS')) {
+                    isBMS = true;
+                    console.log('[getQuotePayload] User Primary Scope: BMS');
+                }
             }
 
-            // 2. Check Pricing Summary (Visible Groups on UI)
-            if (pricingSummary && pricingSummary.length > 0) {
-                pricingSummary.forEach(grp => {
-                    const up = grp.name.toUpperCase();
-                    if (up.includes('PLUMBING') || up.includes('PLFF') || up.includes('P&F') || up.includes('P & F')) isPlumbing = true;
-                    else if (up.includes('BMS')) isBMS = true;
-                    else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
-                    else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
-                    else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
-                    console.log(`[getQuotePayload] Inspecting Group: ${grp.name} -> Plumb:${isPlumbing}, BMS:${isBMS}, Civil:${isCivil}`);
-                });
+            // 1. Check Selected Jobs (Only if no primary scope detected)
+            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS) {
+                if (selectedJobs && selectedJobs.length > 0) {
+                    selectedJobs.forEach(job => {
+                        const up = job.toUpperCase();
+                        if (up.includes('PLUMBING') || up.includes('PLFF')) isPlumbing = true;
+                        else if (up.includes('BMS')) isBMS = true;
+                        else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
+                        else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
+                        else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
+                    });
+                }
+            }
+
+            // 2. Check Pricing Summary (Visible Groups on UI) - ONLY if no primary scope detected
+            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS) {
+                if (pricingSummary && pricingSummary.length > 0) {
+                    pricingSummary.forEach(grp => {
+                        const up = grp.name.toUpperCase();
+                        if (up.includes('PLUMBING') || up.includes('PLFF') || up.includes('P&F') || up.includes('P & F')) isPlumbing = true;
+                        else if (up.includes('BMS')) isBMS = true;
+                        else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
+                        else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
+                        else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
+                        console.log(`[getQuotePayload] Inspecting Group: ${grp.name} -> Plumb:${isPlumbing}, BMS:${isBMS}, Civil:${isCivil}`);
+                    });
+                }
+            } else {
+                console.log('[getQuotePayload] Skipping Pricing Summary check - Primary scope already detected');
             }
 
             // 3. User Department Hint & Access (Final Tie-Breaker)
@@ -1844,6 +2110,8 @@ const QuoteForm = () => {
                 console.log(`[getQuotePayload] Using Tab-based Division: ${tabDivision}`);
             } else if (isCivil) effectiveDivisionCode = 'CVLP';
             else effectiveDivisionCode = baseDiv;
+
+            console.log(`[getQuotePayload] FINAL Division Code: ${effectiveDivisionCode} (isElec:${isElec}, isBMS:${isBMS}, isPlumb:${isPlumbing})`);
             // ---------------------------------------------------------
         }
 
@@ -2619,13 +2887,49 @@ const QuoteForm = () => {
                         {toName && (
                             // Simplified Visibility Logic: If matching quotes exist, show the section.
                             existingQuotes.filter(q => {
+                                // 1. Basic Match
                                 const matchCustomer = (q.ToName || '').trim().toLowerCase() === (toName || '').trim().toLowerCase();
-                                let matchLeadJob = true;
+                                if (!matchCustomer) return false;
+
+                                // 2. Lead Job Prefix Match
                                 if (enquiryData && enquiryData.leadJobPrefix) {
                                     const prefixPattern = `-${enquiryData.leadJobPrefix}`;
-                                    matchLeadJob = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
+                                    if (!q.QuoteNumber || !q.QuoteNumber.includes(prefixPattern)) return false;
                                 }
-                                return matchCustomer && matchLeadJob;
+
+                                // 3. Role-Based Scope Filter: Non-admins only see their own division's quotes
+                                const userEmail = (currentUser?.email || currentUser?.EmailId || '').toLowerCase().trim();
+                                const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
+                                if (!isAdmin) {
+                                    // STRICT DIVISION FILTER: Filter by division code to ensure separation.
+                                    const quoteDiv = q.QuoteNumber?.split('/')[1]?.toUpperCase();
+
+                                    // Check 1: User's editable jobs from pricing access
+                                    const userEditableJobs = pricingData?.access?.editableJobs || [];
+                                    const hasEditAccess = userEditableJobs.some(job => {
+                                        const jobUpper = job.toUpperCase();
+                                        if (quoteDiv === 'ELE' && (jobUpper.includes('ELECTRICAL') || jobUpper.includes('ELE'))) return true;
+                                        if (quoteDiv === 'BMS' && jobUpper.includes('BMS')) return true;
+                                        if (quoteDiv === 'PLFF' && (jobUpper.includes('PLUMBING') || jobUpper.includes('PLFF'))) return true;
+                                        if (quoteDiv === 'CVLP' && (jobUpper.includes('CIVIL') || jobUpper.includes('CVLP'))) return true;
+                                        if (quoteDiv === 'FPE' && (jobUpper.includes('FIRE') || jobUpper.includes('FPE'))) return true;
+                                        if (quoteDiv === 'AAC' && jobUpper.includes('AIR')) return true;
+                                        return false;
+                                    });
+
+                                    // Check 2: Email-based access
+                                    const hasDivAccess = (enquiryData?.availableProfiles || []).some(p => {
+                                        if (p.divisionCode?.toUpperCase() !== quoteDiv) return false;
+                                        const dm = (enquiryData?.divisionEmails || []).find(d => d.itemName === p.itemName);
+                                        if (!dm) return false;
+                                        const allEmails = [dm.ccMailIds, dm.commonMailIds].filter(Boolean).join(',').toLowerCase();
+                                        return allEmails.includes(userEmail);
+                                    });
+
+                                    if (!hasEditAccess && !hasDivAccess) return false;
+                                }
+
+                                return true;
                             }).length > 0
                         ) && (
                                 <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
@@ -2688,19 +2992,48 @@ const QuoteForm = () => {
 
                                                             // Filter Logic
                                                             const filteredQuotes = existingQuotes.filter(q => {
-                                                                // Basic Match
+                                                                // 1. Basic Match
                                                                 const matchCustomer = (q.ToName || '').trim().toLowerCase() === (toName || '').trim().toLowerCase();
                                                                 if (!matchCustomer) return false;
 
-                                                                // Match Lead Job Context (Prefix Check) - CRITICAL FIX
-                                                                // Even if user has access to BMS quotes, they must match the selected Lead Job (L1 vs L2)
+                                                                // 2. Match Lead Job Context (Prefix Check) - CRITICAL FIX
                                                                 if (enquiryData && enquiryData.leadJobPrefix) {
                                                                     const prefixPattern = `-${enquiryData.leadJobPrefix.trim()}`;
                                                                     const matchesPrefix = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
-                                                                    if (!matchesPrefix) {
-                                                                        // console.log(`[QuoteFilter] Filtered OUT: ${q.QuoteNumber} - Prefix Mismatch. Expected ${prefixPattern}`);
+                                                                    if (!matchesPrefix) return false;
+                                                                }
+
+                                                                // 3. User Role/Division Access Filter
+                                                                const userEmail = (currentUser?.email || currentUser?.EmailId || '').toLowerCase().trim();
+                                                                const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
+                                                                if (!isAdmin) {
+                                                                    // STRICT DIVISION FILTER
+                                                                    const quoteDiv = q.QuoteNumber?.split('/')[1]?.toUpperCase();
+
+                                                                    // Check 1: User's editable jobs from pricing access
+                                                                    const userEditableJobs = pricingData?.access?.editableJobs || [];
+                                                                    const hasEditAccess = userEditableJobs.some(job => {
+                                                                        const jobUpper = job.toUpperCase();
+                                                                        // Map job names to division codes
+                                                                        if (quoteDiv === 'ELE' && (jobUpper.includes('ELECTRICAL') || jobUpper.includes('ELE'))) return true;
+                                                                        if (quoteDiv === 'BMS' && jobUpper.includes('BMS')) return true;
+                                                                        if (quoteDiv === 'PLFF' && (jobUpper.includes('PLUMBING') || jobUpper.includes('PLFF'))) return true;
+                                                                        if (quoteDiv === 'CVLP' && (jobUpper.includes('CIVIL') || jobUpper.includes('CVLP'))) return true;
+                                                                        if (quoteDiv === 'FPE' && (jobUpper.includes('FIRE') || jobUpper.includes('FPE'))) return true;
+                                                                        if (quoteDiv === 'AAC' && jobUpper.includes('AIR')) return true;
                                                                         return false;
-                                                                    }
+                                                                    });
+
+                                                                    // Check 2: Email-based access (CC or Common)
+                                                                    const hasDivAccess = (enquiryData?.availableProfiles || []).some(p => {
+                                                                        if (p.divisionCode?.toUpperCase() !== quoteDiv) return false;
+                                                                        const dm = (enquiryData?.divisionEmails || []).find(d => d.itemName === p.itemName);
+                                                                        if (!dm) return false;
+                                                                        const allEmails = [dm.ccMailIds, dm.commonMailIds].filter(Boolean).join(',').toLowerCase();
+                                                                        return allEmails.includes(userEmail);
+                                                                    });
+
+                                                                    if (!hasEditAccess && !hasDivAccess) return false;
                                                                 }
 
                                                                 // Match Tab Context
@@ -2994,9 +3327,21 @@ const QuoteForm = () => {
                                     </div>
 
                                     <div style={{ marginBottom: '10px' }}>
+                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of</label>
+                                        <input
+                                            type="text"
+                                            value={toAttention}
+                                            onChange={(e) => setToAttention(e.target.value)}
+                                            placeholder="Contact Person..."
+                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                        />
+                                    </div>
+
+                                    <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Subject</label>
                                         <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical' }} />
                                     </div>
+
 
                                     <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Prepared By</label>
@@ -3552,7 +3897,9 @@ const QuoteForm = () => {
                                             </tr>
                                             <tr>
                                                 <td style={{ fontWeight: '600', padding: '8px 12px', color: '#64748b' }}>Attention of:</td>
-                                                <td style={{ padding: '8px 12px', fontWeight: '500' }}>{enquiryData.enquiry.ReceivedFrom || 'N/A'}</td>
+                                                <td style={{ padding: '8px 12px', fontWeight: '500' }}>
+                                                    {toAttention ? toAttention.split(',').map(n => n.trim()).join(', ') : 'N/A'}
+                                                </td>
                                             </tr>
                                         </tbody>
                                     </table>

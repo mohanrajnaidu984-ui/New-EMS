@@ -298,27 +298,81 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             console.error('[Quote API] Error fetching Prepared By options:', err);
         }
 
-        // Get Customer Options
+        // Get Customer Options with ReceivedFrom contacts
         let customerOptions = [];
+        let customerContacts = {}; // Map customer names to their ReceivedFrom contacts
         try {
-            const customerResult = await sql.query`SELECT CustomerName FROM EnquiryCustomer WHERE RequestNo = ${requestNo}`;
+            // Get customers from EnquiryCustomer table
+            const customerResult = await sql.query`
+                SELECT CustomerName 
+                FROM EnquiryCustomer 
+                WHERE RequestNo = ${requestNo}
+            `;
+
+            // Get ReceivedFrom contacts from ReceivedFrom table
+            const receivedFromResult = await sql.query`
+                SELECT ContactName, CompanyName 
+                FROM ReceivedFrom 
+                WHERE RequestNo = ${requestNo}
+            `;
+
+            console.log('[Quote API] ReceivedFrom records:', receivedFromResult.recordset);
+
+            // Build customerContacts mapping from ReceivedFrom table
+            receivedFromResult.recordset.forEach(row => {
+                if (row.CompanyName && row.ContactName) {
+                    // Clean trailing commas and trim
+                    const company = row.CompanyName.replace(/,+$/, '').trim();
+                    const contact = row.ContactName.trim();
+
+                    // If this company already has contacts, append with comma
+                    if (customerContacts[company]) {
+                        customerContacts[company] += ', ' + contact;
+                    } else {
+                        customerContacts[company] = contact;
+                    }
+                }
+            });
+
+            // Helper to check if a customer already has a contact (normalized)
+            const hasContact = (cust) => {
+                const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const target = norm(cust);
+                return Object.keys(customerContacts).some(k => norm(k) === target);
+            };
+
+            // Process EnquiryCustomer records
             customerResult.recordset.forEach(row => {
                 if (row.CustomerName) {
-                    // Split by comma in case of legacy data or combined strings
+                    // Split by comma and clean
                     row.CustomerName.split(',').forEach(c => {
-                        const trimmed = c.trim();
-                        if (trimmed) customerOptions.push(trimmed);
+                        const trimmed = c.replace(/,+$/, '').trim();
+                        if (trimmed) {
+                            customerOptions.push(trimmed);
+                        }
                     });
                 }
             });
 
+            // Add main enquiry customer if not already in the list
             if (enquiry.CustomerName) {
                 enquiry.CustomerName.split(',').forEach(c => {
-                    const trimmed = c.trim();
-                    if (trimmed) customerOptions.push(trimmed);
+                    const trimmed = c.replace(/,+$/, '').trim();
+                    if (trimmed) {
+                        if (!customerOptions.includes(trimmed)) {
+                            customerOptions.push(trimmed);
+                        }
+                        // Use the main enquiry's ReceivedFrom ONLY if no specific contact exists for this customer
+                        if (!hasContact(trimmed) && enquiry.ReceivedFrom) {
+                            customerContacts[trimmed] = enquiry.ReceivedFrom;
+                            console.log(`[Quote API] Mapped main customer "${trimmed}" to ReceivedFrom: "${enquiry.ReceivedFrom}"`);
+                        }
+                    }
                 });
             }
+
             customerOptions = [...new Set(customerOptions)];
+            console.log('[Quote API] Final customerContacts mapping:', customerContacts);
         } catch (err) {
             console.error('[Quote API] Error fetching Customer options:', err);
             if (enquiry.CustomerName) {
@@ -337,6 +391,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             availableProfiles,
             preparedByOptions,
             customerOptions,
+            customerContacts,  // Map of customer names to ReceivedFrom contacts
             leadJobPrefix,
             divisionEmails: resolvedItems.map(item => ({
                 itemName: item.ItemName,
@@ -427,26 +482,35 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'Request number is required' });
         }
 
-        // Get next quote number
-        // User requested Global Serial Number (Step 675) - "next serial continuation number available in the database"
-        // This ensures unique running numbers across all enquiries/divisions
-        const quoteCountResult = await sql.query(`
-            SELECT ISNULL(MAX(QuoteNo), 0) + 1 AS NextQuoteNo 
-            FROM EnquiryQuotes 
-        `);
-        const quoteNo = quoteCountResult.recordset[0].NextQuoteNo;
-        const revisionNo = 0;
+        // Get next quote number - UNIQUE PER CUSTOMER
+        // Check for existing quotes for this specific combination:
+        // - Same RequestNo (Enquiry)
+        // - Same Division Code (e.g., ELE, BMS)
+        // - Same Lead Job Prefix (e.g., L1)
+        // - Same Customer (ToName)
+        // This ensures each customer gets a unique sequential quote number
 
-        // Use supplied codes (from frontend, based on user login/selection)
         const dept = departmentCode || "GEN";
         const division = divisionCode || "AAC";
-
-        // Revert to including Lead Job Prefix (e.g. 104-L1) as requested by user in Step 587
         const requestRef = leadJobPrefix ? `${requestNo}-${leadJobPrefix}` : requestNo;
+
+        const existingQuotesResult = await sql.query`
+            SELECT ISNULL(MAX(QuoteNo), 0) AS MaxQuoteNo
+            FROM EnquiryQuotes
+            WHERE RequestNo = ${requestNo}
+              AND QuoteNumber LIKE ${dept + '/' + division + '/' + requestRef + '/%'}
+              AND ToName = ${toName}
+        `;
+
+        const quoteNo = (existingQuotesResult.recordset[0].MaxQuoteNo || 0) + 1;
+        const revisionNo = 0;
 
         // FORMAT: Dept/Div/EnquiryRef/QuoteNo-Revision
         const quoteNumber = `${dept}/${division}/${requestRef}/${quoteNo}-R${revisionNo}`;
 
+        console.log(`[Quote Creation] Customer: ${toName}, Division: ${division}, QuoteNo: ${quoteNo}, Full: ${quoteNumber}`);
+
+        const now = new Date();
         const result = await sql.query`
             INSERT INTO EnquiryQuotes (
                 RequestNo, QuoteNumber, QuoteNo, RevisionNo, ValidityDays,
@@ -456,7 +520,7 @@ router.post('/', async (req, res) => {
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
                 TotalAmount, Status, CustomClauses, ClauseOrder,
-                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail
+                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
             VALUES (
@@ -467,7 +531,7 @@ router.post('/', async (req, res) => {
                 ${scopeOfWork}, ${basisOfOffer}, ${exclusions}, ${pricingTerms},
                 ${schedule}, ${warranty}, ${responsibilityMatrix}, ${termsConditions}, ${acceptance}, ${billOfQuantity},
                 ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson},
-                ${quoteDate}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}
+                ${quoteDate}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${now}, ${now}
             )
         `;
 
@@ -511,6 +575,7 @@ router.put('/:id', async (req, res) => {
         const customClausesJson = JSON.stringify(customClauses);
         const clauseOrderJson = JSON.stringify(clauseOrder);
 
+        const now = new Date();
         await sql.query`
             UPDATE EnquiryQuotes SET
         ValidityDays = ${validityDays},
@@ -549,7 +614,7 @@ router.put('/:id', async (req, res) => {
         ToEmail = ${toEmail},
         PreparedBy = ${preparedBy},
         PreparedByEmail = ${preparedByEmail},
-        UpdatedAt = GETDATE()
+        UpdatedAt = ${now}
             WHERE ID = ${id}
         `;
 
@@ -615,6 +680,7 @@ router.post('/:id/revise', async (req, res) => {
         const customClausesJson = customClauses ? JSON.stringify(customClauses) : existing.CustomClauses;
         const clauseOrderJson = clauseOrder ? JSON.stringify(clauseOrder) : existing.ClauseOrder;
 
+        const now = new Date();
         const result = await sql.query`
             INSERT INTO EnquiryQuotes (
                 RequestNo, QuoteNumber, QuoteNo, RevisionNo, ValidityDays,
@@ -624,7 +690,7 @@ router.post('/:id/revise', async (req, res) => {
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
                 TotalAmount, Status, CustomClauses, ClauseOrder,
-                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail
+                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
             VALUES (
@@ -662,7 +728,7 @@ router.post('/:id/revise', async (req, res) => {
                 ${toName !== undefined ? toName : existing.ToName}, 
                 ${toAddress !== undefined ? toAddress : existing.ToAddress}, 
                 ${toPhone !== undefined ? toPhone : existing.ToPhone}, 
-                ${toEmail !== undefined ? toEmail : existing.ToEmail}
+                ${toEmail !== undefined ? toEmail : existing.ToEmail}, ${now}, ${now}
             )
         `;
 
@@ -703,18 +769,19 @@ router.post('/config/templates', async (req, res) => {
 
         const configJson = JSON.stringify(clausesConfig);
 
+        const now = new Date();
         const check = await sql.query`SELECT ID FROM QuoteTemplates WHERE TemplateName = ${templateName} `;
         if (check.recordset.length > 0) {
             await sql.query`
                 UPDATE QuoteTemplates 
-                SET ClausesConfig = ${configJson}, CreatedBy = ${createdBy}, CreatedAt = GETDATE()
+                SET ClausesConfig = ${configJson}, CreatedBy = ${createdBy}, CreatedAt = ${now}
                 WHERE TemplateName = ${templateName}
         `;
             res.json({ success: true, message: 'Template updated' });
         } else {
             await sql.query`
-                INSERT INTO QuoteTemplates(TemplateName, ClausesConfig, CreatedBy)
-        VALUES(${templateName}, ${configJson}, ${createdBy})
+                INSERT INTO QuoteTemplates(TemplateName, ClausesConfig, CreatedBy, CreatedAt)
+        VALUES(${templateName}, ${configJson}, ${createdBy}, ${now})
             `;
             res.json({ success: true, message: 'Template saved' });
         }
