@@ -714,6 +714,7 @@ app.get('/api/enquiries', async (req, res) => {
                 id: i.ID,
                 parentId: i.ParentID,
                 itemName: i.ItemName,
+                leadJobCode: i.LeadJobCode,
                 parentName: i.ParentItemName
             }));
             const relatedItemsDisplay = relatedItemsRaw.map(i => i.ItemName);
@@ -858,6 +859,7 @@ app.post('/api/enquiries', async (req, res) => {
                         return {
                             tempId: i.id || Math.random().toString(36),
                             itemName: i.itemName,
+                            leadJobCode: i.leadJobCode,
                             parentId: i.parentId,
                             parentName: i.parentName
                         };
@@ -874,10 +876,23 @@ app.post('/api/enquiries', async (req, res) => {
                             if (ready) {
                                 const r = new sql.Request(txn);
                                 r.input('reqNo', sql.NVarChar, RequestNo);
-                                r.input('val', sql.NVarChar, item.itemName);
+
+                                let code = item.leadJobCode || null;
+                                let name = item.itemName;
+
+                                if (!code) {
+                                    const match = name.match(/^(L\d+)\s+-\s+(.*)$/);
+                                    if (match) {
+                                        code = match[1];
+                                        name = match[2];
+                                    }
+                                }
+
+                                r.input('code', sql.NVarChar, code);
+                                r.input('val', sql.NVarChar, name);
                                 r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
 
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, LeadJobCode, ItemName, ParentID) VALUES (@reqNo, @code, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             } else {
                                 nextBatch.push(item);
@@ -887,9 +902,22 @@ app.post('/api/enquiries', async (req, res) => {
                             for (const item of nextBatch) {
                                 const r = new sql.Request(txn);
                                 r.input('reqNo', sql.NVarChar, RequestNo);
-                                r.input('val', sql.NVarChar, item.itemName);
+
+                                let code = item.leadJobCode || null;
+                                let name = item.itemName;
+
+                                if (!code) {
+                                    const match = name.match(/^(L\d+)\s+-\s+(.*)$/);
+                                    if (match) {
+                                        code = match[1];
+                                        name = match[2];
+                                    }
+                                }
+
+                                r.input('code', sql.NVarChar, code);
+                                r.input('val', sql.NVarChar, name);
                                 r.input('pId', sql.Int, null);
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, LeadJobCode, ItemName, ParentID) VALUES (@reqNo, @code, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             }
                             break;
@@ -1316,6 +1344,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
                         return {
                             tempId: i.id || Math.random().toString(36),
                             itemName: i.itemName,
+                            leadJobCode: i.leadJobCode,
                             parentId: i.parentId,
                             parentName: i.parentName
                         };
@@ -1332,11 +1361,24 @@ app.put('/api/enquiries/:id', async (req, res) => {
                             if (ready) {
                                 const r = new sql.Request();
                                 r.input('reqNo', sql.NVarChar, id);
-                                r.input('val', sql.NVarChar, item.itemName);
+
+                                let code = item.leadJobCode || null;
+                                let name = item.itemName;
+
+                                if (!code) {
+                                    const match = name.match(/^(L\d+)\s+-\s+(.*)$/);
+                                    if (match) {
+                                        code = match[1];
+                                        name = match[2];
+                                    }
+                                }
+
+                                r.input('code', sql.NVarChar, code);
+                                r.input('val', sql.NVarChar, name);
                                 r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, item.parentId ? idMap[item.parentId] : null);
 
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, LeadJobCode, ItemName, ParentID) VALUES (@reqNo, @code, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             } else {
                                 nextBatch.push(item);
@@ -1346,10 +1388,23 @@ app.put('/api/enquiries/:id', async (req, res) => {
                             for (const item of nextBatch) {
                                 const r = new sql.Request();
                                 r.input('reqNo', sql.NVarChar, id);
-                                r.input('val', sql.NVarChar, item.itemName);
+
+                                let code = item.leadJobCode || null;
+                                let name = item.itemName;
+
+                                if (!code) {
+                                    const match = name.match(/^(L\d+)\s+-\s+(.*)$/);
+                                    if (match) {
+                                        code = match[1];
+                                        name = match[2];
+                                    }
+                                }
+
+                                r.input('code', sql.NVarChar, code);
+                                r.input('val', sql.NVarChar, name);
                                 r.input('pName', sql.NVarChar, item.parentName || null);
                                 r.input('pId', sql.Int, null);
-                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, ItemName, ParentID) VALUES (@reqNo, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
+                                const res = await r.query(`INSERT INTO EnquiryFor (RequestNo, LeadJobCode, ItemName, ParentID) VALUES (@reqNo, @code, @val, @pId); SELECT SCOPE_IDENTITY() AS id;`);
                                 idMap[item.tempId] = res.recordset[0].id;
                             }
                             break;

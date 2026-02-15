@@ -282,9 +282,25 @@ const PricingForm = () => {
                 // Process Raw Array into Nested Map: [CustomerName][Key] = Value
                 const groupedValues = {}; // { 'Nass': { '204_280': ... }, 'Ahmed': { ... } }
 
+                // Create a Map of OptionID -> CustomerName for robust lookup
+                const optionCustomerMap = {};
+                if (data.options) {
+                    data.options.forEach(o => {
+                        if (o.id) optionCustomerMap[o.id] = o.customerName; // Assume Option's Customer is Truth
+                    });
+                }
+
                 if (Array.isArray(data.values) && data.jobs) {
                     data.values.forEach(v => {
-                        const rawCust = v.CustomerName || data.enquiry.customerName || 'Main';
+                        // FIX: Resolve Customer from Option Definition first (Defense against DB having NULL CustomerName on Values)
+                        let rawCust = 'Main';
+                        if (optionCustomerMap[v.OptionID]) {
+                            rawCust = optionCustomerMap[v.OptionID];
+                        } else {
+                            // Fallback to Value's stored customer or Enquiry default
+                            rawCust = v.CustomerName || data.enquiry.customerName || 'Main';
+                        }
+
                         const cust = rawCust.trim(); // Ensure clean customer name match (Step 937)
 
                         if (!groupedValues[cust]) groupedValues[cust] = {};
@@ -293,6 +309,12 @@ const PricingForm = () => {
                         // 1. Strict ID Key
                         if (v.EnquiryForID) {
                             const idKey = `${v.OptionID}_${v.EnquiryForID}`;
+                            // Priority Logic: If key already exists, overwrite ONLY if this value is "Better Match"?
+                            // Currently we partition by `cust` so collisions are rare within same customer bucket.
+                            // BUT, if we have "Main" falling back into "Noorwood" bucket due to Option Map logic?
+                            // No, `optionCustomerMap` forces it.
+
+                            // Standard Assignment
                             groupedValues[cust][idKey] = v;
                         }
 
@@ -300,7 +322,8 @@ const PricingForm = () => {
                         if (v.EnquiryForItem) {
                             // Try to find job by ID first if possible
                             let job = null;
-                            if (v.EnquiryForID) job = data.jobs.find(j => j.id == v.EnquiryForID);
+                            const jobId = v.EnquiryForID;
+                            if (jobId) job = data.jobs.find(j => j.id == jobId);
 
                             if (job) {
                                 // We have Job Object, generate robustness keys
@@ -308,10 +331,8 @@ const PricingForm = () => {
                                 groupedValues[cust][nameKey] = v;
 
                                 const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                if (cleanName !== job.itemName) {
-                                    const cleanKey = `${v.OptionID}_${cleanName}`;
-                                    groupedValues[cust][cleanKey] = v;
-                                }
+                                const cleanKey = `${v.OptionID}_${cleanName}`;
+                                groupedValues[cust][cleanKey] = v;
                             } else {
                                 // Legacy/Orphan Value (No Job ID linked, or Job missing)
                                 // Just use stored ItemName
@@ -463,20 +484,20 @@ const PricingForm = () => {
                         const idKey = `${activeOptionId}_${jobId}`;
                         let selfPrice = 0;
 
-                        // Check strict match
-                        if (data.values && data.values[idKey] && parseFloat(data.values[idKey].Price) > 0) {
+                        // Check strict match (Allow 0 to be displayed)
+                        if (data.values && data.values[idKey] && parseFloat(data.values[idKey].Price) >= 0) {
                             selfPrice = parseFloat(data.values[idKey].Price);
                         } else {
                             // Fallbacks (Name/Clean)
                             const job = data.jobs.find(j => j.id === jobId);
                             if (job) {
                                 const nameKey = `${activeOptionId}_${job.itemName}`;
-                                if (data.values && data.values[nameKey] && parseFloat(data.values[nameKey].Price) > 0) {
+                                if (data.values && data.values[nameKey] && parseFloat(data.values[nameKey].Price) >= 0) {
                                     selfPrice = parseFloat(data.values[nameKey].Price);
                                 } else {
                                     const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
                                     const cleanKey = `${activeOptionId}_${cleanName}`;
-                                    if (data.values && data.values[cleanKey] && parseFloat(data.values[cleanKey].Price) > 0) {
+                                    if (data.values && data.values[cleanKey] && parseFloat(data.values[cleanKey].Price) >= 0) {
                                         selfPrice = parseFloat(data.values[cleanKey].Price);
                                     }
                                 }
@@ -516,7 +537,14 @@ const PricingForm = () => {
                             // Calculate Aggregated Price
                             const aggregatedPrice = getRecursivePrice(opt.id, job.id);
 
-                            if (aggregatedPrice > 0) {
+                            // Determine if we should show this value (Show if > 0 OR if explicitly set to 0 in DB)
+                            const exactKey = `${opt.id}_${job.id}`;
+                            const hasExplicitRow = data.values && (
+                                data.values[exactKey] ||
+                                (data.values[`${opt.id}_${job.itemName}`]) // Check legacy key too
+                            );
+
+                            if (aggregatedPrice > 0 || (aggregatedPrice === 0 && hasExplicitRow)) {
                                 const idKey = `${opt.id}_${job.id}`;
                                 initialValues[idKey] = aggregatedPrice;
                             }
@@ -647,9 +675,10 @@ const PricingForm = () => {
     const handleValueChange = (optionId, jobId, value) => {
         // Allow numeric and empty check
         const key = `${optionId}_${jobId}`;
+        const floatVal = parseFloat(value);
         setValues(prev => ({
             ...prev,
-            [key]: value === '' ? '' : (parseFloat(value) || '')
+            [key]: value === '' ? '' : (isNaN(floatVal) ? '' : floatVal)
         }));
     };
 
@@ -775,17 +804,16 @@ const PricingForm = () => {
 
                         // Helper to get total price of a child node (Aggregated)
                         const getChildAggregate = (optId, chId) => {
-                            // This is basically getRecursivePrice(optId, chId)
-                            // Since we are traversing DOWN a hidden path, we just sum everything.
-
-                            // 1. Resolve Option ID for Child
                             let childActiveOptId = optId;
+                            // Re-resolve Option ID properly (Inheritance Logic)
                             const pOpt = pricingData.options.find(o => o.id === optId);
                             const pJob = pricingData.jobs.find(j => j.id === chId);
                             if (pOpt && pJob) {
+                                // Try Exact Match first
                                 let sOpt = pricingData.options.find(o =>
                                     o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === pJob.itemName
                                 );
+                                // Try Clean Match
                                 if (!sOpt) {
                                     const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
                                     sOpt = pricingData.options.find(o =>
@@ -797,26 +825,25 @@ const PricingForm = () => {
 
                             const key = `${childActiveOptId}_${chId}`;
                             let val = 0;
-                            // Prefer Value from 'values' state if available (edited hidden value?)
-                            // But Hidden values aren't in 'values' state usually if input not rendered?
-                            // Actually initialValues populates EVERYTHING.
-                            // So 'values' should have it if it existed in DB or was initialized.
+                            // Priority 1: Check Current State (User Edits)
+                            if (values[key] !== undefined && values[key] !== '') {
+                                val = parseFloat(values[key]) || 0;
+                            }
+                            // Priority 2: Check Database Values (Pre-loaded)
+                            else if (pricingData.values[key]) {
+                                val = parseFloat(pricingData.values[key].Price) || 0;
+                            }
 
-                            if (values[key] !== undefined) val = parseFloat(values[key]) || 0;
-                            else if (pricingData.values[key]) val = parseFloat(pricingData.values[key].Price) || 0;
-
-                            // Clean/Name Fallbacks
+                            // Fallbacks (Name based keys)
                             if (val === 0 && pJob) {
                                 const nKey = `${childActiveOptId}_${pJob.itemName}`;
-                                if (values[nKey] !== undefined) val = parseFloat(values[nKey]);
+                                if (values[nKey] !== undefined && values[nKey] !== '') val = parseFloat(values[nKey]);
                                 else if (pricingData.values[nKey]) val = parseFloat(pricingData.values[nKey].Price);
                             }
 
-                            // Add Grandchildren
                             let gcSum = 0;
                             const gKids = pricingData.jobs.filter(x => x.parentId === chId);
                             gKids.forEach(mk => gcSum += getChildAggregate(optId, mk.id));
-
                             return val + gcSum;
                         };
 
@@ -826,15 +853,64 @@ const PricingForm = () => {
                 return sum;
             };
 
+
+
             const hiddenSum = getHiddenChildrenSum(optionId, jobId);
-            const finalSelfPrice = displayPrice - hiddenSum;
 
-            console.log(`Save Debug [${job.itemName}]: Input=${displayPrice}, ChildrenSum=${hiddenSum}, CalcSelf=${finalSelfPrice}`);
+            // CASCADING ZERO LOGIC:
+            // If User Explicitly set 0, and HiddenChildren have value, we must CLEAR them.
+            const userInitiatedZero = (values.hasOwnProperty(key) && parseFloat(values[key]) === 0);
 
-            // Integrity Check: If self price becomes negative due to math (e.g. User lowered total below hidden sum),
-            // we should probably warn or floor? 
-            // For now, let's allow it but warn in console. 
-            // Or if user typed "0", they want to clear it.
+            if (userInitiatedZero && hiddenSum > 0) {
+                // Automatically clear hidden children (No Confirm - assume intent)
+
+                // Collect all hidden descendants recursively
+                const collectWipableNodes = (optId, chId) => {
+                    const isVisible = pricingData.access.visibleJobs.includes(pricingData.jobs.find(j => j.id === chId)?.itemName);
+                    if (isVisible) return;
+
+                    let childActiveOptId = optId;
+                    const pOpt = pricingData.options.find(o => o.id === optId);
+                    const pJob = pricingData.jobs.find(j => j.id === chId);
+                    if (pOpt && pJob) {
+                        let sOpt = pricingData.options.find(o =>
+                            o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === pJob.itemName
+                        );
+                        if (!sOpt) {
+                            const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            sOpt = pricingData.options.find(o =>
+                                o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === cleanPJobName
+                            );
+                        }
+                        if (sOpt) childActiveOptId = sOpt.id;
+
+                        valuesToSave.push({
+                            optionId: childActiveOptId,
+                            optionName: pOpt.name,
+                            enquiryForItem: pJob.itemName,
+                            enquiryForId: chId,
+                            price: 0,
+                            customerName: pOpt.customerName,
+                            leadJobName: pOpt.leadJobName
+                        });
+                    }
+
+                    const gKids = pricingData.jobs.filter(x => x.parentId === chId);
+                    gKids.forEach(mk => collectWipableNodes(optId, mk.id));
+                };
+
+                const children = pricingData.jobs.filter(j => j.parentId === jobId);
+                children.forEach(c => collectWipableNodes(optionId, c.id));
+
+                // Force Self Price to 0 (override hiddenSum subtraction)
+                // Because if we wipe hiddenSum, it becomes 0.
+                // So SelfPrice = Display(0) - NewHiddenSum(0) = 0.
+            }
+
+            // If we wiped children, treat hiddenSum as 0.
+            const effectiveHiddenSum = (userInitiatedZero && hiddenSum > 0) ? 0 : hiddenSum;
+
+            const finalSelfPrice = displayPrice - effectiveHiddenSum;
 
             // Actually, if finalSelfPrice is effectively the Component Cost.
 
@@ -851,9 +927,19 @@ const PricingForm = () => {
                 priceToSave = 0;
             }
 
-            if (priceToSave <= 0 && displayPrice <= 0.01) {
-                skippedCount++;
-                return;
+            // NEW SKIP LOGIC (Robust Dirty Check):
+            const dbValRow = pricingData.values[key];
+            const currentDbPrice = dbValRow ? (parseFloat(dbValRow.Price) || 0) : 0;
+            const hasExplicitDbRow = !!dbValRow;
+            const isNoChange = Math.abs(priceToSave - currentDbPrice) < 0.01;
+
+            if (isNoChange) {
+                // Skip if already explicit in DB, or if implicit (0) and untouched by user
+                if (hasExplicitDbRow || !values.hasOwnProperty(key)) {
+                    skippedCount++;
+                    return;
+                }
+                // If implicit 0 but User explicitly touched/typed 0, we PROCEED to save (Create Explicit 0 Row)
             }
 
             valuesToSave.push({
@@ -1622,28 +1708,37 @@ const PricingForm = () => {
                                                     if (match) {
                                                         // Calculate Row Total (Visibility Check)
                                                         // Calculate Row Total (Visibility Check)
+                                                        // Calculate Row Total (Visibility Check)
+                                                        // Calculate Row Total (Visibility Check)
                                                         const key = `${opt.id}_${job.id}`;
-                                                        let price = 0;
+                                                        let price = null; // Default to NULL (Missing) to differentiate from 0
+                                                        let hasExplicitValue = false;
+
                                                         if (values[key] !== undefined && values[key] !== '') {
                                                             price = parseFloat(values[key]) || 0;
+                                                            hasExplicitValue = true;
                                                         } else {
                                                             // Standard Lookup (Current Tab)
                                                             const lookupValue = (dataSet) => {
-                                                                if (!dataSet) return 0;
-                                                                if (dataSet[key] && dataSet[key].Price) return parseFloat(dataSet[key].Price);
+                                                                if (!dataSet) return null; // Return NULL if not found
+                                                                if (dataSet[key] && dataSet[key].Price !== undefined) return parseFloat(dataSet[key].Price);
 
                                                                 const nameKey = `${opt.id}_${job.itemName}`;
-                                                                if (dataSet[nameKey] && dataSet[nameKey].Price) return parseFloat(dataSet[nameKey].Price);
+                                                                if (dataSet[nameKey] && dataSet[nameKey].Price !== undefined) return parseFloat(dataSet[nameKey].Price);
 
                                                                 const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
                                                                 const cleanKey = `${opt.id}_${cleanName}`;
-                                                                if (dataSet[cleanKey] && dataSet[cleanKey].Price) return parseFloat(dataSet[cleanKey].Price);
+                                                                if (dataSet[cleanKey] && dataSet[cleanKey].Price !== undefined) return parseFloat(dataSet[cleanKey].Price);
 
-                                                                return 0;
+                                                                return null; // Return NULL if truly missing
                                                             };
 
                                                             price = lookupValue(pricingData.values);
+                                                            if (price !== null) hasExplicitValue = true;
                                                         }
+
+                                                        // Default to 0 for math if still null, but keep flag
+                                                        const effectivePriceForCalc = (price === null) ? 0 : price;
 
                                                         // FALLBACK / OVERRIDE: Cross-Tab Lookup for Descendants in External Tabs
                                                         // MOVED OUTSIDE if/else to ensure it runs even if direct value exists (Override behavior)
@@ -1658,7 +1753,11 @@ const PricingForm = () => {
                                                         const isMyScope = pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
                                                         const shouldForceInternal = isExternalContext && !job.isLead && !isMyScope;
 
-                                                        if ((price <= 0.01 || shouldForceInternal) && !isMyInternalTab && pricingData.allValues) {
+                                                        // LOGIC CHANGE: Only fallback if value is MISSING (price === null) OR if we are forced to internal view.
+                                                        // If price === 0 (Explicit), we respecting it unless ForceInternal is true.
+                                                        const isMissing = (price === null);
+
+                                                        if ((isMissing || shouldForceInternal) && !isMyInternalTab && pricingData.allValues) {
                                                             // Check if this job is a child of one of my scopes
                                                             const parentJob = pricingData.jobs.find(j => j.id === job.parentId);
                                                             if (parentJob) {
@@ -1679,36 +1778,39 @@ const PricingForm = () => {
                                                                         const lookupInternal = (dataSet, optionId) => {
                                                                             if (!dataSet) return 0;
                                                                             const iKey = `${optionId}_${job.id}`;
-                                                                            if (dataSet[iKey] && dataSet[iKey].Price) return parseFloat(dataSet[iKey].Price);
+                                                                            if (dataSet[iKey] && dataSet[iKey].Price !== undefined) return parseFloat(dataSet[iKey].Price);
                                                                             const iNameKey = `${optionId}_${job.itemName}`;
-                                                                            if (dataSet[iNameKey] && dataSet[iNameKey].Price) return parseFloat(dataSet[iNameKey].Price);
+                                                                            if (dataSet[iNameKey] && dataSet[iNameKey].Price !== undefined) return parseFloat(dataSet[iNameKey].Price);
                                                                             const iCleanKey = `${optionId}_${job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim()}`;
-                                                                            if (dataSet[iCleanKey] && dataSet[iCleanKey].Price) return parseFloat(dataSet[iCleanKey].Price);
+                                                                            if (dataSet[iCleanKey] && dataSet[iCleanKey].Price !== undefined) return parseFloat(dataSet[iCleanKey].Price);
                                                                             return 0;
                                                                         };
 
                                                                         const internalPrice = lookupInternal(internalValues, internalOption.id);
 
+                                                                        // If internal price found, use it as fallback
                                                                         if (internalPrice > 0) {
                                                                             price = internalPrice;
+                                                                            hasExplicitValue = true; // Treat as explicit for display
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         }
 
+                                                        // Finalize Price for Display Logic
+                                                        if (price === null) price = 0;
+
                                                         // Hide if Empty, Not Newest, Not Base Price
                                                         const isDefault = (opt.name === 'Price' || opt.name === 'Optional');
-                                                        const isEmpty = price <= 0.01;
+                                                        const isEmpty = (price <= 0.01 && !hasExplicitValue); // Treat 0 as empty ONLY if implicit
                                                         const isNotNewest = opt.id !== maxId;
 
                                                         if (isDefault && isEmpty && isNotNewest) return;
                                                         if (isEmpty && isNotNewest && opt.name !== 'Base Price') {
-                                                            // Check DB value existence strictly?
-                                                            // If DB has value, show it.
-                                                            if (!pricingData.values[key] || parseFloat(pricingData.values[key].Price) <= 0) {
-                                                                return;
-                                                            }
+                                                            // Check if explicit row exists in DB (Double Check)
+                                                            // If price is 0 but explicit, we show it?
+                                                            if (!hasExplicitValue) return;
                                                         }
 
                                                         // Push cloned option with effective Price for display

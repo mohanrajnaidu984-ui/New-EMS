@@ -2,6 +2,15 @@
 const express = require('express');
 const router = express.Router();
 const sql = require('mssql');
+const fs = require('fs');
+const path = require('path');
+
+// Debug log file
+const debugLogPath = path.join(__dirname, 'pricing_debug.log');
+function logToFile(message) {
+    const timestamp = new Date().toISOString();
+    fs.appendFileSync(debugLogPath, `[${timestamp}] ${message}\n`);
+}
 
 // Helper to get Enquiry List with Pricing Tree
 async function getEnquiryPricingList(userEmail, search = null, pendingOnly = true) {
@@ -22,8 +31,9 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         WHERE 1=1
     `;
 
+
     if (pendingOnly) {
-        baseQuery += ` AND (E.Status IN ('Open', 'Enquiry') OR E.Status IS NULL OR E.Status = '') `;
+        baseQuery += ` AND (E.Status IN ('Open', 'Enquiry', 'Priced', 'Estimated', 'Quote') OR E.Status IS NULL OR E.Status = '') `;
     }
 
     if (search) {
@@ -62,15 +72,23 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     `);
     const allJobs = jobsRes.recordset;
 
-    // 5. Fetch Prices
+    // 5. Fetch Pricing Options (to know what needs to be priced)
+    const optionsRes = await sql.query(`
+        SELECT RequestNo, ID as OptionID, OptionName, ItemName, CustomerName, LeadJobName
+        FROM EnquiryPricingOptions
+        WHERE RequestNo IN (${requestNosList})
+    `);
+    const allOptions = optionsRes.recordset;
+
+    // 6. Fetch Prices
     const pricesRes = await sql.query(`
-        SELECT RequestNo, EnquiryForID, EnquiryForItem, Price, UpdatedAt
+        SELECT RequestNo, OptionID, EnquiryForID, EnquiryForItem, Price, UpdatedAt
         FROM EnquiryPricingValues
         WHERE RequestNo IN (${requestNosList})
     `);
     const allPrices = pricesRes.recordset;
 
-    // 6. Map and Process
+    // 7. Map and Process
     return enquiries.map(enq => {
         const enqJobsRaw = allJobs.filter(j => j.RequestNo == enq.RequestNo);
         const seenIds = new Set();
@@ -82,6 +100,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             }
         }
 
+        const enqOptions = allOptions.filter(o => o.RequestNo == enq.RequestNo);
         const enqPrices = allPrices.filter(p => p.RequestNo == enq.RequestNo);
 
         let myJobs = [];
@@ -94,7 +113,19 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             // Check assignments
             enqJobs.forEach(job => {
                 const emails = [job.CommonMailIds, job.CCMailIds].filter(Boolean).join(',');
-                if (emails.toLowerCase().includes(userEmail.toLowerCase())) {
+                const emailsLower = emails.toLowerCase();
+                const userEmailLower = userEmail.toLowerCase();
+
+                // Extract username from email (part before @)
+                const userEmailUsername = userEmailLower.split('@')[0];
+
+                // Match if either full email or username is found
+                const isMatch = emailsLower.includes(userEmailLower) ||
+                    emailsLower.split(',').some(e => e.trim() === userEmailUsername);
+
+                console.log(`[Pricing] Job "${job.ItemName}" - Emails: "${emails}" - Match: ${isMatch}`);
+
+                if (isMatch) {
                     if (!myJobs.find(x => x.ID === job.ID)) {
                         myJobs.push(job);
                     }
@@ -102,7 +133,13 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             });
         }
 
-        if (myJobs.length === 0) return null;
+
+        if (myJobs.length === 0) {
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out - no matching jobs for user ${userEmail}`);
+            console.log(`[Pricing]   Total jobs in enquiry: ${enqJobs.length}`);
+            console.log(`[Pricing]   User is admin: ${isAdmin}, is creator: ${isCreator}, is concerned SE: ${isConcernedSE}`);
+            return null;
+        }
 
         // Recursively build visible set
         let visibleJobs = new Set();
@@ -139,17 +176,60 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         visualRoots.forEach(root => traverse(root, 0));
 
-        let hasPendingItems = false;
+        // CORRECT LOGIC: An enquiry is pending for a division if NONE of the customers have prices entered
+        // Once AT LEAST ONE customer has a price > 0 for the division, it's NOT pending
+        let hasPendingItems = true; // Assume pending until we find at least one valid price
+
+        // Get IDs and names of user's assigned jobs
+        const myJobIds = new Set(myJobs.map(j => j.ID));
+        const myJobNames = new Set(myJobs.map(j => j.ItemName));
+
+        console.log(`[Pricing] Enquiry ${enq.RequestNo} - Checking pending for user jobs:`, Array.from(myJobNames));
+        logToFile(`Enquiry ${enq.RequestNo} - Checking pending for user jobs: ${JSON.stringify(Array.from(myJobNames))}`);
+
+        // Strategy: Check if there's AT LEAST ONE price value > 0 for the user's jobs
+        // If we find even one valid price, the enquiry is NOT pending for this division
+
+        // If user has no jobs in this enquiry, it's not pending for them
+        if (myJobs.length === 0) {
+            hasPendingItems = false;
+        } else {
+            for (const priceValue of enqPrices) {
+                // Check if this price value belongs to one of the user's jobs
+                const belongsToMyJob =
+                    (priceValue.EnquiryForID && myJobIds.has(priceValue.EnquiryForID)) ||
+                    (priceValue.EnquiryForItem && myJobNames.has(priceValue.EnquiryForItem));
+
+                if (belongsToMyJob && priceValue.Price && priceValue.Price > 0) {
+                    // Found at least one valid price for the user's division - NOT pending!
+                    console.log(`[Pricing] Enquiry ${enq.RequestNo} - ✓ NOT PENDING: Found price ${priceValue.Price} for job (OptionID: ${priceValue.OptionID})`);
+                    logToFile(`Enquiry ${enq.RequestNo} - ✓ NOT PENDING: Found price ${priceValue.Price} for job (OptionID: ${priceValue.OptionID})`);
+                    hasPendingItems = false;
+                    break; // Found a valid price, no need to check further
+                }
+            }
+        }
+
+        // If we didn't find any valid prices (and they have jobs), log it as pending
+        if (hasPendingItems) {
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} - ⚠️ PENDING: No prices found for user's division`);
+            logToFile(`Enquiry ${enq.RequestNo} - ⚠️ PENDING: No prices found for user's division`);
+        }
+
         const displayItems = flatList.map(job => {
             const priceRow = enqPrices.find(p => p.EnquiryForID === job.ID || p.EnquiryForItem === job.ItemName);
             const priceVal = priceRow ? priceRow.Price : 0;
             const updatedAt = priceRow ? priceRow.UpdatedAt : null;
-            if (priceVal <= 0) hasPendingItems = true;
             return `${job.ItemName}|${priceVal > 0 ? priceVal : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`;
         });
 
         // Filter for Pending View
-        if (pendingOnly && !hasPendingItems) return null;
+        // Show ONLY if there are pending items in user's division
+        if (pendingOnly && !hasPendingItems) {
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out - all prices entered for user's division (Status: ${enq.Status})`);
+            logToFile(`Enquiry ${enq.RequestNo} filtered out - all prices entered for user's division (Status: ${enq.Status})`);
+            return null;
+        }
 
         return {
             ...enq,
@@ -467,6 +547,7 @@ router.get('/:requestNo', async (req, res) => {
         let editableJobs = [];
 
         // 1. EDIT PERMISSIONS (Strict)
+                let visibleJobIds, editableJobIds;
         if (userRole === 'Admin') {
             editableJobs = jobs.map(j => j.ItemName);
         } else {
@@ -521,6 +602,8 @@ router.get('/:requestNo', async (req, res) => {
             const allVisibleIds = new Set([...selfJobIds, ...descendantIds]);
 
             visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
+            visibleJobIds = allVisibleIds; // ID Set
+            editableJobIds = new Set(selfJobIds); // ID Set
 
         }
 
@@ -553,8 +636,8 @@ router.get('/:requestNo', async (req, res) => {
                 fax: j.FaxNo,
                 email: j.CommonMailIds,
                 isLead: j.ItemName === leadJobItem,
-                visible: visibleJobs.includes(j.ItemName),
-                editable: editableJobs.includes(j.ItemName)
+                                visible: typeof visibleJobIds !== 'undefined' ? visibleJobIds.has(j.ID) : visibleJobs.includes(j.ItemName),
+                                editable: typeof editableJobIds !== 'undefined' ? editableJobIds.has(j.ID) : editableJobs.includes(j.ItemName)
             })),
             options: options.map(o => ({
                 id: o.ID,
@@ -641,9 +724,9 @@ router.put('/value', async (req, res) => {
 
         const priceValue = parseFloat(price) || 0;
 
-        // Reject zero or negative values
-        if (priceValue <= 0) {
-            return res.status(400).json({ error: 'Price must be greater than zero', skipped: true });
+        // Reject negative values (Allow 0 to reset/clear price)
+        if (priceValue < 0) {
+            return res.status(400).json({ error: 'Price cannot be negative', skipped: true });
         }
 
         // --- UPSERT LOGIC WITH ID SUPPORT ---
@@ -679,7 +762,8 @@ router.put('/value', async (req, res) => {
                 UPDATE EnquiryPricingValues 
                 SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = ${now},
                     EnquiryForID = ${enquiryForId || null},
-                    LeadJobName = ${leadJobName || null} -- Update Lead Job Name (Step 1078)
+                    LeadJobName = ${leadJobName || null}, -- Update Lead Job Name (Step 1078)
+                    CustomerName = ${customerName || null} -- FIX: Ensure CustomerName is backfilled/corrected
                 WHERE ID = ${recordId}
             `;
         } else {

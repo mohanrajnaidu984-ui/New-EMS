@@ -24,6 +24,16 @@ const HierarchyBuilder = ({
             // 1. First pass: Ensure all items have IDs
             let items = value.map(v => {
                 let item = typeof v === 'string' ? { itemName: v, parentName: null } : { ...v };
+
+                // Extract legacy string format if leadJobCode is missing
+                if (!item.leadJobCode && item.itemName) {
+                    const match = item.itemName.match(/^(L\d+)\s+-\s+(.*)$/);
+                    if (match) {
+                        item.leadJobCode = match[1];
+                        item.itemName = match[2];
+                    }
+                }
+
                 // Use backend ID if available, else generate temp id
                 if (!item.id) item.id = Math.random().toString(36).substr(2, 9);
                 // Ensure parentId field exists (might be null)
@@ -67,21 +77,26 @@ const HierarchyBuilder = ({
         const rootItems = localItems.filter(i => !i.parentId);
         const usedCodes = rootItems
             .map(i => {
+                if (i.leadJobCode) {
+                    const match = i.leadJobCode.match(/^L(\d+)$/);
+                    return match ? parseInt(match[1]) : 0;
+                }
                 const match = i.itemName.match(/^L(\d+)\s-\s/);
                 return match ? parseInt(match[1]) : 0;
             });
 
         const nextCode = usedCodes.length > 0 ? Math.max(...usedCodes) + 1 : 1;
-        const prefixedName = `L${nextCode} - ${name}`;
+        const leadCode = `L${nextCode}`;
 
-        // Prevent duplicate prefixed names (extra safety)
-        if (localItems.some(i => !i.parentId && i.itemName === prefixedName)) {
+        // Check duplicate name
+        if (localItems.some(i => !i.parentId && i.itemName === name)) {
             alert('This Job is already added.');
             return;
         }
 
         const newItem = {
-            itemName: prefixedName,
+            itemName: name,
+            leadJobCode: leadCode,
             parentId: null,
             parentName: null,
             id: Math.random().toString(36).substr(2, 9)
@@ -156,7 +171,7 @@ const HierarchyBuilder = ({
                     width: 'fit-content'
                 }}>
                     <span style={{ fontWeight: level === 0 ? '700' : '500', color: level === 0 ? '#166534' : '#334155' }}>
-                        {item.itemName}
+                        {item.leadJobCode ? `${item.leadJobCode} - ` : ''}{item.itemName}
                         {level === 0 && <span style={{ fontSize: '10px', marginLeft: '6px', background: '#166534', color: 'white', padding: '1px 4px', borderRadius: '4px' }}>LEAD</span>}
                     </span>
 
