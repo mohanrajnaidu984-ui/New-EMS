@@ -432,7 +432,7 @@ const SalesReport = () => {
     };
 
     const formatFullNumber = (num) => {
-        return Number(num).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        return Number(num).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
     };
 
     const formatBarLabel = (num) => {

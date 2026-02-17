@@ -494,8 +494,8 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
 
                                                 const total = breakdown.reduce((sum, item) => sum + (Number(item?.Price) || 0), 0);
                                                 const displayTotal = breakdown.length > 0
-                                                    ? total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                                                    : (row.TotalQuotedPrice ? Number(row.TotalQuotedPrice).toLocaleString() : '-');
+                                                    ? total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
+                                                    : (row.TotalQuotedPrice ? Number(row.TotalQuotedPrice).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : '-');
 
                                                 // Sort: L1 (Civil) -> Electrical -> BMS -> Others
                                                 const sortedBreakdown = [...breakdown].sort((a, b) => {
@@ -540,7 +540,7 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
                                                                             <span className={`fw-bold ${isL1 ? 'text-dark' : 'text-secondary'}`}>{itemName}: </span>
                                                                             {price > 0 ? (
                                                                                 <span className={`px-1 rounded ${isL1 ? 'bg-success bg-opacity-10 text-success' : 'bg-light text-dark border'}`}>
-                                                                                    {price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                                                                    {price.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                                                                                 </span>
                                                                             ) : (
                                                                                 <span className="text-muted fst-italic p-1 bg-light rounded">Not Updated</span>

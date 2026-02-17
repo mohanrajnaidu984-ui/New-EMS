@@ -400,6 +400,109 @@ router.get('/:requestNo', async (req, res) => {
             console.error('Error fetching customers:', err);
         }
 
+        let excludedNames = new Set();
+
+
+        // Determine user access (MOVED UP)
+        let userHasLeadAccess = false;
+        let userJobItems = [];
+        let userRole = '';
+        let userFullName = '';
+
+        if (userEmail) {
+            try {
+                const userResult = await sql.query`
+                    SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
+                `;
+                if (userResult.recordset.length > 0) {
+                    userFullName = userResult.recordset[0].FullName || '';
+                    userRole = userResult.recordset[0].Roles || '';
+                }
+            } catch (err) {
+                console.error('Error getting user name:', err);
+            }
+
+            // Check if user is the creator (Lead Job owner) or Admin
+            const isAdmin = userRole === 'Admin';
+            if (isAdmin) {
+                userHasLeadAccess = true;
+                userJobItems = jobs.map(j => j.ItemName);
+            }
+
+            // Also check email-based access
+            jobs.forEach(job => {
+                const commonMails = (job.CommonMailIds || '').toLowerCase().split(',').map(s => s.trim());
+                const ccMails = (job.CCMailIds || '').toLowerCase().split(',').map(s => s.trim());
+                const allMails = [...commonMails, ...ccMails];
+
+                if (allMails.includes(userEmail.toLowerCase())) {
+                    if (!userJobItems.includes(job.ItemName)) {
+                        userJobItems.push(job.ItemName);
+                    }
+                    if (job.ItemName === leadJobItem) {
+                        // If explicitly assigned to Lead, treat as Lead Access
+                        userHasLeadAccess = true;
+                    }
+                }
+            });
+
+            // SMART SCOPE EXPANSION:
+            const cleanUserScopes = new Set(userJobItems.map(name =>
+                name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            ));
+
+            jobs.forEach(job => {
+                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                if (cleanUserScopes.has(cleanName)) {
+                    if (!userJobItems.includes(job.ItemName)) {
+                        userJobItems.push(job.ItemName);
+                    }
+                }
+            });
+        }
+
+        // FILTER: Scope Customers based on User Role
+        if (leadJobItem && jobs.length > 0) {
+            const clean = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() : '';
+            const leadJob = jobs.find(j => j.ItemName === leadJobItem);
+
+            if (leadJob) {
+                const findDescendants = (parentId, set) => {
+                    const children = jobs.filter(j => j.ParentID === parentId);
+                    children.forEach(c => {
+                        set.add(clean(c.ItemName));
+                        set.add(c.ItemName); // Add raw too
+                        findDescendants(c.ID, set);
+                    });
+                };
+
+                if (userHasLeadAccess) {
+                    // LEAD / ADMIN: Exclude Lead Job (Self) AND All Descendants (Sub-jobs)
+                    // Because a Lead Job should only see External Customers.
+                    excludedNames.add(clean(leadJobItem));
+                    excludedNames.add(leadJobItem);
+                    findDescendants(leadJob.ID, excludedNames);
+                } else {
+                    // SUB-JOB USER: Exclude Self (Assigned Jobs) AND Descendants of Assigned Jobs.
+                    // Do NOT exclude Lead Job (Parent), as it is a valid internal customer for them.
+                    userJobItems.forEach(jobName => {
+                        const jobObj = jobs.find(j => j.ItemName === jobName);
+                        if (jobObj) {
+                            excludedNames.add(clean(jobName));
+                            excludedNames.add(jobName);
+                            findDescendants(jobObj.ID, excludedNames);
+                        }
+                    });
+                }
+
+                if (excludedNames.size > 0) {
+                    const excluded = [...excludedNames];
+                    console.log('Pricing API: Filtering out internal/descendant customers:', excluded);
+                    customers = customers.filter(c => !excludedNames.has(clean(c)) && !excludedNames.has(c));
+                }
+            }
+        }
+
         // Get pricing options (ALL customers)
         let options = [];
         try {
@@ -451,95 +554,6 @@ router.get('/:requestNo', async (req, res) => {
 
 
 
-        // Determine user access
-        // User has Lead Job access if:
-        // 1. They created the enquiry (CreatedBy matches their name)
-        // 2. OR their email is in the Lead Job's CommonMailIds/CCMailIds
-        let userHasLeadAccess = false;
-        let userJobItems = [];
-        let userRole = '';
-
-        // Get user's full name from email
-        let userFullName = '';
-        if (userEmail) {
-            try {
-                const userResult = await sql.query`
-                    SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
-                `;
-                if (userResult.recordset.length > 0) {
-                    userFullName = userResult.recordset[0].FullName || '';
-                    userRole = userResult.recordset[0].Roles || '';
-                }
-            } catch (err) {
-                console.error('Error getting user name:', err);
-            }
-
-            console.log('Pricing API DEBUG:');
-            console.log(' - RequestNo:', requestNo);
-            console.log(' - UserEmail (Token):', userEmail);
-            console.log(' - UserFullName (DB):', userFullName);
-            console.log(' - Enquiry CreatedBy:', enquiry.CreatedBy);
-            console.log(' - User Role:', userRole);
-
-            // Check if user is the creator (Lead Job owner) or Admin
-            const isAdmin = userRole === 'Admin';
-
-            if (isAdmin) {
-                userHasLeadAccess = true;
-                userJobItems = jobs.map(j => j.ItemName);
-                console.log('Pricing API: User is Admin - granting Full access');
-            }
-            // FIX: Removed implicit "Creator = View All" logic.
-            // Creators must rely on Email Assignments or explicit assignments.
-
-            // Also check email-based access
-            jobs.forEach(job => {
-                const commonMails = (job.CommonMailIds || '').toLowerCase().split(',').map(s => s.trim());
-                const ccMails = (job.CCMailIds || '').toLowerCase().split(',').map(s => s.trim());
-                const allMails = [...commonMails, ...ccMails];
-
-                if (allMails.includes(userEmail.toLowerCase())) {
-                    if (!userJobItems.includes(job.ItemName)) {
-                        userJobItems.push(job.ItemName);
-                    }
-                    if (job.ItemName === leadJobItem) {
-                        // userHasLeadAccess = true; // DO NOT GRANT GLOBAL VIEW just because of Lead Job assignment? 
-                        // Actually, if assigned to Lead Job, they probably should see all descendants?
-                        // But for now, let's keep hierarchy lookup handle siblings.
-                    }
-                }
-            });
-
-            // CHECK CONCERNED SE ACCESS
-            let isConcernedSE = false;
-            try {
-                const cseRes = await sql.query`SELECT * FROM ConcernedSE WHERE RequestNo = ${requestNo} AND SEName = ${userFullName}`;
-                if (cseRes.recordset.length > 0) {
-                    console.log('Pricing API: User is Concerned SE -> Keeping strict scope (No implicit View All)');
-                    isConcernedSE = true;
-                    // FIX: Removed `userHasLeadAccess = true` for Concerned SEs.
-                    // They will only see what they are assigned to.
-                }
-            } catch (err) {
-                console.error('Error checking ConcernedSE:', err);
-            }
-
-            // SMART SCOPE EXPANSION:
-            // If user is assigned to "BMS" (Clean Name), they should also see "L2 - BMS" (Clean Name: BMS).
-            const cleanUserScopes = new Set(userJobItems.map(name =>
-                name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
-            ));
-
-            jobs.forEach(job => {
-                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-                if (cleanUserScopes.has(cleanName)) {
-                    if (!userJobItems.includes(job.ItemName)) {
-                        console.log(`Pricing API: Auto-granting access to '${job.ItemName}' based on matching scope '${cleanName}'`);
-                        userJobItems.push(job.ItemName);
-                    }
-                }
-            });
-        }
 
         // Determine visible and editable jobs
         // HIERARCHY LOGIC IMPLEMENTATION
@@ -547,7 +561,7 @@ router.get('/:requestNo', async (req, res) => {
         let editableJobs = [];
 
         // 1. EDIT PERMISSIONS (Strict)
-                let visibleJobIds, editableJobIds;
+        let visibleJobIds, editableJobIds;
         if (userRole === 'Admin') {
             editableJobs = jobs.map(j => j.ItemName);
         } else {
@@ -603,7 +617,10 @@ router.get('/:requestNo', async (req, res) => {
 
             visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
             visibleJobIds = allVisibleIds; // ID Set
-            editableJobIds = new Set(selfJobIds); // ID Set
+            // FIX: Allow editing of ALL Assignee descendants
+            const allEditableIds = new Set([...selfJobIds, ...descendantIds]);
+            editableJobIds = allEditableIds;
+            editableJobs = jobs.filter(j => allEditableIds.has(j.ID)).map(j => j.ItemName);
 
         }
 
@@ -620,9 +637,16 @@ router.get('/:requestNo', async (req, res) => {
                 clientName: enquiry.ClientName,
                 consultantName: enquiry.ConsultantName
             },
-            extraCustomers: extraCustomers.map(c => c.CustomerName),
+            extraCustomers: extraCustomers
+                .map(c => c.CustomerName)
+                .filter(name => {
+                    const cleanName = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                    return !excludedNames.has(name) && !excludedNames.has(cleanName);
+                }),
             customers: customers,
-            activeCustomer: activeCustomerName,
+            activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim())))
+                ? (customers.length > 0 ? customers[0] : '')
+                : activeCustomerName,
             leadJob: leadJobItem,
             jobs: jobs.map(j => ({
                 id: j.ID,
@@ -636,8 +660,8 @@ router.get('/:requestNo', async (req, res) => {
                 fax: j.FaxNo,
                 email: j.CommonMailIds,
                 isLead: j.ItemName === leadJobItem,
-                                visible: typeof visibleJobIds !== 'undefined' ? visibleJobIds.has(j.ID) : visibleJobs.includes(j.ItemName),
-                                editable: typeof editableJobIds !== 'undefined' ? editableJobIds.has(j.ID) : editableJobs.includes(j.ItemName)
+                visible: typeof visibleJobIds !== 'undefined' ? visibleJobIds.has(j.ID) : visibleJobs.includes(j.ItemName),
+                editable: typeof editableJobIds !== 'undefined' ? editableJobIds.has(j.ID) : editableJobs.includes(j.ItemName)
             })),
             options: options.map(o => ({
                 id: o.ID,

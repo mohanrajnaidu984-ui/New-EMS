@@ -263,7 +263,7 @@ const SalesTarget = () => {
                                                 placeholder="0"
                                             />
                                         </td>
-                                        <td className="fw-bold text-success">{total.toLocaleString()}</td>
+                                        <td className="fw-bold text-success">{total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td>
                                     </tr>
                                 );
                             }) : (
@@ -278,7 +278,7 @@ const SalesTarget = () => {
                             <tr>
                                 <th className="text-start ps-4">Grand Total</th>
                                 <th colSpan="4"></th>
-                                <th className="fw-bold text-success fs-5">{grandTotal.toLocaleString()}</th>
+                                <th className="fw-bold text-success fs-5">{grandTotal.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</th>
                             </tr>
                         </tfoot>
                     </table>

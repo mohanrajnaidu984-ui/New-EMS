@@ -1373,7 +1373,7 @@ const PricingForm = () => {
                                                     let displayPrice = rawPrice;
                                                     if (isUpdated) {
                                                         const num = parseFloat(rawPrice);
-                                                        if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                                        if (!isNaN(num)) displayPrice = num.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
                                                     }
 
                                                     // Format Date

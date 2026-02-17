@@ -600,7 +600,7 @@ const ProbabilityForm = () => {
                                                             <span className="text-danger italic">Refer quote</span>
                                                         ) : (
                                                             item.TotalQuotedValue !== null && item.TotalQuotedValue !== undefined ?
-                                                                'BD ' + Number(item.TotalQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+                                                                'BD ' + Number(item.TotalQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
                                                                 : 'BD 0'
                                                         )}
                                                     </td>
@@ -609,7 +609,7 @@ const ProbabilityForm = () => {
                                                             <span className="text-danger italic">Refer quote</span>
                                                         ) : (
                                                             item.NetQuotedValue !== null && item.NetQuotedValue !== undefined ?
-                                                                'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+                                                                'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
                                                                 : 'BD 0'
                                                         )}
                                                     </td>

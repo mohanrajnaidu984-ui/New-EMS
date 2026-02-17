@@ -495,7 +495,12 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
             SELECT ID, QuoteNumber, QuoteDate, ToName, ToAddress, ToPhone, ToEmail, 
                    Subject, CustomerReference, ValidityDays, PreparedBy, PreparedByEmail,
                    Signatory, SignatoryDesignation, Status, RevisionNo, TotalAmount, QuoteNo,
-                   RequestNo, CreatedAt, UpdatedAt
+                   RequestNo, CreatedAt, UpdatedAt,
+                   ShowScopeOfWork, ShowBasisOfOffer, ShowExclusions, ShowPricingTerms,
+                   ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
+                   ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
+                   Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
+                   CustomClauses, ClauseOrder
             FROM EnquiryQuotes 
             WHERE RequestNo = ${requestNo}
             ORDER BY QuoteNo, RevisionNo DESC
@@ -1054,7 +1059,7 @@ router.post('/', async (req, res) => {
                 ${scopeOfWork}, ${basisOfOffer}, ${exclusions}, ${pricingTerms},
                 ${schedule}, ${warranty}, ${responsibilityMatrix}, ${termsConditions}, ${acceptance}, ${billOfQuantity},
                 ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson},
-                ${quoteDate}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${now}, ${now}
+                ${quoteDate ? quoteDate.split('T')[0] : null}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${now}, ${now}
             )
         `;
 
@@ -1126,7 +1131,7 @@ router.put('/:id', async (req, res) => {
         Status = ${status},
         CustomClauses = ${customClausesJson},
         ClauseOrder = ${clauseOrderJson},
-        QuoteDate = ${quoteDate},
+        QuoteDate = ${quoteDate ? quoteDate.split('T')[0] : null},
         CustomerReference = ${customerReference},
         Subject = ${subject},
         Signatory = ${signatory},
@@ -1165,6 +1170,8 @@ router.post('/:id/revise', async (req, res) => {
             totalAmount, customClauses, clauseOrder,
             quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail
         } = req.body;
+
+        const cleanQuoteDate = quoteDate ? quoteDate.split('T')[0] : null;
 
         const existingResult = await sql.query`SELECT * FROM EnquiryQuotes WHERE ID = ${id}`;
 
@@ -1243,7 +1250,7 @@ router.post('/:id/revise', async (req, res) => {
                 'Saved', 
                 ${customClausesJson}, 
                 ${clauseOrderJson},
-                ${quoteDate !== undefined ? quoteDate : existing.QuoteDate}, 
+                ${cleanQuoteDate !== null ? cleanQuoteDate : (existing.QuoteDate ? existing.QuoteDate.toISOString().split('T')[0] : null)}, 
                 ${customerReference !== undefined ? customerReference : existing.CustomerReference}, 
                 ${subject !== undefined ? subject : existing.Subject}, 
                 ${signatory !== undefined ? signatory : existing.Signatory}, 

@@ -805,9 +805,9 @@ app.post('/api/enquiries', async (req, res) => {
         const request = new sql.Request(transaction);
         request.input('RequestNo', sql.NVarChar, RequestNo);
         request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo || null);
-        request.input('EnquiryDate', sql.DateTime, EnquiryDate);
-        request.input('DueDate', sql.DateTime, DueOn || null);
-        request.input('SiteVisitDate', sql.DateTime, SiteVisitDate || null);
+        request.input('EnquiryDate', sql.VarChar(10), EnquiryDate ? EnquiryDate.split('T')[0] : null);
+        request.input('DueDate', sql.VarChar(10), DueOn ? DueOn.split('T')[0] : null);
+        request.input('SiteVisitDate', sql.VarChar(10), SiteVisitDate ? SiteVisitDate.split('T')[0] : null);
 
         request.input('CustomerName', sql.NVarChar, SelectedCustomers ? SelectedCustomers.join(',') : null);
         request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
@@ -1294,9 +1294,9 @@ app.put('/api/enquiries/:id', async (req, res) => {
         const request = new sql.Request();
         request.input('RequestNo', sql.NVarChar, id);
         request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo);
-        request.input('EnquiryDate', sql.DateTime, EnquiryDate);
-        request.input('DueDate', sql.DateTime, DueOn);
-        request.input('SiteVisitDate', sql.DateTime, SiteVisitDate || null);
+        request.input('EnquiryDate', sql.VarChar(10), EnquiryDate ? EnquiryDate.split('T')[0] : null);
+        request.input('DueDate', sql.VarChar(10), DueOn ? DueOn.split('T')[0] : null);
+        request.input('SiteVisitDate', sql.VarChar(10), SiteVisitDate ? SiteVisitDate.split('T')[0] : null);
         request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
 
         request.input('ProjectName', sql.NVarChar, ProjectName);

@@ -76,7 +76,8 @@ router.get('/calendar', async (req, res) => {
 
         // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
         const today = new Date();
-        request.input('today', sql.Date, today);
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
 
         const query = `
             WITH FilteredEnquiries AS (
@@ -110,7 +111,7 @@ router.get('/calendar', async (req, res) => {
                 GROUP BY RequestNo, CAST(ISNULL(QuoteDate, CreatedAt) AS DATE)
             )
             SELECT 
-                CAST(DateVal as DATE) as Date,
+                CONVERT(VARCHAR(10), DateVal, 23) as Date,
                 SUM(CASE WHEN Type = 'Enquiry' THEN 1 ELSE 0 END) as Enquiries,
                 SUM(CASE WHEN Type = 'Due' THEN 1 ELSE 0 END) as Due,
                 SUM(CASE WHEN Type = 'Lapsed' THEN 1 ELSE 0 END) as Lapsed,
@@ -118,7 +119,7 @@ router.get('/calendar', async (req, res) => {
                 SUM(CASE WHEN Type = 'Quote' THEN 1 ELSE 0 END) as Quoted
             FROM Dates
             WHERE DateVal IS NOT NULL
-            GROUP BY CAST(DateVal as DATE)
+            GROUP BY CONVERT(VARCHAR(10), DateVal, 23)
         `;
 
         const result = await request.query(query);
@@ -177,14 +178,15 @@ router.get('/summary', async (req, res) => {
         const today = new Date();
         const query = `
             SELECT
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(EnquiryDate AS DATE) = CAST(@today AS DATE) ${baseFilter}) as EnquiriesToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) = CAST(@today AS DATE) ${baseFilter}) as DueToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) > CAST(@today AS DATE) ${baseFilter}) as UpcomingDues,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), EnquiryDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as EnquiriesToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as DueToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) > CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as UpcomingDues,
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE Status IN ('Quoted', 'Quote', 'Submitted') ${baseFilter}) as QuotedCount,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CAST(DueDate AS DATE) < CAST(@today AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
         `;
 
-        request.input('today', sql.Date, today);
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
         const result = await request.query(query);
         res.json(result.recordset[0]);
 
@@ -231,10 +233,11 @@ router.get('/enquiries', async (req, res) => {
             request.input('salesEngineer', sql.NVarChar, salesEngineer);
         }
         const today = new Date();
-        request.input('today', sql.Date, today);
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
 
         if (status === 'Lapsed') {
-            whereClause += ` AND CAST(em.DueDate AS DATE) < CAST(@today AS DATE) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
+            whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
         } else if (status && status !== 'All') {
             whereClause += ` AND em.Status = @status `;
             request.input('status', sql.NVarChar, status);
@@ -253,28 +256,24 @@ router.get('/enquiries', async (req, res) => {
             console.log('Type:', type);
 
             if (type === 'Due Date') {
-                whereClause += ` AND CAST(em.DueDate AS DATE) BETWEEN @fromDate AND @toDate `;
+                whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
             } else if (type === 'Quote Date') {
-                whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CAST(ISNULL(eq.QuoteDate, eq.CreatedAt) AS DATE) BETWEEN @fromDate AND @toDate) `;
+                whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(eq.QuoteDate, eq.CreatedAt), 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23)) `;
             } else {
-                whereClause += ` AND CAST(em.EnquiryDate AS DATE) BETWEEN @fromDate AND @toDate `;
+                whereClause += ` AND CONVERT(VARCHAR(10), em.EnquiryDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
             }
 
-            request.input('fromDate', sql.Date, new Date(fromDate));
-            request.input('toDate', sql.Date, new Date(toDate));
+            request.input('fromDate', sql.VarChar(10), fromDate);
+            request.input('toDate', sql.VarChar(10), toDate);
         } else if (date) {
             console.log('Path: Specific Date');
             whereClause += ` AND (
-                CAST(em.EnquiryDate AS DATE) = @date OR
-                CAST(em.DueDate AS DATE) = @date OR
-                CAST(em.SiteVisitDate AS DATE) = @date OR
-                EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CAST(ISNULL(eq.QuoteDate, eq.CreatedAt) AS DATE) = @date)
+                CONVERT(VARCHAR(10), em.EnquiryDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(eq.QuoteDate, eq.CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23))
             ) `;
-        }
-
-        // Always input date if present, as it's used in SELECT subquery
-        if (date) {
-            request.input('date', sql.Date, new Date(date));
+            request.input('date', sql.VarChar(10), date);
         }
 
         if (!fromDate && !toDate && !date) {
@@ -286,11 +285,11 @@ router.get('/enquiries', async (req, res) => {
 
                 if (currentMode === 'today') {
                     whereClause += ` AND (
-                        CAST(em.DueDate AS DATE) = CAST(@today AS DATE) OR
-                        CAST(em.SiteVisitDate AS DATE) = CAST(@today AS DATE)
+                        CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) OR
+                        CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @today, 23)
                     ) `;
                 } else if (currentMode === 'future') {
-                    whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(@today AS DATE) `;
+                    whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) >= CONVERT(VARCHAR(10), @today, 23) `;
                 }
             } else {
                 console.log('Path: Search Active (Skipping Default Mode)');
@@ -308,24 +307,25 @@ router.get('/enquiries', async (req, res) => {
                 em.CustomerName,
                 em.ClientName,
                 em.ConsultantName,
-                em.DueDate,
-                em.SiteVisitDate,
+                CONVERT(VARCHAR(10), em.DueDate, 23) as DueDate,
+                CONVERT(VARCHAR(10), em.SiteVisitDate, 23) as SiteVisitDate,
                 em.EnquiryDetails,
-                em.EnquiryDate,
+                CONVERT(VARCHAR(10), em.EnquiryDate, 23) as EnquiryDate,
                 em.Status,
                 em.ReceivedFrom,
                 STUFF((SELECT ', ' + SEName FROM ConcernedSE WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as ConcernedSE,
                 STUFF((SELECT ', ' + ItemName FROM EnquiryFor WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as EnquiryFor,
 
-                ${date ? `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo AND CAST(ISNULL(QuoteDate, CreatedAt) AS DATE) = @date) as QuoteDate` : `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo) as QuoteDate`},
+                ${date ? `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23)) as QuoteDate` : `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo) as QuoteDate`},
                 
-                -- Add Quote Details prioritized by Current User (Department)
+                -- Add Quote Details prioritized by Day Match and Current User (Department)
                 (
                     SELECT TOP 1 
                         QuoteNumber + ' (' + CONVERT(VARCHAR, ISNULL(QuoteDate, CreatedAt), 106) + ')' 
                     FROM EnquiryQuotes 
                     WHERE RequestNo = em.RequestNo 
                     ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
                         CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
                         CreatedAt DESC
                 ) as QuoteRefNo,
@@ -334,6 +334,7 @@ router.get('/enquiries', async (req, res) => {
                     FROM EnquiryQuotes 
                     WHERE RequestNo = em.RequestNo 
                     ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
                         CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
                         CreatedAt DESC
                 ) as TotalQuotedPrice,
@@ -342,6 +343,7 @@ router.get('/enquiries', async (req, res) => {
                     FROM EnquiryQuotes 
                     WHERE RequestNo = em.RequestNo 
                     ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
                         CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
                         CreatedAt DESC
                 ) as NetQuotedPrice,
