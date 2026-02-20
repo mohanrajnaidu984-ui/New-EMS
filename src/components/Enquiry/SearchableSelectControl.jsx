@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import Select from 'react-select';
 import ValidationTooltip from '../Common/ValidationTooltip';
 
@@ -17,12 +17,14 @@ const SearchableSelectControl = ({
     renderOption = (opt) => opt,
     selectedItemDetails = null
 }) => {
+    const [inputValue, setInputValue] = React.useState('');
+
     // Convert options to react-select format { value, label }
     // Handle both simple strings and objects if renderOption is used
-    const selectOptions = options.map(opt => ({
+    const selectOptions = useMemo(() => options.map(opt => ({
         value: opt,
         label: renderOption(opt)
-    }));
+    })), [options, renderOption]);
 
     // Find selected object
     const selectedValue = selectOptions.find(opt => opt.value === selectedOption) || null;
@@ -57,7 +59,9 @@ const SearchableSelectControl = ({
                 <Select
                     value={selectedValue}
                     onChange={(opt) => onOptionChange(opt ? opt.value : '')}
-                    options={selectOptions}
+                    onInputChange={(val) => setInputValue(val)}
+                    options={inputValue.length >= 3 ? selectOptions : []}
+                    noOptionsMessage={() => inputValue.length < 3 ? "Type 3+ characters to search..." : "No results found"}
                     styles={customStyles}
                     isDisabled={disabled}
                     isClearable={true}
@@ -119,4 +123,4 @@ const SearchableSelectControl = ({
     );
 };
 
-export default SearchableSelectControl;
+export default React.memo(SearchableSelectControl);

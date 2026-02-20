@@ -16,7 +16,7 @@ router.get('/list', async (req, res) => {
             SELECT
                 LTRIM(RTRIM(E.RequestNo)) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
                 E.Probability, E.ProbabilityOption, E.ExpectedOrderDate, E.ProbabilityRemarks,
-                E.WonOrderValue, E.WonJobNo, E.WonCustomerName, E.CustomerPreferredPrice, E.WonQuoteRef, E.WonOption,
+                E.WonOrderValue, E.WonJobNo, E.WonCustomerName, E.CustomerPreferredPrice, E.WonQuoteRef, E.WonOption, E.WonGrossProfit,
                 E.LostCompetitor, E.LostReason, E.LostCompetitorPrice, E.LostDate,
                 (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) ORDER BY QuoteDate DESC) as LastQuoteDate,
                 (
@@ -325,6 +325,7 @@ router.post('/update', async (req, res) => {
         request.input('WonContactNo', sql.VarChar, wonDetails?.contactNo || null);
         request.input('WonQuoteRef', sql.NVarChar, wonDetails?.wonQuoteRef || null);
         request.input('WonOption', sql.NVarChar, wonDetails?.wonOption || null);
+        request.input('WonGrossProfit', sql.Decimal(5, 2), wonDetails?.grossProfit != null && wonDetails.grossProfit !== '' ? parseFloat(wonDetails.grossProfit) : null);
 
         request.input('LostCompetitor', sql.VarChar, lostDetails?.customer || null);
         request.input('LostReason', sql.VarChar, lostDetails?.reason || null);
@@ -352,6 +353,7 @@ Status = @Status,
                 WonContactNo = @WonContactNo,
                 WonQuoteRef = @WonQuoteRef,
                 WonOption = @WonOption,
+    WonGrossProfit = @WonGrossProfit,
                 LostCompetitor = @LostCompetitor,
     LostReason = @LostReason,
     LostCompetitorPrice = @LostCompetitorPrice,

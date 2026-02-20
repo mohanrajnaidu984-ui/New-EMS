@@ -222,6 +222,7 @@ const ProbabilityForm = () => {
                     jobNo: item.WonJobNo,
                     wonQuoteRef: item.WonQuoteRef,
                     wonOption: item.WonOption,
+                    grossProfit: item.WonGrossProfit != null && item.WonGrossProfit !== '' ? parseFloat(item.WonGrossProfit) : null,
                 },
                 customerPreferredPrice: customerPreferredPrice,
                 expectedDate: item.ExpectedOrderDate,
@@ -946,25 +947,7 @@ const ProbabilityForm = () => {
                                                                         </div>
                                                                     </div>
 
-                                                                    {/* Option Dropdown (Conditional) */}
-                                                                    {(item.QuoteOptions && item.QuoteOptions.length > 0) && (
-                                                                        <div className="d-flex flex-column">
-                                                                            <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Option</span>
-                                                                            <div style={{ width: '150px' }}>
-                                                                                <select
-                                                                                    className="form-select form-select-sm"
-                                                                                    value={item.WonOption || ''}
-                                                                                    onChange={(e) => handleInlineUpdate(item, 'WonOption', e.target.value)}
-                                                                                    onClick={(e) => e.stopPropagation()}
-                                                                                >
-                                                                                    <option value="">Option...</option>
-                                                                                    {item.QuoteOptions.map(opt => (
-                                                                                        <option key={opt.name} value={opt.name}>{opt.name}</option>
-                                                                                    ))}
-                                                                                </select>
-                                                                            </div>
-                                                                        </div>
-                                                                    )}
+
 
                                                                     <div className="d-flex flex-column">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>ERP Job No.</span>
@@ -991,6 +974,23 @@ const ProbabilityForm = () => {
                                                                                 onChange={(e) => handleInlineUpdate(item, 'WonOrderValue', e.target.value)}
                                                                                 onClick={(e) => e.stopPropagation()}
                                                                             />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="d-flex flex-column">
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>GP %</span>
+                                                                        <div className="input-group input-group-sm" style={{ width: '110px' }}>
+                                                                            <input
+                                                                                type="number"
+                                                                                className="form-control form-control-sm"
+                                                                                placeholder="0.00"
+                                                                                min="0"
+                                                                                max="100"
+                                                                                step="0.01"
+                                                                                value={item.WonGrossProfit ?? ''}
+                                                                                onChange={(e) => handleInlineUpdate(item, 'WonGrossProfit', e.target.value)}
+                                                                                onClick={(e) => e.stopPropagation()}
+                                                                            />
+                                                                            <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>%</span>
                                                                         </div>
                                                                     </div>
                                                                     <div className="d-flex flex-column">

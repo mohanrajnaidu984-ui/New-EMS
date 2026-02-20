@@ -11,7 +11,7 @@ function AppContent() {
   const [showSignup, setShowSignup] = useState(false);
 
   React.useEffect(() => {
-    console.log('AppContent Re-render: Auth=', isAuthenticated, 'User=', currentUser);
+    // Auth state logging removed for performance
   }, [isAuthenticated, currentUser]);
 
   return (

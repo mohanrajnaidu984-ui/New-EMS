@@ -39,7 +39,6 @@ export const DataProvider = ({ children }) => {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                console.log('[DataContext] Starting data fetch...');
 
                 const [enqRes, custRes, contRes, userRes, itemRes] = await Promise.all([
                     fetch(`${API_URL}/enquiries`).catch(err => {
@@ -64,13 +63,6 @@ export const DataProvider = ({ children }) => {
                     })
                 ]);
 
-                console.log('[DataContext] Fetch responses:', {
-                    enquiries: enqRes.ok,
-                    customers: custRes.ok,
-                    contacts: contRes.ok,
-                    users: userRes.ok,
-                    items: itemRes.ok
-                });
 
                 const enqData = await enqRes.json();
                 const custData = await custRes.json();
@@ -82,29 +74,9 @@ export const DataProvider = ({ children }) => {
                 enqData.forEach(e => { enqMap[e.RequestNo] = e; });
                 setEnquiries(enqMap);
 
-                console.log('[DataContext] Customer data received:', custData.length, 'records');
-                console.log('[DataContext] Sample customer:', custData[0]);
-
-                // Check unique Category values
-                const uniqueCategories = [...new Set(custData.map(c => c.Category))];
-                console.log('[DataContext] Unique Category values:', uniqueCategories);
-
-                // Show samples of each category
-                const sampleContractor = custData.find(c => c.Category === 'Contractor');
-                const sampleClient = custData.find(c => c.Category === 'Client');
-                const sampleConsultant = custData.find(c => c.Category === 'Consultant');
-
-                console.log('[DataContext] Sample Contractor:', sampleContractor);
-                console.log('[DataContext] Sample Client:', sampleClient);
-                console.log('[DataContext] Sample Consultant:', sampleConsultant);
-
                 const contractors = custData.filter(c => c.Category === 'Contractor').map(c => c.CompanyName);
                 const clients = custData.filter(c => c.Category === 'Client').map(c => c.CompanyName);
                 const consultants = custData.filter(c => c.Category === 'Consultant').map(c => c.CompanyName);
-
-                console.log('[DataContext] Contractors:', contractors.length);
-                console.log('[DataContext] Clients:', clients.length, clients);
-                console.log('[DataContext] Consultants:', consultants.length, consultants);
 
                 setMasters(prev => ({
                     ...prev,
@@ -118,8 +90,6 @@ export const DataProvider = ({ children }) => {
                     enqItems: itemData,
                     enquiryFor: itemData.map(i => i.ItemName)
                 }));
-
-                console.log('[DataContext] Masters updated successfully');
             } catch (err) {
                 console.error("[DataContext] API Fetch Error:", err);
                 console.error("[DataContext] Error stack:", err.stack);

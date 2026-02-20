@@ -17,6 +17,7 @@ const PricingForm = () => {
     const [searchResults, setSearchResults] = useState([]);
     const [searching, setSearching] = useState(false);
     const [pendingRequests, setPendingRequests] = useState([]); // Pending List State
+    const [pendingSortConfig, setPendingSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
     const searchRef = useRef(null);
 
     // Pricing state
@@ -26,6 +27,7 @@ const PricingForm = () => {
     const [pricingData, setPricingData] = useState(null);
     const [values, setValues] = useState({});
     const [newOptionNames, setNewOptionNames] = useState({});
+    const [focusedCell, setFocusedCell] = useState(null); // tracks which price input is focused
 
     // Customer state
     const [selectedCustomer, setSelectedCustomer] = useState('');
@@ -64,19 +66,27 @@ const PricingForm = () => {
     // Fetch suggestions as user types
     const handleSearchInput = (value) => {
         setSearchTerm(value);
-        setSearchResults([]);
-        setPricingData(null);
+        setSuggestions([]);
+        // We only clear searchResults if the value is cleared
+        if (!value.trim()) {
+            setSearchResults([]);
+            setPricingData(null);
+        }
 
         if (debounceRef.current) clearTimeout(debounceRef.current);
 
-        if (value.trim().length >= 2) {
+        // Allow suggestions from 1 character for numbers (Enquiry No) or 2+ for text
+        const shouldSuggest = value.trim().length >= 1;
+
+        if (shouldSuggest) {
             debounceRef.current = setTimeout(async () => {
                 try {
                     const userEmail = currentUser?.email || currentUser?.EmailId || '';
-                    const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(value.trim())}&userEmail=${encodeURIComponent(userEmail)}`);
+                    // Note: Use pendingOnly=false for search bar to find everything
+                    const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(value.trim())}&userEmail=${encodeURIComponent(userEmail)}&pendingOnly=false`);
                     if (res.ok) {
                         const data = await res.json();
-                        setSuggestions(data.slice(0, 8));
+                        setSuggestions(data.slice(0, 10));
                         setShowSuggestions(data.length > 0);
                     }
                 } catch (err) {
@@ -98,16 +108,25 @@ const PricingForm = () => {
     };
 
     // Manual search
-    const handleSearch = () => {
+    const handleSearch = async () => {
         if (!searchTerm.trim()) return;
         setShowSuggestions(false);
+        setSearching(true);
+        setPricingData(null);
 
-        // If we already have a selected result in searchResults, keep it
-        if (searchResults.length === 1) return;
-
-        // Otherwise search from suggestions
-        if (suggestions.length > 0) {
-            setSearchResults(suggestions);
+        try {
+            const userEmail = currentUser?.email || currentUser?.EmailId || '';
+            const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(searchTerm.trim())}&userEmail=${encodeURIComponent(userEmail)}&pendingOnly=false`);
+            if (res.ok) {
+                const data = await res.json();
+                setSearchResults(data);
+                setSuggestions([]);
+            }
+        } catch (err) {
+            console.error('Manual search error:', err);
+            alert('Search failed. Please try again.');
+        } finally {
+            setSearching(false);
         }
     };
 
@@ -135,7 +154,22 @@ const PricingForm = () => {
             const url = `${API_BASE}/api/pricing/${encodeURIComponent(requestNo)}?userEmail=${encodeURIComponent(userEmail)}${customerName ? `&customerName=${encodeURIComponent(customerName)}` : ''}`;
             const res = await fetch(url);
 
-            if (res.ok) {
+            if (!res.ok) {
+                const errData = await res.json();
+                console.error('Failed to load pricing:', errData);
+                if (res.status === 404) {
+                    setPricingData({
+                        enquiry: errData.enquiry || { RequestNo: requestNo },
+                        jobs: [],
+                        options: [],
+                        values: [],
+                        customers: [],
+                        access: { canEditAll: false, visibleJobs: [], editableJobs: [], hasLeadAccess: false }
+                    });
+                } else {
+                    setError(errData.error || 'Failed to load pricing');
+                }
+            } else {
                 const data = await res.json();
 
                 // SANITIZATION: Globally Trim Customer Names to prevent mismatch (Step 944)
@@ -177,13 +211,13 @@ const PricingForm = () => {
 
                 // AUTO-PROVISION TABS (Pricing Sheets)
                 // Ensure ALL linked customers (Main + Extra + Internal Parents) have pricing tabs.
-                // If they are missing, auto-create "Base Price" for them.
+                // Sync ALL unique options (e.g. "Base Price", "Option-1") across all customers to ensure consistency.
                 const linkedCustomers = [
-                    ...(data.enquiry.customerName || '').split(','),
+                    ...(data.enquiry?.customerName || '').split(','),
                     ...(data.extraCustomers || []).flatMap(c => (c || '').split(',')),
                     ...internalParentCustomers // Include internal parents
                 ].map(s => s.trim())
-                    .filter(s => s && s.length > 0)
+                    .filter(s => s && s.length > 0 && s !== '(Not Assigned)')
                     .filter(s => {
                         // STRICT FILTER: Only include if explicitly in Master/Extra OR is an Internal Parent
                         const isMaster = (data.enquiry.customerName || '').includes(s);
@@ -192,59 +226,84 @@ const PricingForm = () => {
                         return isMaster || isExtra || isInternal;
                     });
 
+                // 1. Collect all unique (ItemName, OptionName) tuples from existing options
+                // This ensures that if "Option-1" exists for BMS in one customer, it is propagated to all customers.
+                const uniqueOptions = [];
+                if (data.options) {
+                    data.options.forEach(o => {
+                        if (!uniqueOptions.some(uo => uo.itemName === o.itemName && uo.name === o.name)) {
+                            uniqueOptions.push({ itemName: o.itemName, name: o.name });
+                        }
+                    });
+                }
+                // Ensure 'Base Price' is always in the list for all Jobs
+                if (data.jobs) {
+                    data.jobs.forEach(j => {
+                        if (!uniqueOptions.some(uo => uo.itemName === j.itemName && uo.name === 'Base Price')) {
+                            uniqueOptions.push({ itemName: j.itemName, name: 'Base Price' });
+                        }
+                    });
+                }
 
-                const existingPricingCustomers = data.customers || [];
+                // 2. Identify missing options for each Linked Customer
+                const optionsToCreate = [];
 
-                // Find customers who need initialization (Either completely new, OR missing specific Job Options)
-                const customersToInit = linkedCustomers.filter(c => {
-                    // Check 1: Is customer fully missing?
-                    if (!existingPricingCustomers.includes(c)) return true;
-
-                    // Check 2: Does customer have 'Base Price' for ALL jobs?
-                    if (data.jobs && data.options) {
-                        const distinctItemNames = [...new Set(data.jobs.map(j => j.itemName))];
-                        const customerOptions = data.options.filter(o => o.customerName === c);
-
-                        // If any job is missing a 'Base Price' option for this customer, we need to init
-                        const missingJob = distinctItemNames.some(jobName =>
-                            !customerOptions.some(o => o.itemName === jobName && o.name === 'Base Price')
-                        );
-                        return missingJob;
+                // Build a helper to find the lead job for a given itemName
+                // A job is a lead job if it has no parentId (root job)
+                const findLeadJobName = (itemName) => {
+                    if (!data.jobs) return null;
+                    const job = data.jobs.find(j => j.itemName === itemName);
+                    if (!job) return null;
+                    // Walk up to root to find lead job
+                    let current = job;
+                    while (current.parentId) {
+                        const parent = data.jobs.find(j => j.id === current.parentId);
+                        if (!parent) break;
+                        current = parent;
                     }
-                    return false;
+                    // current is now the root (lead) job
+                    return current.itemName;
+                };
+
+                linkedCustomers.forEach(custName => {
+                    uniqueOptions.forEach(uo => {
+                        // Check if this customer already has this option
+                        const exists = data.options && data.options.some(o =>
+                            o.customerName === custName &&
+                            o.itemName === uo.itemName &&
+                            o.name === uo.name
+                        );
+
+                        if (!exists) {
+                            // Derive leadJobName for this option's item
+                            const derivedLeadJobName = findLeadJobName(uo.itemName);
+                            optionsToCreate.push({
+                                customerName: custName,
+                                itemName: uo.itemName,
+                                optionName: uo.name,
+                                leadJobName: derivedLeadJobName   // ← include so filter works
+                            });
+                        }
+                    });
                 });
 
-                if (customersToInit.length > 0) {
+                if (optionsToCreate.length > 0) {
                     // Start Provisioning
                     try {
-                        const allJobs = data.jobs || [];
-                        const promises = [];
-
-                        // Create Base Price for EACH Missing Customer for EACH UNIQUE ItemName
-                        const distinctItemNames = [...new Set(allJobs.map(j => j.itemName))];
-
-                        customersToInit.forEach(cName => {
-                            // Filter to Find ONLY the jobs that are missing Base Price for this customer
-                            const existingOps = data.options.filter(o => o.customerName === cName && o.name === 'Base Price');
-                            const existingJobNames = existingOps.map(o => o.itemName);
-
-                            const missingItems = distinctItemNames.filter(jobName => !existingJobNames.includes(jobName));
-
-                            missingItems.forEach(itemName => {
-                                const payload = {
-                                    requestNo: requestNo,
-                                    optionName: 'Base Price',
-                                    itemName: itemName,
-                                    customerName: cName
-                                };
-                                promises.push(
-                                    fetch(`${API_BASE}/api/pricing/option`, {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify(payload)
-                                    }).then(r => r.ok ? r.json() : null)
-                                );
-                            });
+                        // Track originating optionsToCreate entry so we can backfill from it
+                        const promises = optionsToCreate.map((opt, idx) => {
+                            const payload = {
+                                requestNo: requestNo,
+                                optionName: opt.optionName,
+                                itemName: opt.itemName,
+                                customerName: opt.customerName,
+                                leadJobName: opt.leadJobName || null   // ← include derived leadJobName
+                            };
+                            return fetch(`${API_BASE}/api/pricing/option`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            }).then(r => r.ok ? r.json().then(json => ({ json, srcOpt: opt })) : null);
                         });
 
                         const results = await Promise.all(promises);
@@ -253,18 +312,30 @@ const PricingForm = () => {
                         if (!data.options) data.options = [];
                         if (!data.customers) data.customers = []; // Ensure initialized
 
-                        results.forEach(res => {
-                            if (res) {
-                                // Add to options if successful
+                        results.forEach(item => {
+                            if (!item || !item.json) return;
+                            const res = item.json;   // { success, option: { ID, OptionName, ItemName, CustomerName, LeadJobName } }
+                            const srcOpt = item.srcOpt;
+                            // API returns the DB row nested under res.option
+                            const optRow = res.option || res;
+                            const realId = optRow.ID || optRow.id;
+                            const realName = optRow.OptionName || optRow.optionName || srcOpt.optionName;
+                            const realItem = optRow.ItemName || optRow.itemName || srcOpt.itemName;
+                            const realCustomer = optRow.CustomerName || optRow.customerName || srcOpt.customerName;
+                            const realLeadJob = optRow.LeadJobName || optRow.leadJobName || srcOpt.leadJobName;
+
+                            if (realId) {
                                 data.options.push({
-                                    id: res.optionId || res.id,
-                                    name: 'Base Price',
-                                    itemName: res.itemName // Use returned item name
+                                    id: realId,
+                                    name: realName,
+                                    itemName: realItem,
+                                    customerName: realCustomer,
+                                    leadJobName: realLeadJob
                                 });
-                                // Add to active customers list if not already there
-                                if (!data.customers.includes(res.customerName)) {
-                                    data.customers.push(res.customerName);
-                                }
+                            }
+                            // Add to active customers list if not already there
+                            if (realCustomer && !data.customers.includes(realCustomer)) {
+                                data.customers.push(realCustomer);
                             }
                         });
 
@@ -365,15 +436,15 @@ const PricingForm = () => {
 
                 // Cleanup: Filter out malformed customer names (containing commas) from display
                 if (data.customers) {
-                    data.customers = data.customers.filter(c => !c.includes(','));
+                    data.customers = data.customers.filter(c => c && typeof c === 'string' && !c.includes(','));
 
                     // STRICT DISPLAY FILTER: 
                     // Ensure displayed customers are ONLY those currently valid in Enquiry or Internal Parents
                     // This hides stale customers that might still exist in the options table
                     data.customers = data.customers.filter(s => {
-                        const isMaster = (data.enquiry.customerName || '').includes(s);
-                        const isExtra = (data.extraCustomers || []).some(ec => ec.includes(s));
-                        const isInternal = internalParentCustomers.includes(s);
+                        const isMaster = (data.enquiry?.customerName || '').includes(s);
+                        const isExtra = (data.extraCustomers || []).some(ec => ec && typeof ec === 'string' && ec.includes(s));
+                        const isInternal = (internalParentCustomers || []).includes(s);
                         return isMaster || isExtra || isInternal;
                     });
                 }
@@ -387,38 +458,14 @@ const PricingForm = () => {
                 // 3. They have a Pricing Option (Row) explicitly assigned to their Job in that Tab.
                 // 4. They are an Admin/Manager (canEditAll).
 
-                if (data.customers && data.access && !data.access.canEditAll) { // Assuming !canEditAll means restricted user
-                    const myJobs = data.access.editableJobs || [];
-                    const mainCustomer = (data.enquiry.customerName || '').trim();
+                // ---------------------------------------------------------
+                // VISIBILITY FILTER: Strict Role-Based View
+                // ---------------------------------------------------------
+                // ---------------------------------------------------------
+                // VISIBILITY FILTER: Dynamic filtering moved to useMemo (Step 1727)
+                // ---------------------------------------------------------
 
-                    data.customers = data.customers.filter(cName => {
-                        const cleanCName = cName.trim();
-
-                        // 1. Always show Main Customer
-                        if (cleanCName === mainCustomer) return true;
-
-                        // 2. Show if Tab Name matches one of My Jobs (e.g. I am "Electrical", viewing "Electrical" tab)
-                        //    (We compare against Clean Scope Names)
-                        const matchesMyJob = myJobs.some(jobName => {
-                            const cleanJob = jobName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                            return cleanJob === cleanCName;
-                        });
-                        if (matchesMyJob) return true;
-
-                        // 3. Show if I have a Pricing Option in this Tab
-                        //    (e.g. I am "BMS", "Electrical" tab has a "BMS" option -> I see it)
-                        if (data.options) {
-                            const hasMyOption = data.options.some(opt =>
-                                opt.customerName === cleanCName &&
-                                myJobs.includes(opt.itemName) // Verify exact job name match
-                            );
-                            if (hasMyOption) return true;
-                        }
-
-                        // Otherwise Hide
-                        return false;
-                    });
-                }
+                // ---------------------------------------------------------
                 // ---------------------------------------------------------
 
                 setPricingData(data);
@@ -580,9 +627,14 @@ const PricingForm = () => {
                     );
 
                     if (roots.length > 0) {
-                        // Only auto-select if not already set or invalid
+                        // Priority: Auto-select a root the user is explicitly assigned to
+                        const myJobs = (data.access && data.access.editableJobs) || [];
+                        const myRoot = roots.find(r => myJobs.includes(r.itemName));
+                        const targetRoot = myRoot || roots[0];
+
+                        // Only auto-select if not already set or invalid (Step 865)
                         if (!selectedLeadId || !data.jobs.find(j => j.id === selectedLeadId)) {
-                            setSelectedLeadId(roots[0].id);
+                            setSelectedLeadId(targetRoot.id);
                         }
                     }
                 }
@@ -605,7 +657,13 @@ const PricingForm = () => {
 
         // Resolve display name back to raw ItemName
         // Logic: specific job names are used as keys. If key matches lead job display name, map to lead item.
-        if (targetScope.includes(' / Lead Job') || targetScope === 'Lead Job' || (leadJob && targetScope === `${leadJob.itemName} / Lead Job`)) {
+        if (
+            targetScope.includes(' / Lead Job') ||
+            targetScope === 'Lead Job' ||
+            (leadJob && targetScope === `${leadJob.itemName} / Lead Job`) ||
+            (leadJob && targetScope === `${leadJob.itemName} (Lead Job)`) ||  // Fix: groupName uses "(Lead Job)" format
+            targetScope.endsWith(' (Lead Job)')  // Generic fallback for any lead job label
+        ) {
             targetItemName = leadJob ? leadJob.itemName : null;
         }
 
@@ -671,14 +729,23 @@ const PricingForm = () => {
         }
     };
 
-    // Update cell value
+    // Format a numeric value as ###,###,###.### (up to 3 decimal places, no trailing zeros)
+    const formatPrice = (val) => {
+        if (val === '' || val === undefined || val === null) return '';
+        const num = parseFloat(val);
+        if (isNaN(num)) return '';
+        // Use locale string with max 3 decimal places, no trailing zeros
+        return num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+    };
+
+    // Update cell value — always strip commas and store as plain float
     const handleValueChange = (optionId, jobId, value) => {
-        // Allow numeric and empty check
         const key = `${optionId}_${jobId}`;
-        const floatVal = parseFloat(value);
+        const stripped = String(value).replace(/,/g, ''); // remove commas the user may paste
+        const floatVal = parseFloat(stripped);
         setValues(prev => ({
             ...prev,
-            [key]: value === '' ? '' : (isNaN(floatVal) ? '' : floatVal)
+            [key]: stripped === '' ? '' : (isNaN(floatVal) ? '' : floatVal)
         }));
     };
 
@@ -702,6 +769,10 @@ const PricingForm = () => {
         allKeys.forEach(key => {
             const parts = key.split('_');
             if (parts.length < 2) return;
+
+            // Skip simulated option keys (e.g. 'simulated_base_1708450547000_jobId')
+            // These are frontend-only placeholders; real DB options should be used instead.
+            if (key.startsWith('simulated')) return;
 
             const optionId = parseInt(parts[0]);
             const jobId = parseInt(parts[1]); // Assuming Job ID is int
@@ -1026,8 +1097,77 @@ const PricingForm = () => {
         }
     };
 
-    // Check if job is editable
-    const canEditJob = (job) => job && job.editable;
+    // Dynamic Customer Tabs Filter (Step 1727)
+    const displayedCustomers = React.useMemo(() => {
+        if (!pricingData) return [];
+        // Admins/Managers see everything
+        if (pricingData.access?.canEditAll) return pricingData.customers || [];
+
+        const myJobs = pricingData.access.editableJobs || [];
+        const selectedJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
+        if (!selectedJob) return pricingData.customers || [];
+
+        // 1. Identify External Customers (Main + Extra)
+        const externalCustomers = [
+            ...(pricingData.enquiry?.customerName || '').split(','),
+            ...(pricingData.extraCustomers || []).flatMap(c => (c || '').split(','))
+        ].map(s => s.trim()).filter(Boolean);
+
+        // 2. Identify Role for THIS selection
+        const isLeadForThisSelection = myJobs.includes(selectedJob.itemName);
+
+        // 3. Identify Parent Customers (subjob logic)
+        const parentCustomers = new Set();
+        if (!isLeadForThisSelection) {
+            myJobs.forEach(myJobName => {
+                const jobObj = pricingData.jobs.find(j => j.itemName === myJobName);
+                if (jobObj) {
+                    // Check if descendant of selectedLeadJob
+                    let isDescendant = false;
+                    let curr = jobObj;
+                    while (curr && curr.parentId) {
+                        if (curr.parentId == selectedLeadId) {
+                            isDescendant = true;
+                            break;
+                        }
+                        curr = pricingData.jobs.find(j => j.id == curr.parentId);
+                    }
+
+                    if (isDescendant) {
+                        const parentObj = pricingData.jobs.find(p => p.id == jobObj.parentId);
+                        if (parentObj) {
+                            // Clean name as per heuristic (Step 1727)
+                            const cleanP = parentObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            parentCustomers.add(cleanP);
+                        }
+                    }
+                }
+            });
+        }
+
+        // 4. Return filtered list: External (if Lead) OR Parent (if Sub)
+        return (pricingData.customers || []).filter(cName => {
+            const cleanC = cName.trim();
+            // LEAD ACCESS: If user has lead access (global or assigned to any root), show all external customers
+            if (isLeadForThisSelection || pricingData.access?.hasLeadAccess) {
+                return externalCustomers.includes(cleanC);
+            } else if (parentCustomers.size > 0) {
+                // INTERNAL VIEW: Show parent jobs as customers (Sales to other divisions)
+                return parentCustomers.has(cleanC);
+            }
+            return false;
+        });
+    }, [pricingData, selectedLeadId]);
+
+    // Sync selectedCustomer with displayed tabs
+    useEffect(() => {
+        if (displayedCustomers.length > 0 && pricingData && !loading) {
+            if (!selectedCustomer || !displayedCustomers.includes(selectedCustomer)) {
+                console.log('Syncing selectedCustomer to first available tab:', displayedCustomers[0]);
+                loadPricing(pricingData.enquiry.requestNo, displayedCustomers[0], values);
+            }
+        }
+    }, [displayedCustomers]);
 
     // Get visible jobs
     const visibleJobs = pricingData ? pricingData.jobs.filter(j => j.visible !== false) : [];
@@ -1085,7 +1225,7 @@ const PricingForm = () => {
             return false;
         };
 
-        return pricingData.options.filter(o => {
+        const results = pricingData.options.filter(o => {
             // LEAD JOB SCOPING (Step 1013)
             // Ensure option belongs to the currently viewed Lead Job logic
             if (activeLeadName) {
@@ -1118,6 +1258,20 @@ const PricingForm = () => {
 
             return false;
         });
+
+        // ENSURE "Base Price" row is ALWAYS present for the lead job in the active customer tab
+        const leadJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
+        if (leadJob && selectedCustomer && !results.some(o => o.name === 'Base Price' && o.itemName === leadJob.itemName)) {
+            results.push({
+                id: 'simulated_base_' + Date.now(),
+                name: 'Base Price',
+                itemName: leadJob.itemName,
+                customerName: selectedCustomer,
+                isSimulated: true
+            });
+        }
+
+        return results;
     }, [pricingData, selectedCustomer, selectedLeadId]);
 
     return (
@@ -1213,6 +1367,13 @@ const PricingForm = () => {
                 </div>
             </div>
 
+            {/* Searching Indicator */}
+            {searching && (
+                <div style={{ background: 'white', padding: '20px', borderRadius: '8px', textAlign: 'center', color: '#64748b', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+                    Searching for enquiries...
+                </div>
+            )}
+
             {/* Search Results Table */}
             {
                 searchResults.length > 0 && !pricingData && (
@@ -1233,7 +1394,7 @@ const PricingForm = () => {
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Enquiry Date</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1322,109 +1483,157 @@ const PricingForm = () => {
 
             {/* Pending Requests List - Display when no search and no pricing loaded */}
             {
-                !pricingData && searchResults.length === 0 && !searchTerm && pendingRequests.length > 0 && (
-                    <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
-                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <FileText size={16} /> Pending Updates ({pendingRequests.length})
-                            </h3>
-                            <span style={{ fontSize: '12px', color: '#64748b' }}>Sorted by Due Date</span>
-                        </div>
-                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                                    <tr>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Project Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Customer Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Due Date</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {pendingRequests.map((enq, idx) => (
-                                        <tr
-                                            key={enq.RequestNo || idx}
-                                            style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                            onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                            onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                            onClick={() => loadPricing(enq.RequestNo)}
-                                        >
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                            <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
-                                                    const parts = s.split('|');
-                                                    const name = parts[0];
-                                                    const rawPrice = parts[1];
-                                                    const rawDate = parts[2]; // ISODate
-                                                    const rawLevel = parts[3]; // Level (Depth)
+                !pricingData && searchResults.length === 0 && !searchTerm && pendingRequests.length > 0 && (() => {
+                    // --- Sort Logic ---
+                    const sortedPending = [...pendingRequests].sort((a, b) => {
+                        const { field, direction } = pendingSortConfig;
+                        let aVal = a[field];
+                        let bVal = b[field];
+                        // Date fields
+                        if (field === 'DueDate' || field === 'EnquiryDate') {
+                            aVal = aVal ? new Date(aVal).getTime() : Infinity;
+                            bVal = bVal ? new Date(bVal).getTime() : Infinity;
+                        } else {
+                            aVal = (aVal || '').toString().toLowerCase();
+                            bVal = (bVal || '').toString().toLowerCase();
+                        }
+                        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+                        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+                        return 0;
+                    });
 
-                                                    const level = parseInt(rawLevel) || 0;
-                                                    const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+                    const SortableHeader = ({ field, label, style = {} }) => {
+                        const isActive = pendingSortConfig.field === field;
+                        const isAsc = pendingSortConfig.direction === 'asc';
+                        return (
+                            <th
+                                onClick={() => setPendingSortConfig(prev =>
+                                    prev.field === field
+                                        ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                                        : { field, direction: 'asc' }
+                                )}
+                                style={{
+                                    padding: '10px 16px', textAlign: 'left', fontSize: '12px',
+                                    fontWeight: '600', color: isActive ? '#0284c7' : '#64748b',
+                                    borderBottom: '1px solid #e2e8f0', cursor: 'pointer',
+                                    userSelect: 'none', whiteSpace: 'nowrap', ...style
+                                }}
+                            >
+                                {label}
+                                {isActive
+                                    ? (isAsc ? ' ▲' : ' ▼')
+                                    : <span style={{ color: '#cbd5e1' }}> ⇅</span>
+                                }
+                            </th>
+                        );
+                    };
 
-                                                    // Format price if numeric
-                                                    let displayPrice = rawPrice;
-                                                    if (isUpdated) {
-                                                        const num = parseFloat(rawPrice);
-                                                        if (!isNaN(num)) displayPrice = num.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-                                                    }
-
-                                                    // Format Date
-                                                    let displayDate = '';
-                                                    if (rawDate) {
-                                                        try {
-                                                            displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
-                                                        } catch (e) {
-                                                            console.error('Date parse error:', e);
-                                                        }
-                                                    }
-
-                                                    return (
-                                                        <div key={i} style={{
-                                                            fontSize: '11px',
-                                                            marginBottom: '4px',
-                                                            whiteSpace: 'nowrap',
-                                                            marginLeft: `${level * 20}px`,
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            gap: '4px'
-                                                        }}>
-                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
-                                                            <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
-                                                            <span style={{
-                                                                color: isUpdated ? '#166534' : '#94a3b8',
-                                                                marginLeft: '4px',
-                                                                fontStyle: isUpdated ? 'normal' : 'italic',
-                                                                background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                                                                padding: '1px 6px',
-                                                                borderRadius: '4px',
-                                                                fontSize: '10px'
-                                                            }}>
-                                                                {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
-                                                            </span>
-                                                            {isUpdated && displayDate && (
-                                                                <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
-                                                                    ({displayDate})
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </td>
+                    return (
+                        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
+                            <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <FileText size={16} /> Pending Updates ({pendingRequests.length})
+                                </h3>
+                                <span style={{ fontSize: '12px', color: '#64748b' }}>
+                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                                </span>
+                            </div>
+                            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                        <tr>
+                                            <SortableHeader field="RequestNo" label="Enquiry No." style={{ width: '80px' }} />
+                                            <SortableHeader field="ProjectName" label="Project Name" />
+                                            <SortableHeader field="CustomerName" label="Customer Name" />
+                                            <SortableHeader field="ClientName" label="Client Name" />
+                                            <SortableHeader field="ConsultantName" label="Consultant Name" />
+                                            <SortableHeader field="DueDate" label="Due Date" style={{ width: '120px' }} />
+                                            <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody>
+                                        {sortedPending.map((enq, idx) => (
+                                            <tr
+                                                key={enq.RequestNo || idx}
+                                                style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
+                                                onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                                onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                                onClick={() => loadPricing(enq.RequestNo)}
+                                            >
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
+                                                <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                                    {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
+                                                        const parts = s.split('|');
+                                                        const name = parts[0];
+                                                        const rawPrice = parts[1];
+                                                        const rawDate = parts[2]; // ISODate
+                                                        const rawLevel = parts[3]; // Level (Depth)
+
+                                                        const level = parseInt(rawLevel) || 0;
+                                                        const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+
+                                                        // Format price if numeric
+                                                        let displayPrice = rawPrice;
+                                                        if (isUpdated) {
+                                                            const num = parseFloat(rawPrice);
+                                                            if (!isNaN(num)) displayPrice = num.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+                                                        }
+
+                                                        // Format Date
+                                                        let displayDate = '';
+                                                        if (rawDate) {
+                                                            try {
+                                                                displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
+                                                            } catch (e) {
+                                                                console.error('Date parse error:', e);
+                                                            }
+                                                        }
+
+                                                        return (
+                                                            <div key={i} style={{
+                                                                fontSize: '11px',
+                                                                marginBottom: '4px',
+                                                                whiteSpace: 'nowrap',
+                                                                marginLeft: `${level * 20}px`,
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '4px'
+                                                            }}>
+                                                                {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
+                                                                <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
+                                                                <span style={{
+                                                                    color: isUpdated ? '#166534' : '#94a3b8',
+                                                                    marginLeft: '4px',
+                                                                    fontStyle: isUpdated ? 'normal' : 'italic',
+                                                                    background: isUpdated ? '#dcfce7' : '#f1f5f9',
+                                                                    padding: '1px 6px',
+                                                                    borderRadius: '4px',
+                                                                    fontSize: '10px'
+                                                                }}>
+                                                                    {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
+                                                                </span>
+                                                                {isUpdated && displayDate && (
+                                                                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
+                                                                        ({displayDate})
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
-                    </div>
-                )
+                    );
+                })()
             }
 
             {/* No Results (Only show if truly no results and no pending list default) */}
@@ -1474,45 +1683,6 @@ const PricingForm = () => {
                                 >
                                     <X size={20} />
                                 </button>
-                            </div>
-                        </div>
-
-                        {/* Customer Selection Tabs */}
-                        <div style={{ padding: '0 20px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', overflow: addingCustomer ? 'visible' : 'auto' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', minWidth: 'min-content' }}>
-                                {pricingData.customers && pricingData.customers.map(cust => (
-                                    <div
-                                        key={cust}
-                                        onClick={() => {
-                                            // FIX: Reload pricing data for the selected customer while PRESERVING current edits.
-                                            // This ensures 'pricingData.values' updates to the new customer's DB values,
-                                            // preventing headers/footers from showing 0s visually.
-                                            // Passing 'values' ensures unsaved changes from the previous tab are kept in state.
-                                            loadPricing(pricingData.enquiry.requestNo, cust, values);
-                                        }}
-                                        style={{
-                                            padding: '10px 16px',
-                                            background: selectedCustomer === cust ? 'white' : 'transparent',
-                                            color: selectedCustomer === cust ? '#0284c7' : '#64748b',
-                                            borderTop: selectedCustomer === cust ? '3px solid #0284c7' : '3px solid transparent',
-                                            borderLeft: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
-                                            borderRight: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
-                                            borderBottom: 'none',
-                                            fontWeight: selectedCustomer === cust ? '600' : '500',
-                                            cursor: 'pointer',
-                                            fontSize: '13px',
-                                            marginTop: '4px',
-                                            whiteSpace: 'nowrap',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}
-                                    >
-                                        <span>{cust || 'Default Customer'}</span>
-                                    </div>
-                                ))}
-
-                                { /* Add New Customer Button Removed */}
                             </div>
                         </div>
 
@@ -1585,6 +1755,47 @@ const PricingForm = () => {
                             );
                         })()}
 
+                        {/* Customer Selection Tabs */}
+                        <div style={{ padding: '0 20px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', overflow: addingCustomer ? 'visible' : 'auto' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', minWidth: 'min-content' }}>
+                                {displayedCustomers && displayedCustomers.map((cust, idx) => (
+                                    <div
+                                        key={`${cust}-${idx}`}
+                                        onClick={() => {
+                                            // Ensure we don't reload if already active
+                                            if (cust === selectedCustomer) return;
+                                            // FIX: Reload pricing data for the selected customer while PRESERVING current edits.
+                                            // This ensures 'pricingData.values' updates to the new customer's DB values,
+                                            // preventing headers/footers from showing 0s visually.
+                                            // Passing 'values' ensures unsaved changes from the previous tab are kept in state.
+                                            loadPricing(pricingData.enquiry.requestNo, cust, values);
+                                        }}
+                                        style={{
+                                            padding: '10px 16px',
+                                            background: selectedCustomer === cust ? 'white' : 'transparent',
+                                            color: selectedCustomer === cust ? '#0284c7' : '#64748b',
+                                            borderTop: selectedCustomer === cust ? '3px solid #0284c7' : '3px solid transparent',
+                                            borderLeft: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
+                                            borderRight: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
+                                            borderBottom: 'none',
+                                            fontWeight: selectedCustomer === cust ? '600' : '500',
+                                            cursor: 'pointer',
+                                            fontSize: '13px',
+                                            marginTop: '4px',
+                                            whiteSpace: 'nowrap',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px'
+                                        }}
+                                    >
+                                        <span>{cust || 'Default Customer'}</span>
+                                    </div>
+                                ))}
+
+                                { /* Add New Customer Button Removed */}
+                            </div>
+                        </div>
+
                         {/* Pricing Table Content */}
                         {visibleJobs.length === 0 ? (
                             <div style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
@@ -1592,8 +1803,7 @@ const PricingForm = () => {
                             </div>
                         ) : (
                             <>
-                                <table style={{ width: '40%', borderCollapse: 'collapse' }}>
-
+                                <table style={{ width: 'auto', minWidth: '600px', borderCollapse: 'collapse' }}>
                                     <tbody>
                                         {(() => {
                                             // Grouping Logic: Keyed by Job ID
@@ -1609,7 +1819,7 @@ const PricingForm = () => {
                                                     while (changed) {
                                                         changed = false;
                                                         all.forEach(j => {
-                                                            if (!set.has(j.id) && set.has(j.parentId)) {
+                                                            if (j.parentId && set.has(j.parentId) && !set.has(j.id)) {
                                                                 set.add(j.id);
                                                                 changed = true;
                                                             }
@@ -1628,64 +1838,69 @@ const PricingForm = () => {
                                             // Only show Editable Jobs in External/Parent Tabs.
                                             // Admin/Manager (hasLeadAccess) sees all.
 
-                                            let contextFilteredJobs = targetJobs;
-                                            let isMyInternalTab = false;
+                                            // Step 1: Resolve Tab Context (Which Job is this tab about?)
+                                            const cleanTabNameSearch = (name) => name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                            const contextJob = pricingData.jobs.find(j =>
+                                                cleanTabNameSearch(j.itemName) === selectedCustomer || j.itemName === selectedCustomer
+                                            );
 
-                                            if (pricingData && pricingData.access && !pricingData.access.hasLeadAccess) {
-                                                const myEditableScopes = pricingData.access.editableJobs || [];
+                                            // Step 2: Identify Allowed IDs in this Tab (Tree Match)
+                                            let tabAllowedIds = null;
+                                            if (contextJob) {
+                                                tabAllowedIds = new Set([contextJob.id]);
+                                                let changed = true;
+                                                while (changed) {
+                                                    changed = false;
+                                                    pricingData.jobs.forEach(j => {
+                                                        if (!tabAllowedIds.has(j.id) && tabAllowedIds.has(j.parentId)) {
+                                                            tabAllowedIds.add(j.id);
+                                                            changed = true;
+                                                        }
+                                                    });
+                                                }
+                                            }
 
-                                                // Check if current tab is "My Internal Tab"
-                                                isMyInternalTab = myEditableScopes.some(scope => {
-                                                    const cleanScope = scope.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                                    return cleanScope === selectedCustomer;
-                                                });
+                                            // Step 3: Identify User Scope (What can this user see in general?)
+                                            // Provision (Step 1857): Even if user has hasLeadAccess, if they are NOT the lead for this specific selection,
+                                            // we restrict them to their assigned scope.
+                                            const myJobs = pricingData.access.editableJobs || [];
+                                            const selectedJobObj = pricingData.jobs?.find(j => j.id == selectedLeadId);
+                                            const isLeadForThisSelection = selectedJobObj && myJobs.includes(selectedJobObj.itemName);
 
-                                                // NEW VISIBILITY LOGIC (Strict Hierarchy)
-                                                // 1. Identify Context Job from Tab Name
-                                                const cleanTabName = (name) => name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                                const contextJob = pricingData.jobs.find(j =>
-                                                    cleanTabName(j.itemName) === selectedCustomer || j.itemName === selectedCustomer
-                                                );
-
-                                                if (contextJob) {
-                                                    // INTERNAL CONTEXT (Civil, Electrical, BMS Tabs)
-                                                    // Rule: Show Context Job AND All Descendants (Sub-Tree).
-                                                    const allowedIds = new Set([contextJob.id]);
-
-                                                    let changed = true;
-                                                    while (changed) {
-                                                        changed = false;
-                                                        pricingData.jobs.forEach(j => {
-                                                            if (!allowedIds.has(j.id) && allowedIds.has(j.parentId)) {
-                                                                allowedIds.add(j.id);
-                                                                changed = true;
+                                            // Always include descendants of editable jobs for "Subjob View"
+                                            const getMyTotalScope = (names) => {
+                                                const ids = new Set();
+                                                const startJobs = pricingData.jobs.filter(j => names.includes(j.itemName));
+                                                startJobs.forEach(sj => {
+                                                    ids.add(sj.id);
+                                                    let changedInner = true;
+                                                    while (changedInner) {
+                                                        changedInner = false;
+                                                        pricingData.jobs.forEach(child => {
+                                                            if (!ids.has(child.id) && ids.has(child.parentId)) {
+                                                                ids.add(child.id);
+                                                                changedInner = true;
                                                             }
                                                         });
                                                     }
+                                                });
+                                                return ids;
+                                            };
 
-                                                    contextFilteredJobs = targetJobs.filter(j => allowedIds.has(j.id));
-                                                } else {
-                                                    // EXTERNAL CONTEXT (Kartec, etc.)
-                                                    // Rule: Show Lead Job + All Descendants (Full Chain visibility for reference).
-                                                    const leadJob = pricingData.jobs.find(j => j.isLead);
-                                                    if (leadJob) {
-                                                        const allowedIds = new Set([leadJob.id]);
-                                                        let changed = true;
-                                                        while (changed) {
-                                                            changed = false;
-                                                            pricingData.jobs.forEach(j => {
-                                                                if (!allowedIds.has(j.id) && allowedIds.has(j.parentId)) {
-                                                                    allowedIds.add(j.id);
-                                                                    changed = true;
-                                                                }
-                                                            });
-                                                        }
-                                                        contextFilteredJobs = targetJobs.filter(j => allowedIds.has(j.id));
-                                                    } else {
-                                                        contextFilteredJobs = [];
-                                                    }
-                                                }
-                                            }
+                                            const myScopeIds = (pricingData.access.canEditAll || isLeadForThisSelection)
+                                                ? null // Admins or True Lead Jobs have global scope
+                                                : getMyTotalScope(myJobs);
+
+                                            // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
+                                            let contextFilteredJobs = targetJobs.filter(j => {
+                                                // A. Tab Filter: If we are in an internal/parent tab, only show that job and its children
+                                                if (tabAllowedIds && !tabAllowedIds.has(j.id)) return false;
+
+                                                // B. Scope Filter: Non-admins only see their assigned tree
+                                                if (myScopeIds && !myScopeIds.has(j.id)) return false;
+
+                                                return true;
+                                            });
 
                                             contextFilteredJobs.forEach(job => {
                                                 groupMap[job.id] = { job: job, options: [] };
@@ -1695,15 +1910,27 @@ const PricingForm = () => {
                                             const activeLeadJob = pricingData.jobs.find(j => j.id === selectedLeadId) || targetJobs.find(j => j.isLead);
 
                                             // Assign Options to Groups
-                                            const maxId = filteredOptions.reduce((max, opt) => (opt.id > max ? opt.id : max), 0);
+                                            // NOTE: Exclude simulated options (e.g. 'Base Price' placeholder with Date.now() id)
+                                            // from maxId, otherwise every real option becomes 'isNotNewest' and gets hidden.
+                                            const maxId = filteredOptions.reduce((max, opt) => {
+                                                if (opt.isSimulated || typeof opt.id !== 'number') return max;
+                                                return opt.id > max ? opt.id : max;
+                                            }, 0);
 
                                             filteredOptions.forEach(opt => {
                                                 contextFilteredJobs.forEach(job => {
                                                     let match = false;
-                                                    if (!opt.itemName) match = (job.isLead); // Null scope -> Lead Job
-                                                    else if (opt.itemName === 'Lead Job' && job.isLead) match = true;
-                                                    else if (opt.itemName === job.itemName) match = true;
-                                                    else if (opt.itemName === `${job.itemName} / Lead Job`) match = true; // Legacy
+                                                    const activeLeadJobName = activeLeadJob ? activeLeadJob.itemName : null;
+
+                                                    if (!opt.itemName) {
+                                                        match = (job.id === selectedLeadId); // Null scope -> Matches Current Lead
+                                                    } else if (opt.itemName === 'Lead Job') {
+                                                        match = (job.id === selectedLeadId);
+                                                    } else if (opt.itemName === job.itemName) {
+                                                        match = true;
+                                                    } else if (activeLeadJobName && opt.itemName === `${activeLeadJobName} / Lead Job`) {
+                                                        match = true;
+                                                    }
 
                                                     if (match) {
                                                         // Calculate Row Total (Visibility Check)
@@ -1751,6 +1978,7 @@ const PricingForm = () => {
                                                         // If External Tab && Sub-Job (Not Lead) && NOT MY SCOPE, we FORCE internal price (VIEW ONLY mode for Parent).
                                                         // If it IS my scope, I must be able to edit the Direct Quote to the External Customer.
                                                         const isMyScope = pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
+                                                        const isMyInternalTab = contextJob && pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(contextJob.itemName);
                                                         const shouldForceInternal = isExternalContext && !job.isLead && !isMyScope;
 
                                                         // LOGIC CHANGE: Only fallback if value is MISSING (price === null) OR if we are forced to internal view.
@@ -1802,16 +2030,15 @@ const PricingForm = () => {
                                                         if (price === null) price = 0;
 
                                                         // Hide if Empty, Not Newest, Not Base Price
+                                                        // ONLY suppress legacy default options ('Price', 'Optional') when they
+                                                        // are empty AND not the newest — user-created named options always show.
                                                         const isDefault = (opt.name === 'Price' || opt.name === 'Optional');
                                                         const isEmpty = (price <= 0.01 && !hasExplicitValue); // Treat 0 as empty ONLY if implicit
                                                         const isNotNewest = opt.id !== maxId;
 
                                                         if (isDefault && isEmpty && isNotNewest) return;
-                                                        if (isEmpty && isNotNewest && opt.name !== 'Base Price') {
-                                                            // Check if explicit row exists in DB (Double Check)
-                                                            // If price is 0 but explicit, we show it?
-                                                            if (!hasExplicitValue) return;
-                                                        }
+                                                        // NOTE: Do NOT blanket-hide custom options just because they have
+                                                        // no price yet — that caused 2nd/3rd options to appear "replaced".
 
                                                         // Push cloned option with effective Price for display
                                                         groupMap[job.id].options.push({ ...opt, effectivePrice: price });
@@ -1881,9 +2108,11 @@ const PricingForm = () => {
                                                     groupName = `${job.itemName} (Lead Job)`;
                                                 }
 
-                                                // Determine Editable Status
-                                                const isEditableScope = pricingData.access.editableJobs.includes(job.itemName);
-                                                const canEditSection = pricingData.access.hasLeadAccess || isEditableScope;
+                                                // Determine Editable Status (Step 1816)
+                                                // Provision: Enter own price ONLY. Sub-jobs are VIEW ONLY.
+                                                // Logic: must be in editableJobs to actually modify.
+                                                const isExplicityEditable = pricingData.access.editableJobs.includes(job.itemName);
+                                                const canEditSection = pricingData.access.hasLeadAccess || isExplicityEditable;
 
                                                 return (
                                                     <React.Fragment key={job.id}>
@@ -1916,27 +2145,33 @@ const PricingForm = () => {
                                                             return (
                                                                 <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
                                                                     <td style={{ padding: '6px 12px', fontWeight: '500', color: '#1e293b', fontSize: '13px' }}>{option.name}</td>
-                                                                    <td style={{ padding: '4px 8px', textAlign: 'center' }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                                                                    <td style={{ padding: '4px 8px', textAlign: 'left', width: '150px' }}>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '4px', marginLeft: '0px' }}>
                                                                             <input
-                                                                                type="number"
-                                                                                // Use state value OR fallback to DB value (Clean/Legacy) if state is empty (Step 869)
-                                                                                value={displayValue}
+                                                                                type="text"
+                                                                                inputMode="decimal"
+                                                                                // Show formatted value when not focused, raw value when focused
+                                                                                value={
+                                                                                    focusedCell === `${option.id}_${job.id}`
+                                                                                        ? (displayValue === '' ? '' : String(displayValue))
+                                                                                        : formatPrice(displayValue)
+                                                                                }
+                                                                                onFocus={() => setFocusedCell(`${option.id}_${job.id}`)}
+                                                                                onBlur={() => setFocusedCell(null)}
                                                                                 onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
                                                                                 disabled={!canEditRow}
-                                                                                placeholder="0.00"
-                                                                                step="0.01"
+                                                                                placeholder="0"
                                                                                 style={{
                                                                                     width: '100%',
-                                                                                    maxWidth: '150px',
-                                                                                    padding: '4px 8px',
+                                                                                    maxWidth: '130px',
+                                                                                    padding: '4px 6px',
                                                                                     border: '1px solid #e2e8f0',
                                                                                     borderRadius: '4px',
                                                                                     fontSize: '13px',
                                                                                     textAlign: 'right',
-                                                                                    backgroundColor: canEditRow ? '#fff' : '#f1f5f9', // Slightly darker background for read-only
-                                                                                    color: '#1e293b', // Force dark text
-                                                                                    opacity: 1, // Prevent browser fading
+                                                                                    backgroundColor: canEditRow ? '#fff' : '#f1f5f9',
+                                                                                    color: '#1e293b',
+                                                                                    opacity: 1,
                                                                                     cursor: canEditRow ? 'text' : 'not-allowed'
                                                                                 }}
                                                                             />
@@ -1998,16 +2233,14 @@ const PricingForm = () => {
                                                                 </td>
                                                             </tr>
                                                         )}
+                                                        {/* Spacer Row */}
+                                                        <tr><td colSpan={2} style={{ height: '8px' }}></td></tr>
                                                     </React.Fragment>
                                                 );
                                             });
-                                        })()
-                                        }
-
-
+                                        })()}
                                     </tbody>
                                 </table>
-
                                 {/* Actions Footer - Cleaned up */}
                                 <div style={{ padding: '16px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-start', alignItems: 'center', background: '#f8fafc' }}>
                                     <button
@@ -2034,7 +2267,7 @@ const PricingForm = () => {
                     </div>
                 )
             }
-        </div >
+        </div>
     );
 };
 

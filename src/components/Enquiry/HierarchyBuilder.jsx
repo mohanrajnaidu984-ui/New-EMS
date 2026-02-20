@@ -152,7 +152,9 @@ const HierarchyBuilder = ({
     const getAvailableOptions = (parentId) => {
         const siblings = localItems.filter(i => i.parentId === (parentId || null));
         const siblingNames = siblings.map(i => i.itemName);
-        return options.filter(opt => !siblingNames.includes(opt));
+        // Filter out siblings and ensure uniqueness of available options
+        const available = options.filter(opt => opt && !siblingNames.includes(opt));
+        return [...new Set(available)];
     };
 
     // Render Tree Node
@@ -208,8 +210,8 @@ const HierarchyBuilder = ({
                         >
                             <option value="">+ Add Sub</option>
                             {/* Pass *this* item's ID as parent context */}
-                            {getAvailableOptions(item.id).map(opt => (
-                                <option key={opt} value={opt}>{opt}</option>
+                            {getAvailableOptions(item.id).map((opt, idx) => (
+                                <option key={`${opt}-${idx}`} value={opt}>{opt}</option>
                             ))}
                         </select>
                     </div>
@@ -249,8 +251,8 @@ const HierarchyBuilder = ({
                         >
                             <option value="">{rootItems.length > 0 ? "+ Add Another Lead Job" : "-- Select Lead Job --"}</option>
                             {/* Pass null for root options */}
-                            {getAvailableOptions(null).map(opt => (
-                                <option key={opt} value={opt}>{opt}</option>
+                            {getAvailableOptions(null).map((opt, idx) => (
+                                <option key={`${opt}-${idx}`} value={opt}>{opt}</option>
                             ))}
                         </select>
                         {showNew && onNew && (

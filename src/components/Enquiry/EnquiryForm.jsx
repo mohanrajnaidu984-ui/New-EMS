@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import ListBoxControl from './ListBoxControl';
@@ -81,12 +81,15 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const [customerList, setCustomerList] = useState([]);
     const [receivedFromList, setReceivedFromList] = useState([]);
     const [seList, setSeList] = useState([]);
+    const [consultantList, setConsultantList] = useState([]);
 
     // Validation Errors
     const [errors, setErrors] = useState({});
     const [attachments, setAttachments] = useState([]);
-    const [pendingFiles, setPendingFiles] = useState([]);
+    const [pendingFiles, setPendingFiles] = useState([]); // Now stores only meta: { id, fileName, previewUrl }
+    const fileObjectsRef = useRef({}); // Stores actual File objects: { [id]: File }
     const [ackSEList, setAckSEList] = useState([]);
+    const [hyperlink, setHyperlink] = useState({ name: '', url: '' });
 
     // Project Suggestions State
     const [projectSuggestions, setProjectSuggestions] = useState([]);
@@ -101,9 +104,41 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const [originalSeList, setOriginalSeList] = useState([]);
     const [originalCustomerList, setOriginalCustomerList] = useState([]);
     const [originalReceivedFromList, setOriginalReceivedFromList] = useState([]);
+    const [originalConsultantList, setOriginalConsultantList] = useState([]);
 
     // Ref for error section to scroll to it when validation fails
     const errorSectionRef = useRef(null);
+
+    // Dynamic Lists
+    const combinedClientNames = useMemo(() => {
+        const combined = [
+            ...(masters.existingCustomers || []),
+            ...(masters.clientNames || []),
+            ...(masters.consultantNames || [])
+        ];
+        return Array.from(new Set(combined.filter(Boolean))).sort();
+    }, [masters.existingCustomers, masters.clientNames, masters.consultantNames]);
+
+    const enquiriesList = useMemo(() => enquiries ? Object.values(enquiries) : [], [enquiries]);
+
+    const renderContactOption = useCallback((opt) => {
+        const [name, company] = opt.split('|');
+        return `${name} (${company})`;
+    }, []);
+
+    const renderContactListBoxItem = useCallback((item, idx) => {
+        const [name, company] = item.split('|');
+        return `${idx + 1}. ${name} (${company})`;
+    }, []);
+
+    const receivedFromOptions = useMemo(() => {
+        if (!formData.CustomerName || !masters.contacts) return [];
+        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+        const target = normalize(formData.CustomerName);
+        return masters.contacts
+            .filter(c => normalize(c.CompanyName) === target)
+            .map(c => `${c.ContactName}|${c.CompanyName}`);
+    }, [formData.CustomerName, masters.contacts]);
 
     // Effect to determine edit permission
     useEffect(() => {
@@ -186,8 +221,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         // Project Name Autocomplete Logic
         if (field === 'ProjectName') {
-            if (value && value.trim().length > 0 && enquiries) {
-                const matches = Object.values(enquiries).filter(e =>
+            if (value && value.trim().length >= 3 && enquiriesList.length > 0) {
+                const matches = enquiriesList.filter(e =>
                     e.ProjectName && e.ProjectName.toLowerCase().includes(value.toLowerCase())
                 );
                 setProjectSuggestions(matches);
@@ -215,14 +250,12 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             const res = await fetch(`/api/system/next-request-no?t=${Date.now()}`);
             if (res.ok) {
                 const data = await res.json();
-                console.log('Next ID fetched:', data.nextId);
                 setFormData(prev => ({ ...prev, RequestNo: data.nextId }));
             } else {
-                console.error('Failed to get next request no');
                 // Fallback or error handling? For now allow manual entry or retry
             }
         } catch (err) {
-            console.error('Error fetching next request no:', err);
+            // Error handling
         }
     };
 
@@ -280,7 +313,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 }
             }
         } catch (err) {
-            console.error('Error in onAddCustomerClick:', err);
             alert('Error: ' + err.message);
         }
     };
@@ -330,6 +362,13 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                     return rest;
                 });
             }
+        }
+    };
+
+    const handleAddConsultant = () => {
+        if (formData.ConsultantName && !consultantList.includes(formData.ConsultantName)) {
+            setConsultantList([...consultantList, formData.ConsultantName]);
+            handleInputChange('ConsultantName', '');
         }
     };
 
@@ -418,7 +457,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             setModalMode('Edit');
             setShowEnqItemModal(true);
         } else {
-            console.warn('Item not found for edit:', selected);
         }
     };
 
@@ -456,7 +494,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             setFixedCategory('Client');
             setShowCustomerModal(true);
         } else {
-            console.error('Client not found in masters.customers:', selected);
             alert("Client details not found in master data.");
         }
     };
@@ -471,7 +508,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             setFixedCategory('Consultant');
             setShowCustomerModal(true);
         } else {
-            console.error('Consultant not found in masters.customers:', selected);
             alert("Consultant details not found in master data.");
         }
     };
@@ -489,7 +525,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     // --- Modal Submit Handlers ---
     const handleCustomerSubmit = async (data) => {
-        console.log('handleCustomerSubmit data:', data);
         if (modalMode === 'Add') {
             const result = await addMaster('customer', { ...data, RequestNo: formData.RequestNo });
             if (!result) return;
@@ -564,7 +599,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleContactSubmit = async (data) => {
-        console.log('handleContactSubmit data:', data);
         if (modalMode === 'Add') {
             const result = await addMaster('contact', { ...data, RequestNo: formData.RequestNo });
             if (!result) return;
@@ -668,7 +702,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleEnqItemSubmit = async (data) => {
-        console.log('handleEnqItemSubmit data:', data);
         if (modalMode === 'Add') {
             const result = await addMaster('enquiryItem', { ...data, RequestNo: formData.RequestNo });
             if (!result) return;
@@ -681,13 +714,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             }));
         } else {
             if (data.ID) {
-                console.log('Updating ID:', data.ID);
                 const success = await updateMaster('enquiryItem', data.ID, data);
-                console.log('Update success:', success);
                 if (success) {
                     updateMasters(prev => {
                         const newItems = prev.enqItems.map(item => item.ID == data.ID ? data : item);
-                        console.log('Updated enqItems:', newItems);
                         return {
                             ...prev,
                             enqItems: newItems,
@@ -705,8 +735,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 } else {
                     alert('Failed to update item');
                 }
-            } else {
-                console.error('No ItemID in data:', data);
             }
         }
     };
@@ -796,6 +824,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             SelectedCustomers: customerList,
             SelectedReceivedFroms: receivedFromList,
             SelectedConcernedSEs: seList,
+            SelectedConsultants: consultantList,
             AcknowledgementSE: ackSEList[0] || '',
             CreatedBy: isModifyMode ? formData.CreatedBy : (currentUser?.name || 'System'),
             ModifiedBy: currentUser?.name || 'System',
@@ -850,50 +879,99 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     const sendNotification = async (requestNo) => {
         try {
-            console.log('Triggering notification for:', requestNo);
             const res = await fetch('/api/enquiries/notify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ requestNo })
             });
             if (!res.ok) {
-                console.error('Failed to send notification email');
+                // notification failed
             } else {
-                console.log('Notification email triggered successfully');
+                // success
             }
         } catch (err) {
-            console.error('Error triggering notification:', err);
+            // error
         }
     };
 
     const uploadPendingFiles = async (requestNo) => {
-        const uploadData = new FormData();
-        pendingFiles.forEach(fileObj => {
-            uploadData.append('files', fileObj.file, fileObj.fileName);
-        });
+        const userName = currentUser?.name || 'System';
+        const userDivision = currentUser?.DivisionName || '';
 
-        try {
-            // Send RequestNo and UserName as query parameter
-            const userName = currentUser?.name || 'System';
-            const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}`, {
-                method: 'POST',
-                body: uploadData
-            });
+        // Separate pending items into groups by visibility and type
+        const groups = pendingFiles.reduce((acc, item) => {
+            const key = `${item.visibility || 'Public'}-${item.type || 'File'}`;
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(item);
+            return acc;
+        }, {});
 
-            if (res.ok) {
-                console.log('Pending files uploaded successfully');
-                setPendingFiles([]); // Clear pending
-                // Refresh attachments to show uploaded files
-                await fetchAttachments();
-            } else {
-                const errorText = await res.text();
-                // console.error('Failed to upload pending files:', errorText);
-                // alert(`Enquiry saved, but failed to upload pending files: ${errorText}`);
+        for (const key in groups) {
+            const items = groups[key];
+            const [visibility, type] = key.split('-');
+
+            if (type === 'File') {
+                const uploadData = new FormData();
+                items.forEach(meta => {
+                    const file = fileObjectsRef.current[meta.id];
+                    if (file) uploadData.append('files', file, meta.fileName);
+                });
+
+                try {
+                    const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}&visibility=${visibility}&type=File&division=${encodeURIComponent(userDivision)}`, {
+                        method: 'POST',
+                        body: uploadData
+                    });
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        console.error('File upload failed:', errText);
+                    }
+                } catch (err) {
+                    console.error('Upload error:', err);
+                }
+            } else if (type === 'Folder') {
+                for (const item of items) {
+                    const uploadData = new FormData();
+                    const groupFiles = fileObjectsRef.current[item.id];
+                    if (groupFiles && Array.isArray(groupFiles)) {
+                        groupFiles.forEach(file => {
+                            uploadData.append('files', file, file.webkitRelativePath || file.name);
+                        });
+                    }
+
+                    try {
+                        const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}&visibility=${visibility}&type=File&division=${encodeURIComponent(userDivision)}`, {
+                            method: 'POST',
+                            body: uploadData
+                        });
+                        if (!res.ok) {
+                            const errText = await res.text();
+                            console.error('Folder upload failed:', errText);
+                        }
+                    } catch (err) {
+                        console.error('Upload error:', err);
+                    }
+                }
+            } else if (type === 'Link') {
+                for (const item of items) {
+                    try {
+                        const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}&visibility=${visibility}&type=Link&linkUrl=${encodeURIComponent(item.linkUrl)}&fileName=${encodeURIComponent(item.fileName)}&division=${encodeURIComponent(userDivision)}`, {
+                            method: 'POST'
+                        });
+                        if (!res.ok) {
+                            const errText = await res.text();
+                            console.error('Link upload failed:', errText);
+                        }
+                    } catch (err) {
+                        console.error('Upload error:', err);
+                    }
+                }
             }
-        } catch (err) {
-            console.error('Error uploading pending files:', err);
-            // alert(`Enquiry saved, but error uploading pending files: ${err.message}`);
         }
+
+        setPendingFiles([]);
+        fileObjectsRef.current = {};
+        await fetchAttachments();
     };
 
     const resetForm = () => {
@@ -903,6 +981,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setCustomerList([]);
         setReceivedFromList([]);
         setSeList([]);
+        setConsultantList([]);
         setAckSEList([]); // Clear acknowledgement SE list
         setIsModifyMode(false);
         setModifyRequestNo('');
@@ -914,6 +993,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setOriginalSeList([]);
         setOriginalCustomerList([]);
         setOriginalReceivedFromList([]);
+        setOriginalConsultantList([]);
         if (activeTab === 'New') {
             generateNewRequestNo();
         }
@@ -928,11 +1008,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             if (res.ok) {
                 enq = await res.json();
             } else {
-                console.warn(`API fetch fail for ${requestNo}, falling back to context.`);
+                // console.warn(`API fetch fail for ${requestNo}, falling back to context.`);
                 enq = getEnquiry(requestNo);
             }
         } catch (err) {
-            console.error('Error fetching fresh enquiry:', err);
+            // console.error('Error fetching fresh enquiry:', err);
             enq = getEnquiry(requestNo);
         }
 
@@ -988,6 +1068,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             setSeList(seList);
             setOriginalSeList([...seList]); // Store original for comparison
 
+            const consultants = enq.SelectedConsultants || (enq.ConsultantName ? enq.ConsultantName.split(',').filter(Boolean) : []);
+            setConsultantList(consultants);
+            setOriginalConsultantList([...consultants]);
+
             setAckSEList(seList);
             setIsModifyMode(true);
 
@@ -995,8 +1079,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 await loadAttachmentsForEnquiry(enq.RequestNo);
             }
         } else {
-            console.error('Enquiry not found:', requestNo);
-            alert('Enquiry not found!');
+            console.warn('Enquiry not found:', requestNo);
         }
     };
 
@@ -1005,7 +1088,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     };
 
     const handleOpenFromSearch = async (reqNo) => {
-        console.log('Opening from search:', reqNo);
         setModifyRequestNo(reqNo);
         await loadEnquiry(reqNo);
         setActiveTab('Modify');
@@ -1039,54 +1121,210 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         );
     };
 
+    const handleAddLink = (visibility = 'Public') => {
+        if (!hyperlink.url) return;
+
+        // Split by newlines or commas, then filter out empty lines
+        const links = hyperlink.url.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0);
+
+        if (links.length === 0) return;
+
+        const now = Date.now();
+        const addedDate = new Date().toISOString();
+        const newLinks = links.map((link, index) => ({
+            id: now + index,
+            fileName: link,
+            isPending: true,
+            visibility,
+            type: 'Link',
+            linkUrl: link,
+            addedDate
+        }));
+
+        setPendingFiles(prev => [...prev, ...newLinks]);
+        setHyperlink({ ...hyperlink, url: '' }); // Clear only URL
+    };
+
+    const renderAttachmentList = (visibility, type) => {
+        const userDivision = (currentUser?.DivisionName || '').trim().toLowerCase();
+        const isAdmin = (currentUser?.role || currentUser?.Roles || '').toLowerCase().includes('admin');
+
+        // Combined filter for both individual files and folders when type is 'File'
+        const filteredPending = pendingFiles.filter(f => {
+            if ((f.visibility || 'Public') !== visibility) return false;
+            const fType = f.type || 'File';
+            if (type === 'File') return fType === 'File' || fType === 'Folder';
+            return fType === type;
+        });
+
+        const filteredUploaded = attachments.filter(a => {
+            if ((a.Visibility || 'Public') === 'Private') {
+                if (visibility !== 'Private') return false;
+
+                // Strict check: Show only to Admin, same Division, or original Uploader
+                if (!isAdmin) {
+                    const fileDivision = (a.Division || '').trim().toLowerCase();
+                    const isOwnFile = (a.UploadedBy || '').toLowerCase() === (currentUser?.FullName || currentUser?.name || currentUser?.UserName || '').toLowerCase();
+
+                    if (fileDivision && userDivision) {
+                        if (fileDivision !== userDivision && !isOwnFile) return false;
+                    } else if (!isOwnFile) {
+                        // If either division is missing, fallback to creator only
+                        return false;
+                    }
+                }
+            } else {
+                if (visibility !== 'Public') return false;
+            }
+
+            const aType = a.AttachmentType || 'File';
+            if (type === 'File') return aType === 'File';
+            return aType === type;
+        });
+
+        // Grouping logic for UI display
+        const groups = {}; // { folderName: { id, fileName, isGroup: true, items: [] } }
+        const topLevel = [];
+
+        // Group uploaded files by path
+        filteredUploaded.forEach(att => {
+            if (att.FileName.includes('/')) {
+                const root = att.FileName.split('/')[0];
+                if (!groups[root]) {
+                    groups[root] = { id: `ugroup-${root}`, fileName: root, isGroup: true, items: [], visibility: att.Visibility };
+                }
+                groups[root].items.push(att);
+            } else {
+                topLevel.push(att);
+            }
+        });
+
+        // Add pending items
+        filteredPending.forEach(p => {
+            if (p.type === 'Folder') {
+                topLevel.push({ ...p, isGroup: true });
+            } else if (p.fileName && p.fileName.includes('/')) {
+                const root = p.fileName.split('/')[0];
+                if (!groups[root]) {
+                    groups[root] = { id: `pgroup-${root}`, fileName: root, isGroup: true, items: [], isPending: true };
+                }
+                groups[root].items.push(p);
+            } else {
+                topLevel.push(p);
+            }
+        });
+
+        // Merge groups into topLevel
+        Object.values(groups).forEach(g => topLevel.push(g));
+
+        if (topLevel.length === 0) return null;
+
+        return (
+            <ul className="list-group border-0">
+                {topLevel.map((item, idx) => {
+                    const dateVal = item.addedDate || item.UploadedAt || item.CreatedDate || item.UploadDate || '';
+                    const displayDate = dateVal ? new Date(dateVal).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
+                    const uploadedBy = item.UploadedBy || '';
+
+                    return (
+                        <li key={item.id || idx} className={`list-group-item d-flex align-items-center justify-content-between mb-1 border rounded ${type === 'Link' ? 'p-1' : 'p-2'}`}>
+                            <div className="d-flex align-items-center text-truncate me-2" style={{ flex: '1' }} title={item.fileName || item.FileName}>
+                                <i className={item.isGroup ? "bi bi-folder-fill text-warning fs-5 me-2" : (type === 'Link' ? "bi bi-link-45deg text-success fs-6 me-2" : "bi bi-file-earmark-text text-secondary fs-5 me-2")}></i>
+                                <div className="d-flex flex-column text-truncate">
+                                    <span className="fw-medium text-dark text-truncate" style={{ fontSize: type === 'Link' ? '12px' : '13px' }}>{item.fileName || item.FileName}</span>
+                                    {(displayDate || uploadedBy) && (
+                                        <div className="d-flex align-items-center gap-2 text-muted" style={{ fontSize: '9px' }}>
+                                            {displayDate && <span><i className="bi bi-clock me-1"></i>{displayDate}</span>}
+                                            {uploadedBy && <span><i className="bi bi-person me-1"></i>{uploadedBy}</span>}
+                                        </div>
+                                    )}
+                                </div>
+                                {item.isPending && <span className="badge bg-warning text-dark ms-2 rounded-pill" style={{ fontSize: '9px' }}>Pending</span>}
+                                {item.items?.length > 0 && <span className="text-muted ms-2" style={{ fontSize: '10px' }}>({item.items.length} files)</span>}
+                            </div>
+
+                            <div className="d-flex align-items-center gap-1">
+                                {item.isPending ? (
+                                    <button type="button" className="btn btn-sm btn-outline-danger p-0" style={{ width: type === 'Link' ? '24px' : '28px', height: type === 'Link' ? '24px' : '28px', fontSize: '10px' }} onClick={() => handleRemoveAttachment(item.id, true)} title="Remove"><i className="bi bi-trash"></i></button>
+                                ) : (
+                                    !item.isGroup && (
+                                        type === 'File' ? (
+                                            <>
+                                                <a href={`/api/attachments/${item.ID}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="View"><i className="bi bi-eye"></i></a>
+                                                <a href={`/api/attachments/${item.ID}?download=true`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-primary p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="Download"><i className="bi bi-download"></i></a>
+                                            </>
+                                        ) : (
+                                            <a href={(item.LinkURL || '').startsWith('http') ? item.LinkURL : `https://${item.LinkURL}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center" style={{ width: '24px', height: '24px', fontSize: '10px' }} title="Open Link"><i className="bi bi-box-arrow-up-right"></i></a>
+                                        )
+                                    )
+                                )}
+                            </div>
+                        </li>
+                    );
+                })}
+            </ul>
+        );
+    };
+
     // --- File Upload ---
     // --- File Upload ---
-    const handleFileUpload = async (e) => {
-        console.log('=== handleFileUpload called ===');
+    const handleFileUpload = (e, visibility = 'Public') => {
         const files = e.target.files;
-        console.log('Files selected:', files ? files.length : 0);
+        if (!files || files.length === 0) return;
 
-        if (!files || files.length === 0) {
-            console.log('No files selected, returning');
-            return;
-        }
+        // More robust check for folder vs file input
+        const isFolder = e.target.hasAttribute('webkitdirectory');
+        const id = Date.now();
 
-        // Always add to pending files (New or Modify Mode)
-        // This ensures users can review and delete files before final save
-        const newPending = [];
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const fileName = file.webkitRelativePath || file.name;
-            const previewUrl = URL.createObjectURL(file);
-            newPending.push({ file, fileName, isPending: true, id: Date.now() + i, previewUrl });
+        if (isFolder) {
+            // Group files as a single "Folder" entry
+            const firstPath = files[0].webkitRelativePath || '';
+            const rootFolderName = firstPath.split('/')[0] || 'Selected Folder';
+
+            fileObjectsRef.current[id] = Array.from(files);
+            setPendingFiles(prev => [...prev, {
+                id,
+                fileName: rootFolderName,
+                isPending: true,
+                visibility,
+                type: 'Folder',
+                itemCount: files.length,
+                addedDate: new Date().toISOString()
+            }]);
+        } else {
+            // Individual file uploads
+            const newMeta = [];
+            const now = Date.now();
+            const addedDate = new Date().toISOString();
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const fid = now + i;
+                fileObjectsRef.current[fid] = file;
+                newMeta.push({ id: fid, fileName: file.name, isPending: true, visibility, type: 'File', addedDate });
+            }
+            setPendingFiles(prev => [...prev, ...newMeta]);
         }
-        setPendingFiles(prev => [...prev, ...newPending]);
-        e.target.value = null; // Clear input
-        console.log('Added to pending files:', newPending.length);
+        e.target.value = null; // Reset to allow repeated selection of same folder/file
     };
 
     const handleRemoveAttachment = async (attachmentId, isPending = false) => {
-        console.log('handleRemoveAttachment called:', { attachmentId, isPending });
 
         if (isPending) {
             // No confirmation needed for pending files (not saved yet)
-            console.log('Removing pending file, current pendingFiles:', pendingFiles);
             setPendingFiles(prev => {
                 const filtered = prev.filter(f => f.id !== attachmentId);
+                delete fileObjectsRef.current[attachmentId];
                 const fileToRemove = prev.find(f => f.id === attachmentId);
                 if (fileToRemove && fileToRemove.previewUrl) {
                     URL.revokeObjectURL(fileToRemove.previewUrl);
                 }
-                console.log('Filtered pendingFiles:', filtered);
                 return filtered;
             });
-            console.log('Pending file removed');
             return;
         }
 
         // Confirmation only for uploaded files
         if (!window.confirm('Are you sure you want to delete this file?')) {
-            console.log('User cancelled deletion');
             return;
         }
 
@@ -1097,13 +1335,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
             if (res.ok) {
                 setAttachments(prev => prev.filter(a => a.ID !== attachmentId));
-                alert('File deleted successfully');
             } else {
-                alert('Failed to delete file');
+                console.error('Failed to delete file');
             }
         } catch (err) {
-            console.error(err);
-            alert('Error deleting file');
+            console.error('Error deleting file:', err);
         }
     };
 
@@ -1117,7 +1353,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 setAttachments(data);
             }
         } catch (err) {
-            console.error(err);
+            // error
         }
     };
 
@@ -1131,7 +1367,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         fetchAttachments();
     }, [formData.RequestNo]);
 
-    console.log('EnquiryForm Render:', { activeTab, isModifyMode, modifyRequestNo });
+
     return (
         <div style={{ position: 'relative', minHeight: '100vh' }}>
             <div style={{ position: 'relative', zIndex: 1 }}>
@@ -1393,8 +1629,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 }}></div>
 
                                                                 <div className="list-group list-group-flush">
-                                                                    {projectSuggestions.map((suggestion) => (
-                                                                        <div key={suggestion.RequestNo} className="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
+                                                                    {projectSuggestions.map((suggestion, idx) => (
+                                                                        <div key={`${suggestion.RequestNo}-${idx}`} className="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
                                                                             <div>
                                                                                 <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#2d3748' }}>{suggestion.ProjectName}</div>
                                                                                 <div style={{ fontSize: '11px', color: '#718096' }}>{suggestion.RequestNo}</div>
@@ -1558,7 +1794,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <div className="row mb-3">
                                                     <div className="col-md-6">
                                                         <ListBoxControl
-                                                            label={<span>Customer Name<span className="text-danger">*</span></span>}
+                                                            label={<span>Customer Name / Contractor Name<span className="text-danger">*</span></span>}
                                                             options={masters.existingCustomers}
                                                             selectedOption={formData.CustomerName}
                                                             onOptionChange={(val) => {
@@ -1580,17 +1816,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                     <div className="col-md-6">
                                                         <ListBoxControl
                                                             label={<span>Received From<span className="text-danger">*</span></span>}
-                                                            options={
-                                                                (formData.CustomerName
-                                                                    ? masters.contacts.filter(c => {
-                                                                        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-                                                                        const companyMatch = normalize(c.CompanyName) === normalize(formData.CustomerName);
-                                                                        if (c.CompanyName.includes('ECO')) console.log(`Checking Contact: ${c.ContactName}, Company: ${c.CompanyName} vs Selected: ${formData.CustomerName} -> Match: ${companyMatch}`);
-                                                                        return companyMatch;
-                                                                    })
-                                                                    : []
-                                                                ).map(c => `${c.ContactName}|${c.CompanyName}`)
-                                                            }
+                                                            options={receivedFromOptions}
                                                             selectedOption={formData.ReceivedFrom}
                                                             onOptionChange={(val) => handleInputChange('ReceivedFrom', val)}
                                                             listBoxItems={receivedFromList}
@@ -1599,14 +1825,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             showNew={true}
                                                             showEdit={true}
                                                             canEdit={!!formData.ReceivedFrom}
-                                                            renderOption={(opt) => {
-                                                                const [name, company] = opt.split('|');
-                                                                return `${name} (${company})`;
-                                                            }}
-                                                            renderListBoxItem={(item, idx) => {
-                                                                const [name, company] = item.split('|');
-                                                                return `${idx + 1}. ${name} (${company})`;
-                                                            }}
+                                                            renderOption={renderContactOption}
+                                                            renderListBoxItem={renderContactListBoxItem}
                                                             onNew={() => openNewModal(setShowContactModal, null, { CompanyName: formData.CustomerName })}
                                                             onEdit={handleEditContact}
                                                             selectedItemDetails={renderContactCard()}
@@ -1619,7 +1839,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <div className="mb-3" style={{ width: '50%', paddingRight: '12px' }}>
                                                     <SearchableSelectControl
                                                         label={<span>Client Name<span className="text-danger">*</span></span>}
-                                                        options={masters.clientNames}
+                                                        options={combinedClientNames}
                                                         selectedOption={formData.ClientName}
                                                         onOptionChange={(val) => handleInputChange('ClientName', val)}
                                                         showNew={true}
@@ -1634,17 +1854,21 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
                                                 {/* Consultant Name */}
                                                 <div className="mb-3" style={{ width: '50%', paddingRight: '12px' }}>
-                                                    <SearchableSelectControl
-                                                        label="Consultant Name"
+                                                    <ListBoxControl
+                                                        label="Main Consultant / Lead Consultant / MEP Consultant / Project Manager"
                                                         options={masters.consultantNames}
                                                         selectedOption={formData.ConsultantName}
                                                         onOptionChange={(val) => handleInputChange('ConsultantName', val)}
+                                                        listBoxItems={consultantList}
+                                                        onAdd={handleAddConsultant}
+                                                        onRemove={() => handleRemoveItem(consultantList, setConsultantList, originalConsultantList)}
                                                         showNew={true}
                                                         showEdit={true}
                                                         canEdit={!!formData.ConsultantName}
                                                         onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
                                                         onEdit={handleEditConsultant}
                                                         disabled={isLimitedEdit}
+                                                        canRemove={!isLimitedEdit || (consultantList.length > originalConsultantList.length)}
                                                     />
                                                 </div>
                                             </div>
@@ -1659,7 +1883,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <div className="row mb-3">
                                                     <div className="col-md-6">
                                                         <ListBoxControl
-                                                            label={<span>Concerned SE<span className="text-danger">*</span></span>}
+                                                            label={<span>Sales Engineer / Estimation Engineer / Quantity Surveyor<span className="text-danger">*</span></span>}
                                                             options={masters.concernedSEs}
                                                             selectedOption={formData.ConcernedSE}
                                                             onOptionChange={(val) => handleInputChange('ConcernedSE', val)}
@@ -1709,111 +1933,123 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
                                                             value={formData.DocumentsReceived} onChange={(e) => handleInputChange('DocumentsReceived', e.target.value)} disabled={isLimitedEdit} />
 
-                                                        {/* File Upload UI */}
-                                                        <div className="mb-2">
-                                                            <label className="form-label">Attachments</label>
-                                                            <div className="d-flex align-items-center mb-2">
-                                                                <input
-                                                                    type="file"
-                                                                    id="fileInput"
-                                                                    style={{ display: 'none' }}
-                                                                    multiple
-                                                                    onChange={handleFileUpload}
-                                                                    disabled={isLimitedEdit}
-                                                                />
-                                                                <button
-                                                                    type="button"
-                                                                    className="btn btn-outline-secondary btn-sm"
-                                                                    onClick={() => document.getElementById('fileInput').click()}
-                                                                    disabled={isLimitedEdit}
-                                                                >
-                                                                    Choose Files
-                                                                </button>
-                                                                <span className="ms-2 text-muted" style={{ fontSize: '13px' }}>
-                                                                    {pendingFiles.length > 0
-                                                                        ? `${pendingFiles.length} file(s) pending save`
-                                                                        : 'No new files selected'}
-                                                                </span>
-                                                            </div>
-                                                            <div className="form-text mb-2" style={{ fontSize: '11px' }}>Supported: Multiple files</div>
+                                                        {/* Attachment Sections */}
+                                                        <div className="mt-4">
+                                                            {/* 1. Public Attachments */}
+                                                            <div className="mb-4">
+                                                                <h6 className="fw-bold text-primary mb-2" style={{ fontSize: '14px' }}>
+                                                                    <i className="bi bi-globe me-2"></i>1. Public Attachments <span className="text-muted fw-normal" style={{ fontSize: '11px' }}>(Visible to all subjobs)</span>
+                                                                </h6>
+                                                                <div className="d-flex align-items-center mb-2 gap-2 ps-3">
+                                                                    <input type="file" id="publicFileInput" style={{ display: 'none' }} multiple onChange={(e) => handleFileUpload(e, 'Public')} />
+                                                                    <input type="file" id="publicFolderInput" style={{ display: 'none' }} webkitdirectory="" directory="" onChange={(e) => handleFileUpload(e, 'Public')} />
 
-                                                            {/* Combined List of Pending and Uploaded Files */}
-                                                            {(attachments.length > 0 || pendingFiles.length > 0) && (
-                                                                <ul className="list-group mt-2 border-0">
-                                                                    {/* Pending Files */}
-                                                                    {pendingFiles.map((file, idx) => (
-                                                                        <li key={`pending-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded bg-light">
-                                                                            <div className="d-flex align-items-center text-truncate me-3" title={file.fileName}>
-                                                                                <i className="bi bi-file-earmark-text text-secondary fs-5 me-2"></i>
-                                                                                <span className="fw-medium text-dark">{file.fileName}</span>
-                                                                                <span className="badge bg-warning text-dark ms-2 rounded-pill" style={{ fontSize: '0.7em' }}>Pending</span>
+                                                                    <button type="button" className="btn btn-outline-primary btn-sm" style={{ fontSize: '12px' }} onClick={() => document.getElementById('publicFileInput').click()}>
+                                                                        <i className="bi bi-file-earmark-plus me-1"></i>Add Files
+                                                                    </button>
+                                                                    <button type="button" className="btn btn-outline-primary btn-sm" style={{ fontSize: '12px' }} onClick={() => document.getElementById('publicFolderInput').click()}>
+                                                                        <i className="bi bi-folder-plus me-1"></i>Add Folder
+                                                                    </button>
+                                                                </div>
+                                                                <div className="ps-3">
+                                                                    {(() => {
+                                                                        const list = renderAttachmentList('Public', 'File');
+                                                                        return list ? (
+                                                                            <div className="border rounded p-2 bg-light-subtle" style={{ maxHeight: '230px', overflowY: 'auto' }}>
+                                                                                {list}
                                                                             </div>
-                                                                            <div className="d-flex align-items-center gap-2">
-                                                                                <a
-                                                                                    href={file.previewUrl}
-                                                                                    target="_blank"
-                                                                                    rel="noopener noreferrer"
-                                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
-                                                                                    style={{ width: '32px', height: '32px' }}
-                                                                                    title="View"
-                                                                                >
-                                                                                    <i className="bi bi-eye"></i>
-                                                                                </a>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
-                                                                                    style={{ width: '32px', height: '32px' }}
-                                                                                    onClick={() => handleRemoveAttachment(file.id, true)}
-                                                                                    title="Remove"
-                                                                                    disabled={isLimitedEdit}
-                                                                                >
-                                                                                    <i className="bi bi-trash"></i>
-                                                                                </button>
+                                                                        ) : null;
+                                                                    })()}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* 2. Private Attachments */}
+                                                            <div className="mb-4">
+                                                                <h6 className="fw-bold text-danger mb-2" style={{ fontSize: '14px' }}>
+                                                                    <i className="bi bi-lock me-2"></i>2. Private Attachments <span className="text-muted fw-normal" style={{ fontSize: '11px' }}>(Visible only to own division users)</span>
+                                                                </h6>
+                                                                <div className="d-flex align-items-center mb-2 gap-2 ps-3">
+                                                                    <input type="file" id="privateFileInput" style={{ display: 'none' }} multiple onChange={(e) => handleFileUpload(e, 'Private')} />
+                                                                    <input type="file" id="privateFolderInput" style={{ display: 'none' }} webkitdirectory="" directory="" onChange={(e) => handleFileUpload(e, 'Private')} />
+
+                                                                    <button type="button" className="btn btn-outline-danger btn-sm" style={{ fontSize: '12px' }} onClick={() => document.getElementById('privateFileInput').click()}>
+                                                                        <i className="bi bi-file-earmark-lock me-1"></i>Add Files
+                                                                    </button>
+                                                                    <button type="button" className="btn btn-outline-danger btn-sm" style={{ fontSize: '12px' }} onClick={() => document.getElementById('privateFolderInput').click()}>
+                                                                        <i className="bi bi-folder-lock me-1"></i>Add Folder
+                                                                    </button>
+                                                                </div>
+                                                                <div className="ps-3">
+                                                                    {(() => {
+                                                                        const list = renderAttachmentList('Private', 'File');
+                                                                        return list ? (
+                                                                            <div className="border rounded p-2 bg-light-subtle" style={{ maxHeight: '230px', overflowY: 'auto' }}>
+                                                                                {list}
                                                                             </div>
-                                                                        </li>
-                                                                    ))}
-                                                                    {/* Uploaded Files */}
-                                                                    {attachments.map((att, idx) => (
-                                                                        <li key={`uploaded-${idx}`} className="list-group-item d-flex align-items-center justify-content-between p-2 mb-1 border rounded">
-                                                                            <div className="d-flex align-items-center text-truncate me-3" title={att.FileName}>
-                                                                                <i className="bi bi-paperclip text-secondary fs-5 me-2"></i>
-                                                                                <span className="fw-medium text-dark">{att.FileName}</span>
-                                                                            </div>
-                                                                            <div className="d-flex align-items-center gap-2">
-                                                                                <a
-                                                                                    href={`/api/attachments/${att.ID}`}
-                                                                                    target="_blank"
-                                                                                    rel="noopener noreferrer"
-                                                                                    className="btn btn-sm btn-outline-info d-flex align-items-center justify-content-center"
-                                                                                    style={{ width: '32px', height: '32px' }}
-                                                                                    title="View"
-                                                                                >
-                                                                                    <i className="bi bi-eye"></i>
-                                                                                </a>
-                                                                                <a
-                                                                                    href={`/api/attachments/${att.ID}?download=true`}
-                                                                                    target="_blank"
-                                                                                    rel="noopener noreferrer"
-                                                                                    className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"
-                                                                                    style={{ width: '32px', height: '32px' }}
-                                                                                    title="Download"
-                                                                                >
-                                                                                    <i className="bi bi-download"></i>
-                                                                                </a>
-                                                                                {/* <button
-                                                                                    type="button"
-                                                                                    className="btn btn-sm btn-outline-danger d-flex align-items-center justify-content-center"
-                                                                                    style={{ width: '32px', height: '32px' }}
-                                                                                    onClick={() => handleRemoveAttachment(att.ID, false)}
-                                                                                    title="Remove"
-                                                                                >
-                                                                                    <i className="bi bi-trash"></i>
-                                                                                </button> */}
-                                                                            </div>
-                                                                        </li>
-                                                                    ))}
-                                                                </ul>
-                                                            )}
+                                                                        ) : null;
+                                                                    })()}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* 3. Hyperlinks */}
+                                                            <div className="mb-4">
+                                                                <h6 className="fw-bold text-success mb-2" style={{ fontSize: '14px' }}>
+                                                                    <i className="bi bi-link-45deg me-2"></i>3. Hyperlinks for Document Download
+                                                                </h6>
+                                                                <div className="ps-3">
+                                                                    {/* Input Row */}
+                                                                    <div className="mb-4">
+                                                                        <div className="mb-2">
+                                                                            <label className="form-label" style={{ fontSize: '11px' }}>URL / Path (Paste one or more links separated by Enter)</label>
+                                                                            <textarea
+                                                                                className="form-control form-control-sm mb-2"
+                                                                                style={{ fontSize: '12px', minHeight: '60px' }}
+                                                                                placeholder={"https://link1.com\nhttps://link2.com\n\\\\server\\path"}
+                                                                                value={hyperlink.url}
+                                                                                onChange={(e) => setHyperlink({ ...hyperlink, url: e.target.value })}
+                                                                            />
+                                                                        </div>
+                                                                        <div className="d-flex gap-2">
+                                                                            <button type="button" className="btn btn-sm btn-outline-success" style={{ fontSize: '11px', minWidth: '120px' }} onClick={() => handleAddLink('Public')} disabled={!hyperlink.url}>
+                                                                                <i className="bi bi-plus-lg me-1"></i>Public Link
+                                                                            </button>
+                                                                            <button type="button" className="btn btn-sm btn-outline-danger" style={{ fontSize: '11px', minWidth: '120px' }} onClick={() => handleAddLink('Private')} disabled={!hyperlink.url}>
+                                                                                <i className="bi bi-lock me-1"></i>Private Link
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+
+                                                                    {/* Link Lists */}
+                                                                    <div className="row mt-2">
+                                                                        <div className="col-md-6 border-end">
+                                                                            {(() => {
+                                                                                const list = renderAttachmentList('Public', 'Link');
+                                                                                return list ? (
+                                                                                    <>
+                                                                                        <span className="badge bg-success-subtle text-success mb-2" style={{ fontSize: '10px' }}>Public Links</span>
+                                                                                        <div className="border rounded p-2 bg-light-subtle" style={{ maxHeight: '160px', overflowY: 'auto' }}>
+                                                                                            {list}
+                                                                                        </div>
+                                                                                    </>
+                                                                                ) : null;
+                                                                            })()}
+                                                                        </div>
+                                                                        <div className="col-md-6">
+                                                                            {(() => {
+                                                                                const list = renderAttachmentList('Private', 'Link');
+                                                                                return list ? (
+                                                                                    <>
+                                                                                        <span className="badge bg-danger-subtle text-danger mb-2" style={{ fontSize: '10px' }}>Private (Division Only)</span>
+                                                                                        <div className="border rounded p-2 bg-light-subtle" style={{ maxHeight: '160px', overflowY: 'auto' }}>
+                                                                                            {list}
+                                                                                        </div>
+                                                                                    </>
+                                                                                ) : null;
+                                                                            })()}
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -1967,13 +2203,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     />
                                 </div>
                             </div>
-                        )
-                        }
+                        )}
                     </>
-                )
-                }
-            </div >
-        </div >
+                )}
+            </div>
+        </div>
     );
 };
 
@@ -1988,7 +2222,6 @@ class ErrorBoundary extends React.Component {
     }
 
     componentDidCatch(error, errorInfo) {
-        console.error("EnquiryForm Error:", error, errorInfo);
         this.setState({ error, errorInfo });
     }
 

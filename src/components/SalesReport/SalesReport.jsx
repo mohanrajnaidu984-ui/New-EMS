@@ -710,7 +710,7 @@ const SalesReport = () => {
                             </div>
 
                             {/* Chart Section */}
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: 0 }}>
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px' }}>
                                 <ResponsiveContainer width="100%" height="100%">
                                     <BarChart data={targetVsActualData} margin={{ top: 25, right: 10, left: 5, bottom: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
@@ -793,7 +793,7 @@ const SalesReport = () => {
                             </div>
 
                             {/* Prospect Pie Section */}
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: 0, position: 'relative' }}>
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px', position: 'relative' }}>
                                 {/* Heading removed as requested */}
                                 <ResponsiveContainer width="100%" height="100%">
                                     <PieChart>
@@ -854,7 +854,7 @@ const SalesReport = () => {
                                         </button>
                                     ))}
                                 </div>
-                                <div className="flex-grow-1" style={{ width: '100%', minHeight: 0 }}>
+                                <div className="flex-grow-1" style={{ width: '100%', minHeight: '150px' }}>
                                     <ResponsiveContainer width="100%" height="100%">
                                         <BarChart data={itemWiseData.length > 0 ? itemWiseData : []} margin={{ top: 50, right: 5, left: 10, bottom: 0 }}>
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
@@ -981,7 +981,7 @@ const SalesReport = () => {
                     {/* Row 1: Customers & Projects */}
                     <div className="d-flex w-100" style={{ flex: 1, minHeight: 0, gap: '0.75rem' }}>
                         {/* 1. Top 10 Customers */}
-                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)' }}>
+                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Customer's job booked</h6>
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={topCustomersData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
@@ -1002,7 +1002,7 @@ const SalesReport = () => {
                         </div>
 
                         {/* 2. Top 10 Projects */}
-                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)' }}>
+                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Projects' Job booked</h6>
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={topProjectsData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
@@ -1026,7 +1026,7 @@ const SalesReport = () => {
                     {/* Row 2: Clients & Pipeline */}
                     <div className="d-flex w-100" style={{ flex: 1, minHeight: 0, gap: '0.75rem' }}>
                         {/* 3. Top 10 Clients */}
-                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)' }}>
+                        <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Client's Job booked</h6>
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={topClientsData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
@@ -1058,7 +1058,7 @@ const SalesReport = () => {
                             }}
                         >
                             <h6 className="fw-bold small mb-2 text-start" style={{ color: '#34D399' }}>Sales Pipeline</h6>
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: 0 }}>
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px' }}>
                                 <ResponsiveContainer width="100%" height="100%">
                                     <FunnelChart margin={{ top: 10, bottom: 10, left: 120, right: 10 }} style={{ outline: 'none' }}>
                                         <defs>

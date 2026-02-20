@@ -238,7 +238,7 @@ router.get('/list/pending', async (req, res) => {
 
             // Fetch Jobs
             const jobsRes = await sql.query(`
-                SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName
+                SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode
                 FROM EnquiryFor EF
                 WHERE EF.RequestNo IN (${requestNos})
             `);
@@ -323,8 +323,8 @@ router.get('/list/pending', async (req, res) => {
                 let externalCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
                 externalCustomers = externalCustomers.filter(c => {
                     const cNorm = normalize(c);
-                    // Keep if it's NOT a sub-job, or if it IS the root job item name
-                    return !jobNameSetNorm.has(cNorm) || (cNorm === internalCustomerNorm);
+                    // Keep if it's NOT a job name. Internal customers are handled separately via aggregatedPricing.
+                    return !jobNameSetNorm.has(cNorm);
                 });
 
                 const filteredFlatList = flatList.filter(job => validIDs.has(job.ID.toString()));
@@ -334,11 +334,16 @@ router.get('/list/pending', async (req, res) => {
                 const updateDates = {};
                 flatList.forEach(job => {
                     const matches = enqPrices.filter(p =>
-                        (p.EnquiryForID && p.EnquiryForID.toString() == job.ID.toString()) ||
-                        (p.EnquiryForItem && p.EnquiryForItem.toString().trim() == job.ItemName.toString().trim())
+                        (p.EnquiryForID && p.EnquiryForID.toString() == job.ID.toString())
                     );
 
-                    const sortedMatches = [...matches].sort((a, b) => new Date(b.UpdatedAt) - new Date(a.UpdatedAt));
+                    // Fallback to ItemName match ONLY for legacy records with no ID
+                    let finalMatches = matches;
+                    if (finalMatches.length === 0) {
+                        finalMatches = enqPrices.filter(p => !p.EnquiryForID && p.EnquiryForItem && p.EnquiryForItem.toString().trim() == job.ItemName.toString().trim());
+                    }
+
+                    const sortedMatches = [...finalMatches].sort((a, b) => new Date(b.UpdatedAt) - new Date(a.UpdatedAt));
 
                     // For Subjob Prices tree, strictly use the internal customer view or divisions
                     let priceRow = sortedMatches.find(p => p.Price > 0 && p.CustomerName && (
@@ -365,8 +370,9 @@ router.get('/list/pending', async (req, res) => {
                     const totalVal = selfPrices[job.ID] || 0;
                     const updatedAt = updateDates[job.ID];
                     const displayLevel = Math.max(0, (job.level || 0) - minLevel);
+                    const displayName = job.LeadJobCode ? `${job.ItemName} (${job.LeadJobCode})` : job.ItemName;
 
-                    return `${job.ItemName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${displayLevel}`;
+                    return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${displayLevel}`;
                 }).join(';;');
 
                 // Aggregate PricingCustomerDetails (Hide Subjobs, Aggregate to Root)
@@ -380,8 +386,8 @@ router.get('/list/pending', async (req, res) => {
 
                         const nameNorm = normalize(name);
                         if (jobNameSetNorm.has(nameNorm)) {
-                            // It's a job name (Internal) -> aggregate to Root/Internal Customer
-                            aggregatedPricing[internalCustomer] = (aggregatedPricing[internalCustomer] || 0) + val;
+                            // It's a job name (Internal) -> keep as original name (Parent Job)
+                            aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
                         } else {
                             // It's an external customer
                             aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
@@ -393,17 +399,19 @@ router.get('/list/pending', async (req, res) => {
                     .map(([name, val]) => `${name}|${val.toFixed(2)}`)
                     .join(';;');
 
-                // Final Customer List is External + Root (deduplicated)
+                // Final Customer List is External + any Internal Parent who received pricing
                 const finalCustomerSet = new Set(externalCustomers);
-                if (internalCustomer) finalCustomerSet.add(internalCustomer);
+                Object.keys(aggregatedPricing).forEach(k => finalCustomerSet.add(k));
 
                 // EXPLICIT FILTER: Remove any existing customer name that is a sub-job
                 // or if it matches the current user's division (for specific user view)
                 const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
                 const finalCustomers = Array.from(finalCustomerSet).filter(c => {
                     const cNorm = normalize(c);
-                    if (cNorm === internalCustomerNorm) return true; // Keep root
-                    if (jobNameSetNorm.has(cNorm)) return false; // Filter subjob
+                    // Provision: Keep any customer that has actual pricing aggregation (Parent Jobs)
+                    if (aggregatedPricing[c]) return true;
+
+                    if (jobNameSetNorm.has(cNorm)) return false; // Filter subjob names that don't have pricing for us
                     if (userDivisionKey && cNorm.includes(userDivisionKey)) return false; // Filter own division
                     return true;
                 });
@@ -488,7 +496,7 @@ router.get('/single/:id', async (req, res) => {
 // GET /api/quotes/by-enquiry/:requestNo - Get all quotes for an enquiry
 router.get('/by-enquiry/:requestNo', async (req, res) => {
     try {
-        const requestNo = parseInt(req.params.requestNo, 10);
+        const { requestNo } = req.params;
         console.log(`[Quote API] Fetching all quotes for RequestNo: ${requestNo}`);
 
         const result = await sql.query`
@@ -658,7 +666,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 parentId: r.ParentID,
                 itemName: r.ItemName,
                 commonMailIds: r.CommonMailIds,
-                ccMailIds: r.CCMailIds
+                ccMailIds: r.CCMailIds,
+                leadJobCode: r.LeadJobCode
             }));
 
             // 2. Resolve Master Details for EACH item (handling prefixes)

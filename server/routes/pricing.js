@@ -64,7 +64,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     // 4. Fetch Jobs
     const jobsRes = await sql.query(`
         SELECT 
-            EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, 
+            EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode,
             MEF.CommonMailIds, MEF.CCMailIds
         FROM EnquiryFor EF
         LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
@@ -216,11 +216,69 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             logToFile(`Enquiry ${enq.RequestNo} - ⚠️ PENDING: No prices found for user's division`);
         }
 
+        // Build a quick map: optionId -> option row (for joining)
+        const optionMap = {};
+        enqOptions.forEach(o => { optionMap[o.OptionID] = o; });
+
+
         const displayItems = flatList.map(job => {
-            const priceRow = enqPrices.find(p => p.EnquiryForID === job.ID || p.EnquiryForItem === job.ItemName);
+            // Strategy: Show the "Base Price" option value for each job/division.
+            // EnquiryPricingValues links OptionID → EnquiryForID → Price.
+            // Step 1: Find the "Base Price" option(s) for this specific job
+            const basePriceOptions = enqOptions.filter(o =>
+                o.OptionName === 'Base Price' &&
+                (o.ItemName === job.ItemName || o.ItemName === null || o.ItemName === '')
+            );
+
+            let priceRow = null;
+
+            // Step 2: Find price row(s) for Base Price option + this job
+            // Match strategy:
+            //   Primary: OptionID matches AND EnquiryForID matches job.ID
+            //   Fallback: OptionID matches AND EnquiryForItem matches job.ItemName (handles stale/wrong IDs)
+            if (basePriceOptions.length > 0) {
+                for (const bpOpt of basePriceOptions) {
+                    // Try strict ID match first
+                    const foundById = enqPrices.find(p =>
+                        p.OptionID == bpOpt.OptionID &&
+                        p.EnquiryForID == job.ID
+                    );
+                    // Try name match as fallback (handles cases where EnquiryForID is stale/wrong)
+                    const foundByName = enqPrices.find(p =>
+                        p.OptionID == bpOpt.OptionID &&
+                        p.EnquiryForItem === job.ItemName
+                    );
+                    // Prefer ID match with price > 0, then name match with price > 0, then any match
+                    const found = (foundById && foundById.Price > 0) ? foundById
+                        : (foundByName && foundByName.Price > 0) ? foundByName
+                            : foundById || foundByName;
+
+                    if (found && found.Price > 0) {
+                        priceRow = found;
+                        break;
+                    } else if (found && !priceRow) {
+                        priceRow = found; // keep as fallback (zero or explicit row)
+                    }
+                }
+            }
+
+            // Step 3: Fallback — any non-zero price for this job (any option, ID or name match)
+            if (!priceRow || !priceRow.Price) {
+                const allJobPrices = enqPrices.filter(p =>
+                    p.EnquiryForID == job.ID ||
+                    p.EnquiryForItem === job.ItemName
+                );
+                const nonZero = allJobPrices.filter(p => p.Price > 0);
+                if (nonZero.length > 0) {
+                    nonZero.sort((a, b) => b.Price - a.Price);
+                    priceRow = nonZero[0];
+                }
+            }
+
             const priceVal = priceRow ? priceRow.Price : 0;
             const updatedAt = priceRow ? priceRow.UpdatedAt : null;
-            return `${job.ItemName}|${priceVal > 0 ? priceVal : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`;
+            const displayName = job.LeadJobCode ? `${job.ItemName} (${job.LeadJobCode})` : job.ItemName;
+            return `${displayName}|${priceVal > 0 ? priceVal : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`;
         });
 
         // Filter for Pending View
@@ -327,7 +385,7 @@ router.get('/:requestNo', async (req, res) => {
         try {
             const jobsResult = await sql.query`
                 SELECT 
-                    ef.ID, ef.ParentID, ef.ItemName, 
+                    ef.ID, ef.ParentID, ef.ItemName, ef.LeadJobCode,
                     mef.CommonMailIds, mef.CCMailIds, mef.CompanyLogo,
                     mef.DepartmentName, mef.CompanyName, mef.Address, mef.Phone, mef.FaxNo
                 FROM EnquiryFor ef
@@ -439,8 +497,8 @@ router.get('/:requestNo', async (req, res) => {
                     if (!userJobItems.includes(job.ItemName)) {
                         userJobItems.push(job.ItemName);
                     }
-                    if (job.ItemName === leadJobItem) {
-                        // If explicitly assigned to Lead, treat as Lead Access
+                    // NEW: Detect Lead Access if assigned to ANY root job
+                    if (!job.ParentID || job.ParentID === '0' || job.ParentID === 0) {
                         userHasLeadAccess = true;
                     }
                 }
@@ -477,11 +535,27 @@ router.get('/:requestNo', async (req, res) => {
                 };
 
                 if (userHasLeadAccess) {
-                    // LEAD / ADMIN: Exclude Lead Job (Self) AND All Descendants (Sub-jobs)
-                    // Because a Lead Job should only see External Customers.
-                    excludedNames.add(clean(leadJobItem));
-                    excludedNames.add(leadJobItem);
-                    findDescendants(leadJob.ID, excludedNames);
+                    // LEAD / ADMIN: Exclude ALL jobs in branches where user is a Lead
+                    // Find roots user has access to
+                    const roots = jobs.filter(j => !j.ParentID || j.ParentID === '0' || j.ParentID === 0);
+                    roots.forEach(root => {
+                        // Check if user is assigned to this root or if they are Admin
+                        const isAdmin = userRole === 'Admin';
+                        const isAssigned = userJobItems.includes(root.ItemName);
+
+                        if (isAdmin || isAssigned) {
+                            excludedNames.add(clean(root.ItemName));
+                            excludedNames.add(root.ItemName);
+                            findDescendants(root.ID, excludedNames);
+                        }
+                    });
+
+                    // Fallback: If no specific roots assigned but user has Lead Access (Creator match?), use first lead job
+                    if (excludedNames.size === 0) {
+                        excludedNames.add(clean(leadJobItem));
+                        excludedNames.add(leadJobItem);
+                        findDescendants(leadJob.ID, excludedNames);
+                    }
                 } else {
                     // SUB-JOB USER: Exclude Self (Assigned Jobs) AND Descendants of Assigned Jobs.
                     // Do NOT exclude Lead Job (Parent), as it is a valid internal customer for them.
@@ -652,6 +726,7 @@ router.get('/:requestNo', async (req, res) => {
                 id: j.ID,
                 parentId: j.ParentID,
                 itemName: j.ItemName,
+                leadJobCode: j.LeadJobCode,
                 companyLogo: j.CompanyLogo ? j.CompanyLogo.replace(/\\/g, '/') : null,
                 departmentName: j.DepartmentName,
                 companyName: j.CompanyName,

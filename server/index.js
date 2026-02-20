@@ -511,7 +511,7 @@ app.post('/api/auth/login', async (req, res) => {
 
         // Fetch user's primary division name based on RequestNo
         if (user.RequestNo) {
-            const divisionResult = await sql.query`SELECT TOP 1 ItemName FROM EnquiryFor WHERE RequestNo = ${user.RequestNo}`;
+            const divisionResult = await sql.query`SELECT TOP 1 ItemName FROM EnquiryFor WHERE RequestNo = ${user.RequestNo} ORDER BY ParentID DESC`;
             if (divisionResult.recordset.length > 0) {
                 userWithoutPassword.DivisionName = divisionResult.recordset[0].ItemName;
             }
@@ -522,7 +522,6 @@ app.post('/api/auth/login', async (req, res) => {
             userWithoutPassword.Roles = 'Admin';
             userWithoutPassword.role = 'Admin';
         }
-
         // Ensure ProfileImage is included (it allows NULL)
         res.json({ user: userWithoutPassword });
     } catch (err) {
@@ -701,6 +700,7 @@ app.get('/api/enquiries', async (req, res) => {
         const typesResult = await sql.query`SELECT * FROM EnquiryType`;
         const itemsResult = await sql.query`SELECT * FROM EnquiryFor`;
         const seResult = await sql.query`SELECT * FROM ConcernedSE`;
+        const consultantsResult = await sql.query`SELECT * FROM EnquiryConsultant`;
 
         const enquiries = result.recordset.map(enq => {
             const reqNo = enq.RequestNo;
@@ -708,6 +708,7 @@ app.get('/api/enquiries', async (req, res) => {
             const relatedCustomers = customersResult.recordset.filter(c => c.RequestNo === reqNo).map(c => c.CustomerName);
             const relatedContacts = contactsResult.recordset.filter(c => c.RequestNo === reqNo).map(c => `${c.ContactName}|${c.CompanyName || ''}`);
             const relatedTypes = typesResult.recordset.filter(t => t.RequestNo === reqNo).map(t => t.TypeName);
+            const relatedConsultants = consultantsResult.recordset.filter(c => c.RequestNo === reqNo).map(c => c.ConsultantName);
             // Use full object for hierarchy
             const relatedItemsRaw = itemsResult.recordset.filter(i => i.RequestNo === reqNo);
             const relatedItemsStructured = relatedItemsRaw.map(i => ({
@@ -728,12 +729,13 @@ app.get('/api/enquiries', async (req, res) => {
                 SelectedCustomers: relatedCustomers,
                 SelectedReceivedFroms: relatedContacts,
                 SelectedConcernedSEs: relatedSEs,
+                SelectedConsultants: relatedConsultants,
                 // Legacy fields for backward compatibility & List View
                 EnquiryType: relatedTypes.join(', '),
                 EnquiryFor: relatedItemsDisplay.join(', '),
                 CustomerName: enq.CustomerName || relatedCustomers.join(', '), // Prefer Master, fallback to transaction
                 ClientName: enq.ClientName,
-                ConsultantName: enq.ConsultantName,
+                ConsultantName: enq.ConsultantName || relatedConsultants.join(', '),
                 ReceivedFrom: relatedContacts.map(c => c.split('|')[0]).join(', '),
                 ConcernedSE: relatedSEs.join(', '),
                 SourceOfInfo: enq.SourceOfEnquiry,
@@ -779,7 +781,7 @@ app.post('/api/enquiries', async (req, res) => {
             SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
             SelectedEnquiryTypes, SelectedEnquiryFor,
             SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
-            ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
+            ProjectName, ClientName, ConsultantName, SelectedConsultants, DetailsOfEnquiry,
             DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
             AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, CustomerRefNo
         } = req.body;
@@ -813,7 +815,7 @@ app.post('/api/enquiries', async (req, res) => {
         request.input('ReceivedFrom', sql.NVarChar, SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(',') : null);
         request.input('ProjectName', sql.NVarChar, ProjectName || null);
         request.input('ClientName', sql.NVarChar, ClientName || null);
-        request.input('ConsultantName', sql.NVarChar, ConsultantName || null);
+        request.input('ConsultantName', sql.NVarChar, SelectedConsultants ? SelectedConsultants.join(',') : (ConsultantName || null));
         request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry || null);
 
         request.input('Doc_HardCopies', sql.Bit, hardcopy ?? false);
@@ -940,6 +942,7 @@ app.post('/api/enquiries', async (req, res) => {
         await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes, transaction);
         await insertRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor, transaction);
         await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs, transaction);
+        await insertRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants, transaction);
 
         if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
             for (const item of SelectedReceivedFroms) {
@@ -1066,7 +1069,7 @@ app.post('/api/enquiries', async (req, res) => {
                 EnquiryType: SelectedEnquiryTypes ? SelectedEnquiryTypes.join(', ') : '',
                 ProjectName,
                 ClientName,
-                ConsultantName,
+                ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
                 DetailsOfEnquiry,
                 DueOn,
                 DocumentsReceived,
@@ -1095,7 +1098,7 @@ app.post('/api/enquiries', async (req, res) => {
                             CustomerName: SelectedCustomers ? SelectedCustomers.join(', ') : '',
                             ProjectName: ProjectName,
                             ClientName: ClientName,
-                            ConsultantName: ConsultantName,
+                            ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
                             DetailsOfEnquiry: DetailsOfEnquiry
                         };
 
@@ -1237,6 +1240,7 @@ app.get('/api/enquiries/:id', async (req, res) => {
         const typesResult = await sql.query`SELECT * FROM EnquiryType WHERE RequestNo = ${reqNo}`;
         const itemsResult = await sql.query`SELECT * FROM EnquiryFor WHERE RequestNo = ${reqNo}`;
         const seResult = await sql.query`SELECT * FROM ConcernedSE WHERE RequestNo = ${reqNo}`;
+        const consultantsResult = await sql.query`SELECT * FROM EnquiryConsultant WHERE RequestNo = ${reqNo}`;
 
         const relatedCustomers = customersResult.recordset.map(c => c.CustomerName);
         const relatedContacts = contactsResult.recordset.map(c => `${c.ContactName}|${c.CompanyName || ''}`);
@@ -1247,6 +1251,7 @@ app.get('/api/enquiries/:id', async (req, res) => {
             id: i.ID,
             parentId: i.ParentID,
             itemName: i.ItemName,
+            leadJobCode: i.LeadJobCode,
             parentName: i.ParentItemName
         }));
         const relatedItemsDisplay = relatedItemsRaw.map(i => i.ItemName);
@@ -1260,6 +1265,7 @@ app.get('/api/enquiries/:id', async (req, res) => {
             SelectedCustomers: relatedCustomers,
             SelectedReceivedFroms: relatedContacts,
             SelectedConcernedSEs: relatedSEs,
+            SelectedConsultants: consultantsResult.recordset.map(c => c.ConsultantName),
             EnquiryType: relatedTypes.join(', '),
             EnquiryFor: relatedItemsDisplay.join(', '),
             CustomerName: enq.CustomerName || relatedCustomers.join(', '),
@@ -1285,7 +1291,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
         SelectedEnquiryTypes, SelectedEnquiryFor,
         SelectedCustomers, SelectedReceivedFroms, SelectedConcernedSEs,
-        ProjectName, ClientName, ConsultantName, DetailsOfEnquiry,
+        ProjectName, ClientName, ConsultantName, SelectedConsultants, DetailsOfEnquiry,
         DocumentsReceived, hardcopy, drawing, dvd, spec, eqpschedule, Remark,
         AutoAck, ceosign, Status, AcknowledgementSE, AdditionalNotificationEmails, CustomerRefNo
     } = req.body;
@@ -1301,7 +1307,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
 
         request.input('ProjectName', sql.NVarChar, ProjectName);
         request.input('ClientName', sql.NVarChar, ClientName);
-        request.input('ConsultantName', sql.NVarChar, ConsultantName);
+        request.input('ConsultantName', sql.NVarChar, SelectedConsultants ? SelectedConsultants.join(',') : (ConsultantName || null));
         request.input('EnquiryDetails', sql.NVarChar, DetailsOfEnquiry);
         // DocumentsReceived is not in new schema as a single field, it's checkboxes
         request.input('Doc_HardCopies', sql.Bit, hardcopy);
@@ -1427,6 +1433,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         await updateRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes);
         await updateRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor);
         await updateRelated('ConcernedSE', 'SEName', SelectedConcernedSEs);
+        await updateRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants);
 
         // ReceivedFrom has multiple columns, handle separately if needed, or just ContactName/CompanyName
         // For now assuming simple string or split logic similar to POST
@@ -1730,7 +1737,6 @@ app.put('/api/enquiry-items/:id', async (req, res) => {
 
 // Upload Attachment - Store in DB
 // Upload Attachment - Store in Disk and DB
-// Upload Attachment - Store in Disk and DB
 app.post('/api/attachments/upload', (req, res, next) => {
     // Ensure uploads directory exists
     const uploadDir = 'uploads';
@@ -1740,7 +1746,13 @@ app.post('/api/attachments/upload', (req, res, next) => {
     next();
 }, upload.array('files'), async (req, res) => {
     const requestNo = req.query.requestNo;
-    console.log('Upload request for RequestNo:', requestNo);
+    const visibility = req.query.visibility || 'Public';
+    const type = req.query.type || 'File';
+    const linkUrl = req.query.linkUrl || null;
+    const uploadedBy = req.query.userName || 'System';
+    const division = req.query.division || null;
+
+    console.log('Upload request:', { requestNo, visibility, type, uploadedBy, division });
 
     if (!requestNo) {
         return res.status(400).send('Request No is required');
@@ -1748,37 +1760,40 @@ app.post('/api/attachments/upload', (req, res, next) => {
 
     const files = req.files;
 
-    if (!files || files.length === 0) {
-        return res.status(400).send('No files uploaded.');
-    }
-
     try {
         const uploadedFiles = [];
-        for (const file of files) {
-            const fileName = file.originalname;
-            const filePath = file.path;
 
-            // Check if RequestNo exists in EnquiryMaster to avoid FK violation
-            const checkEnq = await sql.query`SELECT RequestNo FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
-            if (checkEnq.recordset.length === 0) {
-                // If not found, we can't link attachment. 
-                // But we already saved the file. Should we delete it?
-                // For now, just error out.
-                throw new Error(`RequestNo ${requestNo} not found in EnquiryMaster`);
-            }
-
-            const now = new Date();
-            // Insert into DB with FilePath
-            await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath, UploadedAt) 
-            VALUES(${requestNo}, ${fileName}, ${filePath}, ${now})`;
-
+        // Handle Hyperlink case
+        if (type === 'Link' && linkUrl) {
+            const fileName = req.query.fileName || linkUrl;
+            await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath, UploadedAt, Visibility, AttachmentType, LinkURL, UploadedBy, Division) 
+            VALUES(${requestNo}, ${fileName}, NULL, ${new Date()}, ${visibility}, 'Link', ${linkUrl}, ${uploadedBy}, ${division})`;
             uploadedFiles.push({ fileName });
         }
 
-        res.status(201).json({ message: 'Files uploaded successfully', files: uploadedFiles });
+        // Handle Files
+        if (files && files.length > 0) {
+            for (const file of files) {
+                const fileName = file.originalname;
+                const filePath = file.path;
+
+                // Check if RequestNo exists in EnquiryMaster to avoid FK violation
+                const checkEnq = await sql.query`SELECT RequestNo FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
+                if (checkEnq.recordset.length === 0) {
+                    throw new Error(`RequestNo ${requestNo} not found in EnquiryMaster`);
+                }
+
+                await sql.query`INSERT INTO Attachments (RequestNo, FileName, FilePath, UploadedAt, Visibility, AttachmentType, LinkURL, UploadedBy, Division) 
+                VALUES(${requestNo}, ${fileName}, ${filePath}, ${new Date()}, ${visibility}, 'File', NULL, ${uploadedBy}, ${division})`;
+
+                uploadedFiles.push({ fileName });
+            }
+        }
+
+        res.status(201).json({ message: 'Success', files: uploadedFiles });
     } catch (err) {
-        console.error(err);
-        res.status(500).send('Server Error');
+        console.error('Upload error:', err);
+        res.status(500).send(err.message || 'Server Error');
     }
 });
 
@@ -1815,14 +1830,12 @@ app.get('/api/system/next-request-no', async (req, res) => {
 // Get Attachments List
 app.get('/api/attachments', async (req, res) => {
     const requestNo = req.query.requestNo;
-    console.log('Get attachments for RequestNo:', requestNo);
-
     if (!requestNo) {
         return res.status(400).send('Request No is required');
     }
 
     try {
-        const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt FROM Attachments WHERE RequestNo = ${requestNo} `;
+        const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt, Visibility, AttachmentType, LinkURL, UploadedBy, Division FROM Attachments WHERE RequestNo = ${requestNo} `;
         res.json(result.recordset);
     } catch (err) {
         console.error(err);

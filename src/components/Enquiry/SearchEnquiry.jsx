@@ -236,7 +236,6 @@ const SearchEnquiry = ({ onOpen }) => {
     }, [searchQuery]);
 
     const handleClear = () => {
-        console.log("SearchEnquiry: Clear Button Clicked");
 
         // 1. Reset all state variables
         setSearchQuery("");
@@ -253,7 +252,6 @@ const SearchEnquiry = ({ onOpen }) => {
         // 4. Reset the results list
         setResults([...filteredEnquiries]);
 
-        console.log("SearchEnquiry: All filters and states successfully reset.");
     };
 
     const handleExport = () => {
@@ -262,7 +260,7 @@ const SearchEnquiry = ({ onOpen }) => {
             return;
         }
 
-        const headers = ["Enquiry No.", "Enquiry Date", "Customer", "Client", "Project", "Source", "Due Date", "SE(s)", "Status", "Created By"];
+        const headers = ["Enquiry No.", "Enquiry Date", "Customer Name / Contractor Name", "Client", "Project", "Source", "Due Date", "Sales Engineer / Estimation Engineer / Quantity Surveyor", "Status", "Created By"];
 
         const csvContent = [
             headers.join(","),
@@ -441,7 +439,7 @@ const SearchEnquiry = ({ onOpen }) => {
                                 <div className="header-content">Enquiry Date <SortIcon column="EnquiryDate" /></div>
                             </th>
                             <th className="sortable-header" onClick={() => handleSort('Customer')}>
-                                <div className="header-content">Customer <SortIcon column="Customer" /></div>
+                                <div className="header-content">Customer Name / Contractor Name <SortIcon column="Customer" /></div>
                             </th>
                             <th className="sortable-header" onClick={() => handleSort('ClientName')}>
                                 <div className="header-content">Client <SortIcon column="ClientName" /></div>
@@ -456,7 +454,7 @@ const SearchEnquiry = ({ onOpen }) => {
                                 <div className="header-content">Due <SortIcon column="DueOn" /></div>
                             </th>
                             <th className="sortable-header" onClick={() => handleSort('SE')}>
-                                <div className="header-content">SE(s) <SortIcon column="SE" /></div>
+                                <div className="header-content">Sales Engineer / Estimation Engineer / Quantity Surveyor <SortIcon column="SE" /></div>
                             </th>
                             <th className="sortable-header" onClick={() => handleSort('Status')}>
                                 <div className="header-content">Status <SortIcon column="Status" /></div>
@@ -470,13 +468,12 @@ const SearchEnquiry = ({ onOpen }) => {
                         {sortedResults.length === 0 ? (
                             <tr><td colSpan="11" className="text-muted text-center">No results.</td></tr>
                         ) : (
-                            sortedResults.map(r => (
-                                <tr key={r.RequestNo}>
+                            sortedResults.map((r, idx) => (
+                                <tr key={`${r.RequestNo}-${idx}`}>
                                     <td className="position-relative">
                                         <div
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                console.log(`SearchEnquiry: ${r._canEdit ? 'Edit' : 'View'} clicked for`, r.RequestNo);
                                                 onOpen(r.RequestNo);
                                             }}
                                             style={{

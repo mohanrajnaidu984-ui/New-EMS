@@ -119,7 +119,6 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                 alert('Failed to post note');
             }
         } catch (err) {
-            console.error(err);
             alert('Failed to post note');
         } finally {
             setLoading(false);
@@ -147,14 +146,18 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
 
         if (lastWord.startsWith('@')) {
             const query = lastWord.slice(1).toLowerCase();
-            setMentionQuery(query);
-            setShowSuggestions(true);
+            if (query.length >= 3) {
+                setMentionQuery(query);
+                setShowSuggestions(true);
 
-            if (masters.concernedSEs) {
-                const matches = masters.concernedSEs.filter(u =>
-                    u.FullName.toLowerCase().includes(query)
-                );
-                setFilteredUsers(matches);
+                if (masters.concernedSEs) {
+                    const matches = masters.concernedSEs.filter(u =>
+                        u.FullName.toLowerCase().includes(query)
+                    );
+                    setFilteredUsers(matches);
+                }
+            } else {
+                setShowSuggestions(false);
             }
         } else {
             setShowSuggestions(false);

@@ -2,6 +2,27 @@ const express = require('express');
 const router = express.Router();
 const { sql } = require('../dbConfig');
 
+// One-time migration flag
+let gpColumnMigrated = false;
+async function ensureGPColumn() {
+    if (gpColumnMigrated) return;
+    try {
+        await new sql.Request().query(`
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'SalesTargets' AND COLUMN_NAME = 'GrossProfitTarget'
+            )
+            BEGIN
+                ALTER TABLE SalesTargets ADD GrossProfitTarget DECIMAL(18, 2) NULL DEFAULT 0;
+            END
+        `);
+        gpColumnMigrated = true;
+        console.log('[SalesTargets] GrossProfitTarget column ready.');
+    } catch (e) {
+        console.warn('[SalesTargets] Migration warning:', e.message);
+    }
+}
+
 // 1. Check Manager Access & Get Managed Divisions
 router.get('/manager-access', async (req, res) => {
     try {
@@ -98,6 +119,7 @@ router.get('/items', async (req, res) => {
 // 4. Get Existing Targets
 router.get('/targets', async (req, res) => {
     try {
+        await ensureGPColumn(); // Lazy migration: add GrossProfitTarget column if missing
         const { year, division, engineer } = req.query;
         const request = new sql.Request();
         request.input('year', sql.Int, year);
@@ -105,7 +127,7 @@ router.get('/targets', async (req, res) => {
         request.input('engineer', sql.NVarChar, engineer);
 
         const result = await request.query(`
-            SELECT ItemName, Quarter, TargetValue 
+            SELECT ItemName, Quarter, TargetValue, ISNULL(GrossProfitTarget, 0) AS GrossProfitTarget
             FROM SalesTargets 
             WHERE FinancialYear = @year AND Division = @division AND SalesEngineer = @engineer
         `);
@@ -156,6 +178,7 @@ router.post('/save', async (req, res) => {
                 for (const q of quarters) {
                     const val = t[q] ? parseFloat(t[q]) : 0;
                     if (val >= 0) { // allow 0
+                        const gpVal = t[`${q}_GP`] ? parseFloat(t[`${q}_GP`]) : 0;
                         const insRequest = new sql.Request(transaction);
                         insRequest.input('year', sql.Int, year);
                         insRequest.input('div', sql.NVarChar, division);
@@ -163,11 +186,12 @@ router.post('/save', async (req, res) => {
                         insRequest.input('item', sql.NVarChar, t.itemName);
                         insRequest.input('q', sql.NVarChar, q);
                         insRequest.input('val', sql.Decimal(18, 2), val);
+                        insRequest.input('gpVal', sql.Decimal(18, 2), gpVal);
                         insRequest.input('by', sql.NVarChar, userEmail);
 
                         await insRequest.query(`
-                            INSERT INTO SalesTargets (FinancialYear, Quarter, Division, ItemName, SalesEngineer, TargetValue, CreatedBy)
-                            VALUES (@year, @q, @div, @item, @se, @val, @by)
+                            INSERT INTO SalesTargets (FinancialYear, Quarter, Division, ItemName, SalesEngineer, TargetValue, GrossProfitTarget, CreatedBy)
+                            VALUES (@year, @q, @div, @item, @se, @val, @gpVal, @by)
                          `);
                     }
                 }

@@ -28,37 +28,28 @@ export const AuthProvider = ({ children }) => {
     }, []);
 
     const login = (userData) => {
-        console.log('AuthContext: login called with', userData);
-
         let finalUserData = { ...userData };
-        // Force Admin for ranigovardhan@gmail.com
         if (finalUserData.EmailId?.toLowerCase() === 'ranigovardhan@gmail.com' || finalUserData.email?.toLowerCase() === 'ranigovardhan@gmail.com') {
             finalUserData.Roles = 'Admin';
             finalUserData.role = 'Admin';
         }
-
         setCurrentUser(finalUserData);
         localStorage.setItem('currentUser', JSON.stringify(finalUserData));
     };
 
     const logout = () => {
-        console.log('AuthContext: Logout called');
         setCurrentUser(null);
         localStorage.removeItem('currentUser');
         window.location.href = '/';
-        // window.location.reload(); 
     };
 
     const updateProfileImage = async (userId, base64) => {
         try {
-            // Update Backend
             await fetch('/api/auth/update-profile-image', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ userId, imageBase64: base64 })
             });
-
-            // Update Local State
             if (currentUser) {
                 const updatedUser = { ...currentUser, ProfileImage: base64 };
                 setCurrentUser(updatedUser);
@@ -69,8 +60,16 @@ export const AuthProvider = ({ children }) => {
         }
     };
 
+    const authValue = React.useMemo(() => ({
+        currentUser,
+        login,
+        logout,
+        updateProfileImage,
+        isAuthenticated: !!currentUser
+    }), [currentUser]);
+
     return (
-        <AuthContext.Provider value={{ currentUser, login, logout, updateProfileImage, isAuthenticated: !!currentUser }}>
+        <AuthContext.Provider value={authValue}>
             {children}
         </AuthContext.Provider>
     );

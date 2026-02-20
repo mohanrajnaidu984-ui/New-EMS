@@ -255,9 +255,32 @@ const QuoteForm = () => {
     const [usersList, setUsersList] = useState([]);
     const [customersList, setCustomersList] = useState([]);
     const [pendingQuotes, setPendingQuotes] = useState([]); // Pending List State
+    const [pendingQuotesSortConfig, setPendingQuotesSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
 
     // Tab State for unified Quote and Pricing Sections
     const [activeQuoteTab, setActiveQuoteTab] = useState('self');
+
+    const isDescendant = useCallback((childId, ancestorId, pool = null) => {
+        if (!childId || !ancestorId) return false;
+        const targetAncId = String(ancestorId);
+        const jobsPool = pool || (pricingData?.jobs && pricingData.jobs.length > 0 ? pricingData.jobs : (enquiryData?.divisionsHierarchy || []));
+
+        let currentId = String(childId);
+        let visited = new Set();
+
+        while (currentId && !visited.has(currentId)) {
+            visited.add(currentId);
+            const item = jobsPool.find(j => String(j.id || j.ItemID || j.ID || j.ID) === currentId);
+            if (!item) break;
+
+            const pid = String(item.parentId || item.ParentID || '');
+            if (!pid || pid === '0' || pid === '' || pid === 'undefined') break;
+
+            if (pid === targetAncId) return true;
+            currentId = pid;
+        }
+        return false;
+    }, [pricingData, enquiryData]);
 
     // Templates State
     const [templates, setTemplates] = useState([]);
@@ -279,107 +302,178 @@ const QuoteForm = () => {
         let leadJobId = null;
         let leadPrefix = (enquiryData.leadJobPrefix || '').toUpperCase();
 
+        // Find the active lead job object (allowing sub-jobs as lead context)
+        const findLeadJob = (pool) => pool.find(j => {
+            const jName = (j.itemName || '').toUpperCase();
+            const cleanJName = jName.replace(/^(L\d+\s*-\s*)/, '').trim();
+            return jName === leadPrefix || cleanJName === leadPrefix || jName.startsWith(leadPrefix + ' -') || (j.leadJobCode && j.leadJobCode.toUpperCase() === leadPrefix);
+        });
+
         if (pricingData && pricingData.jobs && pricingData.jobs.length > 0) {
-            // Case A: Use Pricing Data (Preferred)
             jobsList = pricingData.jobs;
-            const leadJobNameFull = (enquiryData.divisions || []).find(d => d.toUpperCase().startsWith(leadPrefix)) || '';
-            const leadJobObj = jobsList.find(j => {
-                const jName = (j.itemName || '').toUpperCase();
-                return (leadJobNameFull && jName === leadJobNameFull.toUpperCase()) ||
-                    jName.startsWith(leadPrefix + ' -') ||
-                    jName === leadPrefix;
-            });
-            leadJobId = leadJobObj?.id;
+            leadJobId = findLeadJob(jobsList)?.id;
         } else if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
-            // Case B: Fallback to Enquiry Divisions Hierarchy (Step 296 Fix)
             jobsList = enquiryData.divisionsHierarchy.map(d => ({
                 id: d.id || d.ItemID,
                 parentId: d.parentId || d.ParentID,
                 itemName: d.itemName || d.ItemName || d.DivisionName,
+                leadJobCode: d.leadJobCode || d.LeadJobCode,
                 companyLogo: d.companyLogo,
                 companyName: d.companyName,
                 departmentName: d.departmentName
             }));
-            // Find root for current lead job prefix
-            const root = jobsList.find(j => (!j.parentId || j.parentId == '0' || j.parentId == 0) && (j.itemName || '').toUpperCase().startsWith(leadPrefix));
-            leadJobId = root?.id;
+            leadJobId = findLeadJob(jobsList)?.id;
         } else if (enquiryData.divisions) {
-            // Case C: Minimal fallback from flat divisions list
             jobsList = enquiryData.divisions.map((d, i) => ({ id: `div_${i}`, itemName: d }));
-            const leadJob = jobsList.find(j => (j.itemName || '').toUpperCase().startsWith(leadPrefix));
+            const leadJob = jobsList.find(j => (j.itemName || '').toUpperCase().includes(leadPrefix) || leadPrefix.includes((j.itemName || '').toUpperCase()));
             leadJobId = leadJob?.id;
         }
+
+        // --- Resolved Lead Code for Quote Number Comparison (Robust Walk-up) ---
+        const currentLeadCode = (() => {
+            const curr = (enquiryData.leadJobPrefix || '').toUpperCase();
+            if (!curr) return '';
+            if (curr.match(/^L\d+/)) return curr.split('-')[0].trim();
+
+            // Resolve from jobsList
+            let job = jobsList.find(j => String(j.id || j.ItemID) === String(leadJobId));
+            if (!job && curr) {
+                const target = curr.trim();
+                job = jobsList.find(j => (j.itemName || '').toUpperCase().trim() === target);
+            }
+
+            if (job) {
+                // Walk up to Root to find the L-code
+                let root = job;
+                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                    const parent = jobsList.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                    if (parent) root = parent;
+                    else break;
+                }
+                if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+            }
+            return curr;
+        })();
 
         if (jobsList.length === 0) return [];
 
         const userAccess = pricingData?.access || {};
         const accessibleJobs = jobsList.filter(j => {
+            // --- BRANCH FILTER: Job must belong to the currently selected Lead Job's hierarchy ---
+            const isLeadJobSelf = String(j.id) === String(leadJobId);
+            let isInThisBranch = isLeadJobSelf;
+
+            if (!isInThisBranch) {
+                let curr = j;
+                while (curr && curr.parentId && curr.parentId !== '0' && curr.parentId !== 0) {
+                    if (String(curr.parentId) === String(leadJobId)) {
+                        isInThisBranch = true;
+                        break;
+                    }
+                    curr = jobsList.find(sj => sj.id === curr.parentId || sj.ItemID === curr.parentId);
+                    if (!curr) break;
+                }
+            }
+
+            if (!isInThisBranch) return false;
+
+            // --- 2. PERMISSION FILTER: Only show jobs where user is assigned or is a lead ---
             if (isAdmin) return true;
 
-            const hasLimitedAccess = !pricingData?.access?.hasLeadAccess && (pricingData?.access?.editableJobs?.length > 0);
+            const editableNames = (pricingData?.access?.editableJobs || []).map(n => n.trim().toLowerCase());
+            const jName = (j.itemName || j.DivisionName || '').trim().toLowerCase();
 
-            // If we have pricing data, respect its access rules
-            if (pricingData) {
-                const userAccess = pricingData.access;
-                const visibleNames = (userAccess.visibleJobs || []).map(n => n.trim().toLowerCase());
-                const editableNames = (userAccess.editableJobs || []).map(n => n.trim().toLowerCase());
-                const jName = (j.itemName || '').trim().toLowerCase();
+            // 2.1 Direct match (is this an assigned job?)
+            if (editableNames.includes(jName)) return true;
 
-                // Rule: If hasLimitedAccess, we only show tabs that are editable or descendants of editable.
-                // We do NOT show parents (even if 'visible') to sub-jobs to enforce hierarchy.
-                if (hasLimitedAccess) {
-                    // Check if current job (jName) is one of our editable scopes OR a descendant
-                    const isEditableRoot = editableNames.some(acc => jName === acc || jName.includes(acc) || acc.includes(jName));
-                    if (isEditableRoot) return true;
+            // 2.2 Ancestor check (is user assigned to an ancestor? if so, they manage this sub-tree)
+            let curr = j;
+            while (curr && (curr.parentId || curr.ParentID) && (curr.parentId || curr.ParentID) !== '0' && (curr.parentId || curr.ParentID) !== 0) {
+                const pid = String(curr.parentId || curr.ParentID);
+                const parent = jobsList.find(sj => String(sj.id || sj.ItemID) === pid);
+                if (!parent) break;
+                if (editableNames.includes((parent.itemName || parent.DivisionName || '').trim().toLowerCase())) return true;
+                curr = parent;
+            }
 
-                    // Check if current job is a descendant of any editable scope
-                    const isDescendant = editableNames.some(scopeName => {
-                        const scopeJob = jobsList.find(sj => sj.itemName?.trim().toLowerCase() === scopeName);
-                        if (!scopeJob) return false;
+            return false;
+        });
 
-                        let curr = j;
-                        while (curr && curr.parentId) {
-                            if (curr.parentId === scopeJob.id) return true;
-                            curr = jobsList.find(sj => sj.id === curr.parentId);
-                        }
-                        return false;
+        const leadJobObj = accessibleJobs.find(j => j.id === leadJobId);
+        const leadJobName = leadJobObj ? (leadJobObj.itemName || leadJobObj.DivisionName) : '';
+
+        const seenNames = new Set();
+        if (leadJobName) seenNames.add(leadJobName.trim().toLowerCase());
+
+        const finalTabs = accessibleJobs
+            .filter(job => {
+                const jName = (job.itemName || job.DivisionName || '').trim().toLowerCase();
+                // 1. If this is the lead job, always include it (it's already in seenNames)
+                if (job.id === leadJobId) return true;
+
+                // 2. If name is empty or already seen, skip it
+                if (!jName || seenNames.has(jName)) return false;
+
+                // 3. Mark as seen and include
+                seenNames.add(jName);
+                return true;
+            })
+            .map(job => {
+                const isLead = job.id === leadJobId;
+                let displayName = job.itemName;
+
+                // Clean prefix for display
+                if (leadPrefix && displayName.toUpperCase().startsWith(leadPrefix)) {
+                    displayName = displayName.substring(leadPrefix.length).replace(/^\s*-\s*/, '').trim();
+                }
+                if (!displayName) displayName = job.itemName;
+
+                // Quote Reference Resolution
+                let quoteNo = null;
+                if (toName && existingQuotes.length > 0) {
+                    const tabQuotes = existingQuotes.filter(q => {
+                        const parts = q.QuoteNumber?.split('/') || [];
+                        const qDivCode = parts[1]?.toUpperCase();
+                        const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
+
+                        // Rule: If quote has an L-prefix, it MUST match current lead prefix context to be relevant to this branch.
+                        if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
+
+                        const qJob = jobsList.find(j => {
+                            const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                            return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                                (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                                (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                                (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                                (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                (qDivCode === 'AAC' && jName.includes('AIR'));
+                        });
+
+                        if (!qJob) return false;
+                        const qJobId = qJob.id || qJob.ItemID || qJob.ID;
+                        return String(qJobId) === String(job.id);
                     });
 
-                    return isDescendant;
+                    if (tabQuotes.length > 0) {
+                        const sorted = tabQuotes.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
+                        quoteNo = sorted[0].QuoteNumber;
+                    }
                 }
 
-                const accessibleNames = [...visibleNames, ...editableNames];
-                return accessibleNames.some(acc => {
-                    const aName = acc.trim().toLowerCase();
-                    return jName === aName || jName.includes(aName) || aName.includes(jName);
-                });
-            }
-            // If no pricing data yet, show all identified jobs as tabs (unrestricted)
-            return true;
-        });
-
-        const finalTabs = accessibleJobs.map(job => {
-            const isLead = job.id === leadJobId;
-            let displayName = job.itemName;
-
-            // Clean prefix for display
-            if (leadPrefix && displayName.toUpperCase().startsWith(leadPrefix)) {
-                displayName = displayName.substring(leadPrefix.length).replace(/^\s*-\s*/, '').trim();
-            }
-            if (!displayName) displayName = job.itemName;
-
-            return {
-                id: isLead ? 'self' : job.id,
-                name: isLead ? 'Own Job' : displayName,
-                label: job.itemName,
-                companyLogo: job.companyLogo,
-                companyName: job.companyName,
-                departmentName: job.departmentName,
-                isSelf: isLead,
-                realId: job.id,
-                parentId: job.parentId
-            };
-        });
+                return {
+                    id: isLead ? 'self' : job.id,
+                    name: isLead ? 'Own Job' : displayName,
+                    label: job.itemName,
+                    companyLogo: job.companyLogo,
+                    companyName: job.companyName,
+                    departmentName: job.departmentName,
+                    isSelf: isLead,
+                    realId: job.id,
+                    parentId: job.parentId,
+                    quoteNo: quoteNo
+                };
+            });
 
         // Sort Tabs: Lead/Own Job first, then hierarchy
         finalTabs.sort((a, b) => {
@@ -391,7 +485,6 @@ const QuoteForm = () => {
         });
 
         // Ensure at least one tab is 'Own Job' and is the default 'self' ID
-        // If we filtered out the lead job, the first accessible job becomes the 'Own Job' for this user context
         if (finalTabs.length > 0 && !finalTabs.some(t => t.id === 'self')) {
             finalTabs[0].id = 'self';
             finalTabs[0].name = 'Own Job';
@@ -399,7 +492,7 @@ const QuoteForm = () => {
         }
 
         return finalTabs;
-    }, [pricingData, enquiryData, usersList, isAdmin]);
+    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, isDescendant]);
 
     // Auto-resolve active tabs based on calculated permissions
     useEffect(() => {
@@ -443,6 +536,84 @@ const QuoteForm = () => {
             }
         }
     }, [activeQuoteTab, calculatedTabs]);
+
+
+    // Ref to track if we've already auto-selected for the current tab (prevents overwriting user manual selection)
+    const lastAutoSelectRef = useRef({ tab: null, processed: false });
+
+    // Auto-select customer based on tab navigation (singleness rule)
+    useEffect(() => {
+        if (!enquiryData || !pricingData || !activeQuoteTab) return;
+
+        // Reset processed flag if tab changes
+        if (lastAutoSelectRef.current.tab !== activeQuoteTab) {
+            lastAutoSelectRef.current = { tab: activeQuoteTab, processed: false };
+        }
+
+        // Only run logic if not yet processed for this tab
+        if (lastAutoSelectRef.current.processed) return;
+
+        // Helper to check hierarchy
+        const isDescendantLocal = (childId, parentId) => {
+            const hierarchy = enquiryData.divisionsHierarchy || [];
+            let current = hierarchy.find(d => String(d.ItemID) === String(childId));
+            while (current) {
+                if (String(current.ParentID) === String(parentId)) return true;
+                current = hierarchy.find(d => String(d.ItemID) === String(current.ParentID));
+            }
+            return false;
+        };
+
+        const activeTabObj = (calculatedTabs || []).find(t => t.id === activeQuoteTab);
+        if (!activeTabObj) return;
+
+        const realId = activeTabObj.realId;
+        const allCandidates = (enquiryData.customerOptions || []).map(c => c.trim());
+
+        // Identify customers who have at least one price > 0 for this tab's subtree
+        const pricedCustomers = allCandidates.filter(custName => {
+            const custKey = normalize(custName);
+            const custValues = pricingData.allValues ? pricingData.allValues[custKey] : null;
+            if (!custValues) return false;
+
+            return Object.values(custValues).some(v => {
+                const vJobId = v.EnquiryForID;
+                if (!vJobId) return false;
+
+                const isMatch = String(vJobId) === String(realId) || isDescendantLocal(vJobId, realId);
+                return isMatch && parseFloat(v.Price) > 0;
+            });
+        });
+
+        console.log(`[AutoSelect] Tab: ${activeQuoteTab}, RealId: ${realId}, Priced Customers:`, pricedCustomers);
+
+        let targetCustomer = toName;
+        if (pricedCustomers.length === 1) {
+            targetCustomer = pricedCustomers[0];
+        } else if (pricedCustomers.length > 1) {
+            // If current is NOT in the priced list, pick the first one instead of blanking
+            if (!pricedCustomers.includes(toName)) {
+                targetCustomer = pricedCustomers[0];
+            }
+        } else {
+            // No one has pricing yet for this tab
+            // If there's only one customer in total for the enquiry, use it.
+            if (allCandidates.length === 1) {
+                targetCustomer = allCandidates[0];
+            }
+        }
+
+        if (toName !== targetCustomer) {
+            console.log(`[AutoSelect] Updating toName: "${toName}" -> "${targetCustomer}"`);
+            setToName(targetCustomer);
+        }
+
+        // Mark as processed for this tab so we don't run again until tab changes
+        lastAutoSelectRef.current.processed = true;
+
+    }, [activeQuoteTab, pricingData, enquiryData, calculatedTabs, toName]); // toName kept to ensure effect runs, but 'processed' guard prevents loop
+
+
 
     // NEW: Sync Attention Of (toAttention) whenever toName or enquiryData changes
     useEffect(() => {
@@ -530,28 +701,25 @@ const QuoteForm = () => {
 
         // 2. Strict Scope Validation (Based on Active Tab)
         // User can only create/edit quotes for divisions they explicitly have 'editable' access to.
-        if (pricingData?.access) {
-            const activeTabObj = calculatedTabs.find(t => t.id === activeQuoteTab);
-            if (activeTabObj) {
-                // Determine the "Job Name" of the current tab
-                // For 'Own Job' / Lead, we need to resolve the actual job name if possible, or use the label
-                const targetJob = normalize(activeTabObj.label || activeTabObj.name);
+        const activeTabObj = (calculatedTabs || []).find(t => t.id === activeQuoteTab);
+        if (!activeTabObj) return false;
 
-                // Get list of jobs the user is allowed to edit
-                const allowedJobs = (pricingData.access.editableJobs || []).map(j => normalize(j));
+        // 2. Disable for any subjob tab (any tab that is not the 'Own Job' / 'self' tab)
+        // This ensures users can only create/revise quotes from their primary job context.
+        if (activeQuoteTab !== 'self') return false;
 
-                if (allowedJobs.length > 0) {
-                    // Check if current tab is in the allowed list
-                    // We use contains check to handle potential naming variations (e.g. "Civil Works" vs "Civil")
-                    const isAllowed = allowedJobs.some(allowed =>
-                        targetJob === allowed || targetJob.includes(allowed) || allowed.includes(targetJob)
-                    );
+        const targetJob = normalize(activeTabObj.label || activeTabObj.name);
+        const allowedJobs = (pricingData?.access?.editableJobs || []).map(j => normalize(j));
 
-                    if (!isAllowed) {
-                        return false; // Tab is outside user's editable scope
-                    }
-                }
-            }
+        // Block if the current tab is not in the user's explicit editable list
+        if (allowedJobs.length > 0) {
+            const isAllowed = allowedJobs.some(allowed =>
+                targetJob === allowed || targetJob.includes(allowed) || allowed.includes(targetJob)
+            );
+            if (!isAllowed) return false;
+        } else if (!pricingData?.access?.hasLeadAccess) {
+            // If not lead and no specific jobs allowed, block everything
+            return false;
         }
 
         // 3. Existing Quote Ownership check (If we are editing a specific quote)
@@ -562,10 +730,17 @@ const QuoteForm = () => {
             const userEmail = (currentUser.email || currentUser.EmailId || '').toLowerCase().trim();
             const preparedByEmail = (selectedQuote.PreparedByEmail || '').toLowerCase().trim();
 
-            // Creator
+            // Creator always has access
             if (userEmail === preparedByEmail) return true;
 
-            // CC List
+            // Otherwise, we check if the user belongs to the division of this quote
+            // We use the same 'allowedJobs' check from above - if they are allowed to edit this tab,
+            // they are allowed to revise quotes in this tab (Division level access).
+
+            // NOTE: We no longer allow Lead users to edit other divisions' quotes blindly.
+            // They must have 'editable' access to that specific division (Step 2321)
+
+            // Check if user is in the CC list/Division Emails for this job
             if (enquiryData?.divisionEmails) {
                 const isInCC = enquiryData.divisionEmails.some(div => {
                     const emails = [div.ccMailIds, div.commonMailIds].filter(Boolean).join(',');
@@ -575,10 +750,9 @@ const QuoteForm = () => {
                 if (isInCC) return true;
             }
 
-            // Lead Access (If I passed Scope check above, and have Lead Access, I can edit my division's quotes even if not creator)
-            if (pricingData?.access?.hasLeadAccess) return true;
-
-            return false;
+            // If the user passed the Tab Scope check above (which we already did for revisions)
+            // they can revise any quote in their own division.
+            return true;
         }
 
         // New Quote (and passed Scope Check)
@@ -661,39 +835,64 @@ const QuoteForm = () => {
         let internalOpts = [];
         if (enquiryData.divisionsHierarchy && enquiryData.leadJobPrefix) {
             const allNodes = enquiryData.divisionsHierarchy;
+            const myJobs = (pricingData?.access?.editableJobs || []).map(j => j.trim().toLowerCase());
 
-            // Find the Current Lead Job Node
-            // Matching logic: ItemName acts as the key. leadJobPrefix might be 'Civil Project' or 'L1' or 'BMS'
-            // We try to find the node that *Best Matches* the prefix.
-            // Usually prefix is the Clean Name or the Code.
-
-            let startNode = allNodes.find(n => {
-                const clean = n.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                return clean.toLowerCase() === enquiryData.leadJobPrefix.toLowerCase() ||
-                    n.itemName.toLowerCase().includes(enquiryData.leadJobPrefix.toLowerCase());
+            // Step A: Find the Root for the selected prefix
+            let selectedRoot = allNodes.find(n => {
+                const name = n.itemName.toLowerCase();
+                const clean = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                const isRoot = !n.parentId || n.parentId === '0' || n.parentId === 0;
+                // Match either prefix (L1) or full name or clean name
+                return isRoot && (
+                    clean === enquiryData.leadJobPrefix.toLowerCase() ||
+                    name.toLowerCase() === enquiryData.leadJobPrefix.toLowerCase() ||
+                    name.startsWith(enquiryData.leadJobPrefix.toLowerCase() + ' -')
+                );
             });
 
-            if (startNode && startNode.parentId) {
-                console.log('Found Lead Node:', startNode.itemName);
+            if (selectedRoot) {
+                const rootId = String(selectedRoot.id || selectedRoot.ItemID);
+                console.log('[Customer Filter] Active Root:', selectedRoot.itemName, 'ID:', rootId);
 
-                // Strictly take DIRECT PARENT only
-                const parent = allNodes.find(p => p.id === startNode.parentId);
-                if (parent) {
-                    const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                    // Only add if it's a valid parent name
-                    if (cleanParent && cleanParent !== 'Root') {
-                        console.log('Adding Direct Parent as Internal Customer:', cleanParent);
-                        internalOpts.push({ value: cleanParent, label: cleanParent, type: 'Internal Division' });
+                // Step B: Find User's Job inside this root's branch
+                // We look for a node matching user's editable jobs that descends from the selected root
+                const userJobInBranch = allNodes.find(n => {
+                    if (!myJobs.includes(n.itemName.trim().toLowerCase())) return false;
+
+                    // Recursive ancestor check to verify it belongs to selectedRoot
+                    let curr = n;
+                    while (curr) {
+                        if (String(curr.id || curr.ItemID) === rootId) return true;
+                        const pid = curr.parentId || curr.ParentID;
+                        if (!pid || pid === '0' || pid === 0) break;
+                        curr = allNodes.find(p => String(p.id || p.ItemID) === String(pid));
                     }
+                    return false;
+                });
+
+                if (userJobInBranch) {
+                    console.log(`[Customer Filter] Found User Job in Branch: ${userJobInBranch.itemName}`);
+                    const pid = userJobInBranch.parentId || userJobInBranch.ParentID;
+                    if (pid && pid !== '0' && pid !== 0) {
+                        const parent = allNodes.find(p => String(p.id || p.ItemID) === String(pid));
+                        if (parent) {
+                            const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            if (cleanParent && cleanParent !== 'Root') {
+                                console.log('[Customer Filter] Parent identified:', cleanParent);
+                                internalOpts.push({ value: cleanParent, label: cleanParent, type: 'Internal Division' });
+                            }
+                        }
+                    } else {
+                        console.log('[Customer Filter] User job is the Lead Job (Root) - No internal parent.');
+                    }
+                } else if (isAdmin) {
+                    // ADMIN FALLBACK: If no specific job assigned but they selected a root, 
+                    // we assume they act as Lead unless they are deep.
+                    // (Admins usually work as Lead on roots)
                 }
-            } else if (!startNode) {
-                console.warn('Could not find Lead Node for prefix:', enquiryData.leadJobPrefix);
             }
-            // Fallback: If no specific lead node found (rare), maybe show nothing internal?
-            // Or risky fallback to finding parents of *any* node matching user?
-            // Let's stick to safe "Ancestors Only" - if we can't find ancestors, we show none.
         }
-        console.log('2. Internal Options (Direct Parent Only):', internalOpts.map(o => o.value));
+        console.log('2. Internal Options (calculated):', internalOpts.map(o => o.value));
 
         // 3. Pricing Context Customers
         let pricingOpts = [];
@@ -711,49 +910,44 @@ const QuoteForm = () => {
 
         allOpts.forEach(item => {
             if (!item.value) return;
-
-            // Aggressive normalization
             const key = item.value.toLowerCase().replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-
             if (!uniqueMap.has(key)) {
                 uniqueMap.set(key, item);
-            } else {
-                const existing = uniqueMap.get(key);
-                console.log(`Duplicate detected for key '${key}': Kept '${existing.value}' (${existing.type}), Ignored '${item.value}' (${item.type})`);
             }
         });
 
         const uniqueOptions = Array.from(uniqueMap.values());
 
-        // STRICTION: Filter out all sub-jobs and User's own division from the dropdown
-        // EXCEPT the direct parent calculated above.
-        const parentName = internalOpts.length > 0 ? internalOpts[0].value : '';
-        const parentNorm = normalize(parentName);
-        const jobNamesNorm = new Set((enquiryData.divisionsHierarchy || []).map(n => normalize(n.itemName)));
-        const myEmail = (currentUser?.EmailId || currentUser?.email || '').toLowerCase();
-        const myName = myEmail.split('@')[0].toLowerCase();
+        // 5. STRICTION LOGIC: 
+        // Mode A (Sub Job): User has an internal parent in this branch -> Show ONLY Parent.
+        // Mode B (Lead Job): User is at the root of this branch -> Show ONLY External.
+
+        const isSubJobMode = internalOpts.length > 0;
+        const parentName = isSubJobMode ? internalOpts[0].value : '';
+        const parentNorm = parentName.toLowerCase().trim();
+        const allJobNamesNorm = new Set((enquiryData.divisionsHierarchy || []).map(n => n.itemName.toLowerCase().trim()));
+
+        console.log(`[Customer Filter] Final Logic: IsSubJob=${isSubJobMode}, Parent=${parentName || 'None'}`);
 
         const filteredOptions = uniqueOptions.filter(opt => {
-            const valNorm = normalize(opt.value);
+            const valNorm = opt.value.toLowerCase().trim();
 
-            // 1. Keep if it's the calculated direct parent (Internal Customer)
-            if (parentNorm && valNorm === parentNorm) return true;
-
-            // 2. Filter out all other internal job names
-            if (jobNamesNorm.has(valNorm)) return false;
-
-            // 3. Filter out if it matches user's own division name (e.g. "electrical")
-            if (valNorm.includes(myName)) return false;
-
-            // 4. Everything else (external customers) is kept
-            return true;
+            if (isSubJobMode) {
+                // RULE 1: Sub Job mode -> only its parent job
+                return valNorm === parentNorm;
+            } else {
+                // RULE 2: Lead Job mode -> only external customers
+                // Hide any name that is actually an internal division/job
+                if (allJobNamesNorm.has(valNorm)) return false;
+                return true;
+            }
         });
 
-        console.log('--- Final Filtered Options ---', filteredOptions);
+        console.log('--- Final Filtered Options ---', filteredOptions.map(o => o.value));
         setEnquiryCustomerOptions(filteredOptions);
         console.log('--- [Customer Options Calculation] END ---');
 
-    }, [enquiryData?.leadJobPrefix, enquiryData?.divisionsHierarchy, enquiryData?.customerOptions, currentUser?.EmailId, enquiryData?.availableProfiles, pricingData?.customers, pricingData?.extraCustomers]);
+    }, [enquiryData?.leadJobPrefix, enquiryData?.divisionsHierarchy, enquiryData?.customerOptions, currentUser, pricingData?.access?.editableJobs, pricingData?.customers, pricingData?.extraCustomers]);
 
     // Handle Metadata Selections
     const handleSelectSignatory = (e) => {
@@ -937,6 +1131,13 @@ const QuoteForm = () => {
                         if (v.EnquiryForID) {
                             groupedValues[custKey][`${v.OptionID}_${v.EnquiryForID}`] = v;
                         }
+                        if (v.EnquiryForItem) {
+                            // Also store by name as fallback
+                            const nameKey = `${v.OptionID}_${v.EnquiryForItem}`;
+                            if (!groupedValues[custKey][nameKey]) {
+                                groupedValues[custKey][nameKey] = v;
+                            }
+                        }
                     });
                 }
                 pData.allValues = groupedValues;
@@ -963,12 +1164,41 @@ const QuoteForm = () => {
 
                 // Calculate Summary
                 const summary = [];
-                // Initial Select All Jobs if loading new pricing data for the first time or if empty
-                // Assuming we want to select all available jobs by default
-                const allJobs = pData.jobs ? pData.jobs.map(j => j.itemName) : [];
-                // Also add Lead Job to selected if it exists
+                // INITIAL SELECTION: Filter jobs by current branch prefix (Step 2293)
+                const branchPrefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+                const jobsPool = pData.jobs || [];
+
+                const activeRoot = branchPrefix ? jobsPool.find(j => {
+                    const name = (j.itemName || '').toUpperCase();
+                    const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                    return name === branchPrefix || clean === branchPrefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix);
+                }) : null;
+
+                let filteredJobs = jobsPool;
+                if (activeRoot) {
+                    const rootId = String(activeRoot.id);
+                    const branchIds = new Set([rootId]);
+                    let changed = true;
+                    while (changed) {
+                        changed = false;
+                        jobsPool.forEach(j => {
+                            const jId = String(j.id);
+                            if (!branchIds.has(jId) && branchIds.has(String(j.parentId))) {
+                                branchIds.add(jId);
+                                changed = true;
+                            }
+                        });
+                    }
+                    filteredJobs = jobsPool.filter(j => branchIds.has(String(j.id)));
+                }
+
+                const allJobs = filteredJobs.map(j => j.itemName);
+                // Also add Lead Job to selected if it exists and matches branch
                 if (pData.leadJob && !allJobs.includes(pData.leadJob)) {
-                    allJobs.push(pData.leadJob);
+                    const leadNorm = normalize(pData.leadJob);
+                    if (!branchPrefix || leadNorm.includes(normalize(branchPrefix))) {
+                        allJobs.push(pData.leadJob);
+                    }
                 }
 
                 setSelectedJobs(allJobs);
@@ -1075,6 +1305,34 @@ const QuoteForm = () => {
 
         const groups = {};
 
+        // BRANCH ISOLATION (Step 2293)
+        // Identify IDs that belong to the current Lead Job Prefix to avoid branch cross-contamination
+        const branchIds = new Set();
+        const branchPrefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+        if (branchPrefix && jobsPool.length > 0) {
+            const rootJob = jobsPool.find(j => {
+                const name = (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+                const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                return name === branchPrefix || clean === branchPrefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix);
+            });
+            if (rootJob) {
+                branchIds.add(String(rootJob.id || rootJob.ItemID || rootJob.ID));
+                let changed = true;
+                while (changed) {
+                    changed = false;
+                    jobsPool.forEach(j => {
+                        const jId = String(j.id || j.ItemID || j.ID);
+                        const pId = String(j.parentId || j.ParentID || j.ParentID);
+                        if (jId && !branchIds.has(jId) && branchIds.has(pId)) {
+                            branchIds.add(jId);
+                            changed = true;
+                        }
+                    });
+                }
+            }
+        }
+        console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
+
         // DEDUPLICATE OPTIONS (Step 1560)
         // If multiple options with the same name/item exist (e.g. one for 'Main' and one for 'Civil Project'),
         // we should only process the most relevant one to prevent double counting.
@@ -1121,6 +1379,21 @@ const QuoteForm = () => {
                         }
                     }
                 }
+
+                // EXTERNAL CUSTOMER ALLOWANCE:
+                // If the active customer is external (not a job in the pool), then sub-job options
+                // that are priced to any internal lead job should still be included.
+                // e.g. Electrical priced to "Civil Project" should appear when Civil quotes to "Ministry of Housing"
+                const isExternalCustomer = !jobsPool.some(j => normalizeCust(j.itemName || j.DivisionName) === activeCust);
+                if (isExternalCustomer) {
+                    const optJob = jobsPool.find(j => normalizeCust(j.itemName || j.DivisionName) === optCust);
+                    if (optJob) {
+                        // The option's customerName is a job in our hierarchy — allow it
+                        // (It represents a sub-job quoting to its lead/parent division)
+                        return true;
+                    }
+                }
+
                 return false;
             })());
 
@@ -1187,10 +1460,30 @@ const QuoteForm = () => {
             let optionTotal = 0;
             if (data.jobs) {
                 data.jobs.forEach(job => {
+                    // STRICT SCOPE MATCHING: If option is specific to a job, ONLY sum against that job.
+                    // This prevents "Civil Project" option from picking up "Sub Civil Job" values if they share ID or key.
+                    if (opt.itemName) {
+                        const optNorm = normalizeCust(opt.itemName);
+                        const jobNorm = normalizeCust(job.itemName);
+                        const isLeadMatch = (opt.itemName === 'Lead Job' && job.isLead);
+                        const isSuffixMatch = opt.itemName.endsWith(' / Lead Job') && job.isLead;
+
+                        // If names differ and it's not a generic "Lead Job" option, SKIP.
+                        if (optNorm !== jobNorm && !isLeadMatch && !isSuffixMatch) {
+                            return;
+                        }
+                    }
+
                     // Filter: If Limited Access, skip jobs outside scope
                     // FIX: Ensure editable jobs AND their descendants are visible (Robust Normalized Check) (Step 1310)
                     const normalizeName = (s) => (s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
                     const editableNames = (data.access?.editableJobs || []).map(n => normalizeName(n));
+
+                    // BRANCH FILTER: Skip jobs that do not belong to the selected Lead Job branch (Step 2293)
+                    const jId = String(job.id || job.ItemID || job.ID);
+                    if (branchIds.size > 0 && !branchIds.has(jId)) {
+                        return;
+                    }
 
                     const isEditableName = editableNames.includes(normalizeName(job.itemName));
 
@@ -1224,16 +1517,6 @@ const QuoteForm = () => {
                             return isAncestorOf(scopeId, checkId);
                         });
                     })();
-                    if (job.itemName && job.itemName.toLowerCase().includes('bms')) {
-                        console.log(`[Filter Debug] Job: ${job.itemName}, ID: ${job.id}, Parent: ${job.parentId}`);
-                        console.log(`[Filter Debug]  - EditableName: ${isEditableName}`);
-                        console.log(`[Filter Debug]  - Descendant: ${isEditableDescendant}`);
-                        console.log(`[Filter Debug]  - AllowedQuoteIds has it? ${allowedQuoteIds.has(job.id)}`);
-                        console.log(`[Filter Debug]  - HasLimited: ${hasLimitedAccess}`);
-                        console.log(`[Filter Debug]  - Result: ${(hasLimitedAccess && !allowedQuoteIds.has(job.id) && !isEditableName && !isEditableDescendant) ? 'HIDDEN' : 'VISIBLE'}`);
-                    }
-                    if (job.itemName && job.itemName.toLowerCase().includes('bms')) {
-                    }
 
                     // Also check allowedQuoteIds (which comes from initial scoping)
                     // But if isEditableName OR isEditableDescendant is true, we allow it.
@@ -1243,7 +1526,8 @@ const QuoteForm = () => {
 
                     // IMPACT: Resolves 'Hidden Price' (Step 1189) by checking explicit price first.
                     const key = `${opt.id}_${job.id}`;
-                    let val = data.values[key];
+                    const nameKey = `${opt.id}_${job.itemName}`;
+                    let val = data.values[key] || data.values[nameKey];
                     let price = val ? parseFloat(val.Price || 0) : 0;
 
                     // Only enforce scoping if price is 0 (to prevent double counting)
@@ -1267,13 +1551,27 @@ const QuoteForm = () => {
                     // FALLBACK CHAIN: Parent Customers -> Main -> Generic
                     if (price <= 0 && data.allValues) {
                         const fallbackCandidates = [];
-                        let pId = job.parentId || job.ParentID;
-                        while (pId && pId !== '0' && pId !== 0) {
-                            const pJob = jobsPool.find(j => (j.id || j.ItemID) === pId);
-                            if (pJob) {
-                                fallbackCandidates.push((pJob.itemName || pJob.DivisionName).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim());
-                                pId = pJob.parentId || pJob.ParentID;
-                            } else break;
+                        // ONLY add parent names as candidates if the active customer is also an internal job (Step 2293)
+                        const isInternalCustomer = jobsPool.some(j => normalizeCust(j.itemName || j.DivisionName) === normalizeCust(activeCustomer));
+
+                        if (isInternalCustomer) {
+                            let pId = job.parentId || job.ParentID;
+                            while (pId && pId !== '0' && pId !== 0) {
+                                const pJob = jobsPool.find(j => (j.id || j.ItemID) === pId);
+                                if (pJob) {
+                                    fallbackCandidates.push((pJob.itemName || pJob.DivisionName).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim());
+                                    pId = pJob.parentId || pJob.ParentID;
+                                } else break;
+                            }
+                        } else {
+                            // EXTERNAL CUSTOMER FALLBACK:
+                            // When quoting to an external customer (e.g. Ministry of Housing),
+                            // sub-jobs often price their work to an internal lead (e.g. Electrical → Civil Project).
+                            // Add ALL internal job names as fallback candidates so those prices are found.
+                            jobsPool.forEach(j => {
+                                const jName = (j.itemName || j.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                if (jName) fallbackCandidates.push(jName);
+                            });
                         }
                         fallbackCandidates.push('Main');
 
@@ -1288,7 +1586,7 @@ const QuoteForm = () => {
                                     normalizeCust(o.customerName) === candKey
                                 );
                                 if (iOpt) {
-                                    const iVal = vals[`${iOpt.id}_${job.id}`];
+                                    const iVal = vals[`${iOpt.id}_${job.id}`] || vals[`${iOpt.id}_${job.itemName}`];
                                     if (iVal && parseFloat(iVal.Price) > 0) {
                                         price = parseFloat(iVal.Price);
                                         break;
@@ -1301,57 +1599,152 @@ const QuoteForm = () => {
                     if (price > 0) {
                         console.log(`[calculateSummary]   Job "${job.itemName}": ${price}`);
                     }
-                    optionTotal += price;
+                    // DISTRIBUTE TO JOB GROUP (Deduplicated Aggregate per Group)
+                    const jobGroupName = job.itemName;
+                    if (!groups[jobGroupName]) {
+                        groups[jobGroupName] = { total: 0, items: [], hasOptional: false };
+                    }
+
+                    // Avoid duplicate items with the same name in the same group (Step 1705 Fix)
+                    const existingItem = groups[jobGroupName].items.find(it => it.name === opt.name);
+                    if (existingItem) {
+                        // If it's a duplicate entry for the same name/job, keep the highest price
+                        if (price > existingItem.total) {
+                            groups[jobGroupName].total += (price - existingItem.total);
+                            existingItem.total = price;
+                        }
+                    } else {
+                        groups[jobGroupName].items.push({ name: opt.name, total: price });
+                        groups[jobGroupName].total += price;
+                    }
+
+                    if (opt.name === 'Optional' || opt.name === 'Option') {
+                        groups[jobGroupName].hasOptional = true;
+                        if (opt.name === 'Optional') foundPricedOptional = true;
+                    } else if (opt.name === 'Base Price') {
+                        // Add to Grand Total if Job is Active
+                        const isThisJobActive = activeJobs.length === 0 || activeJobs.includes(job.itemName);
+                        if (isThisJobActive) {
+                            // Only add if we haven't already added a 'Base Price' for this specific job group
+                            // Note: Grand total calculation remains trickier if jobs overlap name-wise.
+                            // For simplicity, we assume one 'Base Price' per group is the standard.
+                            if (!existingItem) {
+                                calculatedGrandTotal += price;
+                            }
+                        }
+                    }
+                    userHasEnteredPrice = true;
                 });
             }
-            console.log(`[calculateSummary] Total for "${opt.name}": ${optionTotal}`);
-
-            // 3. Zero Value Filter
-            if (optionTotal <= 0) {
-                console.log(`[calculateSummary] Filtered out (zero value):`, opt.name);
-                return;
-            }
-            console.log(`[calculateSummary] Passed zero value filter:`, opt.name);
-
-            // Add to Total ONLY if included
-            if (isJobIncluded) {
-                // Check Optional
-                if (opt.name === 'Optional' || opt.name === 'Option') {
-                    if (opt.name === 'Optional') foundPricedOptional = true;
-                } else {
-                    calculatedGrandTotal += optionTotal;
-                }
-            }
-
-            // 4. Grouping
-            let rawGroupName = opt.itemName || data.leadJob || 'General';
-            let groupName = rawGroupName;
-            if (data.jobs) {
-                const jobObj = data.jobs.find(j => j.itemName === rawGroupName);
-                if (jobObj) {
-                    groupName = rawGroupName;
-                } else if (rawGroupName === (data.leadJob || 'General')) {
-                    groupName = rawGroupName;
-                }
-            }
-            if (!groups[groupName]) {
-                groups[groupName] = { total: 0, items: [], hasOptional: false };
-            }
-            groups[groupName].items.push({ name: opt.name, total: optionTotal });
-            groups[groupName].total += optionTotal; // Note: We keep the group total intact for display.
-
-            if (opt.name === 'Optional') groups[groupName].hasOptional = true;
-
-            userHasEnteredPrice = true;
         });
+
+        // POST-PROCESSING: Calculate NET Prices for Parent Jobs
+        // If a Parent Job (e.g. Civil) includes the cost of its Children (e.g. Electrical),
+        // and both are being displayed in the summary, we must subtract the Child's cost from the Parent
+        // to avoid double counting and show the "Net" Parent cost.
+        // POST-PROCESSING: Calculate NET Prices for Parent Jobs - DISABLED per User Request (Step 315)
+        // User requested that Pricing Module and Quote Module match exactly what was entered.
+        // If user enters 200 for Civil, they expect to see 200, regardless of subjobs.
+        // if (data.jobs) {
+        //     Object.keys(groups).forEach(parentName => {
+        //         const parentGroup = groups[parentName];
+        //         const parentJob = data.jobs.find(j => j.itemName === parentName);
+
+        //         if (parentJob) {
+        //             const children = data.jobs.filter(j => j.parentId === parentJob.id);
+        //             children.forEach(childJob => {
+        //                 const childGroup = groups[childJob.itemName];
+        //                 if (childGroup) {
+        //                     const childBase = childGroup.items.find(i => i.name === 'Base Price');
+        //                     const parentBase = parentGroup.items.find(i => i.name === 'Base Price');
+
+        //                     if (childBase && parentBase) {
+        //                         // console.log(`[calculateSummary] Adjusting Net Price: ${parentName} (${parentBase.total}) - ${childJob.itemName} (${childBase.total})`);
+        //                         // parentBase.total = Math.max(0, parentBase.total - childBase.total);
+        //                         // parentGroup.total = Math.max(0, parentGroup.total - childBase.total);
+        //                     }
+        //                 }
+        //             });
+        //         }
+        //     });
+        // }
 
         // Flatten to summary array
         Object.keys(groups).forEach(name => {
             summary.push({ name: name, ...groups[name] });
         });
 
-        // Sort
-        summary.sort((a, b) => a.name.localeCompare(b.name));
+        // Sort by Hierarchy (Lead Job -> Sub Job -> ...)
+        if (data.jobs && data.jobs.length > 0) {
+            const jobs = data.jobs;
+
+            // Build Adjacency List for Hierarchy with String IDs
+            const childrenMap = {};
+            const allIds = new Set(jobs.map(j => String(j.id || j.ID)));
+            const roots = [];
+
+            jobs.forEach(j => {
+                const pIdRaw = j.parentId || j.ParentID;
+                const pId = pIdRaw ? String(pIdRaw) : null;
+                const jId = String(j.id || j.ID);
+
+                // Determine if root: No parent, parent is 0, or parent ID not in list
+                if (!pId || pId === '0' || !allIds.has(pId)) {
+                    roots.push(j);
+                } else {
+                    if (!childrenMap[pId]) childrenMap[pId] = [];
+                    childrenMap[pId].push(j);
+                }
+            });
+
+            // Recursive Flatten to get Ordered Names
+            const orderedNames = [];
+            const traverse = (job) => {
+                orderedNames.push(job.itemName);
+                const jId = String(job.id || job.ID);
+                if (childrenMap[jId]) {
+                    // Sort siblings by name to ensure consistent sub-ordering
+                    childrenMap[jId].sort((a, b) => (a.itemName || '').localeCompare(b.itemName || ''));
+                    childrenMap[jId].forEach(child => traverse(child));
+                }
+            };
+
+            // Sort roots: Priority to Lead Job Code (L1, L2...), then Alpha
+            roots.sort((a, b) => {
+                const codeA = a.leadJobCode || '';
+                const codeB = b.leadJobCode || '';
+
+                // Extract numeric L-code if present
+                const matchA = codeA.match(/^L(\d+)$/i);
+                const matchB = codeB.match(/^L(\d+)$/i);
+
+                if (matchA && matchB) {
+                    return parseInt(matchA[1], 10) - parseInt(matchB[1], 10);
+                }
+                if (matchA) return -1; // A has code, comes first
+                if (matchB) return 1;  // B has code, comes first
+
+                // Fallback: Use Item Name if no code (or both no code)
+                return (a.itemName || '').localeCompare(b.itemName || '');
+            });
+            roots.forEach(root => traverse(root));
+
+            // Apply Sort to Summary
+            summary.sort((a, b) => {
+                const nameA = (a.name || '').trim();
+                const nameB = (b.name || '').trim();
+
+                const idxA = orderedNames.findIndex(n => n.trim() === nameA);
+                const idxB = orderedNames.findIndex(n => n.trim() === nameB);
+
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1; // A is in hierarchy, comes first
+                if (idxB !== -1) return 1;  // B is in hierarchy, comes first
+                return nameA.localeCompare(nameB); // Fallback: Alpha
+            });
+        } else {
+            summary.sort((a, b) => a.name.localeCompare(b.name));
+        }
 
         setHasUserPricing(userHasEnteredPrice);
         setGrandTotal(calculatedGrandTotal);
@@ -1430,8 +1823,12 @@ const QuoteForm = () => {
                 tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">Total ${cleanedName}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">BD ${grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
             }
 
-            // Accumulate filtered total
-            htmlGrandTotal += grp.total;
+            // Accumulate filtered total (Base Price Only for Grand Total)
+            grp.items.forEach(item => {
+                if (item.name === 'Base Price') {
+                    htmlGrandTotal += item.total;
+                }
+            });
         });
 
         if (!foundPricedOptional && htmlGrandTotal > 0) {
@@ -1699,6 +2096,7 @@ const QuoteForm = () => {
 
         setGrandTotal(quote.TotalAmount || 0);
         setExpandedClause(null);
+        setPendingFiles([]); // Clear any pending files from previous session
         window.scrollTo({ top: 0, behavior: 'smooth' });
 
         // FORCE CORRECT CONTEXT FOR REVISIONS
@@ -1757,6 +2155,33 @@ const QuoteForm = () => {
         console.log('[AutoLoad] Checking quotes for tab:', activeTabObj.label, 'ID:', activeTabRealId);
 
         // Filter quotes for this tab (Replicating render logic)
+        // Helper to resolve current lead code
+        // Robust resolution of lead code for filtering (Walking up to root L-code)
+        const currentLeadCode = (() => {
+            const prefix = (enquiryData.leadJobPrefix || '').toUpperCase();
+            if (!prefix) return '';
+            if (prefix.match(/^L\d+/)) return prefix.split('-')[0].trim().toUpperCase();
+
+            // Find item in pool and walk up
+            let job = jobsPool.find(j => {
+                const name = (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+                const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                return name === prefix || clean === prefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === prefix);
+            });
+
+            if (job) {
+                let root = job;
+                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                    const parent = jobsPool.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                    if (parent) root = parent;
+                    else break;
+                }
+                if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+            }
+            return prefix;
+        })();
+
         const tabQuotes = existingQuotes.filter(q => {
             // 1. Customer Context Match
             const normalizedQuoteTo = normalize(q.ToName);
@@ -1764,7 +2189,7 @@ const QuoteForm = () => {
             const isMainOrGeneric = !normalizedQuoteTo || normalizedQuoteTo === 'main' || normalizedQuoteTo === 'generic';
 
             // Check if context is internal
-            const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.DivisionName));
+            const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.ItemName || d.DivisionName));
             const currentIsInternal = mJobs.includes(normalizedCurrentTo);
             const quoteIsInternal = mJobs.includes(normalizedQuoteTo) || isMainOrGeneric;
 
@@ -1777,11 +2202,17 @@ const QuoteForm = () => {
                     !normalizedCurrentTo.startsWith(normalizedQuoteTo + '-')) return false;
             }
 
-            // 2. Hierarchy Match
-            const qDivCode = q.QuoteNumber?.split('/')[1]?.toUpperCase();
+            // 2. Hierarchy & Branch Match
+            const parts = q.QuoteNumber?.split('/') || [];
+            const qDivCode = parts[1]?.toUpperCase();
+            const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
+
+            // Strict Branch Isolation: L1 quotes shouldn't load in L2 context
+            if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
+
             // Simplified match as per render block
             const qJob = jobsPool.find(j => {
-                const jName = (j.itemName || j.DivisionName || '').toUpperCase();
+                const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
                 return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
                     (qDivCode === 'BMS' && jName.includes('BMS')) ||
                     (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
@@ -1790,9 +2221,11 @@ const QuoteForm = () => {
                     (qDivCode === 'AAC' && jName.includes('AIR'));
             });
 
-            if (!qJob) return activeTabObj.isSelf; // Fallback mapping
-            const qJobId = qJob.id || qJob.ItemID;
-            return String(qJobId) == String(activeTabRealId);
+            if (!qJob) return activeTabObj.isSelf;
+            const qJobId = qJob.id || qJob.ItemID || qJob.ID;
+
+            // Strict Match: Auto-load only if it's an exact match for this subjob/tab
+            return String(qJobId) === String(activeTabRealId);
         });
 
         if (tabQuotes.length > 0) {
@@ -1812,13 +2245,18 @@ const QuoteForm = () => {
                 setQuoteId(null);
                 setQuoteNumber('');
                 setClauseContent(defaultClauses);
+                setClauses({
+                    showScopeOfWork: true, showBasisOfOffer: true, showExclusions: true,
+                    showPricingTerms: true, showSchedule: true, showWarranty: true,
+                    showResponsibilityMatrix: true, showTermsConditions: true, showAcceptance: true, showBillOfQuantity: true
+                });
                 setQuoteDate(new Date().toISOString().split('T')[0]);
                 setValidityDays(30);
                 setSubject('');
                 setCustomerReference('');
             }
         }
-    }, [activeQuoteTab, calculatedTabs, existingQuotes, toName]); // Excluded quoteId to allowing 'New Quote' action (clearing ID), kept others for stability
+    }, [activeQuoteTab, calculatedTabs, existingQuotes, toName]);
 
 
 
@@ -1876,12 +2314,26 @@ const QuoteForm = () => {
                 setQuoteId(data.id);
                 setQuoteNumber(data.quoteNumber);
 
+                // Clear metadata for revision (User request Step 1440)
+                setQuoteDate('');
+                setValidityDays('');
+                setPreparedBy('');
+                setSignatory('');
+                setSignatoryDesignation('');
+
                 // Wait a moment for DB commit, then refresh the quotes list
                 console.log('[handleRevise] Waiting 500ms for DB commit...');
                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 console.log('[handleRevise] Refreshing quotes list...');
                 await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+
+                // Upload any pending files now that we have a new Revision ID
+                if (pendingFiles.length > 0) {
+                    console.log('[handleRevise] Uploading pending files to new revision...', pendingFiles.length);
+                    await uploadFiles(pendingFiles, data.id);
+                    setPendingFiles([]); // Clear queue
+                }
 
                 console.log('[handleRevise] All updates complete!');
                 alert('Revision created successfully!');
@@ -1933,83 +2385,6 @@ const QuoteForm = () => {
     }, []);
 
     // NEW: Auto-load latest revision for selected customer and lead job
-    useEffect(() => {
-        if (!toName || !enquiryData?.leadJobPrefix || existingQuotes.length === 0) {
-            // If we previously had a quoteId but now customer/lead job is missing matching quotes,
-            // reset to draft mode (null quoteId)
-            if (quoteId !== null && (!toName || !enquiryData?.leadJobPrefix)) {
-                console.log('[AutoLoad] Resetting to Draft (Selection cleared/missing)');
-                setQuoteId(null);
-                setQuoteNumber(enquiryData?.quoteNumber || '');
-            }
-            return;
-        }
-
-        // Find matches for current customer AND lead job prefix
-        // We use the same prefix pattern logic as the sidebar filter to stay consistent
-        // Find matches for current customer
-
-        // 1. Identify current division context from active tab
-        const activeTab = (calculatedTabs || []).find(t => t.id === activeQuoteTab) || (calculatedTabs || []).find(t => t.id === 'self');
-        let currentTabCode = '';
-        if (activeTab) {
-            const up = (activeTab.label || '').toUpperCase();
-            if (up.includes('PLUMBING') || up.includes('PLFF')) currentTabCode = 'PLFF';
-            else if (up.includes('BMS')) currentTabCode = 'BMS';
-            else if (up.includes('CIVIL') || up.includes('CVLP')) currentTabCode = 'CVLP';
-            else if (up.includes('ELECTRICAL') || up.includes('ELE') || up.includes('ELECT')) currentTabCode = 'ELE';
-            else if (up.includes('FIRE') || up.includes('FPE')) currentTabCode = 'FPE';
-            else if (up.includes('AIR CONDITIONING') || (up.includes('AAC'))) currentTabCode = 'AAC';
-        }
-
-        // 2. Filter matches by Customer AND Division
-        const matches = existingQuotes.filter(q => {
-            const sameCustomer = (q.ToName || '').trim().toLowerCase() === toName.trim().toLowerCase();
-            if (!sameCustomer) return false;
-
-            // Strict Division Check: Only auto-load if it matches the current tab context
-            if (currentTabCode) {
-                const qDivCode = q.QuoteNumber?.split('/')[1]?.toUpperCase();
-                return qDivCode === currentTabCode;
-            }
-            return true;
-        });
-
-        if (matches.length > 0) {
-            // Sort by RevisionNo descending
-            const sorted = matches.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
-            const latest = sorted[0];
-
-            // Only auto-load if no quote is currently selected (quoteId is null).
-            // This prevents jumping back to latest when the user explicitly clicks an older revision (R0).
-            if (quoteId === null) {
-                console.log('[AutoLoad] Found existing quote(s) for this division, loading latest:', latest.QuoteNumber);
-                loadQuote(latest);
-            }
-        } else {
-            // No matches found for this specific customer/division combination
-            // ALWAYS reset to default clauses if no quote is found, to ensure we don't carry over
-            // any state (like disabled clauses) from a previous selection or default initialization.
-            // This ensures a fresh "Draft" always starts with all checkboxes enabled.
-            if (true) {
-                console.log('[AutoLoad] No matching quotes found. Resetting to Draft default state.');
-                setQuoteId(null);
-                setQuoteNumber(enquiryData?.quoteNumber || '');
-
-                // RESET CLAUSES TO DEFAULT (ALL TRUE) for fresh Draft
-                setClauses({
-                    showScopeOfWork: true, showBasisOfOffer: true, showExclusions: true,
-                    showPricingTerms: true, showSchedule: true, showWarranty: true,
-                    showResponsibilityMatrix: true, showTermsConditions: true, showAcceptance: true, showBillOfQuantity: true
-                });
-
-                // Reset their content to defaults as well? 
-                // Probably better to keep current content if the user was typing, 
-                // BUT if they switched contexts, maybe we should reset to templates?
-                // For now, just ensuring visibility is enabled is the critical fix.
-            }
-        }
-    }, [toName, enquiryData?.leadJobPrefix, existingQuotes, quoteId, enquiryData?.quoteNumber, activeQuoteTab, calculatedTabs]);
 
 
     const handleSelectEnquiry = async (enq) => {
@@ -2018,6 +2393,7 @@ const QuoteForm = () => {
         setShowSuggestions(false);
         setLoading(true);
         setExistingQuotes([]);
+        setPendingFiles([]); // Clear queue
         setToName('');
         setToAttention('');
         setPreparedBy('');
@@ -2192,7 +2568,13 @@ const QuoteForm = () => {
                 setSignatoryOptions(uniqueSigOptions);
 
                 // Initialize Metadata
-                setQuoteDate(new Date().toISOString().split('T')[0]);
+                // User request Step 1440: Clear metadata for new quote
+                setQuoteDate('');
+                setValidityDays('');
+                setPreparedBy('');
+                setSignatory('');
+                setSignatoryDesignation('');
+
                 setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
 
@@ -2278,19 +2660,7 @@ const QuoteForm = () => {
                 loadPricingData(data.enquiry.RequestNo, defaultCustomer);
 
 
-                // Default Prepared By to Current User
-                if (currentUser) {
-                    setPreparedBy(currentUser.name || currentUser.FullName);
-                }
-
-                // Set default signatory to current user if in list
-                if (currentUser) {
-                    const user = usersList.find(u => u.EmailId === currentUser.EmailId || u.FullName === currentUser.FullName);
-                    if (user) {
-                        setSignatory(user.FullName);
-                        setSignatoryDesignation(user.Designation);
-                    }
-                }
+                // System defaults for Prepared By / Signatory removed per User request Step 1440
             }
         } catch (err) {
             console.error('Error loading enquiry data:', err);
@@ -2313,9 +2683,15 @@ const QuoteForm = () => {
         }
     }, []);
 
-    const uploadFiles = useCallback(async (files, targetQuoteId = quoteId) => {
-        if (!targetQuoteId) {
-            // New Behavior: Queue files as pending until saved
+    const uploadFiles = useCallback(async (files, targetQuoteId) => {
+        // If targetQuoteId is EXPLICITLY passed (e.g. from Save/Revise), we upload.
+        // If it is NOT passed, we use component's quoteId and DECIDE whether to upload.
+        // Rule: If we have ANY quoteId (Saved State), we queue files to pending so they go to the NEXT Revise/Save.
+        const isInternalCall = targetQuoteId !== undefined;
+        const effectiveId = isInternalCall ? targetQuoteId : quoteId;
+
+        if (!effectiveId || (!isInternalCall && quoteId)) {
+            // New Behavior: Queue files as pending until saved (Fresh Quote or Revision required)
             if (files && files.length > 0) {
                 const fileArray = Array.from(files);
                 // Simple duplication check based on name
@@ -2383,6 +2759,7 @@ const QuoteForm = () => {
     // Clear selection
     const handleClear = () => {
         setExistingQuotes([]);
+        setPendingFiles([]); // Clear queue
         setExpandedGroups({});
         setSearchTerm('');
         setSuggestions([]);
@@ -2390,6 +2767,11 @@ const QuoteForm = () => {
         setEnquiryData(null);
         setQuoteId(null);
         setQuoteNumber('');
+        setQuoteDate('');
+        setValidityDays('');
+        setPreparedBy('');
+        setSignatory('');
+        setSignatoryDesignation('');
         setPricingData(null);
         setPricingSummary([]);
         setHasUserPricing(false);
@@ -2569,7 +2951,39 @@ const QuoteForm = () => {
         return {
             divisionCode: effectiveDivisionCode,
             departmentCode: enquiryData.companyDetails?.departmentCode || '',
-            leadJobPrefix: enquiryData.leadJobPrefix || '',
+            leadJobPrefix: (() => {
+                const curr = enquiryData.leadJobPrefix || '';
+                if (!curr) return '';
+                if (curr.match(/^L\d+/)) return curr.split('-')[0].trim(); // Already L code
+
+                // Try to resolve L-code from hierarchy (up to Root)
+                const hierarchy = enquiryData.divisionsHierarchy || [];
+                const normalize = s => (s || '').toLowerCase().trim();
+                const target = normalize(curr);
+
+                // 1. Find the node corresponding to the current prefix (Name or Clean Name)
+                const node = hierarchy.find(d => {
+                    const name = normalize(d.itemName);
+                    const clean = name.replace(/^(l\d+\s*-\s*)/, '').trim();
+                    return name === target || clean === target;
+                });
+
+                if (node) {
+                    // 2. Walk up to Root
+                    let root = node;
+                    while (root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                        const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                        if (parent) root = parent;
+                        else break;
+                    }
+                    // 3. Return Root's L code if present
+                    if (root.leadJobCode) return root.leadJobCode;
+                    if (root.itemName && root.itemName.match(/^L\d+/)) {
+                        return root.itemName.split('-')[0].trim();
+                    }
+                }
+                return curr;
+            })(),
             requestNo: enquiryData.enquiry.RequestNo,
             validityDays,
             preparedBy: preparedBy,
@@ -2630,54 +3044,56 @@ const QuoteForm = () => {
             if (!quoteId && existingQuotes.length > 0) {
                 // Check if any existing quote has the same customer AND same lead job AND same division
                 const sameCustomerQuote = existingQuotes.find(q => {
-                    const matchCustomer = q.ToName === toName;
+                    const matchCustomer = normalize(q.ToName) === normalize(toName);
 
+                    // Robust Lead Match (L1 vs L1, or BMS vs L2 branch detection)
                     let matchLeadJob = true;
                     if (enquiryData && enquiryData.leadJobPrefix) {
-                        const prefixPattern = `-${enquiryData.leadJobPrefix}`;
+                        const resolvedLeadCode = (() => {
+                            const cp = enquiryData.leadJobPrefix.toUpperCase();
+                            if (cp.match(/^L\d+/)) return cp.split('-')[0].trim();
+
+                            const hierarchy = enquiryData.divisionsHierarchy || [];
+                            let job = hierarchy.find(h => {
+                                const hn = (h.itemName || '').toUpperCase();
+                                return hn === cp || hn.replace(/^(L\d+\s*-\s*)/, '').trim() === cp;
+                            });
+                            if (job) {
+                                let root = job;
+                                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                                    const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                                    if (parent) root = parent;
+                                    else break;
+                                }
+                                if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                                if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+                            }
+                            return cp;
+                        })();
+
+                        const prefixPattern = `-${resolvedLeadCode}`;
                         matchLeadJob = q.QuoteNumber && q.QuoteNumber.includes(prefixPattern);
                     }
-                    console.log(`[saveQuote-Debug] Checking Quote: ${q.QuoteNumber}, MatchCustomer=${matchCustomer}, MatchLead=${matchLeadJob}`);
 
-                    // STRICT DIVISION MATCH IS REQUIRED TO BLOCK
-                    // Strict Division matching (Step 762)
-                    // Only block if division codes are IDENTICAL.
-                    // Allows ELE and BMS to coexist for same customer/lead job.
+                    // STRICT DIVISION MATCH
                     let matchDivision = false;
                     if (q.QuoteNumber) {
                         const quoteParts = q.QuoteNumber.split('/');
                         if (quoteParts.length >= 2) {
                             const existingQuoteDivision = quoteParts[1];
                             matchDivision = existingQuoteDivision === effectiveDivisionCode;
-                            console.log(`[saveQuote] Check collision: Existing=${existingQuoteDivision} vs New=${effectiveDivisionCode} -> Match=${matchDivision}`);
                         }
                     }
 
-                    // BLOCK ONLY IF ALL 3 MATCH (Customer + Lead Job + Division)
                     return matchCustomer && matchLeadJob && matchDivision;
                 });
 
                 if (sameCustomerQuote) {
-                    // Check if we should block or warn
                     if (!suppressCollisionAlert) {
-                        const proceed = window.confirm(
-                            `A quote (${sameCustomerQuote.QuoteNumber}) already exists for this enquiry, customer and lead job.\n\n` +
-                            `Click OK to generate a NEW QUOTE (New Reference Number).\n` +
-                            `Click Cancel to stop (you can then Revise the existing quote).`
-                        );
-
-                        if (!proceed) {
-                            if (!isAutoSave) setSaving(false);
-                            return { isCollision: true, existingQuote: sameCustomerQuote };
-                        }
-                        // If proceed is true, we fall through to Create New Quote (POST)
-                    } else {
-                        // For silent/auto-saves, we typically block duplicates to avoid spamming
-                        // unless the caller explicitly handles it.
-                        // But since we removed auto-save on paste, this path is rare.
-                        if (!isAutoSave) setSaving(false);
-                        return { isCollision: true, existingQuote: sameCustomerQuote };
+                        alert(`A quote (${sameCustomerQuote.QuoteNumber}) already exists for this enquiry, customer and division.\n\nPlease select and REVISE the existing quote instead of creating a new one with a different number.`);
                     }
+                    if (!isAutoSave) setSaving(false);
+                    return { isCollision: true, existingQuote: sameCustomerQuote };
                 }
             }
 
@@ -3141,13 +3557,16 @@ const QuoteForm = () => {
                                                 }
                                             }
 
+                                            // Deduplicate Lead Jobs (Step Fix: Duplicate Key Issue)
+                                            const uniqueLeadJobs = [...new Set(allLeadJobs)];
+
                                             // If no pricing data loaded yet, show all
                                             if (!pricingData || !pricingData.access) {
-                                                return allLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
+                                                return uniqueLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
                                             }
 
                                             // Filter based on user access
-                                            const visibleLeadJobs = allLeadJobs.filter(leadJob => {
+                                            const visibleLeadJobs = uniqueLeadJobs.filter(leadJob => {
                                                 // Extract lead job name (e.g., "L1 - Civil Project" -> "Civil Project")
                                                 const leadJobName = leadJob.replace(/^L\d+\s*-\s*/, '').trim();
 
@@ -3360,504 +3779,541 @@ const QuoteForm = () => {
 
 
                 {/* Scrollable Content Area */}
-                {enquiryData && (
+                {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected (Step 2305) */}
+                {enquiryData && enquiryData.leadJobPrefix && toName ? (
                     <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
 
 
                         {/* Unified Previous Quotes & Pricing Summary Section */}
-                        {toName && (
-                            <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
-                                <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Previous Quotes / Revisions (Updated):</h4>
+                        <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
+                            <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Previous Quotes / Revisions (Updated):</h4>
 
-                                {/* Tab Headers and Content Wrapper */}
-                                {(() => {
-                                    let tabs = calculatedTabs || [];
-                                    if (tabs.length === 0) {
-                                        tabs = [{ id: 'default', name: 'Own Job', label: 'Own Job', isSelf: true }];
-                                    }
+                            {/* Tab Headers and Content Wrapper */}
+                            {(() => {
+                                let tabs = calculatedTabs || [];
+                                if (tabs.length === 0) {
+                                    tabs = [{ id: 'default', name: 'Own Job', label: 'Own Job', isSelf: true }];
+                                }
 
-                                    return (
+                                return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        {/* Tab Headers */}
+                                        <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #e2e8f0', marginBottom: '4px', flexWrap: 'wrap' }}>
+                                            {tabs.map(tab => (
+                                                <button
+                                                    key={tab.id}
+                                                    onClick={() => setActiveQuoteTab(tab.id)}
+                                                    style={{
+                                                        padding: '4px 8px',
+                                                        fontSize: '11px',
+                                                        fontWeight: '600',
+                                                        border: 'none',
+                                                        background: activeQuoteTab === tab.id ? '#e0f2fe' : 'transparent',
+                                                        color: activeQuoteTab === tab.id ? '#0284c7' : '#64748b',
+                                                        borderBottom: activeQuoteTab === tab.id ? '2px solid #0284c7' : '2px solid transparent',
+                                                        cursor: 'pointer',
+                                                        borderRadius: '4px 4px 0 0'
+                                                    }}
+                                                >
+                                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: '1' }}>
+                                                        <span>{tab.name || tab.label}</span>
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        {/* Content for Active Tab */}
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                            {/* Tab Headers */}
-                                            <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #e2e8f0', marginBottom: '4px', flexWrap: 'wrap' }}>
-                                                {tabs.map(tab => (
-                                                    <button
-                                                        key={tab.id}
-                                                        onClick={() => setActiveQuoteTab(tab.id)}
-                                                        style={{
-                                                            padding: '4px 8px',
-                                                            fontSize: '11px',
-                                                            fontWeight: '600',
-                                                            border: 'none',
-                                                            background: activeQuoteTab === tab.id ? '#e0f2fe' : 'transparent',
-                                                            color: activeQuoteTab === tab.id ? '#0284c7' : '#64748b',
-                                                            borderBottom: activeQuoteTab === tab.id ? '2px solid #0284c7' : '2px solid transparent',
-                                                            cursor: 'pointer',
-                                                            borderRadius: '4px 4px 0 0'
-                                                        }}
-                                                    >
-                                                        {tab.name || tab.label}
-                                                    </button>
-                                                ))}
-                                            </div>
+                                            {(() => {
+                                                const activeTabObj = tabs.find(t => t.id === activeQuoteTab) || tabs[0];
+                                                if (!activeTabObj) return null;
 
-                                            {/* Content for Active Tab */}
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                                {(() => {
-                                                    const activeTabObj = tabs.find(t => t.id === activeQuoteTab) || tabs[0];
-                                                    if (!activeTabObj) return null;
+                                                const jobsPool = (pricingData?.jobs && pricingData.jobs.length > 0) ? pricingData.jobs : (enquiryData?.divisionsHierarchy || []);
+                                                const activeTabRealId = activeTabObj.realId;
 
-                                                    const jobsPool = (pricingData?.jobs && pricingData.jobs.length > 0) ? pricingData.jobs : (enquiryData?.divisionsHierarchy || []);
-                                                    const activeTabRealId = activeTabObj.realId;
+                                                // Hierarchy Helper
+                                                const isDescendant = (childId, ancestorId, pool = null) => {
+                                                    const p = pool || jobsPool;
+                                                    const child = p.find(j => String(j.id || j.ItemID || j.ID) === String(childId));
+                                                    if (!child) return false;
+                                                    const pid = child.parentId || child.ParentID;
+                                                    if (String(pid) === String(ancestorId)) return true;
+                                                    if (pid && pid !== '0' && pid !== 0) return isDescendant(pid, ancestorId, p);
+                                                    return false;
+                                                };
 
-                                                    // Hierarchy Helper
-                                                    const isDescendant = (childId, ancestorId) => {
-                                                        const child = jobsPool.find(j => (j.id || j.ItemID) === childId);
-                                                        if (!child) return false;
-                                                        const pid = child.parentId || child.ParentID;
-                                                        if (pid === ancestorId) return true;
-                                                        if (pid && pid !== '0' && pid !== 0) return isDescendant(pid, ancestorId);
-                                                        return false;
-                                                    };
+                                                // Filter and Render Previous Quotes
+                                                const filteredQuotes = existingQuotes.filter(q => {
+                                                    const normalizedQuoteTo = normalize(q.ToName);
+                                                    const normalizedCurrentTo = normalize(toName);
+                                                    const isMainOrGeneric = !normalizedQuoteTo || normalizedQuoteTo === 'main' || normalizedQuoteTo === 'generic';
 
-                                                    // Filter and Render Previous Quotes
-                                                    const filteredQuotes = existingQuotes.filter(q => {
-                                                        // 1. Customer Match
-                                                        const normalizedQuoteTo = normalize(q.ToName);
-                                                        const normalizedCurrentTo = normalize(toName);
-                                                        const isMainOrGeneric = !normalizedQuoteTo || normalizedQuoteTo === 'main' || normalizedQuoteTo === 'generic';
+                                                    const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.ItemName || d.DivisionName));
+                                                    const mJobsSet = new Set(mJobs);
+                                                    const currentIsInternal = mJobsSet.has(normalizedCurrentTo);
+                                                    const quoteIsInternal = mJobsSet.has(normalizedQuoteTo) || isMainOrGeneric;
 
-                                                        // HIERARCHY ALLOWANCE: Filter based on whether we are in an Internal Project Context or External Customer Context
-                                                        const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.DivisionName));
-                                                        const currentIsInternal = mJobs.includes(normalizedCurrentTo);
-                                                        const quoteIsInternal = mJobs.includes(normalizedQuoteTo) || isMainOrGeneric;
-
-                                                        if (currentIsInternal) {
-                                                            // In a Project/Division context, only show quotes sent to internal partners or itself
-                                                            if (!quoteIsInternal && normalizedQuoteTo !== normalizedCurrentTo) return false;
-                                                        } else {
-                                                            // In an External Customer context, only show quotes sent specifically to them
-                                                            if (!isMainOrGeneric &&
-                                                                normalizedQuoteTo !== normalizedCurrentTo &&
-                                                                !normalizedQuoteTo.startsWith(normalizedCurrentTo + '-') &&
-                                                                !normalizedCurrentTo.startsWith(normalizedQuoteTo + '-')) return false;
+                                                    if (currentIsInternal) {
+                                                        // For Internal Customer selections (e.g. Civil Project), only show internal quotes
+                                                        if (!quoteIsInternal && normalizedQuoteTo !== normalizedCurrentTo) {
+                                                            return false;
                                                         }
+                                                    } else {
+                                                        // For External Customer selections, show quotes to them OR internal references
+                                                        if (!quoteIsInternal &&
+                                                            normalizedQuoteTo !== normalizedCurrentTo &&
+                                                            !normalizedQuoteTo.startsWith(normalizedCurrentTo + '-') &&
+                                                            !normalizedCurrentTo.startsWith(normalizedQuoteTo + '-')) {
+                                                            return false;
+                                                        }
+                                                    }
 
-                                                        // 2. Hierarchy Match (Only self and descendants)
-                                                        const qDivCode = q.QuoteNumber?.split('/')[1]?.toUpperCase();
-                                                        const qJob = jobsPool.find(j => {
-                                                            const jName = (j.itemName || j.DivisionName || '').toUpperCase();
-                                                            return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                                                                (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                                                                (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                                                                (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                                                                (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                                                                (qDivCode === 'AAC' && jName.includes('AIR'));
+                                                    const parts = q.QuoteNumber?.split('/') || [];
+                                                    const qDivCode = parts[1]?.toUpperCase();
+                                                    const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
+
+                                                    // Resolve current lead code for robust branch isolation
+                                                    const currentLeadCode = (() => {
+                                                        const prefix = (enquiryData.leadJobPrefix || '').toUpperCase();
+                                                        if (!prefix) return '';
+                                                        if (prefix.match(/^L\d+/)) return prefix.split('-')[0].trim().toUpperCase();
+
+                                                        const hierarchy = enquiryData.divisionsHierarchy || [];
+                                                        let job = hierarchy.find(j => {
+                                                            const name = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                                            const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                                                            return name === prefix || clean === prefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === prefix);
                                                         });
 
-                                                        if (!qJob) return activeTabObj.isSelf; // Show unknowns on Lead Tab only
-                                                        const qJobId = qJob.id || qJob.ItemID;
+                                                        if (job) {
+                                                            let root = job;
+                                                            while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                                                                const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                                                                if (parent) root = parent;
+                                                                else break;
+                                                            }
+                                                            if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                                                            if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+                                                        }
+                                                        return prefix;
+                                                    })();
 
-                                                        // Robust ID comparison (handle type mismatch and 'self' mapping)
-                                                        return String(qJobId) == String(activeTabRealId);
+                                                    // Branch Isolation: L1 quotes shouldn't show in L2 context
+                                                    if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
+
+                                                    const qJob = jobsPool.find(j => {
+                                                        const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                                        return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                                                            (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                                                            (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                                                            (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                                                            (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                                            (qDivCode === 'AAC' && jName.includes('AIR'));
                                                     });
 
-                                                    // Group revisions
-                                                    const quoteGroups = filteredQuotes.reduce((acc, q) => {
-                                                        const key = q.QuoteNumber?.split('-R')[0] || 'Unknown';
-                                                        if (!acc[key]) acc[key] = [];
-                                                        acc[key].push(q);
-                                                        return acc;
-                                                    }, {});
+                                                    if (!qJob) return false;
+                                                    const qJobId = qJob.id || qJob.ItemID || qJob.ID;
 
-                                                    const quoteList = Object.entries(quoteGroups)
-                                                        .sort(([a], [b]) => b.localeCompare(a))
-                                                        .map(([quoteNo, revisions]) => {
-                                                            const sorted = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
-                                                            const latest = sorted[0];
-                                                            const isExpanded = expandedGroups[quoteNo];
-                                                            const hasHistory = sorted.length > 1;
+                                                    // Strict Match: Each tab only shows quotes belonging to its specific subjob/division
+                                                    return String(qJobId) === String(activeTabRealId);
+                                                });
 
-                                                            return (
-                                                                <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                                                    <div
-                                                                        onClick={() => loadQuote(latest)}
-                                                                        style={{
-                                                                            padding: '8px',
-                                                                            background: quoteId === latest.ID ? '#f0f9ff' : 'white',
-                                                                            border: `1px solid ${quoteId === latest.ID ? '#0ea5e9' : '#e2e8f0'}`,
-                                                                            borderRadius: '8px',
-                                                                            cursor: 'pointer',
-                                                                            position: 'relative'
-                                                                        }}
-                                                                    >
-                                                                        {/* Expand Toggle */}
-                                                                        {hasHistory && (
-                                                                            <div
-                                                                                onClick={(e) => {
-                                                                                    e.stopPropagation();
-                                                                                    toggleExpanded(quoteNo);
-                                                                                }}
-                                                                                style={{
-                                                                                    position: 'absolute',
-                                                                                    right: '6px',
-                                                                                    top: '6px',
-                                                                                    padding: '2px',
-                                                                                    cursor: 'pointer',
-                                                                                    color: '#64748b'
-                                                                                }}
-                                                                            >
-                                                                                {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                                                            </div>
-                                                                        )}
+                                                // Group revisions
+                                                const quoteGroups = filteredQuotes.reduce((acc, q) => {
+                                                    const key = q.QuoteNumber?.split('-R')[0] || 'Unknown';
+                                                    if (!acc[key]) acc[key] = [];
+                                                    acc[key].push(q);
+                                                    return acc;
+                                                }, {});
 
-                                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: hasHistory ? '20px' : '0' }}>
-                                                                            <span style={{ fontWeight: '700', fontSize: '12px' }}>{latest.QuoteNumber}</span>
-                                                                            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7' }}>{latest.Status}</span>
-                                                                        </div>
-                                                                        <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-                                                                            BD {parseFloat(latest.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}
-                                                                        </div>
-                                                                    </div>
+                                                const quoteList = Object.entries(quoteGroups)
+                                                    .sort(([a], [b]) => b.localeCompare(a))
+                                                    .map(([quoteNo, revisions]) => {
+                                                        const sorted = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
+                                                        const latest = sorted[0];
+                                                        const isExpanded = expandedGroups[quoteNo];
+                                                        const hasHistory = sorted.length > 1;
 
-                                                                    {/* Render History if Expanded */}
-                                                                    {isExpanded && sorted.slice(1).map(rev => (
+                                                        return (
+                                                            <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                                <div
+                                                                    onClick={() => loadQuote(latest)}
+                                                                    style={{
+                                                                        padding: '8px',
+                                                                        background: quoteId === latest.ID ? '#f0f9ff' : 'white',
+                                                                        border: `1px solid ${quoteId === latest.ID ? '#0ea5e9' : '#e2e8f0'}`,
+                                                                        borderRadius: '8px',
+                                                                        cursor: 'pointer',
+                                                                        position: 'relative'
+                                                                    }}
+                                                                >
+                                                                    {/* Expand Toggle */}
+                                                                    {hasHistory && (
                                                                         <div
-                                                                            key={rev.ID}
-                                                                            onClick={() => loadQuote(rev)}
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                toggleExpanded(quoteNo);
+                                                                            }}
                                                                             style={{
-                                                                                padding: '6px 8px',
-                                                                                background: quoteId === rev.ID ? '#eff6ff' : '#f8fafc',
-                                                                                border: '1px solid #e2e8f0',
-                                                                                borderRadius: '6px',
-                                                                                marginLeft: '12px',
-                                                                                fontSize: '11px',
+                                                                                position: 'absolute',
+                                                                                right: '6px',
+                                                                                top: '6px',
+                                                                                padding: '2px',
                                                                                 cursor: 'pointer',
-                                                                                display: 'flex',
-                                                                                justifyContent: 'space-between',
-                                                                                alignItems: 'center'
+                                                                                color: '#64748b'
                                                                             }}
                                                                         >
-                                                                            <span style={{ color: '#475569' }}>{rev.QuoteNumber}</span>
-                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                                <span style={{ fontWeight: '600' }}>BD {parseFloat(rev.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}</span>
-                                                                                <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '2px', background: '#e2e8f0' }}>{rev.Status}</span>
-                                                                            </div>
+                                                                            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                                                                         </div>
-                                                                    ))}
-                                                                </div>
-                                                            );
-                                                        });
+                                                                    )}
 
-                                                    // Filter Pricing Summary
-                                                    const filteredPricing = pricingSummary.filter(grp => {
-                                                        const job = jobsPool.find(j => (j.itemName || j.DivisionName) === grp.name);
-                                                        // Show 'General' / Unknown jobs on the first tab ('Own Job')
-                                                        if (!job) return activeTabObj.isSelf || tabs.length === 1;
-
-                                                        const jobId = job.id || job.ItemID;
-                                                        return jobId === activeTabRealId || isDescendant(jobId, activeTabRealId);
-                                                    });
-
-                                                    return (
-                                                        <>
-                                                            {quoteList.length > 0 ? quoteList : <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No quotes for this tab.</div>}
-
-                                                            {/* Pricing Summary (Latest Price) */}
-                                                            {(filteredPricing.length > 0) && (
-                                                                <div style={{ padding: '8px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px', marginTop: '12px' }}>
-                                                                    <h5 style={{ margin: '0 0 8px 0', fontSize: '11px', color: '#166534', fontWeight: '800' }}>PRICING SUMMARY (LATEST):</h5>
-                                                                    {filteredPricing.map((grp, i) => (
-                                                                        <div key={i} style={{ marginBottom: '6px', paddingBottom: '4px', borderBottom: '1px dashed #e2e8f0' }}>
-                                                                            <div style={{ fontSize: '11px', fontWeight: '700', color: '#166534', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                                                <input type="checkbox" checked={selectedJobs.includes(grp.name)} onChange={() => handleJobToggle(grp.name)} />
-                                                                                {grp.name}
-                                                                            </div>
-                                                                            <div style={{ marginLeft: '14px', fontSize: '10px', color: '#64748b' }}>
-                                                                                {grp.items.map((item, idx) => (
-                                                                                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                                                                        <span>- {item.name}</span>
-                                                                                        <span>BD {item.total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        </div>
-                                                                    ))}
-
-                                                                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '2px solid #bbf7d0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                                        <span style={{ fontSize: '11px', fontWeight: '800', color: '#166534' }}>GRAND BASE PRICE TOTAL:</span>
-                                                                        <span style={{ fontSize: '12px', fontWeight: '800', color: '#15803d' }}>
-                                                                            BD {filteredPricing
-                                                                                .filter(g => selectedJobs.includes(g.name))
-                                                                                .reduce((sum, g) => sum + (g.total || 0), 0)
-                                                                                .toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                                                                        </span>
+                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: hasHistory ? '20px' : '0' }}>
+                                                                        <span style={{ fontWeight: '700', fontSize: '12px' }}>{latest.QuoteNumber}</span>
+                                                                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7' }}>{latest.Status}</span>
+                                                                    </div>
+                                                                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                                                                        BD {parseFloat(latest.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}
                                                                     </div>
                                                                 </div>
-                                                            )}
-                                                        </>
-                                                    );
-                                                })()}
-                                            </div>
+
+                                                                {/* Render History if Expanded */}
+                                                                {isExpanded && sorted.slice(1).map(rev => (
+                                                                    <div
+                                                                        key={rev.ID}
+                                                                        onClick={() => loadQuote(rev)}
+                                                                        style={{
+                                                                            padding: '6px 8px',
+                                                                            background: quoteId === rev.ID ? '#eff6ff' : '#f8fafc',
+                                                                            border: '1px solid #e2e8f0',
+                                                                            borderRadius: '6px',
+                                                                            marginLeft: '12px',
+                                                                            fontSize: '11px',
+                                                                            cursor: 'pointer',
+                                                                            display: 'flex',
+                                                                            justifyContent: 'space-between',
+                                                                            alignItems: 'center'
+                                                                        }}
+                                                                    >
+                                                                        <span style={{ color: '#475569' }}>{rev.QuoteNumber}</span>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                            <span style={{ fontWeight: '600' }}>BD {parseFloat(rev.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}</span>
+                                                                            <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '2px', background: '#e2e8f0' }}>{rev.Status}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    });
+
+                                                // Filter Pricing Summary
+                                                const filteredPricing = pricingSummary.filter(grp => {
+                                                    const job = jobsPool.find(j => (j.itemName || j.DivisionName) === grp.name);
+                                                    // Show 'General' / Unknown jobs on the first tab ('Own Job')
+                                                    if (!job) return activeTabObj.isSelf || tabs.length === 1;
+
+                                                    const jobId = job.id || job.ItemID;
+                                                    return jobId === activeTabRealId || isDescendant(jobId, activeTabRealId);
+                                                });
+
+                                                return (
+                                                    <>
+                                                        {quoteList.length > 0 ? quoteList : <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No quotes for this tab.</div>}
+
+                                                        {/* Pricing Summary (Latest Price) */}
+                                                        {(filteredPricing.length > 0) && (
+                                                            <div style={{ padding: '8px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px', marginTop: '12px' }}>
+                                                                <h5 style={{ margin: '0 0 8px 0', fontSize: '11px', color: '#166534', fontWeight: '800' }}>PRICING SUMMARY (LATEST):</h5>
+                                                                {filteredPricing.map((grp, i) => (
+                                                                    <div key={i} style={{ marginBottom: '6px', paddingBottom: '4px', borderBottom: '1px dashed #e2e8f0' }}>
+                                                                        <div style={{ fontSize: '11px', fontWeight: '700', color: '#166534', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                                            <input type="checkbox" checked={selectedJobs.includes(grp.name)} onChange={() => handleJobToggle(grp.name)} />
+                                                                            {grp.name}
+                                                                        </div>
+                                                                        <div style={{ marginLeft: '14px', fontSize: '10px', color: '#64748b' }}>
+                                                                            {grp.items.map((item, idx) => (
+                                                                                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                                                                    <span>- {item.name}</span>
+                                                                                    <span>BD {item.total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+
+                                                                <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '2px solid #bbf7d0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                    <span style={{ fontSize: '11px', fontWeight: '800', color: '#166534' }}>GRAND BASE PRICE TOTAL:</span>
+                                                                    <span style={{ fontSize: '12px', fontWeight: '800', color: '#15803d' }}>
+                                                                        BD {filteredPricing
+                                                                            .filter(g => selectedJobs.includes(g.name))
+                                                                            .reduce((sum, g) => {
+                                                                                // Sum only Base Price items
+                                                                                const groupBase = g.items.reduce((s, i) => (i.name === 'Base Price' ? s + i.total : s), 0);
+                                                                                return sum + groupBase;
+                                                                            }, 0)
+                                                                            .toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                );
+                                            })()}
                                         </div>
-                                    );
-                                })()}
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                        {/* Metadata Section (Quote Details) - Moved Below Pricing */}
+                        <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fafafa' }}>
+
+                            <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
+
+                            {/* Division is auto-selected based on user department - no manual selection needed */}
+
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Quote Date <span style={{ color: '#ef4444' }}>*</span></label>
+                                <DateInput value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
                             </div>
-                        )}
-                        {/* Show rest ONLY if a customer is selected (New Quote or Edit Mode) */}
-                        {toName && (
-                            <>
-
-                                {/* Metadata Section (Quote Details) - Moved Below Pricing */}
-                                <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fafafa' }}>
-
-                                    <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
-
-                                    {/* Division is auto-selected based on user department - no manual selection needed */}
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Quote Date <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <DateInput value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
-                                    </div>
 
 
 
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Validity (Days) <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <input type="number" value={validityDays} onChange={(e) => setValidityDays(parseInt(e.target.value) || 0)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
-                                    </div>
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Validity (Days) <span style={{ color: '#ef4444' }}>*</span></label>
+                                <input type="number" value={validityDays} onChange={(e) => setValidityDays(parseInt(e.target.value) || 0)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
+                            </div>
 
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <input
-                                            type="text"
-                                            value={toAttention}
-                                            onChange={(e) => setToAttention(e.target.value)}
-                                            placeholder="Contact Person..."
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                        />
-                                    </div>
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
+                                <input
+                                    type="text"
+                                    value={toAttention}
+                                    onChange={(e) => setToAttention(e.target.value)}
+                                    placeholder="Contact Person..."
+                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                />
+                            </div>
 
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Subject <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical' }} />
-                                    </div>
-
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <CreatableSelect
-                                            isClearable
-                                            onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
-                                            options={preparedByOptions}
-                                            value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
-                                            placeholder="Select or Type Name..."
-                                            styles={{
-                                                control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
-                                                valueContainer: (base) => ({ ...base, padding: '0 8px' }),
-                                                input: (base) => ({ ...base, margin: 0, padding: 0 }),
-                                            }}
-                                        />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Signatory <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <CreatableSelect
-                                            isClearable
-                                            onChange={(newValue) => {
-                                                setSignatory(newValue ? newValue.value : '');
-                                                // Update designation if selected from list
-                                                if (newValue && newValue.designation) {
-                                                    setSignatoryDesignation(newValue.designation);
-                                                }
-                                            }}
-                                            options={signatoryOptions}
-                                            value={signatory ? { label: signatory, value: signatory } : null}
-                                            placeholder="Select or Type Signatory..."
-                                            styles={{
-                                                control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
-                                                valueContainer: (base) => ({ ...base, padding: '0 8px' }),
-                                                input: (base) => ({ ...base, margin: 0, padding: 0 }),
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* Template Section */}
-                                <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fff' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                                        <h4 style={{ margin: 0, fontSize: '13px', color: '#475569' }}>Clause Templates:</h4>
-                                    </div>
-
-                                    {/* Save Template */}
-                                    <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                                        <input
-                                            type="text"
-                                            placeholder="New Template Name"
-                                            value={savedTemplateName}
-                                            onChange={(e) => setSavedTemplateName(e.target.value)}
-                                            style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
-                                        />
-                                        <button onClick={handleSaveTemplate} style={{ padding: '6px 12px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                                            Save
-                                        </button>
-                                    </div>
-
-                                    {/* Load Template */}
-                                    <div style={{ display: 'flex', gap: '8px' }}>
-                                        <select
-                                            value={selectedTemplateId}
-                                            onChange={(e) => setSelectedTemplateId(e.target.value)}
-                                            style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
-                                        >
-                                            <option value="">Select Template...</option>
-                                            {templates.map(t => (
-                                                <option key={t.ID} value={t.ID}>{t.TemplateName}</option>
-                                            ))}
-                                        </select>
-                                        <button onClick={handleLoadTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', color: '#334155' }} title="Load">
-                                            <FolderOpen size={14} />
-                                        </button>
-                                        <button onClick={handleDeleteTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#fff', border: '1px solid #fee2e2', borderRadius: '4px', cursor: 'pointer', color: '#ef4444' }} title="Delete">
-                                            <Trash2 size={14} />
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* Clause Checkboxes */}
-                                <div style={{ padding: '16px' }}>
-                                    <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Select & Reorder Clauses:</h4>
-                                    {orderedClauses.map((id, index) => {
-
-                                        const isCustom = id.startsWith('custom_');
-                                        const customClause = isCustom ? customClauses.find(c => c.id === id) : null;
-                                        const standardClause = !isCustom ? clauseDefinitions.find(c => c.key === id) : null;
-
-                                        if (!customClause && !standardClause) return null;
-
-                                        const title = isCustom ? customClause.title : standardClause.title;
-                                        const isChecked = isCustom ? customClause.isChecked : clauses[id];
-                                        const contentKey = isCustom ? id : standardClause.contentKey;
-
-                                        return (
-                                            <div key={id} style={{ marginBottom: '8px', padding: '4px', background: isCustom ? '#fff' : 'transparent', borderBottom: '1px solid #f1f5f9' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                    {/* Reorder Buttons */}
-                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                                                        <button
-                                                            onClick={() => moveClause(index, 'up')}
-                                                            disabled={index === 0}
-                                                            style={{ padding: '0', cursor: index === 0 ? 'default' : 'pointer', border: 'none', background: 'none', color: index === 0 ? '#cbd5e1' : '#64748b' }}
-                                                            title="Move Up"
-                                                        >
-                                                            <ChevronUp size={14} />
-                                                        </button>
-                                                        <button
-                                                            onClick={() => moveClause(index, 'down')}
-                                                            disabled={index === orderedClauses.length - 1}
-                                                            style={{ padding: '0', cursor: index === orderedClauses.length - 1 ? 'default' : 'pointer', border: 'none', background: 'none', color: index === orderedClauses.length - 1 ? '#cbd5e1' : '#64748b' }}
-                                                            title="Move Down"
-                                                        >
-                                                            <ChevronDown size={14} />
-                                                        </button>
-                                                    </div>
-
-                                                    <label style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '8px', background: isChecked ? '#f0fdf4' : '#f8fafc', borderRadius: '6px', border: `1px solid ${isChecked ? '#86efac' : '#e2e8f0'}` }}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={isChecked}
-                                                            onChange={() => isCustom ? updateCustomClause(id, 'isChecked', !isChecked) : toggleClause(id)}
-                                                            style={{ width: '16px', height: '16px' }}
-                                                        />
-                                                        <span style={{ fontSize: '13px', fontWeight: '500' }}>{title}</span>
-                                                    </label>
-
-                                                    {isCustom && (
-                                                        <button
-                                                            onClick={() => removeCustomClause(id)}
-                                                            style={{ padding: '8px', color: '#ef4444', background: 'white', border: '1px solid #fee2e2', borderRadius: '6px', cursor: 'pointer' }}
-                                                            title="Remove Clause"
-                                                        >
-                                                            <Trash2 size={14} />
-                                                        </button>
-                                                    )}
-                                                </div>
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Subject <span style={{ color: '#ef4444' }}>*</span></label>
+                                <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical' }} />
+                            </div>
 
 
-                                                {isChecked && (
-                                                    <button
-                                                        onClick={() => setExpandedClause(expandedClause === contentKey ? null : contentKey)}
-                                                        style={{ marginTop: '4px', marginLeft: '32px', fontSize: '11px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer' }}
-                                                    >
-                                                        {expandedClause === contentKey ? '▼ Hide Editor' : '► Edit Content'}
-                                                    </button>
-                                                )}
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
+                                <CreatableSelect
+                                    isClearable
+                                    onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
+                                    options={preparedByOptions}
+                                    value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
+                                    placeholder="Select or Type Name..."
+                                    styles={{
+                                        control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
+                                        valueContainer: (base) => ({ ...base, padding: '0 8px' }),
+                                        input: (base) => ({ ...base, margin: 0, padding: 0 }),
+                                    }}
+                                />
+                            </div>
 
-                                                {expandedClause === contentKey && (
-                                                    <div style={{ marginLeft: '32px' }}>
-                                                        <ClauseEditor
-                                                            html={isCustom ? customClause.content : clauseContent[contentKey]}
-                                                            onChange={(val) => {
-                                                                if (isCustom) updateCustomClause(id, 'content', val);
-                                                                else updateClauseContent(contentKey, val);
-                                                            }}
-                                                            style={{
-                                                                width: '100%',
-                                                                marginTop: '8px',
-                                                                padding: '12px',
-                                                                border: '1px solid #e2e8f0',
-                                                                borderRadius: '4px',
-                                                                fontSize: '12px',
-                                                                minHeight: '150px',
-                                                                maxHeight: '400px',
-                                                                overflowY: 'auto',
-                                                                backgroundColor: 'white',
-                                                                outline: 'none'
-                                                            }}
-                                                        />
-                                                    </div>
-                                                )}
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Signatory <span style={{ color: '#ef4444' }}>*</span></label>
+                                <CreatableSelect
+                                    isClearable
+                                    onChange={(newValue) => {
+                                        setSignatory(newValue ? newValue.value : '');
+                                        // Update designation if selected from list
+                                        if (newValue && newValue.designation) {
+                                            setSignatoryDesignation(newValue.designation);
+                                        }
+                                    }}
+                                    options={signatoryOptions}
+                                    value={signatory ? { label: signatory, value: signatory } : null}
+                                    placeholder="Select or Type Signatory..."
+                                    styles={{
+                                        control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
+                                        valueContainer: (base) => ({ ...base, padding: '0 8px' }),
+                                        input: (base) => ({ ...base, margin: 0, padding: 0 }),
+                                    }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Template Section */}
+                        <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fff' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <h4 style={{ margin: 0, fontSize: '13px', color: '#475569' }}>Clause Templates:</h4>
+                            </div>
+
+                            {/* Save Template */}
+                            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                                <input
+                                    type="text"
+                                    placeholder="New Template Name"
+                                    value={savedTemplateName}
+                                    onChange={(e) => setSavedTemplateName(e.target.value)}
+                                    style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                />
+                                <button onClick={handleSaveTemplate} style={{ padding: '6px 12px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                                    Save
+                                </button>
+                            </div>
+
+                            {/* Load Template */}
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <select
+                                    value={selectedTemplateId}
+                                    onChange={(e) => setSelectedTemplateId(e.target.value)}
+                                    style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                >
+                                    <option value="">Select Template...</option>
+                                    {templates.map(t => (
+                                        <option key={t.ID} value={t.ID}>{t.TemplateName}</option>
+                                    ))}
+                                </select>
+                                <button onClick={handleLoadTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', color: '#334155' }} title="Load">
+                                    <FolderOpen size={14} />
+                                </button>
+                                <button onClick={handleDeleteTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#fff', border: '1px solid #fee2e2', borderRadius: '4px', cursor: 'pointer', color: '#ef4444' }} title="Delete">
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Clause Checkboxes */}
+                        <div style={{ padding: '16px' }}>
+                            <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Select & Reorder Clauses:</h4>
+                            {orderedClauses.map((id, index) => {
+
+                                const isCustom = id.startsWith('custom_');
+                                const customClause = isCustom ? customClauses.find(c => c.id === id) : null;
+                                const standardClause = !isCustom ? clauseDefinitions.find(c => c.key === id) : null;
+
+                                if (!customClause && !standardClause) return null;
+
+                                const title = isCustom ? customClause.title : standardClause.title;
+                                const isChecked = isCustom ? customClause.isChecked : clauses[id];
+                                const contentKey = isCustom ? id : standardClause.contentKey;
+
+                                return (
+                                    <div key={id} style={{ marginBottom: '8px', padding: '4px', background: isCustom ? '#fff' : 'transparent', borderBottom: '1px solid #f1f5f9' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            {/* Reorder Buttons */}
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                <button
+                                                    onClick={() => moveClause(index, 'up')}
+                                                    disabled={index === 0}
+                                                    style={{ padding: '0', cursor: index === 0 ? 'default' : 'pointer', border: 'none', background: 'none', color: index === 0 ? '#cbd5e1' : '#64748b' }}
+                                                    title="Move Up"
+                                                >
+                                                    <ChevronUp size={14} />
+                                                </button>
+                                                <button
+                                                    onClick={() => moveClause(index, 'down')}
+                                                    disabled={index === orderedClauses.length - 1}
+                                                    style={{ padding: '0', cursor: index === orderedClauses.length - 1 ? 'default' : 'pointer', border: 'none', background: 'none', color: index === orderedClauses.length - 1 ? '#cbd5e1' : '#64748b' }}
+                                                    title="Move Down"
+                                                >
+                                                    <ChevronDown size={14} />
+                                                </button>
                                             </div>
-                                        );
-                                    })}
 
-
-                                    {/* Custom Clauses Section */}
-
-
-                                    {/* Add New Clause Button */}
-                                    <div style={{ marginTop: '16px', borderTop: '1px dashed #e2e8f0', paddingTop: '16px' }}>
-                                        {isAddingClause ? (
-                                            <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                                            <label style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '8px', background: isChecked ? '#f0fdf4' : '#f8fafc', borderRadius: '6px', border: `1px solid ${isChecked ? '#86efac' : '#e2e8f0'}` }}>
                                                 <input
-                                                    type="text"
-                                                    value={newClauseTitle}
-                                                    onChange={(e) => setNewClauseTitle(e.target.value)}
-                                                    placeholder="Clause Heading (e.g., Special Conditions)"
-                                                    style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '13px', marginBottom: '8px' }}
-                                                    autoFocus
+                                                    type="checkbox"
+                                                    checked={isChecked}
+                                                    onChange={() => isCustom ? updateCustomClause(id, 'isChecked', !isChecked) : toggleClause(id)}
+                                                    style={{ width: '16px', height: '16px' }}
                                                 />
-                                                <div style={{ display: 'flex', gap: '8px' }}>
-                                                    <button onClick={addCustomClause} style={{ flex: 1, padding: '6px', background: '#3b82f6', color: 'white', borderRadius: '4px', border: 'none', fontSize: '12px', cursor: 'pointer' }}>Add</button>
-                                                    <button onClick={() => setIsAddingClause(false)} style={{ flex: 1, padding: '6px', background: 'white', color: '#64748b', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
-                                                </div>
-                                            </div>
-                                        ) : (
+                                                <span style={{ fontSize: '13px', fontWeight: '500' }}>{title}</span>
+                                            </label>
+
+                                            {isCustom && (
+                                                <button
+                                                    onClick={() => removeCustomClause(id)}
+                                                    style={{ padding: '8px', color: '#ef4444', background: 'white', border: '1px solid #fee2e2', borderRadius: '6px', cursor: 'pointer' }}
+                                                    title="Remove Clause"
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+
+
+                                        {isChecked && (
                                             <button
-                                                onClick={() => setIsAddingClause(true)}
-                                                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '10px', background: 'white', color: '#3b82f6', border: '1px dashed #3b82f6', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
+                                                onClick={() => setExpandedClause(expandedClause === contentKey ? null : contentKey)}
+                                                style={{ marginTop: '4px', marginLeft: '32px', fontSize: '11px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer' }}
                                             >
-                                                <Plus size={16} /> Add New Clause
+                                                {expandedClause === contentKey ? '▼ Hide Editor' : '► Edit Content'}
                                             </button>
                                         )}
+
+                                        {expandedClause === contentKey && (
+                                            <div style={{ marginLeft: '32px' }}>
+                                                <ClauseEditor
+                                                    html={isCustom ? customClause.content : clauseContent[contentKey]}
+                                                    onChange={(val) => {
+                                                        if (isCustom) updateCustomClause(id, 'content', val);
+                                                        else updateClauseContent(contentKey, val);
+                                                    }}
+                                                    style={{
+                                                        width: '100%',
+                                                        marginTop: '8px',
+                                                        padding: '12px',
+                                                        border: '1px solid #e2e8f0',
+                                                        borderRadius: '4px',
+                                                        fontSize: '12px',
+                                                        minHeight: '150px',
+                                                        maxHeight: '400px',
+                                                        overflowY: 'auto',
+                                                        backgroundColor: 'white',
+                                                        outline: 'none'
+                                                    }}
+                                                />
+                                            </div>
+                                        )}
                                     </div>
-                                </div>
-                            </>
-                        )}
+                                );
+                            })}
+
+
+                            {/* Custom Clauses Section */}
+
+
+                            {/* Add New Clause Button */}
+                            <div style={{ marginTop: '16px', borderTop: '1px dashed #e2e8f0', paddingTop: '16px' }}>
+                                {isAddingClause ? (
+                                    <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                                        <input
+                                            type="text"
+                                            value={newClauseTitle}
+                                            onChange={(e) => setNewClauseTitle(e.target.value)}
+                                            placeholder="Clause Heading (e.g., Special Conditions)"
+                                            style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '13px', marginBottom: '8px' }}
+                                            autoFocus
+                                        />
+                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                            <button onClick={addCustomClause} style={{ flex: 1, padding: '6px', background: '#3b82f6', color: 'white', borderRadius: '4px', border: 'none', fontSize: '12px', cursor: 'pointer' }}>Add</button>
+                                            <button onClick={() => setIsAddingClause(false)} style={{ flex: 1, padding: '6px', background: 'white', color: '#64748b', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <button
+                                        onClick={() => setIsAddingClause(true)}
+                                        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '10px', background: 'white', color: '#3b82f6', border: '1px dashed #3b82f6', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
+                                    >
+                                        <Plus size={16} /> Add New Clause
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '13px', fontStyle: 'italic', padding: '20px', textAlign: 'center' }}>
+                        Please select Enquiry, Lead Job, and Customer to continue.
                     </div>
                 )}
-
-                {/* Action Buttons */}
             </div>
 
             {/* Resizer Handle */}
@@ -3865,17 +4321,16 @@ const QuoteForm = () => {
                 onMouseDown={startResizing}
                 title="Drag to resize sidebar"
                 style={{
-                    width: '10px', // Increased touch target
+                    width: '10px',
                     backgroundColor: '#f1f5f9',
                     borderRight: '1px solid #e2e8f0',
-                    borderLeft: '1px solid #e2e8f0', // Added border for visibility
+                    borderLeft: '1px solid #e2e8f0',
                     cursor: 'col-resize',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     zIndex: 10,
-                    transition: 'background-color 0.2s',
-                    ':hover': { backgroundColor: '#e2e8f0' } // Note: inline styles don't support pseudo-classes directly in React like this without a library or state, but the borders help.
+                    transition: 'background-color 0.2s'
                 }}
             >
                 <div style={{ width: '4px', height: '32px', backgroundColor: '#cbd5e1', borderRadius: '2px' }}></div>
@@ -3887,196 +4342,231 @@ const QuoteForm = () => {
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }}>
                         Loading enquiry data...
                     </div>
-                ) : (!enquiryData || !enquiryData.leadJobPrefix || !toName) ? (
+                ) : !enquiryData ? (
                     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                        {!enquiryData && pendingQuotes.length > 0 ? (
-                            <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', width: '100%', margin: '0 auto' }}>
-                                <div style={{ padding: '16px 24px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                        <FileText size={20} className="text-blue-600" /> Pending Updates ({pendingQuotes.length})
-                                    </h2>
-                                    <span style={{ fontSize: '12px', color: '#64748b' }}>Sorted by Due Date</span>
-                                </div>
-                                <div style={{ flex: 1, overflowY: 'auto' }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                        <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                                            <tr>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '180px' }}>Project Name</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Customer Name</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '110px' }}>Due Date</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '200px' }}>Client Name</th>
-                                                <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '200px' }}>Consultant Name</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {pendingQuotes.map((enq, idx) => (
-                                                <tr
-                                                    key={enq.RequestNo || idx}
-                                                    style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                                    onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                                    onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                                    onClick={() => handleSelectEnquiry(enq)}
-                                                >
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '180px' }}>{enq.ProjectName || '-'}</td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
-                                                        {enq.CustomerName ? enq.CustomerName.split(',').map((cust, i) => {
-                                                            const cName = cust.trim();
+                        {pendingQuotes.length > 0 ? (
+                            (() => {
+                                const sortedPendingQuotes = [...pendingQuotes].sort((a, b) => {
+                                    const { field, direction } = pendingQuotesSortConfig;
+                                    let aVal = a[field];
+                                    let bVal = b[field];
+                                    if (field === 'DueDate' || field === 'EnquiryDate') {
+                                        aVal = aVal ? new Date(aVal).getTime() : Infinity;
+                                        bVal = bVal ? new Date(bVal).getTime() : Infinity;
+                                    } else {
+                                        aVal = (aVal || '').toString().toLowerCase();
+                                        bVal = (bVal || '').toString().toLowerCase();
+                                    }
+                                    if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+                                    if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+                                    return 0;
+                                });
+                                const quoteSortField = pendingQuotesSortConfig.field;
+                                const quoteSortDir = pendingQuotesSortConfig.direction;
+                                const activeSortLabel = quoteSortField === 'DueDate' ? 'Due Date'
+                                    : quoteSortField === 'RequestNo' ? 'Enquiry No.'
+                                        : quoteSortField === 'ProjectName' ? 'Project Name'
+                                            : quoteSortField === 'CustomerName' ? 'Customer'
+                                                : quoteSortField === 'ClientName' ? 'Client Name'
+                                                    : quoteSortField === 'ConsultantName' ? 'Consultant Name'
+                                                        : quoteSortField;
+                                const renderQSH = (field, label, style = {}) => {
+                                    const isActive = quoteSortField === field;
+                                    const isAsc = quoteSortDir === 'asc';
+                                    return (
+                                        <th
+                                            key={field}
+                                            onClick={() => setPendingQuotesSortConfig(prev =>
+                                                prev.field === field
+                                                    ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                                                    : { field, direction: 'asc' }
+                                            )}
+                                            style={{
+                                                padding: '10px 16px', textAlign: 'left', fontSize: '12px',
+                                                fontWeight: '600', color: isActive ? '#0284c7' : '#64748b',
+                                                borderBottom: '1px solid #e2e8f0', cursor: 'pointer',
+                                                userSelect: 'none', whiteSpace: 'nowrap', ...style
+                                            }}
+                                        >
+                                            {label}{isActive ? (isAsc ? ' ▲' : ' ▼') : <span style={{ color: '#cbd5e1' }}> ⇅</span>}
+                                        </th>
+                                    );
+                                };
+                                return (
+                                    <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', width: '100%', margin: '0 auto' }}>
+                                        <div style={{ padding: '16px 24px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                                <FileText size={20} className="text-blue-600" /> Pending Updates ({pendingQuotes.length})
+                                            </h2>
+                                            <span style={{ fontSize: '12px', color: '#64748b' }}>
+                                                Sorted by <strong>{activeSortLabel}</strong> {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                                            </span>
+                                        </div>
+                                        <div style={{ flex: 1, overflowY: 'auto' }}>
+                                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                                <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                                    <tr>
+                                                        {renderQSH('RequestNo', 'Enquiry No.', { width: '80px' })}
+                                                        {renderQSH('ProjectName', 'Project Name', { minWidth: '234px' })}
+                                                        {renderQSH('CustomerName', 'Customer Name')}
+                                                        {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
+                                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
+                                                        {renderQSH('ClientName', 'Client Name', { minWidth: '200px' })}
+                                                        {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {sortedPendingQuotes.map((enq, idx) => (
+                                                        <tr
+                                                            key={enq.RequestNo || idx}
+                                                            style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
+                                                            onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                                            onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                                            onClick={() => handleSelectEnquiry(enq)}
+                                                        >
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>{enq.ProjectName || '-'}</td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
+                                                                {enq.CustomerName ? enq.CustomerName.split(',').map((cust, i) => {
+                                                                    const cName = cust.trim();
+                                                                    if (!cName) return null;
 
-                                                            const quoteMap = {};
-                                                            (enq.QuotedCustomers || '').split(';;').filter(Boolean).forEach(p => {
-                                                                const parts = p.split('|');
-                                                                if (parts.length >= 2) {
-                                                                    const key = normalize(parts[0]);
-                                                                    const valStr = parts[1].replace(/,/g, '');
-                                                                    const val = parseFloat(valStr) || 0;
-                                                                    quoteMap[key] = (quoteMap[key] || 0) + val;
-                                                                }
-                                                            });
-                                                            const pricingMap = {};
-                                                            (enq.PricingCustomerDetails || '').split(';;').filter(Boolean).forEach(p => {
-                                                                const parts = p.split('|');
-                                                                if (parts.length >= 2) {
-                                                                    const key = normalize(parts[0]);
-                                                                    const val = parseFloat(parts[1]) || 0;
-                                                                    pricingMap[key] = (pricingMap[key] || 0) + val;
-                                                                }
-                                                            });
+                                                                    // Skip the user's own division/job — they are the quoting party, not a customer
+                                                                    const userDept = (currentUser?.Department || '').trim().toLowerCase();
+                                                                    const cNorm = normalize(cName);
+                                                                    const deptNorm = normalize(userDept);
+                                                                    if (userDept && (cNorm === deptNorm || cNorm.includes(deptNorm) || deptNorm.includes(cNorm))) return null;
+
+                                                                    const quoteMap = {};
+                                                                    (enq.QuotedCustomers || '').split(';;').filter(Boolean).forEach(p => {
+                                                                        const parts = p.split('|');
+                                                                        if (parts.length >= 2) {
+                                                                            const key = normalize(parts[0]);
+                                                                            const valStr = parts[1].replace(/,/g, '');
+                                                                            const val = parseFloat(valStr) || 0;
+                                                                            quoteMap[key] = (quoteMap[key] || 0) + val;
+                                                                        }
+                                                                    });
+                                                                    const pricingMap = {};
+                                                                    (enq.PricingCustomerDetails || '').split(';;').filter(Boolean).forEach(p => {
+                                                                        const parts = p.split('|');
+                                                                        if (parts.length >= 2) {
+                                                                            const key = normalize(parts[0]);
+                                                                            const val = parseFloat(parts[1]) || 0;
+                                                                            pricingMap[key] = (pricingMap[key] || 0) + val;
+                                                                        }
+                                                                    });
 
 
-                                                            const cNameNorm = normalize(cName);
-                                                            let quotedVal = quoteMap[cNameNorm];
-                                                            let pricingVal = pricingMap[cNameNorm];
+                                                                    const cNameNorm = normalize(cName);
+                                                                    let quotedVal = quoteMap[cNameNorm];
+                                                                    let pricingVal = pricingMap[cNameNorm];
 
-                                                            if (quotedVal === undefined) {
-                                                                // Fuzzy match: check if one contains the other
-                                                                const fuzzyKey = Object.keys(quoteMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
-                                                                if (fuzzyKey) quotedVal = quoteMap[fuzzyKey];
-                                                            }
-                                                            if (pricingVal === undefined) {
-                                                                const fuzzyKey = Object.keys(pricingMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
-                                                                if (fuzzyKey) pricingVal = pricingMap[fuzzyKey];
-                                                            }
+                                                                    if (quotedVal === undefined) {
+                                                                        // Fuzzy match: check if one contains the other
+                                                                        const fuzzyKey = Object.keys(quoteMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
+                                                                        if (fuzzyKey) quotedVal = quoteMap[fuzzyKey];
+                                                                    }
+                                                                    if (pricingVal === undefined) {
+                                                                        const fuzzyKey = Object.keys(pricingMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
+                                                                        if (fuzzyKey) pricingVal = pricingMap[fuzzyKey];
+                                                                    }
 
-                                                            const displayQuoted = quotedVal !== undefined
-                                                                ? quotedVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                                                                : null;
+                                                                    const displayQuoted = quotedVal !== undefined
+                                                                        ? quotedVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                                                        : null;
 
-                                                            const displayPricing = pricingVal !== undefined && pricingVal > 0
-                                                                ? pricingVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                                                                : null;
+                                                                    const displayPricing = pricingVal !== undefined && pricingVal > 0
+                                                                        ? pricingVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                                                        : null;
 
-                                                            return (
-                                                                <div key={i} style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', flexWrap: 'nowrap', gap: '8px' }}>
-                                                                    <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cName}</span>
-                                                                    {displayPricing ? (
-                                                                        <span style={{
-                                                                            color: '#166534',
-                                                                            fontWeight: '600',
+                                                                    return (
+                                                                        <div key={i} style={{ marginBottom: '4px' }}>
+                                                                            <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cName}</span>
+                                                                        </div>
+                                                                    );
+                                                                }) : '-'}
+                                                            </td>
+
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
+                                                            <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                                                {(enq.SubJobPrices || enq.subJobPrices) ? (enq.SubJobPrices || enq.subJobPrices).split(';;').filter(Boolean).map((s, i) => {
+                                                                    const parts = s.split('|');
+                                                                    const name = parts[0];
+                                                                    const rawPrice = parts[1];
+                                                                    const rawDate = parts[2];
+                                                                    const rawLevel = parts[3];
+
+                                                                    const level = parseInt(rawLevel) || 0;
+                                                                    const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+
+                                                                    let displayPrice = rawPrice;
+                                                                    if (isUpdated) {
+                                                                        const num = parseFloat(rawPrice);
+                                                                        if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                                                    }
+
+                                                                    let displayDate = '';
+                                                                    if (rawDate) {
+                                                                        try {
+                                                                            displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
+                                                                        } catch (e) { }
+                                                                    }
+
+                                                                    return (
+                                                                        <div key={i} style={{
                                                                             fontSize: '11px',
-                                                                            background: '#dcfce7',
-                                                                            padding: '2px 8px',
-                                                                            borderRadius: '4px',
-                                                                            border: '1px solid #bbf7d0',
-                                                                            display: 'inline-flex',
+                                                                            marginBottom: '4px',
+                                                                            whiteSpace: 'nowrap',
+                                                                            marginLeft: `${level * 20}px`,
+                                                                            display: 'flex',
                                                                             alignItems: 'center',
-                                                                            whiteSpace: 'nowrap'
-                                                                        }} title="Pricing Update">
-                                                                            BD {displayPricing}
-                                                                        </span>
-                                                                    ) : displayQuoted ? (
-                                                                        <span style={{
-                                                                            color: '#166534',
-                                                                            fontWeight: '600',
-                                                                            fontSize: '11px',
-                                                                            background: '#dcfce7',
-                                                                            padding: '2px 8px',
-                                                                            borderRadius: '4px',
-                                                                            border: '1px solid #bbf7d0',
-                                                                            display: 'inline-flex',
-                                                                            alignItems: 'center',
-                                                                            whiteSpace: 'nowrap'
-                                                                        }} title="Already Quoted">
-                                                                            BD {displayQuoted}
-                                                                        </span>
-                                                                    ) : null}
-                                                                </div>
-                                                            );
-                                                        }) : '-'}
-                                                    </td>
-
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                                    <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-                                                        {(enq.SubJobPrices || enq.subJobPrices) ? (enq.SubJobPrices || enq.subJobPrices).split(';;').filter(Boolean).map((s, i) => {
-                                                            const parts = s.split('|');
-                                                            const name = parts[0];
-                                                            const rawPrice = parts[1];
-                                                            const rawDate = parts[2];
-                                                            const rawLevel = parts[3];
-
-                                                            const level = parseInt(rawLevel) || 0;
-                                                            const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
-
-                                                            let displayPrice = rawPrice;
-                                                            if (isUpdated) {
-                                                                const num = parseFloat(rawPrice);
-                                                                if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
-                                                            }
-
-                                                            let displayDate = '';
-                                                            if (rawDate) {
-                                                                try {
-                                                                    displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
-                                                                } catch (e) { }
-                                                            }
-
-                                                            return (
-                                                                <div key={i} style={{
-                                                                    fontSize: '11px',
-                                                                    marginBottom: '4px',
-                                                                    whiteSpace: 'nowrap',
-                                                                    marginLeft: `${level * 20}px`,
-                                                                    display: 'flex',
-                                                                    alignItems: 'center',
-                                                                    gap: '4px'
-                                                                }}>
-                                                                    {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
-                                                                    <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
-                                                                    <span style={{
-                                                                        color: isUpdated ? '#166534' : '#94a3b8',
-                                                                        marginLeft: '4px',
-                                                                        fontStyle: isUpdated ? 'normal' : 'italic',
-                                                                        background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                                                                        padding: '1px 6px',
-                                                                        borderRadius: '4px',
-                                                                        fontSize: '10px'
-                                                                    }}>
-                                                                        {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
-                                                                    </span>
-                                                                    {isUpdated && displayDate && (
-                                                                        <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
-                                                                            ({displayDate})
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                            );
-                                                        }) : (
-                                                            <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No subjobs found</div>
-                                                        )}
-                                                    </td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ClientName || enq.clientName || '-'}</td>
-                                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ConsultantName || enq.consultantName || '-'}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
+                                                                            gap: '4px'
+                                                                        }}>
+                                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
+                                                                            <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
+                                                                            <span style={{
+                                                                                color: isUpdated ? '#166534' : '#94a3b8',
+                                                                                marginLeft: '4px',
+                                                                                fontStyle: isUpdated ? 'normal' : 'italic',
+                                                                                background: isUpdated ? '#dcfce7' : '#f1f5f9',
+                                                                                padding: '1px 6px',
+                                                                                borderRadius: '4px',
+                                                                                fontSize: '10px'
+                                                                            }}>
+                                                                                {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
+                                                                            </span>
+                                                                            {isUpdated && displayDate && (
+                                                                                <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
+                                                                                    ({displayDate})
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    );
+                                                                }) : (
+                                                                    <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No subjobs found</div>
+                                                                )}
+                                                            </td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ClientName || enq.clientName || '-'}</td>
+                                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ConsultantName || enq.consultantName || '-'}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                );
+                            })()
                         ) : (
-                            <div style={{ flex: 1 }} />
+                            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', fontStyle: 'italic', background: 'white', borderRadius: '8px', border: '1px dashed #e2e8f0' }}>
+                                No pending updates found. Start by entering an enquiry number above.
+                            </div>
                         )}
+                    </div>
+                ) : (!enquiryData.leadJobPrefix || !toName) ? (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontStyle: 'italic', padding: '40px', background: 'rgba(255,255,255,0.5)', borderRadius: '12px', border: '1px dashed #e2e8f0', margin: '20px' }}>
+                        <div style={{ fontSize: '15px', fontWeight: '500', marginBottom: '8px', color: '#64748b' }}>Scope Selection Incomplete</div>
+                        <div>Please select a <strong>Lead Job</strong> and <strong>Customer</strong> to view the quote preview.</div>
                     </div>
                 ) : (
                     <>
@@ -4290,32 +4780,32 @@ const QuoteForm = () => {
                         <style>{tableStyles}</style>
                         <style>
                             {`
-                            @media print {
-                                body * {
-                                    visibility: hidden;
+                                @media print {
+                                    body * {
+                                        visibility: hidden;
+                                    }
+                                    #quote-preview, #quote-preview * {
+                                        visibility: visible;
+                                    }
+                                    #quote-preview {
+                                        position: absolute;
+                                        left: 0;
+                                        top: 0;
+                                        width: 100%;
+                                        margin: 0;
+                                        padding: 0;
+                                        box-shadow: none !important;
+                                        background: white;
+                                    }
+                                    @page {
+                                        size: A4 portrait;
+                                        margin: 10mm;
+                                    }
+                                    .no-print {
+                                        display: none !important;
+                                    }
                                 }
-                                #quote-preview, #quote-preview * {
-                                    visibility: visible;
-                                }
-                                #quote-preview {
-                                    position: absolute;
-                                    left: 0;
-                                    top: 0;
-                                    width: 100%;
-                                    margin: 0;
-                                    padding: 0;
-                                    box-shadow: none !important;
-                                    background: white;
-                                }
-                                @page { 
-                                    size: A4 portrait; 
-                                    margin: 10mm; 
-                                }
-                                .no-print {
-                                    display: none !important;
-                                }
-                            }
-                        `}
+                            `}
                         </style>
 
                         {/* Document Container */}
@@ -4432,8 +4922,8 @@ const QuoteForm = () => {
                                         </div>
                                         <div>E-mail: {footerDetails?.email || enquiryData.companyDetails?.email || 'bms@almcg.com'}</div>
                                     </div>
-                                </div> {/* End of Page 1 Container */}
-                            </div>
+                                </div>
+                            </div> {/* End of Page 1 Container */}
 
                             {/* Clauses - Standard + Custom Mixed & Numbered via Ordered List */}
                             <div className="page-break" style={{
@@ -4496,13 +4986,11 @@ const QuoteForm = () => {
                                     --- End of Quotation ---
                                 </div>
                             </div>
-
-
                         </div>
                     </>
-                )}
+                )
+                }
             </div>
-
         </div>
     );
 };
