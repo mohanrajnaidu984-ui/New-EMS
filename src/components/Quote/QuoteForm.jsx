@@ -2349,10 +2349,8 @@ const QuoteForm = () => {
         // 4. Lead Access (from Pricing Access)
         const hasLeadAccess = pricingData?.access?.hasLeadAccess;
 
-        if (!isCreator && !isInCC && !isAdmin && !hasLeadAccess) {
-            alert("Permission Denied: You are not authorized to edit or view this quote revision (Creator or CC list only).");
-            return;
-        }
+        // Removed restrictive view block to allow parent job users to view their subjob quotes
+        // edit permissions are strictly handled by the canEdit() check on Save/Revise buttons.
 
         setQuoteId(quote.ID);
         setQuoteNumber(quote.QuoteNumber);
@@ -2632,8 +2630,8 @@ const QuoteForm = () => {
                 });
                 setQuoteDate(new Date().toISOString().split('T')[0]);
                 setValidityDays(30);
-                setSubject('');
-                setCustomerReference('');
+                setSubject(enquiryData?.enquiry?.ProjectName ? `Proposal for ${enquiryData.enquiry.ProjectName}` : '');
+                setCustomerReference(enquiryData?.enquiry?.CustomerRefNo || enquiryData?.enquiry?.RequestNo || '');
             }
 
             // ALWAYS recalculate summary when switching tabs to ensure the sidebar summary matches the active branch,
@@ -4165,8 +4163,25 @@ const QuoteForm = () => {
                                                             (qDivCode === 'AAC' && jName.includes('AIR'));
                                                     });
 
+                                                    const activeTabAncestors = [];
+                                                    let currAnc = activeTabRealId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
+                                                    while (currAnc && (currAnc.parentId || currAnc.ParentID) && (currAnc.parentId || currAnc.ParentID) !== '0' && (currAnc.parentId || currAnc.ParentID) !== 0) {
+                                                        const pId = String(currAnc.parentId || currAnc.ParentID);
+                                                        const parent = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === pId);
+                                                        if (parent) {
+                                                            activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
+                                                            currAnc = parent;
+                                                        } else {
+                                                            break;
+                                                        }
+                                                    }
+
                                                     // STRICT REQUIREMENT: Match current selection ONLY strictly (Step 1053)
-                                                    const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+                                                    // EXCEPTION: Allows viewing subjob quotes sent to parent divisions (Ancestors)
+                                                    const isExactMatch = normalizedCurrentTo && (
+                                                        normalizedQuoteTo === normalizedCurrentTo ||
+                                                        (activeTabRealId && String(activeQuoteTab) !== 'self' && activeTabAncestors.includes(normalizedQuoteTo))
+                                                    );
 
                                                     // STRICT REQUIREMENT: If No Customer is selected, do not show quotes in the list.
                                                     if (!normalizedCurrentTo) return false;

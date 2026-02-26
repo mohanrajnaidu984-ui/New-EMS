@@ -7,15 +7,19 @@ const defaultFormData = {
     FullName: '',
     Designation: '',
     EmailId: '',
+    MobileNumber: '',
     Status: 'Active',
     Department: 'MEP',
     Roles: []
 };
 
-const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
+const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit, allUsers = [], onEmailMatch }) => {
     const [formData, setFormData] = useState(defaultFormData);
     const [newRole, setNewRole] = useState('');
     const [errors, setErrors] = useState({});
+
+    const [showSuggestions, setShowSuggestions] = useState(false);
+    const [suggestions, setSuggestions] = useState([]);
 
     const [divisions, setDivisions] = useState([]); // New state for divisions
 
@@ -54,6 +58,35 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
         setFormData(prev => ({ ...prev, [field]: value }));
         if (errors[field]) {
             setErrors(prev => ({ ...prev, [field]: null }));
+        }
+
+        // Auto-retrieve existing user if Email matches in Add mode
+        if (field === 'EmailId' && mode === 'Add' && allUsers.length > 0) {
+            const val = value.trim().toLowerCase();
+            if (val) {
+                // Generate suggestion list containing the typed characters
+                const filtered = allUsers.filter(u => u.EmailId && u.EmailId.toLowerCase().includes(val));
+                setSuggestions(filtered);
+                setShowSuggestions(true);
+
+                // If typing exactly matches an existing email, automatically select it
+                const existing = allUsers.find(u => u.EmailId && u.EmailId.trim().toLowerCase() === val);
+                if (existing && onEmailMatch) {
+                    onEmailMatch(existing);
+                    setShowSuggestions(false);
+                }
+            } else {
+                setSuggestions([]);
+                setShowSuggestions(false);
+            }
+        }
+    };
+
+    const handleSuggestionClick = (user) => {
+        setFormData(prev => ({ ...prev, EmailId: user.EmailId }));
+        setShowSuggestions(false);
+        if (onEmailMatch) {
+            onEmailMatch(user);
         }
     };
 
@@ -137,8 +170,37 @@ const UserModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }
                     <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
+                            value={formData.EmailId}
+                            onChange={(e) => handleChange('EmailId', e.target.value)}
+                            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                            onFocus={() => {
+                                if (mode === 'Add' && formData.EmailId && suggestions.length > 0) {
+                                    setShowSuggestions(true);
+                                }
+                            }}
+                        />
+                        {showSuggestions && suggestions.length > 0 && (
+                            <ul className="list-group position-absolute w-100 shadow-sm" style={{ zIndex: 1050, maxHeight: '150px', overflowY: 'auto' }}>
+                                {suggestions.map((u, i) => (
+                                    <li
+                                        key={i}
+                                        className="list-group-item list-group-item-action py-1 px-2"
+                                        style={{ fontSize: '12px', cursor: 'pointer' }}
+                                        onMouseDown={(e) => e.preventDefault()} // Prevents input blur from firing before onClick
+                                        onClick={() => handleSuggestionClick(u)}
+                                    >
+                                        <div className="fw-bold text-dark">{u.EmailId}</div>
+                                        <div className="text-muted small">{u.FullName}</div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
                         {errors.EmailId && <ValidationTooltip message={errors.EmailId} />}
+                    </div>
+                    <div className="col-md-6">
+                        <label className="form-label">Mobile Number</label>
+                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
+                            value={formData.MobileNumber} onChange={(e) => handleChange('MobileNumber', e.target.value)} />
                     </div>
                 </div>
                 <div className="row mb-2">

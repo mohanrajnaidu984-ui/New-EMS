@@ -21,7 +21,8 @@ const UserManagementModal = ({ show, onClose }) => {
     // Filtered Users
     const filteredUsers = users.filter(u =>
         (u.FullName && u.FullName.toLowerCase().includes(searchText.toLowerCase())) ||
-        (u.EmailId && u.EmailId.toLowerCase().includes(searchText.toLowerCase()))
+        (u.EmailId && u.EmailId.toLowerCase().includes(searchText.toLowerCase())) ||
+        (u.MobileNumber && u.MobileNumber.toLowerCase().includes(searchText.toLowerCase()))
     );
 
     const handleAdd = () => {
@@ -114,6 +115,7 @@ const UserManagementModal = ({ show, onClose }) => {
                             <tr>
                                 <th>Name</th>
                                 <th>Email</th>
+                                <th>Mobile</th>
                                 <th>Designation</th>
                                 <th>Department</th>
                                 <th>Roles</th>
@@ -123,12 +125,13 @@ const UserManagementModal = ({ show, onClose }) => {
                         </thead>
                         <tbody>
                             {filteredUsers.length === 0 ? (
-                                <tr><td colSpan="7" className="text-center text-muted">No users found.</td></tr>
+                                <tr><td colSpan="8" className="text-center text-muted">No users found.</td></tr>
                             ) : (
                                 filteredUsers.map((u, idx) => (
                                     <tr key={u.ID || idx}>
                                         <td>{u.FullName}</td>
                                         <td>{u.EmailId}</td>
+                                        <td>{u.MobileNumber}</td>
                                         <td>{u.Designation}</td>
                                         <td>{u.Department}</td>
                                         <td>
@@ -172,6 +175,11 @@ const UserManagementModal = ({ show, onClose }) => {
                 mode={modalMode}
                 initialData={editData}
                 onSubmit={handleUserSubmit}
+                allUsers={users}
+                onEmailMatch={(user) => {
+                    setModalMode('Edit');
+                    setEditData(user);
+                }}
             />
 
             {/* Delete Confirmation Modal - Portaled to Body */}

@@ -17,9 +17,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     if (!userEmail) return [];
 
     // 1. Get User Details
-    const userRes = await sql.query`SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
+    const userRes = await sql.query`SELECT FullName, Roles, Department FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
     const user = userRes.recordset[0];
     const userFullName = user ? user.FullName : '';
+    const userDepartment = user && user.Department ? user.Department.toLowerCase().trim() : '';
     const isAdmin = user && user.Roles === 'Admin';
 
     // 2. Fetch Enquiries
@@ -119,9 +120,11 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 // Extract username from email (part before @)
                 const userEmailUsername = userEmailLower.split('@')[0];
 
-                // Match if either full email or username is found
+                // Match if either full email or username is found OR job ItemName matches User Department
                 const isMatch = emailsLower.includes(userEmailLower) ||
-                    emailsLower.split(',').some(e => e.trim() === userEmailUsername);
+                    emailsLower.split(',').some(e => e.trim() === userEmailUsername) ||
+                    (userDepartment && job.ItemName.toLowerCase().trim().includes(userDepartment)) ||
+                    (userFullName && emailsLower.includes(userFullName.toLowerCase()));
 
                 console.log(`[Pricing] Job "${job.ItemName}" - Emails: "${emails}" - Match: ${isMatch}`);
 
@@ -147,31 +150,33 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         let processed = new Set();
         while (queue.length > 0) {
             const currentJob = queue.pop();
-            if (processed.has(currentJob.ID)) continue;
-            processed.add(currentJob.ID);
-            visibleJobs.add(currentJob.ID);
-            const children = enqJobs.filter(child => child.ParentID === currentJob.ID);
-            children.forEach(c => { if (!processed.has(c.ID)) queue.push(c); });
+            const currIdStr = String(currentJob.ID);
+            if (processed.has(currIdStr)) continue;
+            processed.add(currIdStr);
+            visibleJobs.add(currIdStr);
+            const children = enqJobs.filter(child => child.ParentID && String(child.ParentID) === currIdStr);
+            children.forEach(c => { if (!processed.has(String(c.ID))) queue.push(c); });
         }
 
         // Build Display String
         const childrenMap = {};
         enqJobs.forEach(j => {
-            if (j.ParentID) {
-                if (!childrenMap[j.ParentID]) childrenMap[j.ParentID] = [];
-                childrenMap[j.ParentID].push(j);
+            if (j.ParentID && String(j.ParentID) !== '0') {
+                const pidStr = String(j.ParentID);
+                if (!childrenMap[pidStr]) childrenMap[pidStr] = [];
+                childrenMap[pidStr].push(j);
             }
         });
 
-        const allVisibleJobs = enqJobs.filter(j => visibleJobs.has(j.ID)).sort((a, b) => a.ID - b.ID);
-        const visualRoots = allVisibleJobs.filter(j => !j.ParentID || !visibleJobs.has(j.ParentID));
+        const allVisibleJobs = enqJobs.filter(j => visibleJobs.has(String(j.ID))).sort((a, b) => a.ID - b.ID);
+        const visualRoots = allVisibleJobs.filter(j => !j.ParentID || String(j.ParentID) === '0' || !visibleJobs.has(String(j.ParentID)));
 
         const flatList = [];
         const traverse = (job, level) => {
             flatList.push({ ...job, level });
-            const children = childrenMap[job.ID] || [];
+            const children = childrenMap[String(job.ID)] || [];
             children.sort((a, b) => a.ID - b.ID);
-            children.forEach(child => { if (visibleJobs.has(child.ID)) traverse(child, level + 1); });
+            children.forEach(child => { if (visibleJobs.has(String(child.ID))) traverse(child, level + 1); });
         };
 
         visualRoots.forEach(root => traverse(root, 0));
@@ -296,38 +301,40 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 (o.ItemName === job.ItemName || !o.ItemName)
             );
 
-            // 3. Prioritize context match
-            const bestOpt = candidates.find(o => {
+            // 3. Find options matching target customer
+            const targetCandidates = candidates.filter(o => {
                 const c = (o.CustomerName || '').toLowerCase().trim();
                 return c === cleanTarget || cleanTarget.includes(c) || c.includes(cleanTarget);
-            }) || candidates[0];
+            });
 
-            if (!bestOpt) return { price: 0, updatedAt: null };
+            // Helper to lookup price for a set of options
+            const findBestPrice = (opts) => {
+                let bestRow = null;
+                for (const opt of opts) {
+                    const pRows = enqPrices.filter(p => p.OptionID == opt.OptionID);
+                    let row = pRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId));
+                    if (!row) row = pRows.find(p => p.EnquiryForItem === job.ItemName);
 
-            // 4. Lookup Price Value - STRICT ID PRIORITIZATION
-            const pRows = enqPrices.filter(p => p.OptionID == bestOpt.OptionID);
+                    if (row && row.Price > 0) {
+                        if (!bestRow || new Date(row.UpdatedAt) > new Date(bestRow.UpdatedAt)) {
+                            bestRow = row;
+                        }
+                    }
+                }
+                return bestRow;
+            };
 
-            // Priority 1: Exact ID match
-            let pRow = pRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId));
+            // 4. Lookup Price Value
+            // Try Target Options first
+            let pRow = findBestPrice(targetCandidates);
 
-            // Priority 2: Name match ONLY if ID is missing in record OR if it matches
+            // Try ALL Candidates as Fallback if target options had no price
             if (!pRow) {
-                pRow = pRows.find(p => (!p.EnquiryForID || String(p.EnquiryForID) === String(jobId)) && p.EnquiryForItem === job.ItemName);
+                pRow = findBestPrice(candidates);
             }
 
             if (pRow) {
                 return { price: parseFloat(pRow.Price) || 0, updatedAt: pRow.UpdatedAt };
-            }
-
-            // Fallback: If target context has no price, check if OTHER context has a price for this SAME option name
-            for (const otherOpt of candidates) {
-                const otherRows = enqPrices.filter(p => p.OptionID == otherOpt.OptionID);
-                const otherRow = otherRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId)) ||
-                    otherRows.find(p => (!p.EnquiryForID || String(p.EnquiryForID) === String(jobId)) && p.EnquiryForItem === job.ItemName);
-
-                if (otherRow && otherRow.Price > 0) {
-                    return { price: parseFloat(otherRow.Price), updatedAt: otherRow.UpdatedAt };
-                }
             }
 
             return { price: 0, updatedAt: null };
@@ -539,15 +546,17 @@ router.get('/:requestNo', async (req, res) => {
         let userJobItems = [];
         let userRole = '';
         let userFullName = '';
+        let userDepartment = '';
 
         if (userEmail) {
             try {
                 const userResult = await sql.query`
-                    SELECT FullName, Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
+                    SELECT FullName, Roles, Department FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
                 `;
                 if (userResult.recordset.length > 0) {
                     userFullName = userResult.recordset[0].FullName || '';
                     userRole = userResult.recordset[0].Roles || '';
+                    userDepartment = userResult.recordset[0].Department ? userResult.recordset[0].Department.toLowerCase().trim() : '';
                 }
             } catch (err) {
                 console.error('Error getting user name:', err);
@@ -566,7 +575,15 @@ router.get('/:requestNo', async (req, res) => {
                 const ccMails = (job.CCMailIds || '').toLowerCase().split(',').map(s => s.trim());
                 const allMails = [...commonMails, ...ccMails];
 
-                if (allMails.includes(userEmail.toLowerCase())) {
+                const userEmailUsername = userEmail.split('@')[0].toLowerCase();
+                const jobNameLower = job.ItemName.toLowerCase().trim();
+
+                let isMatch = allMails.includes(userEmail.toLowerCase()) ||
+                    allMails.some(e => e.split('@')[0] === userEmailUsername) ||
+                    (userDepartment && jobNameLower.includes(userDepartment)) ||
+                    (userFullName && allMails.some(e => e.includes(userFullName.toLowerCase())));
+
+                if (isMatch) {
                     if (!userJobItems.includes(job.ItemName)) {
                         userJobItems.push(job.ItemName);
                     }

@@ -41,22 +41,23 @@ router.get('/list', async (req, res) => {
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
                                     AND (
-                                        -- Standard: User has access to this specific item
+                                        -- Standard: User has access to this specific item (Own Job)
                                         (
                                             ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                             OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                         )
                                         OR
-                                        -- Hierarchy: Electrical users can see BMS totals
-                                        (
-                                            pv.EnquiryForItem = 'BMS' 
-                                            AND EXISTS (
-                                                SELECT 1 FROM Master_EnquiryFor lead 
-                                                WHERE lead.ItemName = 'Electrical' 
-                                                AND (
-                                                    ',' + REPLACE(REPLACE(ISNULL(lead.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                                    OR ',' + REPLACE(REPLACE(ISNULL(lead.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                                )
+                                        -- Hierarchy: User has access to the Parent job of this specific item (Subjob)
+                                        EXISTS (
+                                            SELECT 1 FROM EnquiryFor child
+                                            JOIN EnquiryFor parent ON child.ParentID = parent.ID
+                                            JOIN Master_EnquiryFor pmef ON (parent.ItemName = pmef.ItemName OR parent.ItemName LIKE '% - ' + pmef.ItemName)
+                                            WHERE (pv.EnquiryForItem = child.ItemName OR pv.EnquiryForItem LIKE '% - ' + child.ItemName)
+                                            AND child.RequestNo = E.RequestNo
+                                            AND parent.RequestNo = E.RequestNo
+                                            AND (
+                                                ',' + REPLACE(REPLACE(ISNULL(pmef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                OR ',' + REPLACE(REPLACE(ISNULL(pmef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                             )
                                         )
                                         OR

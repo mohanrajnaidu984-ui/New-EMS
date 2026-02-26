@@ -1545,22 +1545,7 @@ const PricingForm = () => {
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
                                             <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(s => {
-                                                    const parts = s.split('|');
-                                                    const name = parts[0];
-                                                    // STRICT FILTER: If user is from a specific division (e.g. BMS, Electrical),
-                                                    // they should NOT see prices for parents (e.g. Civil).
-                                                    // This is a global heuristic for the search list.
-                                                    if (pricingData && pricingData.access?.canEditAll) return true;
-                                                    if (currentUser?.Roles === 'Admin' || currentUser?.role === 'Admin') return true;
-
-                                                    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
-                                                    if (!userDept || userDept === 'civil' || userDept === 'admin') return true;
-
-                                                    // Allow if current job name starts with my department or matches it
-                                                    const nameLower = name.toLowerCase();
-                                                    return nameLower.includes(userDept) || userDept.includes(nameLower);
-                                                }).map((s, i) => {
+                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
                                                     const parts = s.split('|');
                                                     const name = parts[0];
                                                     const rawPrice = parts[1];

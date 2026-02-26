@@ -219,6 +219,30 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             .map(c => `${c.ContactName}|${c.CompanyName}`);
     }, [formData.CustomerName, masters.contacts]);
 
+    const filteredSEOptions = useMemo(() => {
+        if (!enqForList || enqForList.length === 0) return masters.concernedSEs;
+        if (!masters.users) return masters.concernedSEs;
+
+        const selectedDivisions = enqForList.map(item => {
+            const nameStr = typeof item === 'string' ? item : (item.itemName || item.name || '');
+            // Strip format "L1 - Name" to handle names correctly
+            const match = nameStr.match(/^L\d+\s-\s(.+)/);
+            return (match ? match[1] : nameStr).trim().toLowerCase();
+        });
+
+        // Filter users whose Department matches any selected division
+        const filteredUsers = masters.users.filter(u => {
+            if (!u.Department) return false;
+            return selectedDivisions.includes(u.Department.trim().toLowerCase());
+        });
+
+        // Create a unique list of FullNames from the filtered users
+        const uniqueNames = Array.from(new Set(filteredUsers.map(u => u.FullName.trim())));
+
+        // Fallback to all SEs if no match found (to avoid empty dropdown if mappings aren't perfect)
+        return uniqueNames.length > 0 ? uniqueNames : masters.concernedSEs;
+    }, [enqForList, masters.users, masters.concernedSEs]);
+
     // Effect to determine edit permission
     useEffect(() => {
         if (activeTab === 'New') {
@@ -1991,7 +2015,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                     <div className="col-md-6">
                                                         <ListBoxControl
                                                             label={<span>Sales Engineer / Estimation Engineer / Quantity Surveyor<span className="text-danger">*</span></span>}
-                                                            options={masters.concernedSEs}
+                                                            options={filteredSEOptions}
                                                             selectedOption={formData.ConcernedSE}
                                                             onOptionChange={(val) => handleInputChange('ConcernedSE', val)}
                                                             listBoxItems={seList}

@@ -30,10 +30,10 @@ const { handleLocalQuery } = require('../services/localAi');
 // Chat Route
 router.post('/chat', async (req, res) => {
     try {
-        const { message } = req.body;
+        const { message, user } = req.body;
         if (!message) return res.status(400).json({ error: 'Message is required' });
 
-        console.log('Received chat message:', message);
+        console.log('Received chat message:', message, 'User:', user?.email || user?.EmailId);
 
         // Check for API Key
         if (!process.env.GEMINI_API_KEY) {
@@ -48,7 +48,24 @@ router.post('/chat', async (req, res) => {
 
         // 2. Search Vector DB
         console.log('Searching vector DB...');
-        const searchResults = await search(queryVector, 5, 0.4); // Top 5, 0.4 threshold
+        let filter = null;
+        if (user) {
+            const roleString = user.role || user.Roles || '';
+            const userRoles = typeof roleString === 'string'
+                ? roleString.split(',').map(r => r.trim().toLowerCase())
+                : (Array.isArray(roleString) ? roleString.map(r => r.trim().toLowerCase()) : []);
+            const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
+
+            if (!isAdmin) {
+                filter = {
+                    role: 'User',
+                    email: (user.email || user.EmailId || '').trim().toLowerCase(),
+                    division: (user.DivisionName || '').trim().toLowerCase()
+                };
+            }
+        }
+
+        const searchResults = await search(queryVector, 5, 0.4, filter); // Top 5, 0.4 threshold
 
         console.log(`Found ${searchResults.length} relevant chunks`);
 

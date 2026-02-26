@@ -79,11 +79,32 @@ async function upsertPoints(points) {
     return true;
 }
 
-async function search(queryVector, limit = 5, scoreThreshold = 0.4) {
+async function search(queryVector, limit = 5, scoreThreshold = 0.4, filter = null) {
     if (vectorStore.length === 0) loadVectors();
 
+    let filteredStore = vectorStore;
+
+    if (filter) {
+        filteredStore = vectorStore.filter(point => {
+            const meta = point.payload.metadata;
+
+            // Check if user is creator
+            const isCreator = meta.created_by && meta.created_by === filter.email;
+
+            // Check if user is concerned SE
+            const isConcerned = meta.concerned_ses && Array.isArray(meta.concerned_ses) &&
+                meta.concerned_ses.some(se => se.trim().toLowerCase() === filter.email.toLowerCase());
+
+            // Check if user's division is in enquiry's divisions
+            const isDivision = meta.divisions && Array.isArray(meta.divisions) &&
+                meta.divisions.some(div => div.trim().toLowerCase() === filter.division.toLowerCase());
+
+            return isCreator || isConcerned || isDivision;
+        });
+    }
+
     // Calculate scores
-    const scored = vectorStore.map(point => ({
+    const scored = filteredStore.map(point => ({
         ...point,
         score: cosineSimilarity(queryVector, point.vector)
     }));

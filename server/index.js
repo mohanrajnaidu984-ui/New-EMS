@@ -1613,7 +1613,7 @@ app.get('/api/version', (req, res) => {
 });
 
 app.post('/api/users', async (req, res) => {
-    const { FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo, ModifiedBy } = req.body;
+    const { FullName, Designation, EmailId, MobileNumber, LoginPassword, Status, Department, Roles, RequestNo, ModifiedBy } = req.body;
 
     try {
         let hashedPassword = null;
@@ -1624,8 +1624,8 @@ app.post('/api/users', async (req, res) => {
 
         // Insert and get ID
         const result = await sql.query`
-            INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, LoginPassword, Status, Department, Roles, RequestNo)
-            VALUES (${FullName}, ${Designation}, ${EmailId}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo});
+            INSERT INTO Master_ConcernedSE (FullName, Designation, EmailId, MobileNumber, LoginPassword, Status, Department, Roles, RequestNo)
+            VALUES (${FullName}, ${Designation}, ${EmailId}, ${MobileNumber}, ${hashedPassword}, ${Status}, ${Department}, ${Roles}, ${RequestNo});
             SELECT SCOPE_IDENTITY() AS ID;
         `;
 
@@ -1650,10 +1650,10 @@ app.post('/api/users', async (req, res) => {
 
 app.put('/api/users/:id', async (req, res) => {
     const { id } = req.params;
-    const { FullName, Designation, EmailId, Status, Department, Roles, ModifiedBy } = req.body; // Expect ModifiedBy (Admin Name)
+    const { FullName, Designation, EmailId, MobileNumber, Status, Department, Roles, ModifiedBy } = req.body; // Expect ModifiedBy (Admin Name)
     try {
         // Note: Password update logic should be separate or handled carefully. Skipping password update here for simplicity unless provided.
-        await sql.query`UPDATE Master_ConcernedSE SET FullName=${FullName}, Designation=${Designation}, EmailId=${EmailId}, Status=${Status}, Department=${Department}, Roles=${Roles} WHERE ID=${id}`;
+        await sql.query`UPDATE Master_ConcernedSE SET FullName=${FullName}, Designation=${Designation}, EmailId=${EmailId}, MobileNumber=${MobileNumber}, Status=${Status}, Department=${Department}, Roles=${Roles} WHERE ID=${id}`;
 
         // Notify the user
         const displayRoles = Array.isArray(Roles) ? Roles.join(', ') : Roles;

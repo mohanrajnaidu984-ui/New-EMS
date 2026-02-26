@@ -1,154 +1,179 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { MessageCircle, X, Send, Bot, User, FileText } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import './ChatWidget.css';
 
-const ChatWidget = ({ onOpenEnquiry }) => {
+const ChatWidget = () => {
+    const { currentUser } = useAuth();
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState([
-        { role: 'bot', content: 'Hello! I am your EMS Assistant. Ask me anything about enquiries.' }
+        { id: 1, text: "Hi! How can I help you today? I'm your EMS Assistant.", sender: 'bot' }
     ]);
-    const [inputValue, setInputValue] = useState('');
+    const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef(null);
-    const inputRef = useRef(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     };
 
     useEffect(() => {
-        scrollToBottom();
+        if (isOpen) {
+            scrollToBottom();
+        }
     }, [messages, isOpen]);
 
-    useEffect(() => {
-        if (isOpen && inputRef.current) {
-            inputRef.current.focus();
-        }
-    }, [isOpen]);
+    const handleSend = async () => {
+        if (!input.trim() || isLoading) return;
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!inputValue.trim() || isLoading) return;
-
-        const userMessage = inputValue.trim();
-        setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
-        setInputValue('');
+        const userMessage = { id: Date.now(), text: input, sender: 'user' };
+        setMessages(prev => [...prev, userMessage]);
+        setInput('');
         setIsLoading(true);
 
         try {
             const response = await fetch('/api/chat', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ message: userMessage }),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: userMessage.text,
+                    user: currentUser
+                })
             });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
 
             const data = await response.json();
 
-            if (data.answer) {
-                setMessages(prev => [...prev, {
-                    role: 'bot',
-                    content: data.answer,
-                    sources: data.sources
-                }]);
-            } else if (data.error) {
-                setMessages(prev => [...prev, { role: 'bot', content: `Error: ${data.error}` }]);
-            }
+            const botMessage = {
+                id: Date.now() + 1,
+                text: data.answer || "I'm sorry, I couldn't process that.",
+                sender: 'bot',
+                sources: data.sources || []
+            };
+
+            setMessages(prev => [...prev, botMessage]);
         } catch (error) {
-            setMessages(prev => [...prev, { role: 'bot', content: 'Sorry, I encountered an error. Please try again.' }]);
             console.error('Chat error:', error);
+            const errorMessage = {
+                id: Date.now() + 1,
+                text: "Sorry, I'm having trouble connecting right now. Please try again later.",
+                sender: 'bot',
+                isError: true
+            };
+            setMessages(prev => [...prev, errorMessage]);
         } finally {
             setIsLoading(false);
         }
     };
 
-    // Helper to parse text with [Enquiry: XXX] links
-    const renderMessageContent = (msg) => {
-        if (msg.role === 'user') return msg.content;
-
-        // Split by citation pattern [Source: XXX] or [Enquiry: XXX]
-        // The backend returns [Source: RequestNo] or [Enquiry: RequestNo]
-        // Let's handle both. regex: /\[(?:Source|Enquiry): ([^\]]+)\]/g
-
-        const parts = msg.content.split(/(\[(?:Source|Enquiry): [^\]]+\])/g);
-
-        return (
-            <>
-                {parts.map((part, i) => {
-                    const match = part.match(/\[(?:Source|Enquiry): ([^\]]+)\]/);
-                    if (match) {
-                        const reqNo = match[1];
-                        return (
-                            <span
-                                key={i}
-                                className="citation-link"
-                                onClick={() => onOpenEnquiry && onOpenEnquiry(reqNo)}
-                                title="Click to view details"
-                            >
-                                📄 {reqNo}
-                            </span>
-                        );
-                    }
-                    return part;
-                })}
-                {msg.sources && msg.sources.length > 0 && (
-                    <div className="sources-list">
-                        <small style={{ display: 'block', width: '100%', color: '#666', marginBottom: '4px' }}>Sources:</small>
-                        {msg.sources.map((s, idx) => (
-                            <span
-                                key={idx}
-                                className="citation-link"
-                                onClick={() => onOpenEnquiry && onOpenEnquiry(s.id)}
-                            >
-                                Reference {idx + 1} ({s.id})
-                            </span>
-                        ))}
-                    </div>
-                )}
-            </>
-        );
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
     };
 
     return (
         <div className="chat-widget-container">
-            <div className={`chat-window ${isOpen ? 'open' : ''}`}>
-                <div className="chat-header">
-                    <h3>EMS Assistant</h3>
-                    <button className="chat-close-btn" onClick={() => setIsOpen(false)}>
-                        ✕
-                    </button>
-                </div>
-                <div className="chat-messages">
-                    {messages.map((msg, idx) => (
-                        <div key={idx} className={`message ${msg.role}`}>
-                            {renderMessageContent(msg)}
-                        </div>
-                    ))}
-                    {isLoading && (
-                        <div className="typing-indicator">
-                            Thinking...
-                        </div>
-                    )}
-                    <div ref={messagesEndRef} />
-                </div>
-                <form className="chat-input-area" onSubmit={handleSubmit}>
-                    <input
-                        ref={inputRef}
-                        type="text"
-                        className="chat-input"
-                        placeholder="Ask about enquiries..."
-                        value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
-                    />
-                    <button type="submit" className="send-btn" disabled={isLoading || !inputValue.trim()}>
-                        ➤
-                    </button>
-                </form>
-            </div>
+            {/* Toggle Button */}
+            {!isOpen && (
+                <button
+                    className="chat-toggle-btn"
+                    onClick={() => setIsOpen(true)}
+                    aria-label="Open Chat"
+                >
+                    <MessageCircle size={24} />
+                </button>
+            )}
 
-            <button className="chat-toggle-btn" onClick={() => setIsOpen(!isOpen)}>
-                {isOpen ? '✕' : '💬'}
-            </button>
+            {/* Chat Window */}
+            {isOpen && (
+                <div className="chat-window shadow-lg border rounded-3 d-flex flex-column">
+                    <div className="chat-header bg-primary text-white p-3 d-flex justify-content-between align-items-center rounded-top">
+                        <div className="d-flex align-items-center gap-2">
+                            <Bot size={20} />
+                            <h6 className="m-0">EMS Assistant</h6>
+                        </div>
+                        <button
+                            className="btn btn-sm text-white p-0 border-0"
+                            onClick={() => setIsOpen(false)}
+                            aria-label="Close Chat"
+                        >
+                            <X size={20} />
+                        </button>
+                    </div>
+
+                    <div className="chat-messages flex-grow-1 p-3 overflow-auto bg-light">
+                        {messages.map((msg) => (
+                            <div
+                                key={msg.id}
+                                className={`message-wrapper d-flex flex-column mb-3 ${msg.sender === 'user' ? 'align-items-end' : 'align-items-start'}`}
+                            >
+                                <div className={`message-bubble p-2 rounded ${msg.sender === 'user' ? 'bg-primary text-white' : 'bg-white border'}`}>
+                                    {msg.text.split('\n').map((line, i) => (
+                                        <p key={i} className="mb-0" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                            {line}
+                                        </p>
+                                    ))}
+                                </div>
+
+                                {/* Sources Display */}
+                                {msg.sources && msg.sources.length > 0 && (
+                                    <div className="sources-container mt-1 bg-white border rounded p-2" style={{ maxWidth: '85%' }}>
+                                        <small className="text-muted d-block mb-1">
+                                            <FileText size={12} className="me-1" />
+                                            Sources
+                                        </small>
+                                        <div className="d-flex flex-wrap gap-1">
+                                            {msg.sources.map((src, i) => (
+                                                <span key={i} className="badge bg-light text-dark border">
+                                                    Enq: {src.id}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+
+                        {isLoading && (
+                            <div className="message-wrapper align-items-start mb-3">
+                                <div className="message-bubble p-2 rounded bg-white border">
+                                    <div className="typing-indicator d-flex gap-1 align-items-center">
+                                        <div className="dot"></div>
+                                        <div className="dot"></div>
+                                        <div className="dot"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        <div ref={messagesEndRef} />
+                    </div>
+
+                    <div className="chat-input-area p-2 bg-white border-top rounded-bottom d-flex align-items-end gap-2">
+                        <textarea
+                            className="form-control"
+                            rows="1"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder="Type a message..."
+                            style={{ resize: 'none', overflowY: 'hidden' }}
+                        />
+                        <button
+                            className="btn btn-primary d-flex align-items-center justify-content-center"
+                            onClick={handleSend}
+                            disabled={!input.trim() || isLoading}
+                            style={{ width: '40px', height: '40px', borderRadius: '50%' }}
+                        >
+                            <Send size={16} />
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

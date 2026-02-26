@@ -45,10 +45,14 @@ router.get('/list/pending', async (req, res) => {
         console.log(`[API] Check Pending Quotes for ${userEmail || 'All'}...`);
 
         let isAdmin = false;
+        let userDepartment = '';
+        let userFullName = '';
         if (userEmail) {
-            const userRes = await sql.query`SELECT Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
+            const userRes = await sql.query`SELECT Roles, Department, FullName FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
             if (userRes.recordset.length > 0) {
                 isAdmin = userRes.recordset[0].Roles === 'Admin';
+                userDepartment = userRes.recordset[0].Department ? userRes.recordset[0].Department.trim() : '';
+                userFullName = userRes.recordset[0].FullName ? userRes.recordset[0].FullName.trim() : '';
             }
         }
 
@@ -114,7 +118,9 @@ router.get('/list/pending', async (req, res) => {
                             WHERE EF2.RequestNo = E.RequestNo
                             AND (
                                 REPLACE(MEF2.CommonMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%' OR 
-                                REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%'
+                                REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%' OR
+                                ('${userDepartment}' <> '' AND MEF2.ItemName LIKE '%${userDepartment}%') OR
+                                ('${userFullName}' <> '' AND (REPLACE(MEF2.CommonMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userFullName}%' OR REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userFullName}%'))
                             )
                             FOR XML PATH(''), TYPE
                         ).value('.', 'NVARCHAR(MAX)'), 1, 1, '')
@@ -138,7 +144,9 @@ router.get('/list/pending', async (req, res) => {
                 WHERE PV.Price > 0
                 AND (
                     REPLACE(MEF.CommonMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%' OR 
-                    REPLACE(MEF.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%'
+                    REPLACE(MEF.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userEmail}%' OR
+                    ('${userDepartment}' <> '' AND MEF.ItemName LIKE '%${userDepartment}%') OR
+                    ('${userFullName}' <> '' AND (REPLACE(MEF.CommonMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userFullName}%' OR REPLACE(MEF.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${userFullName}%'))
                 )
                 AND (
                     EF.ItemName = PO.ItemName OR 
@@ -345,10 +353,10 @@ router.get('/list/pending', async (req, res) => {
                         (p.EnquiryForID && p.EnquiryForID.toString() == job.ID.toString())
                     );
 
-                    // Fallback to ItemName match ONLY for legacy records with no ID
+                    // Fallback to ItemName match if ID is lost/changed on enquiry update
                     let finalMatches = matches;
                     if (finalMatches.length === 0) {
-                        finalMatches = enqPrices.filter(p => !p.EnquiryForID && p.EnquiryForItem && p.EnquiryForItem.toString().trim() == job.ItemName.toString().trim());
+                        finalMatches = enqPrices.filter(p => p.EnquiryForItem && p.EnquiryForItem.toString().trim() === job.ItemName.toString().trim());
                     }
 
                     const sortedMatches = [...finalMatches].sort((a, b) => new Date(b.UpdatedAt) - new Date(a.UpdatedAt));
@@ -653,9 +661,11 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             divisionsList = rawItems.map(r => r.ItemName); // Default all
 
             if (userEmail) {
-                // Fetch User Role
-                const userRes = await sql.query`SELECT Roles FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
+                // Fetch User Role and Department
+                const userRes = await sql.query`SELECT Roles, Department, FullName FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
                 const userRole = userRes.recordset.length > 0 ? userRes.recordset[0].Roles : '';
+                const userDepartment = userRes.recordset.length > 0 && userRes.recordset[0].Department ? userRes.recordset[0].Department.trim().toLowerCase() : '';
+                const userFullName = userRes.recordset.length > 0 && userRes.recordset[0].FullName ? userRes.recordset[0].FullName.trim().toLowerCase() : '';
                 const isAdmin = userRole === 'Admin';
 
                 if (!isAdmin) {
@@ -666,9 +676,12 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     const userScopeItems = rawItems.filter(item => {
                         const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
                         const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
+                        const itemNameLower = item.ItemName.toLowerCase().trim();
 
                         return normalizedMails.includes(normalizedUser) ||
-                            (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@')));
+                            (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@'))) ||
+                            (userDepartment && itemNameLower.includes(userDepartment)) ||
+                            (userFullName && normalizedMails.includes(userFullName));
                     });
 
                     if (userScopeItems.length > 0) {
@@ -726,9 +739,12 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     const userPrefix = normalizedUser.split('@')[0];
                     const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
                     const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
+                    const itemNameLower = item.ItemName.toLowerCase().trim();
 
                     const userIsDirectlyAssigned = normalizedMails.includes(normalizedUser) ||
-                        (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@')));
+                        (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@'))) ||
+                        (userDepartment && itemNameLower.includes(userDepartment)) ||
+                        (userFullName && normalizedMails.includes(userFullName));
 
                     if (userIsDirectlyAssigned && (masterData.DivisionCode || masterData.DepartmentCode)) {
                         const profile = {
