@@ -327,9 +327,9 @@ router.get('/summary', async (req, res) => {
                     WHERE EF_Inner.RequestNo = E.RequestNo
                       AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division
                 ) DivValue
-                WHERE YEAR(EnquiryDate) = @year ${filterClause}
+                WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
                   AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
-                  ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
                 GROUP BY Status
             `;
         } else {
@@ -340,9 +340,9 @@ router.get('/summary', async (req, res) => {
                     SUM(${itemValueCol}) as TotalValue
                 FROM EnquiryMaster E
                 ${itemValueApply}
-                WHERE YEAR(EnquiryDate) = @year ${filterClause}
+                WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
                   AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
-                  ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
                 GROUP BY Status
             `;
         }
@@ -513,9 +513,9 @@ router.get('/summary', async (req, res) => {
                 COUNT(*) as Count
             FROM EnquiryMaster E
             ${itemValueApply}
-            WHERE YEAR(EnquiryDate) = @year ${filterClause}
+            WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
               AND Status NOT IN ('Won', 'Lost')
-              ${safeQuarter ? 'AND DATEPART(QUARTER, EnquiryDate) = @quarterNums' : ''}
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
               AND ProbabilityOption IS NOT NULL AND ProbabilityOption <> ''
             GROUP BY ProbabilityOption
             ORDER BY MAX(Probability) ASC
@@ -594,8 +594,8 @@ router.get('/summary', async (req, res) => {
                    AND (EnquiryForID = EF.ID OR EnquiryForItem = EF.ItemName)
                  ORDER BY OptionID DESC
             ) EPV
-            WHERE YEAR(E.EnquiryDate) = @year ${filterClause} ${itemWiseWhere}
-            ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNums' : ''}
+            WHERE YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause} ${itemWiseWhere}
+            ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums' : ''}
             GROUP BY ${itemWiseGroupBy}
         `);
 
@@ -733,8 +733,8 @@ router.get('/item-wise-stats', async (req, res) => {
                    AND (EnquiryForID = EF.ID OR EnquiryForItem = EF.ItemName)
                  ORDER BY OptionID DESC
             ) EPV
-            WHERE YEAR(E.EnquiryDate) = @year ${filterClause} ${itemWiseWhere}
-            ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNums' : ''}
+            WHERE YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause} ${itemWiseWhere}
+            ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums' : ''}
             GROUP BY ${itemWiseGroupBy}
         `);
 
@@ -839,8 +839,8 @@ router.get('/funnel-details', async (req, res) => {
                 WHERE QM.RequestNo = E.RequestNo
                 ORDER BY QuoteDate DESC
             ) Q
-            WHERE YEAR(E.EnquiryDate) = @year 
-              ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''}
+            WHERE YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year 
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNum' : ''}
               AND E.ProbabilityOption LIKE @probName + '%'
               AND E.Status NOT IN ('Won', 'Lost')
               ${filterClause}
@@ -1011,9 +1011,8 @@ router.get('/drilldown-details', async (req, res) => {
         } else if (metric === 'win-loss') {
             // Label is 'Won', 'Lost', 'Follow Up'
             // Map label to Status
-            // 'Won' -> Status 'Won', Year(EnquiryDate) = @year (Note: Summary uses EnquiryDate for WinLoss, ExpectedOrderDate for Quarterly. Sticking to Summary logic)
-            // Wait, Win-Loss loop in Summary uses YEAR(EnquiryDate).
-            baseQuery += ` AND YEAR(E.EnquiryDate) = @year ${filterClause} ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''} `;
+            // 'Won' -> Status 'Won', Year(ExpectedDate) = @year
+            baseQuery += ` AND YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause} ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNum' : ''} `;
             if (label === 'Won') baseQuery += ` AND E.Status = 'Won' `;
             else if (label === 'Lost') baseQuery += ` AND E.Status = 'Lost' `;
             else if (label === 'Follow Up') baseQuery += ` AND E.Status IN ('Follow-up', 'FollowUp') `;
@@ -1052,8 +1051,8 @@ router.get('/drilldown-details', async (req, res) => {
             else itemFilter = `(mef.DepartmentName = @label)`;
 
             baseQuery += `
-                AND YEAR(E.EnquiryDate) = @year ${filterClause}
-                ${safeQuarter ? 'AND DATEPART(QUARTER, E.EnquiryDate) = @quarterNum' : ''}
+                AND YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause}
+                ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNum' : ''}
                 AND EXISTS (
                     SELECT 1 FROM EnquiryFor EF
                     JOIN Master_EnquiryFor mef ON (EF.ItemName = mef.ItemName OR EF.ItemName LIKE '% - ' + mef.ItemName)

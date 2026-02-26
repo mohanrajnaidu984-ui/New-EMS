@@ -220,65 +220,137 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const optionMap = {};
         enqOptions.forEach(o => { optionMap[o.OptionID] = o; });
 
+        const jobMap = {};
+        enqJobs.forEach(j => jobMap[j.ID] = j);
 
-        const displayItems = flatList.map(job => {
-            // Strategy: Show the "Base Price" option value for each job/division.
-            // EnquiryPricingValues links OptionID → EnquiryForID → Price.
-            // Step 1: Find the "Base Price" option(s) for this specific job
-            const basePriceOptions = enqOptions.filter(o =>
-                o.OptionName === 'Base Price' &&
-                (o.ItemName === job.ItemName || o.ItemName === null || o.ItemName === '')
+        const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
+
+        // Determine if ALL scoped jobs are subjobs (have a parent).
+        const scopedAreSubjobs = myJobs.length > 0 &&
+            myJobs.every(j => (j.ParentID && j.ParentID != '0' && j.ParentID != 0));
+
+        const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
+
+        // Collect External Customers
+        let externalCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+
+        // Collect Alternative (Option) Customers
+        const optionCustomers = new Set();
+        enqOptions.forEach(o => {
+            if (o.CustomerName) optionCustomers.add(o.CustomerName.trim());
+        });
+
+        const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
+        const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
+
+        let finalCustomers;
+        if (scopedAreSubjobs) {
+            // Subjob context: Identify parents of my scoped jobs
+            const parentSet = new Set();
+            myJobs.forEach(j => {
+                if (j.ParentID && jobMap[j.ParentID]) parentSet.add(jobMap[j.ParentID].ItemName);
+            });
+            if (parentSet.size === 0) parentSet.add(internalCustomer);
+
+            finalCustomers = Array.from(parentSet).filter(c => {
+                const cNorm = normalize(c);
+                if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                return true;
+            });
+        } else {
+            // Lead job context: External customers + internal jobs with pricing options
+            const finalSet = new Set(externalCustomers);
+            optionCustomers.forEach(c => finalSet.add(c));
+
+            finalCustomers = Array.from(finalSet).filter(c => {
+                const cNorm = normalize(c);
+                // Filter out own division if it's listed as a customer
+                if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                // Only keep job names if they are actually listed in options (handled by Set addition above)
+                return true;
+            });
+        }
+
+        const fullCustomerName = finalCustomers.join(', ');
+
+        const displayItems = [];
+
+        const getDivisionPrice = (jobId, optionName) => {
+            const job = jobMap[jobId];
+            if (!job) return { price: 0, updatedAt: null };
+
+            // 1. Determine Target Customer context (Internal Division logic)
+            // If sub-job, look for price quoted to Parent. If root, look for price quoted to Main Customer.
+            let targetCust = '';
+            if (job.ParentID && jobMap[job.ParentID]) {
+                targetCust = jobMap[job.ParentID].ItemName;
+            } else {
+                targetCust = enq.CustomerName || '';
+            }
+            const cleanTarget = targetCust.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+
+            // 2. Find and Filter matching options
+            const candidates = enqOptions.filter(o =>
+                o.OptionName === optionName &&
+                (o.ItemName === job.ItemName || !o.ItemName)
             );
 
-            let priceRow = null;
+            // 3. Prioritize context match
+            const bestOpt = candidates.find(o => {
+                const c = (o.CustomerName || '').toLowerCase().trim();
+                return c === cleanTarget || cleanTarget.includes(c) || c.includes(cleanTarget);
+            }) || candidates[0];
 
-            // Step 2: Find price row(s) for Base Price option + this job
-            // Match strategy:
-            //   Primary: OptionID matches AND EnquiryForID matches job.ID
-            //   Fallback: OptionID matches AND EnquiryForItem matches job.ItemName (handles stale/wrong IDs)
-            if (basePriceOptions.length > 0) {
-                for (const bpOpt of basePriceOptions) {
-                    // Try strict ID match first
-                    const foundById = enqPrices.find(p =>
-                        p.OptionID == bpOpt.OptionID &&
-                        p.EnquiryForID == job.ID
-                    );
-                    // Try name match as fallback (handles cases where EnquiryForID is stale/wrong)
-                    const foundByName = enqPrices.find(p =>
-                        p.OptionID == bpOpt.OptionID &&
-                        p.EnquiryForItem === job.ItemName
-                    );
-                    // Prefer ID match with price > 0, then name match with price > 0, then any match
-                    const found = (foundById && foundById.Price > 0) ? foundById
-                        : (foundByName && foundByName.Price > 0) ? foundByName
-                            : foundById || foundByName;
+            if (!bestOpt) return { price: 0, updatedAt: null };
 
-                    if (found && found.Price > 0) {
-                        priceRow = found;
-                        break;
-                    } else if (found && !priceRow) {
-                        priceRow = found; // keep as fallback (zero or explicit row)
+            // 4. Lookup Price Value - STRICT ID PRIORITIZATION
+            const pRows = enqPrices.filter(p => p.OptionID == bestOpt.OptionID);
+
+            // Priority 1: Exact ID match
+            let pRow = pRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId));
+
+            // Priority 2: Name match ONLY if ID is missing in record OR if it matches
+            if (!pRow) {
+                pRow = pRows.find(p => (!p.EnquiryForID || String(p.EnquiryForID) === String(jobId)) && p.EnquiryForItem === job.ItemName);
+            }
+
+            if (pRow) {
+                return { price: parseFloat(pRow.Price) || 0, updatedAt: pRow.UpdatedAt };
+            }
+
+            // Fallback: If target context has no price, check if OTHER context has a price for this SAME option name
+            for (const otherOpt of candidates) {
+                const otherRows = enqPrices.filter(p => p.OptionID == otherOpt.OptionID);
+                const otherRow = otherRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId)) ||
+                    otherRows.find(p => (!p.EnquiryForID || String(p.EnquiryForID) === String(jobId)) && p.EnquiryForItem === job.ItemName);
+
+                if (otherRow && otherRow.Price > 0) {
+                    return { price: parseFloat(otherRow.Price), updatedAt: otherRow.UpdatedAt };
+                }
+            }
+
+            return { price: 0, updatedAt: null };
+        };
+
+        flatList.forEach(job => {
+            const targetOptionNames = ['Base Price', 'Optional'];
+
+            targetOptionNames.forEach(optName => {
+                const { price, updatedAt } = getDivisionPrice(job.ID, optName);
+
+                if (price > 0 || optName === 'Base Price') {
+                    // Identify L1 explicitly based on tree level (Step 1622)
+                    let displayCode = job.LeadJobCode;
+                    if (!displayCode && (job.level === 0 || !job.ParentID || job.ParentID === '0' || job.ParentID === 0)) {
+                        displayCode = 'L1';
                     }
-                }
-            }
+                    const jobLabel = displayCode ? `${job.ItemName} (${displayCode})` : job.ItemName;
+                    const displayName = optName === 'Base Price' ? jobLabel : `${jobLabel} (${optName})`;
 
-            // Step 3: Fallback — any non-zero price for this job (any option, ID or name match)
-            if (!priceRow || !priceRow.Price) {
-                const allJobPrices = enqPrices.filter(p =>
-                    p.EnquiryForID == job.ID ||
-                    p.EnquiryForItem === job.ItemName
-                );
-                const nonZero = allJobPrices.filter(p => p.Price > 0);
-                if (nonZero.length > 0) {
-                    nonZero.sort((a, b) => b.Price - a.Price);
-                    priceRow = nonZero[0];
+                    displayItems.push(`${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`);
                 }
-            }
-
-            const priceVal = priceRow ? priceRow.Price : 0;
-            const updatedAt = priceRow ? priceRow.UpdatedAt : null;
-            const displayName = job.LeadJobCode ? `${job.ItemName} (${job.LeadJobCode})` : job.ItemName;
-            return `${displayName}|${priceVal > 0 ? priceVal : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`;
+            });
         });
 
         // Filter for Pending View
@@ -291,6 +363,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         return {
             ...enq,
+            CustomerName: fullCustomerName,
             SubJobPrices: displayItems.join(';;')
         };
     }).filter(Boolean);
@@ -592,7 +665,7 @@ router.get('/:requestNo', async (req, res) => {
             // Sometimes joins or legacy data cause duplicates.
             const seenOptions = new Set();
             options = options.filter(o => {
-                const key = `${o.OptionName}|${o.ItemName}|${o.CustomerName}`;
+                const key = `${o.OptionName}|${o.ItemName}|${o.CustomerName}|${o.LeadJobName}`;
                 if (seenOptions.has(key)) return false;
                 seenOptions.add(key);
                 return true;
@@ -650,13 +723,14 @@ router.get('/:requestNo', async (req, res) => {
         // 2. VIEW PERMISSIONS (Tree / Global)
         const isCreator = (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim());
 
-        // FIX: Removed 'isCreator' from Manager Access. 
-        // Creators are no longer treated as Super Users for View. They see only their assigned hierarchy.
-        const isManager = userRole === 'Admin' || userHasLeadAccess;
+        // FIX: Only Admins get global 'View All' access. 
+        // Other users (including Leads/Creators) follow the hierarchical View logic below.
+        const isGlobalView = userRole === 'Admin';
 
-        if (isManager) {
-            console.log('Pricing API: Manager Access -> View All');
+        if (isGlobalView) {
+            console.log('Pricing API: Admin Access -> View All');
             visibleJobs = jobs.map(j => j.ItemName);
+            visibleJobIds = new Set(jobs.map(j => j.ID));
         } else {
             // Standard User: View Assigned + Descendants
             // Fallback: If Creator has NO assignments, should we show everything or nothing?
@@ -691,8 +765,9 @@ router.get('/:requestNo', async (req, res) => {
 
             visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
             visibleJobIds = allVisibleIds; // ID Set
-            // FIX: Allow editing of ALL Assignee descendants
-            const allEditableIds = new Set([...selfJobIds, ...descendantIds]);
+            // UPDATE: User can only edit explicitly assigned jobs. 
+            // Descendants are visible but READ-ONLY (Step 852)
+            const allEditableIds = new Set([...selfJobIds]);
             editableJobIds = allEditableIds;
             editableJobs = jobs.filter(j => allEditableIds.has(j.ID)).map(j => j.ItemName);
 
@@ -712,15 +787,15 @@ router.get('/:requestNo', async (req, res) => {
                 consultantName: enquiry.ConsultantName
             },
             extraCustomers: extraCustomers
-                .map(c => c.CustomerName)
+                .map(c => (c.CustomerName || '').replace(/[,.]+$/g, '').trim()) // Normalize names
                 .filter(name => {
                     const cleanName = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                    return !excludedNames.has(name) && !excludedNames.has(cleanName);
+                    return name && !excludedNames.has(name) && !excludedNames.has(cleanName);
                 }),
             customers: customers,
             activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim())))
                 ? (customers.length > 0 ? customers[0] : '')
-                : activeCustomerName,
+                : (activeCustomerName || '').replace(/[,.]+$/g, '').trim(),
             leadJob: leadJobItem,
             jobs: jobs.map(j => ({
                 id: j.ID,
@@ -734,7 +809,7 @@ router.get('/:requestNo', async (req, res) => {
                 phone: j.Phone,
                 fax: j.FaxNo,
                 email: j.CommonMailIds,
-                isLead: j.ItemName === leadJobItem,
+                isLead: !j.ParentID || j.ParentID === 0 || j.ParentID === "0",
                 visible: typeof visibleJobIds !== 'undefined' ? visibleJobIds.has(j.ID) : visibleJobs.includes(j.ItemName),
                 editable: typeof editableJobIds !== 'undefined' ? editableJobIds.has(j.ID) : editableJobs.includes(j.ItemName)
             })),

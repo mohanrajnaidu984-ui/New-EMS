@@ -3,7 +3,7 @@ import Modal from './Modal';
 import ValidationTooltip from '../Common/ValidationTooltip';
 import { useData } from '../../context/DataContext';
 
-const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
+const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit, onModeChange }) => {
     const [formData, setFormData] = useState({
         ItemName: '',
         CompanyName: '',
@@ -72,35 +72,32 @@ const EnquiryItemModal = ({ show, onClose, mode = 'Add', initialData = null, onS
             setErrors(prev => ({ ...prev, [field]: null }));
         }
 
-        // Auto-fill logic for ItemName in Add mode
+        // Auto-fill and Update prompt logic for ItemName in Add mode
         if (mode === 'Add' && field === 'ItemName' && value.trim()) {
             const match = masters.enqItems.find(i =>
                 (i.ItemName || '').toLowerCase() === value.trim().toLowerCase()
             );
 
             if (match) {
-                console.log('Match found for auto-fill:', match);
-                const common = Array.isArray(match.CommonMailIds)
-                    ? match.CommonMailIds
-                    : (match.CommonMailIds ? match.CommonMailIds.split(',') : []);
-                const cc = Array.isArray(match.CCMailIds)
-                    ? match.CCMailIds
-                    : (match.CCMailIds ? match.CCMailIds.split(',') : []);
+                const shouldUpdate = window.confirm(`"${value.trim()}" already exists. Would you like to update its details?`);
+                if (shouldUpdate) {
+                    const common = Array.isArray(match.CommonMailIds)
+                        ? match.CommonMailIds
+                        : (match.CommonMailIds ? match.CommonMailIds.split(',') : []);
+                    const cc = Array.isArray(match.CCMailIds)
+                        ? match.CCMailIds
+                        : (match.CCMailIds ? match.CCMailIds.split(',') : []);
 
-                setFormData(prev => ({
-                    ...prev,
-                    CompanyName: match.CompanyName || '',
-                    DepartmentName: match.DepartmentName || '',
-                    Status: match.Status || 'Active',
-                    CommonMailIds: common,
-                    CCMailIds: cc,
-                    DivisionCode: match.DivisionCode || '',
-                    DepartmentCode: match.DepartmentCode || '',
-                    Phone: match.Phone || '',
-                    Address: match.Address || '',
-                    FaxNo: match.FaxNo || '',
-                    CompanyLogo: match.CompanyLogo || ''
-                }));
+                    setFormData({
+                        ...match,
+                        CommonMailIds: common,
+                        CCMailIds: cc
+                    });
+
+                    if (onModeChange) {
+                        onModeChange('Edit', match);
+                    }
+                }
             }
         }
     };

@@ -15,7 +15,8 @@ const SearchableSelectControl = ({
     disabled = false,
     error = null,
     renderOption = (opt) => opt,
-    selectedItemDetails = null
+    selectedItemDetails = null,
+    minSearchLength = 3
 }) => {
     const [inputValue, setInputValue] = React.useState('');
 
@@ -60,8 +61,8 @@ const SearchableSelectControl = ({
                     value={selectedValue}
                     onChange={(opt) => onOptionChange(opt ? opt.value : '')}
                     onInputChange={(val) => setInputValue(val)}
-                    options={inputValue.length >= 3 ? selectOptions : []}
-                    noOptionsMessage={() => inputValue.length < 3 ? "Type 3+ characters to search..." : "No results found"}
+                    options={inputValue.length >= minSearchLength ? selectOptions : []}
+                    noOptionsMessage={() => inputValue.length < minSearchLength ? `Type ${minSearchLength}+ characters to search...` : "No results found"}
                     styles={customStyles}
                     isDisabled={disabled}
                     isClearable={true}

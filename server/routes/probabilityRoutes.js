@@ -294,6 +294,26 @@ router.post('/update', async (req, res) => {
         console.log(`[Probability Update] Processing ReqNo: ${enquiryNo}, Status: ${status}`);
         console.log(`[Probability Update] Lost Details:`, lostDetails);
 
+        // Server-side validation for Won status
+        if (status === 'Won') {
+            if (!wonDetails?.wonQuoteRef) {
+                return res.status(400).json({ error: 'Quote Reference is mandatory for Won status' });
+            }
+            const rawVal = String(wonDetails?.orderValue || '').replace(/,/g, '').trim();
+            if (!rawVal || isNaN(rawVal) || Number(rawVal) <= 0) {
+                return res.status(400).json({ error: 'Valid Job Value is mandatory for Won status' });
+            }
+            if (!wonDetails?.jobNo || !String(wonDetails.jobNo).trim()) {
+                return res.status(400).json({ error: 'ERP Job No. is mandatory for Won status' });
+            }
+            if (!expectedDate) {
+                return res.status(400).json({ error: 'Booked Date is mandatory for Won status' });
+            }
+            if (wonDetails?.grossProfit == null || wonDetails?.grossProfit === '') {
+                return res.status(400).json({ error: 'GP % is mandatory for Won status' });
+            }
+        }
+
         // Calculate probability int from option string if not provided (e.g. "High Chance (90%)" -> 90)
         let probability = probInput;
         if (probability === undefined || probability === null) {

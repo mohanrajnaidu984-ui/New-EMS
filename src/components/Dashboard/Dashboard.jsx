@@ -17,21 +17,50 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     const API_URL = '/api/dashboard';
 
     // State
-    const [dateState, setDateState] = useState({
-        month: new Date().getMonth() + 1,
-        year: new Date().getFullYear(),
-        selectedDate: null,
-        selectedType: 'all' // 'all', 'enquiry', 'due', 'visit'
+    const [dateState, setDateState] = useState(() => {
+        const saved = localStorage.getItem('dashboard_dateState');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                console.error("Failed to parse dashboard_dateState", e);
+            }
+        }
+        return {
+            month: new Date().getMonth() + 1,
+            year: new Date().getFullYear(),
+            selectedDate: null,
+            selectedType: 'all'
+        };
     });
 
-    const [filters, setFilters] = useState({
-        division: 'All',
-        salesEngineer: 'All',
-        mode: 'future', // Default to Future (Due >= Today)
-        dateType: 'Enquiry Date',
-        status: 'All',
-        search: ''
+    const [filters, setFilters] = useState(() => {
+        const saved = localStorage.getItem('dashboard_filters');
+        if (saved) {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                console.error("Failed to parse dashboard_filters", e);
+            }
+        }
+        return {
+            division: 'All',
+            salesEngineer: 'All',
+            mode: 'future',
+            dateType: 'Enquiry Date',
+            status: 'All',
+            search: ''
+        };
     });
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('dashboard_dateState', JSON.stringify(dateState));
+    }, [dateState]);
+
+    useEffect(() => {
+        localStorage.setItem('dashboard_filters', JSON.stringify(filters));
+    }, [filters]);
 
     const [data, setData] = useState({
         calendar: [],

@@ -60,9 +60,16 @@ const SalesTarget = () => {
     const [managedDivisions, setManagedDivisions] = useState([]);
 
     // Filters
-    const [selectedYear, setSelectedYear] = useState('2026');
-    const [selectedDivision, setSelectedDivision] = useState('');
-    const [selectedEngineer, setSelectedEngineer] = useState('');
+    const [selectedYear, setSelectedYear] = useState(() => localStorage.getItem('target_year') || '2026');
+    const [selectedDivision, setSelectedDivision] = useState(() => localStorage.getItem('target_division') || '');
+    const [selectedEngineer, setSelectedEngineer] = useState(() => localStorage.getItem('target_engineer') || '');
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('target_year', selectedYear);
+        localStorage.setItem('target_division', selectedDivision);
+        localStorage.setItem('target_engineer', selectedEngineer);
+    }, [selectedYear, selectedDivision, selectedEngineer]);
 
     // Lists
     const [engineers, setEngineers] = useState([]);

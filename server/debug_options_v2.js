@@ -1,14 +1,36 @@
-const { sql, connectDB } = require('./dbConfig');
+const sql = require('mssql');
+require('dotenv').config();
 
-const run = async () => {
+const config = {
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    server: process.env.DB_SERVER,
+    database: process.env.DB_DATABASE,
+    options: {
+        encrypt: false,
+        trustServerCertificate: true
+    }
+};
+
+async function checkPricing() {
     try {
-        await connectDB();
-        const data = await new sql.Request().query("SELECT ID, OptionName FROM EnquiryPricingOptions WHERE RequestNo = '20'");
-        data.recordset.forEach(r => console.log(`OP_ID: ${r.ID} | NAME: ${r.OptionName}`));
+        await sql.connect(config);
+        console.log('Connected to DB');
+
+        const requestNo = 16;
+
+        console.log('\n--- EnquiryPricingOptions with "Option 1" (space) ---');
+        const optionsSpace = await sql.query`SELECT * FROM EnquiryPricingOptions WHERE RequestNo = ${requestNo} AND OptionName = 'Option 1'`;
+        console.log(JSON.stringify(optionsSpace.recordset, null, 2));
+
+        console.log('\n--- EnquiryPricingOptions with "Option-1" (hyphen) ---');
+        const optionsHyphen = await sql.query`SELECT * FROM EnquiryPricingOptions WHERE RequestNo = ${requestNo} AND OptionName = 'Option-1'`;
+        console.log(JSON.stringify(optionsHyphen.recordset, null, 2));
+
+        await sql.close();
     } catch (err) {
         console.error(err);
     }
-    process.exit(0);
-};
+}
 
-run();
+checkPricing();

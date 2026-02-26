@@ -18,7 +18,12 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
 
     const { currentUser } = useAuth();
-    const [activeTab, setActiveTab] = useState('New');
+    const [activeTab, setActiveTab] = useState(() => localStorage.getItem('enquiry_subTab') || 'New');
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('enquiry_subTab', activeTab);
+    }, [activeTab]);
 
     // Modal States
     const [showCustomerModal, setShowCustomerModal] = useState(false);
@@ -73,15 +78,62 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         CustomerRefNo: ''
     };
 
-    const [formData, setFormData] = useState(initialFormState);
+    // Initialize formData from localStorage if available, but only for 'New' mode
+    const [formData, setFormData] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_formData');
+        if (saved && (localStorage.getItem('enquiry_subTab') || 'New') === 'New') {
+            try {
+                return JSON.parse(saved);
+            } catch (e) {
+                console.error("Failed to parse enquiry_new_formData", e);
+            }
+        }
+        return initialFormState;
+    });
+
+    useEffect(() => {
+        // Only save to localStorage if we are in 'New' mode to avoid overwriting draft with Modify data
+        if (activeTab === 'New') {
+            localStorage.setItem('enquiry_new_formData', JSON.stringify(formData));
+        }
+    }, [formData, activeTab]);
 
     // ListBox States
-    const [enqTypeList, setEnqTypeList] = useState([]);
-    const [enqForList, setEnqForList] = useState([]);
-    const [customerList, setCustomerList] = useState([]);
-    const [receivedFromList, setReceivedFromList] = useState([]);
-    const [seList, setSeList] = useState([]);
-    const [consultantList, setConsultantList] = useState([]);
+    const [enqTypeList, setEnqTypeList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_enqTypeList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+    const [enqForList, setEnqForList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_enqForList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+    const [customerList, setCustomerList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_customerList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+    const [receivedFromList, setReceivedFromList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_receivedFromList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+    const [seList, setSeList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_seList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+    const [consultantList, setConsultantList] = useState(() => {
+        const saved = localStorage.getItem('enquiry_new_consultantList');
+        return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
+    });
+
+    useEffect(() => {
+        if (activeTab === 'New') {
+            localStorage.setItem('enquiry_new_enqTypeList', JSON.stringify(enqTypeList));
+            localStorage.setItem('enquiry_new_enqForList', JSON.stringify(enqForList));
+            localStorage.setItem('enquiry_new_customerList', JSON.stringify(customerList));
+            localStorage.setItem('enquiry_new_receivedFromList', JSON.stringify(receivedFromList));
+            localStorage.setItem('enquiry_new_seList', JSON.stringify(seList));
+            localStorage.setItem('enquiry_new_consultantList', JSON.stringify(consultantList));
+        }
+    }, [enqTypeList, enqForList, customerList, receivedFromList, seList, consultantList, activeTab]);
 
     // Validation Errors
     const [errors, setErrors] = useState({});
@@ -90,6 +142,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const fileObjectsRef = useRef({}); // Stores actual File objects: { [id]: File }
     const [ackSEList, setAckSEList] = useState([]);
     const [hyperlink, setHyperlink] = useState({ name: '', url: '' });
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     // Project Suggestions State
     const [projectSuggestions, setProjectSuggestions] = useState([]);
@@ -118,6 +171,32 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         ];
         return Array.from(new Set(combined.filter(Boolean))).sort();
     }, [masters.existingCustomers, masters.clientNames, masters.consultantNames]);
+
+    const isFormEmpty = useMemo(() => {
+        // We ignore EnquiryDate as it has a default, and RequestNo/Status/etc.
+        const hasText = (formData.SourceOfInfo || '').trim() ||
+            (formData.DueOn || '').trim() ||
+            (formData.SiteVisitDate || '').trim() ||
+            (formData.ProjectName || '').trim() ||
+            (formData.ClientName || '').trim() ||
+            (formData.ConsultantName || '').trim() ||
+            (formData.DetailsOfEnquiry || '').trim() ||
+            (formData.DocumentsReceived || '').trim() ||
+            (formData.Remark || '').trim() ||
+            (formData.CustomerRefNo || '').trim();
+
+        const hasCheck = formData.hardcopy || formData.drawing || formData.dvd ||
+            formData.spec || formData.eqpschedule || formData.AutoAck || formData.ceosign;
+
+        const hasLists = enqTypeList.length > 0 ||
+            enqForList.length > 0 ||
+            customerList.length > 0 ||
+            receivedFromList.length > 0 ||
+            seList.length > 0 ||
+            consultantList.length > 0;
+
+        return !hasText && !hasCheck && !hasLists;
+    }, [formData, enqTypeList, enqForList, customerList, receivedFromList, seList, consultantList]);
 
     const enquiriesList = useMemo(() => enquiries ? Object.values(enquiries) : [], [enquiries]);
 
@@ -753,7 +832,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
     }, [formData.EnquiryDate, formData.DueOn]);
 
-    // --- Main Form Submit ---
     const handleSubmit = async (e) => {
         e.preventDefault();
 
@@ -762,21 +840,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
-        const newErrors = {};
+        if (isSubmitting) return;
 
-        // Auto-add logic removed as functions are undefined and data requires full modal input
-        // if (formData.EnquiryFor && !enqForList.includes(formData.EnquiryFor)) {
-        //     handleAddEnqFor();
-        // }
-        // if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
-        //     handleAddCustomer();
-        // }
-        // if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
-        //     handleAddReceivedFrom();
-        // }
-        // if (formData.ConcernedSE && !seList.includes(formData.ConcernedSE)) {
-        //     handleAddSE();
-        // }
+        const newErrors = {};
 
         // Validate Required Fields
         const requiredFields = {
@@ -817,6 +883,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
+        setIsSubmitting(true);
+
         const payload = {
             ...formData,
             SelectedEnquiryTypes: enqTypeList,
@@ -832,48 +900,55 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             AutoAck: formData.EnquiryStatus === 'Active' ? formData.AutoAck : false
         };
 
-        if (isModifyMode) {
-            // Check if enquiry is closed (Status = Reports)
-            if (formData.Status === 'Reports') {
-                const confirmed = window.confirm(
-                    'This enquiry has already been closed (Status: Reports).\n\n' +
-                    'Are you sure you want to modify it?'
-                );
-                if (!confirmed) {
-                    return; // User cancelled
+        try {
+            if (isModifyMode) {
+                // Check if enquiry is closed (Status = Reports)
+                if (formData.Status === 'Reports') {
+                    const confirmed = window.confirm(
+                        'This enquiry has already been closed (Status: Reports).\n\n' +
+                        'Are you sure you want to modify it?'
+                    );
+                    if (!confirmed) {
+                        return; // User cancelled
+                    }
                 }
-            }
-            updateEnquiry(formData.RequestNo, payload);
+                await updateEnquiry(formData.RequestNo, payload);
 
-            // Upload pending files if any
-            if (pendingFiles.length > 0) {
-                await uploadPendingFiles(formData.RequestNo);
-            }
-
-            alert(`Enquiry Updated: ${formData.RequestNo}`);
-        } else {
-            // RequestNo is already generated in useEffect
-            const result = await addEnquiry(payload);
-
-            // If duplicate error, regenerate number and retry
-            if (!result.success && result.error && result.error.includes('already exists')) {
-                alert('Duplicate enquiry number detected. Generating a new unique number...');
-                generateNewRequestNo();
-                return; // Don't reset form, let user resubmit with new number
-            }
-
-            if (result.success) {
-                // Upload pending files if any BEFORE triggering notification
+                // Upload pending files if any
                 if (pendingFiles.length > 0) {
                     await uploadPendingFiles(formData.RequestNo);
                 }
 
-                // Trigger Email Notification (Created Mode only)
-                await sendNotification(formData.RequestNo);
+                alert(`Enquiry Updated: ${formData.RequestNo}`);
+            } else {
+                // RequestNo is already generated in useEffect
+                const result = await addEnquiry(payload);
 
-                alert(`Enquiry Added: ${formData.RequestNo}`);
-                resetForm();
+                // If duplicate error, regenerate number and retry
+                if (!result.success && result.error && result.error.includes('already exists')) {
+                    alert('Duplicate enquiry number detected. Generating a new unique number...');
+                    generateNewRequestNo();
+                    return; // Don't reset form, let user resubmit with new number
+                }
+
+                if (result.success) {
+                    // Upload pending files if any BEFORE triggering notification
+                    if (pendingFiles.length > 0) {
+                        await uploadPendingFiles(formData.RequestNo);
+                    }
+
+                    // Trigger Email Notification (Created Mode only)
+                    await sendNotification(formData.RequestNo);
+
+                    alert(`Enquiry Added: ${formData.RequestNo}`);
+                    resetForm();
+                }
             }
+        } catch (err) {
+            console.error('Submit failed:', err);
+            alert('An unexpected error occurred during submission.');
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -955,7 +1030,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             } else if (type === 'Link') {
                 for (const item of items) {
                     try {
-                        const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}&visibility=${visibility}&type=Link&linkUrl=${encodeURIComponent(item.linkUrl)}&fileName=${encodeURIComponent(item.fileName)}&division=${encodeURIComponent(userDivision)}`, {
+                        const url = item.LinkURL || item.linkUrl;
+                        const fName = item.FileName || item.fileName;
+                        const res = await fetch(`/api/attachments/upload?requestNo=${encodeURIComponent(requestNo)}&userName=${encodeURIComponent(userName)}&visibility=${visibility}&type=Link&linkUrl=${encodeURIComponent(url)}&fileName=${encodeURIComponent(fName)}&division=${encodeURIComponent(userDivision)}`, {
                             method: 'POST'
                         });
                         if (!res.ok) {
@@ -994,6 +1071,16 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setOriginalCustomerList([]);
         setOriginalReceivedFromList([]);
         setOriginalConsultantList([]);
+
+        // Clear Persistence
+        localStorage.removeItem('enquiry_new_formData');
+        localStorage.removeItem('enquiry_new_enqTypeList');
+        localStorage.removeItem('enquiry_new_enqForList');
+        localStorage.removeItem('enquiry_new_customerList');
+        localStorage.removeItem('enquiry_new_receivedFromList');
+        localStorage.removeItem('enquiry_new_seList');
+        localStorage.removeItem('enquiry_new_consultantList');
+
         if (activeTab === 'New') {
             generateNewRequestNo();
         }
@@ -1133,11 +1220,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         const addedDate = new Date().toISOString();
         const newLinks = links.map((link, index) => ({
             id: now + index,
-            fileName: link,
+            FileName: link, // Match SQL naming
             isPending: true,
             visibility,
             type: 'Link',
-            linkUrl: link,
+            LinkURL: link, // Match SQL naming
             addedDate
         }));
 
@@ -1186,9 +1273,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         const groups = {}; // { folderName: { id, fileName, isGroup: true, items: [] } }
         const topLevel = [];
 
-        // Group uploaded files by path
+        // Group uploaded files by path (ONLY for File type, not for Links which naturally contain slashes)
         filteredUploaded.forEach(att => {
-            if (att.FileName.includes('/')) {
+            if (type === 'File' && att.FileName && att.FileName.includes('/')) {
                 const root = att.FileName.split('/')[0];
                 if (!groups[root]) {
                     groups[root] = { id: `ugroup-${root}`, fileName: root, isGroup: true, items: [], visibility: att.Visibility };
@@ -1201,10 +1288,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         // Add pending items
         filteredPending.forEach(p => {
+            const pName = p.FileName || p.fileName;
             if (p.type === 'Folder') {
                 topLevel.push({ ...p, isGroup: true });
-            } else if (p.fileName && p.fileName.includes('/')) {
-                const root = p.fileName.split('/')[0];
+            } else if (type === 'File' && pName && pName.includes('/')) {
+                const root = pName.split('/')[0];
                 if (!groups[root]) {
                     groups[root] = { id: `pgroup-${root}`, fileName: root, isGroup: true, items: [], isPending: true };
                 }
@@ -1254,7 +1342,19 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                 <a href={`/api/attachments/${item.ID}?download=true`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-primary p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="Download"><i className="bi bi-download"></i></a>
                                             </>
                                         ) : (
-                                            <a href={(item.LinkURL || '').startsWith('http') ? item.LinkURL : `https://${item.LinkURL}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center" style={{ width: '24px', height: '24px', fontSize: '10px' }} title="Open Link"><i className="bi bi-box-arrow-up-right"></i></a>
+                                            <a
+                                                href={(() => {
+                                                    const url = item.LinkURL || item.linkUrl || '';
+                                                    return url.startsWith('http') ? url : `https://${url}`;
+                                                })()}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center"
+                                                style={{ width: '24px', height: '24px', fontSize: '10px' }}
+                                                title="Open Link"
+                                            >
+                                                <i className="bi bi-box-arrow-up-right"></i>
+                                            </a>
                                         )
                                     )
                                 )}
@@ -1386,7 +1486,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     fontSize: '12px',
                                     opacity: activeTab === 'New' ? 1 : 0.8
                                 }}
-                                onClick={() => { setActiveTab('New'); resetForm(); }}
+                                onClick={() => { setActiveTab('New'); setIsModifyMode(false); }}
                             >
                                 <i className="bi bi-plus-lg me-2"></i>
                                 New Enquiry
@@ -1403,7 +1503,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     fontSize: '12px',
                                     opacity: activeTab === 'Modify' ? 1 : 0.8
                                 }}
-                                onClick={() => { setActiveTab('Modify'); resetForm(); }}
+                                onClick={() => { setActiveTab('Modify'); }}
                             >
                                 <i className="bi bi-pencil-square me-2"></i>
                                 {activeTab === 'Modify' && !canEdit ? 'View Enquiry' : 'Modify Enquiry'}
@@ -1598,6 +1698,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 onBlur={() => setTimeout(() => setShowProjectSuggestions(false), 200)}
                                                                 onFocus={() => { if (formData.ProjectName) handleInputChange('ProjectName', formData.ProjectName); }}
                                                                 autoComplete="off"
+                                                                disabled={isLimitedEdit}
                                                             />
                                                         </div>
 
@@ -1718,6 +1819,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onRemove={() => handleRemoveItem(enqTypeList, setEnqTypeList)}
                                                             error={errors.EnquiryType}
                                                             disabled={isLimitedEdit}
+                                                            minSearchLength={0}
                                                         />
                                                     </div>
 
@@ -1810,6 +1912,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onEdit={handleEditCustomer}
                                                             selectedItemDetails={renderCustomerCard()}
                                                             error={errors.CustomerName}
+                                                            minSearchLength={3}
+                                                            disabled={isLimitedEdit}
                                                         /* Buttons removed to enforce paired insertion via Received From */
                                                         />
                                                     </div>
@@ -1831,6 +1935,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onEdit={handleEditContact}
                                                             selectedItemDetails={renderContactCard()}
                                                             error={errors.ReceivedFrom}
+                                                            minSearchLength={0}
+                                                            disabled={isLimitedEdit}
                                                         />
                                                     </div>
                                                 </div>
@@ -1849,6 +1955,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         onEdit={handleEditClient}
                                                         error={errors.ClientName}
                                                         disabled={isLimitedEdit}
+                                                        minSearchLength={3}
                                                     />
                                                 </div>
 
@@ -1868,7 +1975,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         onNew={() => openNewModal(setShowCustomerModal, 'Consultant')}
                                                         onEdit={handleEditConsultant}
                                                         disabled={isLimitedEdit}
-                                                        canRemove={!isLimitedEdit || (consultantList.length > originalConsultantList.length)}
+                                                        minSearchLength={3}
                                                     />
                                                 </div>
                                             </div>
@@ -1897,6 +2004,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onEdit={handleEditSE}
                                                             error={errors.ConcernedSE}
                                                             canRemove={!isLimitedEdit || (seList.length > originalSeList.length)}
+                                                            minSearchLength={0}
                                                         />
                                                     </div>
                                                 </div>
@@ -2135,11 +2243,22 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                             {/* Buttons Section (Left Aligned, Add then Cancel) */}
                                             <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
                                                 {(!isModifyMode || (isModifyMode && canEdit)) && (
-                                                    <button type="submit" className="btn btn-outline-success">
-                                                        {isModifyMode ? 'Save Changes' : 'Add Enquiry'}
+                                                    <button
+                                                        type="submit"
+                                                        className="btn btn-outline-success"
+                                                        disabled={isSubmitting || (!isModifyMode && isFormEmpty)}
+                                                    >
+                                                        {isSubmitting ? (
+                                                            <>
+                                                                <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                                                {isModifyMode ? 'Saving...' : 'Adding...'}
+                                                            </>
+                                                        ) : (
+                                                            isModifyMode ? 'Save Changes' : 'Add Enquiry'
+                                                        )}
                                                     </button>
                                                 )}
-                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm}>
+                                                <button type="button" className="btn btn-outline-danger" onClick={resetForm} disabled={isSubmitting}>
                                                     {isModifyMode && !canEdit ? 'Close' : 'Cancel'}
                                                 </button>
                                             </div>
@@ -2200,6 +2319,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                         mode={modalMode}
                                         initialData={editData}
                                         onSubmit={handleEnqItemSubmit}
+                                        onModeChange={(newMode, data) => {
+                                            setModalMode(newMode);
+                                            setEditData(data);
+                                        }}
                                     />
                                 </div>
                             </div>

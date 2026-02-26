@@ -8,7 +8,12 @@ const SearchEnquiry = ({ onOpen }) => {
     const { currentUser } = useAuth();
 
     // Search filters
-    const [searchQuery, setSearchQuery] = useState('');
+    const [searchQuery, setSearchQuery] = useState(() => localStorage.getItem('enquiry_searchQuery') || '');
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('enquiry_searchQuery', searchQuery);
+    }, [searchQuery]);
 
     const [resetKey, setResetKey] = useState(0);
 
@@ -450,7 +455,7 @@ const SearchEnquiry = ({ onOpen }) => {
                             <th className="sortable-header" onClick={() => handleSort('SourceOfInfo')}>
                                 <div className="header-content">Source <SortIcon column="SourceOfInfo" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('DueOn')}>
+                            <th className="sortable-header" onClick={() => handleSort('DueOn')} style={{ width: '104px' }}>
                                 <div className="header-content">Due <SortIcon column="DueOn" /></div>
                             </th>
                             <th className="sortable-header" onClick={() => handleSort('SE')}>
@@ -504,7 +509,7 @@ const SearchEnquiry = ({ onOpen }) => {
                                     <td>{r.ClientName}</td>
                                     <td>{r.ProjectName}</td>
                                     <td>{r.SourceOfInfo}</td>
-                                    <td>{formatDate(r.DueOn)}</td>
+                                    <td style={{ width: '104px' }}>{formatDate(r.DueOn)}</td>
                                     <td>{r.SelectedConcernedSEs?.join(', ') || r.ConcernedSE}</td>
                                     <td>{r.Status || 'Enquiry'}</td>
                                     <td>{r.CreatedBy || '-'}</td>

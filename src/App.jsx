@@ -33,18 +33,26 @@ function AppContent() {
 import ChatWidget from './components/Chat/ChatWidget'; // Ensure path is correct
 
 function MainLayoutWrapper() {
-  const [activeTab, setActiveTab] = useState('Enquiry');
-  const [enquiryToOpen, setEnquiryToOpen] = useState(null);
+  const [activeTab, setActiveTab] = useState(() => {
+    return localStorage.getItem('activeTab') || 'Enquiry';
+  });
+  const [enquiryToOpen, setEnquiryToOpen] = useState(() => {
+    return localStorage.getItem('enquiryToOpen') || null;
+  });
 
   const handleOpenEnquiry = (requestNo) => {
     setEnquiryToOpen(requestNo);
+    localStorage.setItem('enquiryToOpen', requestNo);
     setActiveTab('Enquiry');
+    localStorage.setItem('activeTab', 'Enquiry');
   };
 
   const handleTabChange = (tab) => {
     setActiveTab(tab);
+    localStorage.setItem('activeTab', tab);
     if (tab !== 'Enquiry') {
       setEnquiryToOpen(null);
+      localStorage.removeItem('enquiryToOpen');
     }
   };
 

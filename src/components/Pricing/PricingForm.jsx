@@ -11,7 +11,7 @@ const PricingForm = () => {
 
 
     // Search state
-    const [searchTerm, setSearchTerm] = useState('');
+    const [searchTerm, setSearchTerm] = useState(() => localStorage.getItem('pricing_searchTerm') || '');
     const [suggestions, setSuggestions] = useState([]);
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [searchResults, setSearchResults] = useState([]);
@@ -30,11 +30,28 @@ const PricingForm = () => {
     const [focusedCell, setFocusedCell] = useState(null); // tracks which price input is focused
 
     // Customer state
-    const [selectedCustomer, setSelectedCustomer] = useState('');
+    const [selectedCustomer, setSelectedCustomer] = useState(() => localStorage.getItem('pricing_selectedCustomer') || '');
     const [addingCustomer, setAddingCustomer] = useState(false);
     const [newCustomerName, setNewCustomerName] = useState('');
     const [customerSuggestions, setCustomerSuggestions] = useState([]);
-    const [selectedLeadId, setSelectedLeadId] = useState(null); // Filter by Lead Job ID
+    const [selectedLeadId, setSelectedLeadId] = useState(() => {
+        const saved = localStorage.getItem('pricing_selectedLeadId');
+        return saved ? parseInt(saved) : null;
+    });
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('pricing_searchTerm', searchTerm);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        localStorage.setItem('pricing_selectedCustomer', selectedCustomer);
+    }, [selectedCustomer]);
+
+    useEffect(() => {
+        if (selectedLeadId) localStorage.setItem('pricing_selectedLeadId', selectedLeadId);
+        else localStorage.removeItem('pricing_selectedLeadId');
+    }, [selectedLeadId]);
 
 
     // Debounce timer
@@ -173,13 +190,21 @@ const PricingForm = () => {
                 const data = await res.json();
 
                 // SANITIZATION: Globally Trim Customer Names to prevent mismatch (Step 944)
-                if (data.customers) data.customers = data.customers.map(c => c.trim());
-                if (data.activeCustomer) data.activeCustomer = data.activeCustomer.trim();
+                if (data.jobs) data.jobs.forEach(j => { if (j.itemName) j.itemName = j.itemName.trim(); });
                 // Note: data.enquiry.customerName might be CSV, don't trim internal commas here, handled by split logic
-                if (data.extraCustomers) data.extraCustomers = data.extraCustomers.map(c => c.trim());
-                if (data.options) data.options.forEach(o => { if (o.customerName) o.customerName = o.customerName.trim(); });
-                // NOTE: data.values Sanitization is redundant with line 240 logic but safe to keep for consistency
-                if (Array.isArray(data.values)) data.values.forEach(v => { if (v.CustomerName) v.CustomerName = v.CustomerName.trim(); });
+                if (data.extraCustomers) data.extraCustomers = data.extraCustomers.map(c => c ? c.trim() : c);
+                if (data.options) data.options.forEach(o => {
+                    if (o.customerName) o.customerName = o.customerName.trim();
+                    if (o.itemName) o.itemName = o.itemName.trim();
+                    if (o.leadJobName) o.leadJobName = o.leadJobName.trim();
+                });
+                if (data.access && data.access.editableJobs) data.access.editableJobs = data.access.editableJobs.map(j => j ? j.trim() : j);
+                if (data.access && data.access.visibleJobs) data.access.visibleJobs = data.access.visibleJobs.map(j => j ? j.trim() : j);
+                // NOTE: data.values Sanitization (Trim Customer/Lead)
+                if (Array.isArray(data.values)) data.values.forEach(v => {
+                    if (v.CustomerName) v.CustomerName = v.CustomerName.trim();
+                    if (v.LeadJobName) v.LeadJobName = v.LeadJobName.trim();
+                });
 
                 // ---------------------------------------------------------
                 // HIERARCHY LOGIC: Treat Parent Jobs as Customers
@@ -226,37 +251,17 @@ const PricingForm = () => {
                         return isMaster || isExtra || isInternal;
                     });
 
-                // 1. Collect all unique (ItemName, OptionName) tuples from existing options
-                // This ensures that if "Option-1" exists for BMS in one customer, it is propagated to all customers.
-                const uniqueOptions = [];
-                if (data.options) {
-                    data.options.forEach(o => {
-                        if (!uniqueOptions.some(uo => uo.itemName === o.itemName && uo.name === o.name)) {
-                            uniqueOptions.push({ itemName: o.itemName, name: o.name });
-                        }
-                    });
-                }
-                // Ensure 'Base Price' is always in the list for all Jobs
-                if (data.jobs) {
-                    data.jobs.forEach(j => {
-                        if (!uniqueOptions.some(uo => uo.itemName === j.itemName && uo.name === 'Base Price')) {
-                            uniqueOptions.push({ itemName: j.itemName, name: 'Base Price' });
-                        }
-                    });
-                }
-
-                // 2. Identify missing options for each Linked Customer
-                const optionsToCreate = [];
-
-                // Build a helper to find the lead job for a given itemName
+                // Build a helper to find the lead job for a given job object or itemName context
                 // A job is a lead job if it has no parentId (root job)
-                const findLeadJobName = (itemName) => {
+                const findLeadJobName = (jobOrItemName) => {
                     if (!data.jobs) return null;
-                    const job = data.jobs.find(j => j.itemName === itemName);
+                    let job = typeof jobOrItemName === 'object' ? jobOrItemName : data.jobs.find(j => j.itemName === jobOrItemName);
                     if (!job) return null;
                     // Walk up to root to find lead job
                     let current = job;
-                    while (current.parentId) {
+                    let visited = new Set();
+                    while (current.parentId && !visited.has(current.id)) {
+                        visited.add(current.id);
                         const parent = data.jobs.find(j => j.id === current.parentId);
                         if (!parent) break;
                         current = parent;
@@ -265,23 +270,55 @@ const PricingForm = () => {
                     return current.itemName;
                 };
 
+                // 1. Collect all unique (ItemName, OptionName, LeadJobName) tuples from existing options
+                // This ensures that if "Option-1" exists for BMS in one customer, it is propagated to all customers.
+                // 1. Collect all unique Option Names used anywhere in this Enquiry (Across all branches)
+                const allUniqueNames = new Set();
+                if (data.options) {
+                    data.options.forEach(o => {
+                        allUniqueNames.add(o.name);
+                    });
+                }
+
+                // 2. Build the full set of (ItemName, OptionName, LeadJobName) that SHOULD exist
+                const uniqueOptions = [];
+                const seenUo = new Set();
+
+                if (data.jobs) {
+                    data.jobs.forEach(j => {
+                        const ljName = findLeadJobName(j);
+                        const names = new Set(allUniqueNames);
+                        names.add('Base Price'); // Ensure Base Price always exists
+
+                        names.forEach(name => {
+                            const key = `${j.itemName}|${name}|${ljName}`;
+                            if (!seenUo.has(key)) {
+                                seenUo.add(key);
+                                uniqueOptions.push({ itemName: j.itemName, name: name, leadJobName: ljName });
+                            }
+                        });
+                    });
+                }
+
+                // 2. Identify missing options for each Linked Customer
+                const optionsToCreate = [];
+
                 linkedCustomers.forEach(custName => {
                     uniqueOptions.forEach(uo => {
-                        // Check if this customer already has this option
+                        // Check if this customer already has this option bound to this lead job
                         const exists = data.options && data.options.some(o =>
                             o.customerName === custName &&
                             o.itemName === uo.itemName &&
-                            o.name === uo.name
+                            o.name === uo.name &&
+                            o.leadJobName === uo.leadJobName
                         );
 
                         if (!exists) {
-                            // Derive leadJobName for this option's item
-                            const derivedLeadJobName = findLeadJobName(uo.itemName);
                             optionsToCreate.push({
                                 customerName: custName,
                                 itemName: uo.itemName,
                                 optionName: uo.name,
-                                leadJobName: derivedLeadJobName   // ← include so filter works
+                                leadJobName: uo.leadJobName
                             });
                         }
                     });
@@ -427,7 +464,7 @@ const PricingForm = () => {
                 if (data.options) {
                     const seen = new Set();
                     data.options = data.options.filter(o => {
-                        const key = `${o.name}|${o.itemName}|${o.customerName}`;
+                        const key = `${o.name}|${o.itemName}|${o.customerName}|${o.leadJobName}`;
                         if (seen.has(key)) return false;
                         seen.add(key);
                         return true;
@@ -512,15 +549,17 @@ const PricingForm = () => {
                                 let specificOpt = data.options.find(o =>
                                     o.name === rootOpt.name &&
                                     o.customerName === rootOpt.customerName &&
+                                    o.leadJobName === rootOpt.leadJobName &&
                                     (o.itemName === job.itemName)
                                 );
                                 if (!specificOpt) {
-                                    // Fallback to Clean Name lookup
-                                    const cleanJobName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                    // EXTENDED: Look for the option with the same name anywhere (across branches) 
+                                    // if it exists for this job's ItemName + Customer.
+                                    // This ensures sync even if leadJobName differs.
                                     specificOpt = data.options.find(o =>
                                         o.name === rootOpt.name &&
                                         o.customerName === rootOpt.customerName &&
-                                        (o.itemName === cleanJobName)
+                                        (o.itemName === job.itemName)
                                     );
                                 }
                                 if (specificOpt) activeOptionId = specificOpt.id;
@@ -581,6 +620,28 @@ const PricingForm = () => {
 
                     data.options.forEach(opt => {
                         data.jobs.forEach(job => {
+                            // -------------------------------------------------------------
+                            // STRICT MATCHING: Only process Job/Option pairs that belong together
+                            // -------------------------------------------------------------
+                            const jobLeadName = findLeadJobName(job);
+                            const optLeadName = opt.leadJobName;
+
+                            let isMatch = false;
+                            if (opt.itemName === job.itemName) {
+                                // Name matches. Now check hierarchy context.
+                                if (!optLeadName || !jobLeadName || optLeadName === jobLeadName) {
+                                    isMatch = true;
+                                }
+                            } else if (opt.itemName === 'Lead Job' && !job.parentId) {
+                                // Special handling for root-level 'Lead Job' options
+                                if (!optLeadName || !jobLeadName || optLeadName === jobLeadName) {
+                                    isMatch = true;
+                                }
+                            }
+
+                            if (!isMatch) return;
+                            // -------------------------------------------------------------
+
                             // Calculate Aggregated Price
                             const aggregatedPrice = getRecursivePrice(opt.id, job.id);
 
@@ -599,30 +660,28 @@ const PricingForm = () => {
                     });
                 }
                 if (preserveValues) {
-                    setValues({ ...initialValues, ...preserveValues });
+                    setValues(prev => ({ ...initialValues, ...prev, ...preserveValues }));
                 } else {
-                    setValues(initialValues);
+                    setValues(prev => ({ ...initialValues, ...prev }));
                 }
 
                 // Auto-Select First VISIBLE Lead Job
                 if (data.jobs) {
-                    const visibleScope = data.access?.visibleJobs || [];
                     const hasPrefix = data.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
 
-                    // Helper for tree visibility (recursive check matching render logic)
-                    const isTreeVisible = (jobId) => {
+                    // FIX: Use ID-based visible flag set by backend to avoid name-collision
+                    // (e.g. root BMS and child BMS share the same itemName)
+                    const isTreeVisibleById = (jobId) => {
                         const job = data.jobs.find(j => j.id == jobId);
                         if (!job) return false;
-                        // Strict scope check: item MUST be in visibleScope
-                        if (visibleScope.includes(job.itemName)) return true;
-
+                        if (job.visible === true) return true;
                         const children = data.jobs.filter(j => j.parentId == jobId);
-                        return children.some(c => isTreeVisible(c.id));
+                        return children.some(c => isTreeVisibleById(c.id));
                     };
 
                     const roots = data.jobs.filter(j =>
                         !j.parentId &&
-                        (visibleScope.length === 0 || isTreeVisible(j.id)) &&
+                        isTreeVisibleById(j.id) &&
                         (!hasPrefix || /^L\d+\s-\s/.test(j.itemName))
                     );
 
@@ -632,9 +691,15 @@ const PricingForm = () => {
                         const myRoot = roots.find(r => myJobs.includes(r.itemName));
                         const targetRoot = myRoot || roots[0];
 
+                        const currentLeadValid = selectedLeadId && roots.some(r => Number(r.id) === Number(selectedLeadId));
+
                         // Only auto-select if not already set or invalid (Step 865)
-                        if (!selectedLeadId || !data.jobs.find(j => j.id === selectedLeadId)) {
+                        if (!selectedLeadId || !currentLeadValid) {
+                            console.log('Lead Job Auto-selection:', targetRoot.itemName, targetRoot.id);
                             setSelectedLeadId(targetRoot.id);
+                        } else {
+                            // Maintain existing selection but log it for stability check
+                            console.log('Maintaining current Lead Job selection:', selectedLeadId);
                         }
                     }
                 }
@@ -652,28 +717,25 @@ const PricingForm = () => {
         const optionName = explicitName || newOptionNames[targetScope] || '';
         if (!optionName.trim() || !pricingData) return;
 
-        let targetItemName = targetScope;
-        const leadJob = pricingData.jobs.find(j => j.isLead);
-
+        let targetItemName = targetScope ? targetScope.trim() : '';
         // Resolve display name back to raw ItemName
-        // Logic: specific job names are used as keys. If key matches lead job display name, map to lead item.
+        const currentActiveLeadJob = (pricingData.jobs || []).find(j => j.id == selectedLeadId);
+
         if (
-            targetScope.includes(' / Lead Job') ||
-            targetScope === 'Lead Job' ||
-            (leadJob && targetScope === `${leadJob.itemName} / Lead Job`) ||
-            (leadJob && targetScope === `${leadJob.itemName} (Lead Job)`) ||  // Fix: groupName uses "(Lead Job)" format
-            targetScope.endsWith(' (Lead Job)')  // Generic fallback for any lead job label
+            targetItemName.includes(' / Lead Job') ||
+            targetItemName === 'Lead Job' ||
+            (currentActiveLeadJob && targetItemName === `${currentActiveLeadJob.itemName} / Lead Job`) ||
+            (currentActiveLeadJob && targetItemName === `${currentActiveLeadJob.itemName} (Lead Job)`) ||
+            targetItemName.endsWith(' (Lead Job)')
         ) {
-            targetItemName = leadJob ? leadJob.itemName : null;
+            targetItemName = currentActiveLeadJob ? currentActiveLeadJob.itemName.trim() : null;
         }
 
         // Determine customer name for payload
         // Always send the active customer name to ensure specific binding
         const custName = explicitCustomer || selectedCustomer;
 
-        // Determine Lead Job Context (Step 1013)
-        const activeLeadJob = pricingData.jobs.find(j => j.id == selectedLeadId);
-        const leadJobName = activeLeadJob ? activeLeadJob.itemName : null;
+        const leadJobName = currentActiveLeadJob ? currentActiveLeadJob.itemName : null;
 
         const payload = {
             requestNo: pricingData.enquiry.requestNo,
@@ -706,17 +768,41 @@ const PricingForm = () => {
     const deleteOption = async (optionId) => {
         if (!window.confirm('Delete this option row?')) return;
 
+        // Find matched options across all customers to ensure it stays deleted (Step 1912)
+        const optToDelete = (pricingData.options || []).find(o => o.id === optionId);
+        if (!optToDelete) return;
+
+        // Special Rule: Default options like 'Base Price' or 'Price' are usually kept,
+        // but user-added named options should be removed globally to prevent auto-sync from bringing them back.
+        const isDefault = ['Price', 'Optional', 'Base Price'].includes(optToDelete.name);
+
+        let idsToDelete = [optionId];
+        if (!isDefault) {
+            // Find all matching options (Same Name, same ItemName context, same Lead Job branch)
+            const matches = pricingData.options.filter(o =>
+                o.name === optToDelete.name &&
+                o.itemName === optToDelete.itemName &&
+                (o.leadJobName === optToDelete.leadJobName || (!o.leadJobName && !optToDelete.leadJobName))
+            );
+            idsToDelete = matches.map(m => m.id);
+            console.log(`Bulk Delete: Found ${idsToDelete.length} matching rows for "${optToDelete.name}"`);
+        }
+
         const currentValues = { ...values }; // Capture current state
 
         try {
-            const res = await fetch(`${API_BASE}/api/pricing/option/${optionId}`, {
-                method: 'DELETE'
-            });
+            // Deleted all linked IDs in parallel
+            const promises = idsToDelete.map(id =>
+                fetch(`${API_BASE}/api/pricing/option/${id}`, { method: 'DELETE' })
+            );
+            await Promise.all(promises);
 
-            if (res.ok) {
+            if (true) { // Assuming success if no catch
                 // Remove the deleted option's values from currentValues to prevent stale keys
                 const cleanedValues = Object.keys(currentValues).reduce((acc, key) => {
-                    if (!key.startsWith(`${optionId}_`)) {
+                    const parts = key.split('_');
+                    const kOptId = parseInt(parts[0]);
+                    if (!idsToDelete.includes(kOptId)) {
                         acc[key] = currentValues[key];
                     }
                     return acc;
@@ -786,6 +872,34 @@ const PricingForm = () => {
             // Permission Check (based on Job Name still)
             if (!editableJobs.includes(job.itemName)) return;
 
+            // -------------------------------------------------------------
+            // STRICT MATCHING: Only save Job/Option pairs that belong together (Step 1684)
+            // -------------------------------------------------------------
+            const findLocalLeadJobName = (j) => {
+                let curr = j;
+                let visited = new Set();
+                while (curr && curr.parentId && !visited.has(curr.id)) {
+                    visited.add(curr.id);
+                    const parent = pricingData.jobs.find(p => p.id === curr.parentId);
+                    if (!parent) break;
+                    curr = parent;
+                }
+                return curr ? curr.itemName : null;
+            };
+
+            const jobLeadName = findLocalLeadJobName(job);
+            const optLeadName = opt.leadJobName;
+
+            let isMatch = false;
+            if (opt.itemName === job.itemName) {
+                if (!optLeadName || !jobLeadName || optLeadName === jobLeadName) isMatch = true;
+            } else if (opt.itemName === 'Lead Job' && !job.parentId) {
+                if (!optLeadName || !jobLeadName || optLeadName === jobLeadName) isMatch = true;
+            }
+
+            if (!isMatch) return;
+            // -------------------------------------------------------------
+
             // Determine Price
             let displayPrice = 0;
             if (values.hasOwnProperty(key)) {
@@ -823,6 +937,7 @@ const PricingForm = () => {
                     let specificOpt = pricingData.options.find(o =>
                         o.name === rootOpt.name &&
                         o.customerName === rootOpt.customerName &&
+                        o.leadJobName === rootOpt.leadJobName &&
                         (o.itemName === rootJob.itemName)
                     );
                     if (!specificOpt) {
@@ -1030,12 +1145,7 @@ const PricingForm = () => {
             return;
         }
 
-        if (skippedCount > 0) {
-            if (!window.confirm(`${skippedCount} items with zero values will be skipped. Save ${valuesToSave.length} valid items?`)) {
-                loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
-                return;
-            }
-        }
+
 
         setSaving(true);
         const promises = [];
@@ -1099,13 +1209,13 @@ const PricingForm = () => {
 
     // Dynamic Customer Tabs Filter (Step 1727)
     const displayedCustomers = React.useMemo(() => {
-        if (!pricingData) return [];
+        if (!pricingData || !selectedLeadId) return [];
         // Admins/Managers see everything
         if (pricingData.access?.canEditAll) return pricingData.customers || [];
 
         const myJobs = pricingData.access.editableJobs || [];
         const selectedJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
-        if (!selectedJob) return pricingData.customers || [];
+        if (!selectedJob) return [];
 
         // 1. Identify External Customers (Main + Extra)
         const externalCustomers = [
@@ -1148,26 +1258,42 @@ const PricingForm = () => {
         // 4. Return filtered list: External (if Lead) OR Parent (if Sub)
         return (pricingData.customers || []).filter(cName => {
             const cleanC = cName.trim();
-            // LEAD ACCESS: If user has lead access (global or assigned to any root), show all external customers
-            if (isLeadForThisSelection || pricingData.access?.hasLeadAccess) {
+            // LEAD ACCESS: If user is assigned to the root of THIS selection, show external customers
+            if (isLeadForThisSelection) {
                 return externalCustomers.includes(cleanC);
             } else if (parentCustomers.size > 0) {
                 // INTERNAL VIEW: Show parent jobs as customers (Sales to other divisions)
-                return parentCustomers.has(cleanC);
+                // NEW (Step 453): Filter out any tab that is one of my own assigned divisions
+                // "the customer name tab should be only its parent division"
+                const isMyOwnJob = myJobs.includes(cleanC) || myJobs.some(mj => mj.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === cleanC);
+                return parentCustomers.has(cleanC) && !isMyOwnJob;
+            }
+            // Fallback for Users with global Lead Access but No specific assignment to this root
+            if (pricingData.access?.hasLeadAccess) {
+                return externalCustomers.includes(cleanC);
             }
             return false;
         });
-    }, [pricingData, selectedLeadId]);
+    }, [pricingData, selectedLeadId, pricingData?.access?.editableJobs]); // Added editableJobs to ensure refresh on permission change
 
     // Sync selectedCustomer with displayed tabs
+    const lastSyncedCustomersRef = React.useRef("");
     useEffect(() => {
+        const customersStr = displayedCustomers.join('|');
         if (displayedCustomers.length > 0 && pricingData && !loading) {
-            if (!selectedCustomer || !displayedCustomers.includes(selectedCustomer)) {
-                console.log('Syncing selectedCustomer to first available tab:', displayedCustomers[0]);
-                loadPricing(pricingData.enquiry.requestNo, displayedCustomers[0], values);
+            // Check if selectedCustomer is still valid in the NEW list
+            const isSelectedStillValid = selectedCustomer && displayedCustomers.includes(selectedCustomer);
+
+            if (!isSelectedStillValid) {
+                // If not valid, or not yet synced for this list content, jump to first tab
+                if (lastSyncedCustomersRef.current !== customersStr) {
+                    console.log('Syncing selectedCustomer to first available tab:', displayedCustomers[0]);
+                    lastSyncedCustomersRef.current = customersStr;
+                    loadPricing(pricingData.enquiry.requestNo, displayedCustomers[0], values);
+                }
             }
         }
-    }, [displayedCustomers]);
+    }, [displayedCustomers, pricingData?.enquiry?.requestNo, loading]); // Added loading/reqID to ensure stable trigger
 
     // Get visible jobs
     const visibleJobs = pricingData ? pricingData.jobs.filter(j => j.visible !== false) : [];
@@ -1408,12 +1534,33 @@ const PricingForm = () => {
                                         >
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
+                                                {(enq.CustomerName || '-').split(',').map((cust, i) => (
+                                                    <div key={i} style={{ marginBottom: '4px' }}>
+                                                        <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cust.trim()}</span>
+                                                    </div>
+                                                ))}
+                                            </td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
                                             <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
+                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(s => {
+                                                    const parts = s.split('|');
+                                                    const name = parts[0];
+                                                    // STRICT FILTER: If user is from a specific division (e.g. BMS, Electrical),
+                                                    // they should NOT see prices for parents (e.g. Civil).
+                                                    // This is a global heuristic for the search list.
+                                                    if (pricingData && pricingData.access?.canEditAll) return true;
+                                                    if (currentUser?.Roles === 'Admin' || currentUser?.role === 'Admin') return true;
+
+                                                    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                                                    if (!userDept || userDept === 'civil' || userDept === 'admin') return true;
+
+                                                    // Allow if current job name starts with my department or matches it
+                                                    const nameLower = name.toLowerCase();
+                                                    return nameLower.includes(userDept) || userDept.includes(nameLower);
+                                                }).map((s, i) => {
                                                     const parts = s.split('|');
                                                     const name = parts[0];
                                                     const rawPrice = parts[1];
@@ -1562,7 +1709,13 @@ const PricingForm = () => {
                                             >
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.CustomerName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
+                                                    {(enq.CustomerName || '-').split(',').map((cust, i) => (
+                                                        <div key={i} style={{ marginBottom: '4px' }}>
+                                                            <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cust.trim()}</span>
+                                                        </div>
+                                                    ))}
+                                                </td>
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
@@ -1695,15 +1848,18 @@ const PricingForm = () => {
                             // Heuristic: If hierarchy uses "L# -" prefixes, only show those as roots (hide orphans)
                             const hasPrefix = pricingData.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
 
-                            // Recursive check: Visible if Node is visible OR any Descendant is visible
-                            const isTreeVisible = (jobId) => {
-                                const job = pricingData.jobs.find(j => j.id == jobId); // Relaxed check
+                            // FIX: Use ID-based visibility flag (set by backend per job) to avoid
+                            // confusing same-named jobs at different levels (e.g. root BMS vs child BMS)
+                            // Name-based visibleScope matching caused root BMS to appear for Electrical
+                            // users because child BMS shared the same itemName as root BMS.
+                            const isTreeVisibleById = (jobId) => {
+                                const job = pricingData.jobs.find(j => j.id == jobId);
                                 if (!job) return false;
-                                // Strict scope check: item MUST be in visibleScope (no fallback for empty scope)
-                                if (visibleScope.includes(job.itemName)) return true;
-
-                                const children = pricingData.jobs.filter(j => j.parentId == jobId); // Relaxed check
-                                return children.some(c => isTreeVisible(c.id));
+                                // Use the `visible` flag directly (set by backend's ID-based traversal)
+                                if (job.visible === true) return true;
+                                // Recurse into children
+                                const children = pricingData.jobs.filter(j => j.parentId == jobId);
+                                return children.some(c => isTreeVisibleById(c.id));
                             };
 
                             const roots = pricingData.jobs.filter(j => {
@@ -1711,10 +1867,8 @@ const PricingForm = () => {
                                 if (j.parentId) return false;
                                 // 2. Must match Prefix Heuristic
                                 if (hasPrefix && !/^L\d+\s-\s/.test(j.itemName)) return false;
-                                // 3. Must be Visible (Strict Scope)
-                                if (!isTreeVisible(j.id)) return false;
-
-                                // 4. HEURISTIC REMOVED: Show all visible roots regardless of content to allow data entry.
+                                // 3. Must be Visible (ID-based, not name-based)
+                                if (!isTreeVisibleById(j.id)) return false;
 
                                 return true;
                             });
@@ -1731,8 +1885,11 @@ const PricingForm = () => {
                                         value={selectedLeadId || ''}
                                         onChange={(e) => {
                                             const val = e.target.value;
-                                            console.log('Lead Job Selected (Change):', val);
-                                            setSelectedLeadId(val ? parseInt(val) : null);
+                                            const newId = val ? parseInt(val) : null;
+                                            console.log('Lead Job Selected (Change):', newId);
+                                            setSelectedLeadId(newId);
+                                            // UI re-render and sync effect will handle loadPricing if customer changes.
+                                            // No direct loadPricing call here to prevent race conditions with the sync effect.
                                         }}
                                         style={{
                                             padding: '6px 12px',
@@ -1756,513 +1913,526 @@ const PricingForm = () => {
                         })()}
 
                         {/* Customer Selection Tabs */}
-                        <div style={{ padding: '0 20px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', overflow: addingCustomer ? 'visible' : 'auto' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', minWidth: 'min-content' }}>
-                                {displayedCustomers && displayedCustomers.map((cust, idx) => (
-                                    <div
-                                        key={`${cust}-${idx}`}
-                                        onClick={() => {
-                                            // Ensure we don't reload if already active
-                                            if (cust === selectedCustomer) return;
-                                            // FIX: Reload pricing data for the selected customer while PRESERVING current edits.
-                                            // This ensures 'pricingData.values' updates to the new customer's DB values,
-                                            // preventing headers/footers from showing 0s visually.
-                                            // Passing 'values' ensures unsaved changes from the previous tab are kept in state.
-                                            loadPricing(pricingData.enquiry.requestNo, cust, values);
-                                        }}
-                                        style={{
-                                            padding: '10px 16px',
-                                            background: selectedCustomer === cust ? 'white' : 'transparent',
-                                            color: selectedCustomer === cust ? '#0284c7' : '#64748b',
-                                            borderTop: selectedCustomer === cust ? '3px solid #0284c7' : '3px solid transparent',
-                                            borderLeft: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
-                                            borderRight: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
-                                            borderBottom: 'none',
-                                            fontWeight: selectedCustomer === cust ? '600' : '500',
-                                            cursor: 'pointer',
-                                            fontSize: '13px',
-                                            marginTop: '4px',
-                                            whiteSpace: 'nowrap',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}
-                                    >
-                                        <span>{cust || 'Default Customer'}</span>
-                                    </div>
-                                ))}
-
-                                { /* Add New Customer Button Removed */}
+                        {selectedLeadId && (
+                            <div style={{ padding: '0 20px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', overflow: addingCustomer ? 'visible' : 'auto' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', minWidth: 'min-content' }}>
+                                    {displayedCustomers && displayedCustomers.map((cust, idx) => (
+                                        <div
+                                            key={`${cust}-${idx}`}
+                                            onClick={() => {
+                                                if (cust === selectedCustomer) return;
+                                                loadPricing(pricingData.enquiry.requestNo, cust, values);
+                                            }}
+                                            style={{
+                                                padding: '10px 16px',
+                                                background: selectedCustomer === cust ? 'white' : 'transparent',
+                                                color: selectedCustomer === cust ? '#0284c7' : '#64748b',
+                                                borderTop: selectedCustomer === cust ? '3px solid #0284c7' : '3px solid transparent',
+                                                borderLeft: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
+                                                borderRight: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
+                                                borderBottom: 'none',
+                                                fontWeight: selectedCustomer === cust ? '600' : '500',
+                                                cursor: 'pointer',
+                                                fontSize: '13px',
+                                                marginTop: '4px',
+                                                whiteSpace: 'nowrap',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '8px'
+                                            }}
+                                        >
+                                            <span>{cust || 'Default Customer'}</span>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
-                        </div>
+                        )}
 
                         {/* Pricing Table Content */}
-                        {visibleJobs.length === 0 ? (
-                            <div style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
-                                No EnquiryFor items found for this enquiry.
-                            </div>
-                        ) : (
-                            <>
-                                <table style={{ width: 'auto', minWidth: '600px', borderCollapse: 'collapse' }}>
-                                    <tbody>
-                                        {(() => {
-                                            // Grouping Logic: Keyed by Job ID
-                                            const groupMap = {}; // { jobId: { job, options: [] } }
+                        {selectedLeadId && (
+                            visibleJobs.length === 0 ? (
+                                <div style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
+                                    No EnquiryFor items found for this enquiry.
+                                </div>
+                            ) : (
+                                <>
+                                    <table style={{ width: 'auto', minWidth: '600px', borderCollapse: 'collapse' }}>
+                                        <tbody>
+                                            {(() => {
+                                                // Grouping Logic: Keyed by Job ID
+                                                const groupMap = {}; // { jobId: { job, options: [] } }
 
-                                            // LEAD JOB FILTERING LOGIC
-                                            let targetJobs = visibleJobs;
-                                            if (selectedLeadId && pricingData && pricingData.jobs) {
-                                                // EXPANDED: Include ALL descendants (L1, L2, L3...)
-                                                const getFullScope = (rootId, all) => {
-                                                    const set = new Set([rootId]);
+                                                // LEAD JOB FILTERING LOGIC
+                                                let targetJobs = visibleJobs;
+                                                if (selectedLeadId && pricingData && pricingData.jobs) {
+                                                    // EXPANDED: Include ALL descendants (L1, L2, L3...)
+                                                    const getFullScope = (rootId, all) => {
+                                                        const set = new Set([rootId]);
+                                                        let changed = true;
+                                                        while (changed) {
+                                                            changed = false;
+                                                            all.forEach(j => {
+                                                                if (j.parentId && set.has(j.parentId) && !set.has(j.id)) {
+                                                                    set.add(j.id);
+                                                                    changed = true;
+                                                                }
+                                                            });
+                                                        }
+                                                        return set;
+                                                    };
+
+                                                    const validIds = getFullScope(selectedLeadId, pricingData.jobs);
+                                                    targetJobs = visibleJobs.filter(j => validIds.has(j.id));
+                                                }
+
+                                                // Initialize Groups for Target Jobs
+                                                // LOGIC UPDATE: Context-Aware Visibility
+                                                // If User is viewing an External Tab (Not their own Internal Tab), hide Descendants.
+                                                // Only show Editable Jobs in External/Parent Tabs.
+                                                // Admin/Manager (hasLeadAccess) sees all.
+
+                                                // Step 1: Resolve Tab Context (Which Job is this tab about?)
+                                                const cleanTabNameSearch = (name) => name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                const contextJob = pricingData.jobs.find(j =>
+                                                    cleanTabNameSearch(j.itemName) === selectedCustomer || j.itemName === selectedCustomer
+                                                );
+
+                                                // Step 2: Identify Allowed IDs in this Tab (Tree Match)
+                                                let tabAllowedIds = null;
+                                                if (contextJob) {
+                                                    tabAllowedIds = new Set([contextJob.id]);
                                                     let changed = true;
                                                     while (changed) {
                                                         changed = false;
-                                                        all.forEach(j => {
-                                                            if (j.parentId && set.has(j.parentId) && !set.has(j.id)) {
-                                                                set.add(j.id);
+                                                        pricingData.jobs.forEach(j => {
+                                                            if (!tabAllowedIds.has(j.id) && tabAllowedIds.has(j.parentId)) {
+                                                                tabAllowedIds.add(j.id);
                                                                 changed = true;
                                                             }
                                                         });
                                                     }
-                                                    return set;
-                                                };
+                                                }
 
-                                                const validIds = getFullScope(selectedLeadId, pricingData.jobs);
-                                                targetJobs = visibleJobs.filter(j => validIds.has(j.id));
-                                            }
+                                                // Step 3: Identify User Scope (What can this user see in general?)
+                                                // Provision (Step 1857): Even if user has hasLeadAccess, if they are NOT the lead for this specific selection,
+                                                // we restrict them to their assigned scope.
+                                                const myJobs = pricingData.access.editableJobs || [];
+                                                const selectedJobObj = pricingData.jobs?.find(j => j.id == selectedLeadId);
+                                                const isLeadForThisSelection = selectedJobObj && myJobs.includes(selectedJobObj.itemName);
 
-                                            // Initialize Groups for Target Jobs
-                                            // LOGIC UPDATE: Context-Aware Visibility
-                                            // If User is viewing an External Tab (Not their own Internal Tab), hide Descendants.
-                                            // Only show Editable Jobs in External/Parent Tabs.
-                                            // Admin/Manager (hasLeadAccess) sees all.
-
-                                            // Step 1: Resolve Tab Context (Which Job is this tab about?)
-                                            const cleanTabNameSearch = (name) => name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                            const contextJob = pricingData.jobs.find(j =>
-                                                cleanTabNameSearch(j.itemName) === selectedCustomer || j.itemName === selectedCustomer
-                                            );
-
-                                            // Step 2: Identify Allowed IDs in this Tab (Tree Match)
-                                            let tabAllowedIds = null;
-                                            if (contextJob) {
-                                                tabAllowedIds = new Set([contextJob.id]);
-                                                let changed = true;
-                                                while (changed) {
-                                                    changed = false;
-                                                    pricingData.jobs.forEach(j => {
-                                                        if (!tabAllowedIds.has(j.id) && tabAllowedIds.has(j.parentId)) {
-                                                            tabAllowedIds.add(j.id);
-                                                            changed = true;
+                                                // Always include descendants of editable jobs for "Subjob View"
+                                                const getMyTotalScope = (names) => {
+                                                    const ids = new Set();
+                                                    const startJobs = pricingData.jobs.filter(j => names.includes(j.itemName));
+                                                    startJobs.forEach(sj => {
+                                                        ids.add(sj.id);
+                                                        let changedInner = true;
+                                                        while (changedInner) {
+                                                            changedInner = false;
+                                                            pricingData.jobs.forEach(child => {
+                                                                if (!ids.has(child.id) && ids.has(child.parentId)) {
+                                                                    ids.add(child.id);
+                                                                    changedInner = true;
+                                                                }
+                                                            });
                                                         }
                                                     });
-                                                }
-                                            }
+                                                    return ids;
+                                                };
 
-                                            // Step 3: Identify User Scope (What can this user see in general?)
-                                            // Provision (Step 1857): Even if user has hasLeadAccess, if they are NOT the lead for this specific selection,
-                                            // we restrict them to their assigned scope.
-                                            const myJobs = pricingData.access.editableJobs || [];
-                                            const selectedJobObj = pricingData.jobs?.find(j => j.id == selectedLeadId);
-                                            const isLeadForThisSelection = selectedJobObj && myJobs.includes(selectedJobObj.itemName);
+                                                // Provision (Step 1922 Fix): Sub-job users (BMS/Electrical) should NEVER see parent prices (Civil).
+                                                // We treat them as limited even if they have hasLeadAccess, unless they are the Lead of the ROOT job.
+                                                const rootJobs = pricingData.jobs.filter(j => !j.parentId || j.parentId === '0' || j.parentId === 0);
+                                                const isTrulyRootLead = isLeadForThisSelection && rootJobs.some(rj => rj.id == selectedLeadId);
 
-                                            // Always include descendants of editable jobs for "Subjob View"
-                                            const getMyTotalScope = (names) => {
-                                                const ids = new Set();
-                                                const startJobs = pricingData.jobs.filter(j => names.includes(j.itemName));
-                                                startJobs.forEach(sj => {
-                                                    ids.add(sj.id);
-                                                    let changedInner = true;
-                                                    while (changedInner) {
-                                                        changedInner = false;
-                                                        pricingData.jobs.forEach(child => {
-                                                            if (!ids.has(child.id) && ids.has(child.parentId)) {
-                                                                ids.add(child.id);
-                                                                changedInner = true;
-                                                            }
-                                                        });
-                                                    }
+                                                const myScopeIds = (pricingData.access.canEditAll || isTrulyRootLead)
+                                                    ? null // Admins or True Lead Jobs have global scope
+                                                    : getMyTotalScope(myJobs);
+
+                                                // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
+                                                let contextFilteredJobs = targetJobs.filter(j => {
+                                                    // A. Tab Filter: If we are in an internal/parent tab, only show that job and its children
+                                                    if (tabAllowedIds && !tabAllowedIds.has(j.id)) return false;
+
+                                                    // B. Scope Filter: Non-admins only see their assigned tree
+                                                    if (myScopeIds && !myScopeIds.has(j.id)) return false;
+
+                                                    return true;
                                                 });
-                                                return ids;
-                                            };
 
-                                            const myScopeIds = (pricingData.access.canEditAll || isLeadForThisSelection)
-                                                ? null // Admins or True Lead Jobs have global scope
-                                                : getMyTotalScope(myJobs);
-
-                                            // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
-                                            let contextFilteredJobs = targetJobs.filter(j => {
-                                                // A. Tab Filter: If we are in an internal/parent tab, only show that job and its children
-                                                if (tabAllowedIds && !tabAllowedIds.has(j.id)) return false;
-
-                                                // B. Scope Filter: Non-admins only see their assigned tree
-                                                if (myScopeIds && !myScopeIds.has(j.id)) return false;
-
-                                                return true;
-                                            });
-
-                                            contextFilteredJobs.forEach(job => {
-                                                groupMap[job.id] = { job: job, options: [] };
-                                            });
-
-                                            // Determine Lead Job for sorting
-                                            const activeLeadJob = pricingData.jobs.find(j => j.id === selectedLeadId) || targetJobs.find(j => j.isLead);
-
-                                            // Assign Options to Groups
-                                            // NOTE: Exclude simulated options (e.g. 'Base Price' placeholder with Date.now() id)
-                                            // from maxId, otherwise every real option becomes 'isNotNewest' and gets hidden.
-                                            const maxId = filteredOptions.reduce((max, opt) => {
-                                                if (opt.isSimulated || typeof opt.id !== 'number') return max;
-                                                return opt.id > max ? opt.id : max;
-                                            }, 0);
-
-                                            filteredOptions.forEach(opt => {
                                                 contextFilteredJobs.forEach(job => {
-                                                    let match = false;
-                                                    const activeLeadJobName = activeLeadJob ? activeLeadJob.itemName : null;
+                                                    groupMap[job.id] = { job: job, options: [] };
+                                                });
 
-                                                    if (!opt.itemName) {
-                                                        match = (job.id === selectedLeadId); // Null scope -> Matches Current Lead
-                                                    } else if (opt.itemName === 'Lead Job') {
-                                                        match = (job.id === selectedLeadId);
-                                                    } else if (opt.itemName === job.itemName) {
-                                                        match = true;
-                                                    } else if (activeLeadJobName && opt.itemName === `${activeLeadJobName} / Lead Job`) {
-                                                        match = true;
-                                                    }
+                                                // Determine Lead Job for sorting
+                                                const activeLeadJob = pricingData.jobs.find(j => j.id === selectedLeadId) || targetJobs.find(j => j.isLead);
 
-                                                    if (match) {
-                                                        // Calculate Row Total (Visibility Check)
-                                                        // Calculate Row Total (Visibility Check)
-                                                        // Calculate Row Total (Visibility Check)
-                                                        // Calculate Row Total (Visibility Check)
-                                                        const key = `${opt.id}_${job.id}`;
-                                                        let price = null; // Default to NULL (Missing) to differentiate from 0
-                                                        let hasExplicitValue = false;
+                                                // Assign Options to Groups
+                                                // NOTE: Exclude simulated options (e.g. 'Base Price' placeholder with Date.now() id)
+                                                // from maxId, otherwise every real option becomes 'isNotNewest' and gets hidden.
+                                                const maxId = filteredOptions.reduce((max, opt) => {
+                                                    if (opt.isSimulated || typeof opt.id !== 'number') return max;
+                                                    return opt.id > max ? opt.id : max;
+                                                }, 0);
 
-                                                        if (values[key] !== undefined && values[key] !== '') {
-                                                            price = parseFloat(values[key]) || 0;
-                                                            hasExplicitValue = true;
-                                                        } else {
-                                                            // Standard Lookup (Current Tab)
-                                                            const lookupValue = (dataSet) => {
-                                                                if (!dataSet) return null; // Return NULL if not found
-                                                                if (dataSet[key] && dataSet[key].Price !== undefined) return parseFloat(dataSet[key].Price);
+                                                filteredOptions.forEach(opt => {
+                                                    contextFilteredJobs.forEach(job => {
+                                                        let match = false;
+                                                        const activeLeadJobName = activeLeadJob ? activeLeadJob.itemName : null;
 
-                                                                const nameKey = `${opt.id}_${job.itemName}`;
-                                                                if (dataSet[nameKey] && dataSet[nameKey].Price !== undefined) return parseFloat(dataSet[nameKey].Price);
-
-                                                                const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                                                const cleanKey = `${opt.id}_${cleanName}`;
-                                                                if (dataSet[cleanKey] && dataSet[cleanKey].Price !== undefined) return parseFloat(dataSet[cleanKey].Price);
-
-                                                                return null; // Return NULL if truly missing
-                                                            };
-
-                                                            price = lookupValue(pricingData.values);
-                                                            if (price !== null) hasExplicitValue = true;
+                                                        if (!opt.itemName) {
+                                                            match = (job.id === selectedLeadId); // Null scope -> Matches Current Lead
+                                                        } else if (opt.itemName === 'Lead Job') {
+                                                            match = (job.id === selectedLeadId);
+                                                        } else if (opt.itemName === job.itemName) {
+                                                            match = true;
+                                                        } else if (activeLeadJobName && opt.itemName === `${activeLeadJobName} / Lead Job`) {
+                                                            match = true;
                                                         }
 
-                                                        // Default to 0 for math if still null, but keep flag
-                                                        const effectivePriceForCalc = (price === null) ? 0 : price;
+                                                        if (match) {
+                                                            const key = `${opt.id}_${job.id}`;
+                                                            let price = null; // Default to NULL (Missing) to differentiate from 0
+                                                            let hasExplicitValue = false;
 
-                                                        // FALLBACK / OVERRIDE: Cross-Tab Lookup for Descendants in External Tabs
-                                                        // MOVED OUTSIDE if/else to ensure it runs even if direct value exists (Override behavior)
-                                                        const contextJob = pricingData.jobs.find(j =>
-                                                            j.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedCustomer ||
-                                                            j.itemName === selectedCustomer
-                                                        );
-                                                        const isExternalContext = !contextJob;
+                                                            if (values[key] !== undefined && values[key] !== '') {
+                                                                price = parseFloat(values[key]) || 0;
+                                                                hasExplicitValue = true;
+                                                            } else {
+                                                                // Standard Lookup (Current Tab)
+                                                                const lookupValue = (dataSet) => {
+                                                                    if (!dataSet) return null; // Return NULL if not found
+                                                                    if (dataSet[key] && dataSet[key].Price !== undefined) return parseFloat(dataSet[key].Price);
 
-                                                        // If External Tab && Sub-Job (Not Lead) && NOT MY SCOPE, we FORCE internal price (VIEW ONLY mode for Parent).
-                                                        // If it IS my scope, I must be able to edit the Direct Quote to the External Customer.
-                                                        const isMyScope = pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
-                                                        const isMyInternalTab = contextJob && pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(contextJob.itemName);
-                                                        const shouldForceInternal = isExternalContext && !job.isLead && !isMyScope;
+                                                                    const nameKey = `${opt.id}_${job.itemName}`;
+                                                                    if (dataSet[nameKey] && dataSet[nameKey].Price !== undefined) return parseFloat(dataSet[nameKey].Price);
 
-                                                        // LOGIC CHANGE: Only fallback if value is MISSING (price === null) OR if we are forced to internal view.
-                                                        // If price === 0 (Explicit), we respecting it unless ForceInternal is true.
-                                                        const isMissing = (price === null);
+                                                                    const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                    const cleanKey = `${opt.id}_${cleanName}`;
+                                                                    if (dataSet[cleanKey] && dataSet[cleanKey].Price !== undefined) return parseFloat(dataSet[cleanKey].Price);
 
-                                                        if ((isMissing || shouldForceInternal) && !isMyInternalTab && pricingData.allValues) {
-                                                            // Check if this job is a child of one of my scopes
-                                                            const parentJob = pricingData.jobs.find(j => j.id === job.parentId);
-                                                            if (parentJob) {
-                                                                const parentName = parentJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                                                const rawParentName = parentJob.itemName.trim();
+                                                                    return null; // Return NULL if truly missing
+                                                                };
 
-                                                                const internalOption = pricingData.options.find(o =>
-                                                                    o.name === opt.name &&
-                                                                    o.itemName === job.itemName &&
-                                                                    (o.customerName === parentName || o.customerName === rawParentName)
-                                                                );
+                                                                price = lookupValue(pricingData.values);
+                                                                if (price !== null) hasExplicitValue = true;
+                                                            }
 
-                                                                if (internalOption) {
-                                                                    let internalValues = pricingData.allValues[parentName];
-                                                                    if (!internalValues) internalValues = pricingData.allValues[rawParentName];
+                                                            // Default to 0 for math if still null, but keep flag
+                                                            const effectivePriceForCalc = (price === null) ? 0 : price;
 
-                                                                    if (internalValues) {
-                                                                        const lookupInternal = (dataSet, optionId) => {
-                                                                            if (!dataSet) return 0;
-                                                                            const iKey = `${optionId}_${job.id}`;
-                                                                            if (dataSet[iKey] && dataSet[iKey].Price !== undefined) return parseFloat(dataSet[iKey].Price);
-                                                                            const iNameKey = `${optionId}_${job.itemName}`;
-                                                                            if (dataSet[iNameKey] && dataSet[iNameKey].Price !== undefined) return parseFloat(dataSet[iNameKey].Price);
-                                                                            const iCleanKey = `${optionId}_${job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim()}`;
-                                                                            if (dataSet[iCleanKey] && dataSet[iCleanKey].Price !== undefined) return parseFloat(dataSet[iCleanKey].Price);
+                                                            // FALLBACK: Cross-Tab Lookup when price is missing in current customer tab.
+                                                            const contextJob = pricingData.jobs.find(j =>
+                                                                j.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedCustomer ||
+                                                                j.itemName === selectedCustomer
+                                                            );
+                                                            const isExternalContext = !contextJob;
+
+                                                            const isMyScope = pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(job.itemName);
+                                                            const isMyInternalTab = contextJob && pricingData.access && pricingData.access.editableJobs && pricingData.access.editableJobs.includes(contextJob.itemName);
+                                                            const shouldForceInternal = isExternalContext && !job.isLead && !isMyScope;
+
+                                                            const isMissing = (price === null);
+
+                                                            // FIX: Trigger fallback whenever price is MISSING (not just shouldForceInternal).
+                                                            if ((isMissing || shouldForceInternal) && pricingData.allValues) {
+                                                                const lookupInternal = (dataSet, optionId) => {
+                                                                    if (!dataSet) return null;
+                                                                    const iKey = `${optionId}_${job.id}`;
+                                                                    if (dataSet[iKey] && dataSet[iKey].Price !== undefined) return parseFloat(dataSet[iKey].Price);
+                                                                    const iNameKey = `${optionId}_${job.itemName}`;
+                                                                    if (dataSet[iNameKey] && dataSet[iNameKey].Price !== undefined) return parseFloat(dataSet[iNameKey].Price);
+                                                                    const iCleanKey = `${optionId}_${job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim()}`;
+                                                                    if (dataSet[iCleanKey] && dataSet[iCleanKey].Price !== undefined) return parseFloat(dataSet[iCleanKey].Price);
+                                                                    return null;
+                                                                };
+
+                                                                // Strategy 1: Find internal option in parent's customer bucket
+                                                                const parentJob = pricingData.jobs.find(j => j.id === job.parentId);
+                                                                if (parentJob) {
+                                                                    const parentName = parentJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                                                    const rawParentName = parentJob.itemName.trim();
+
+                                                                    // IMPROVED: Prioritize internal option matching the active Lead Job (Step 1912)
+                                                                    const internalOption = pricingData.options
+                                                                        .filter(o => o.name === opt.name && o.itemName === job.itemName && (o.customerName === parentName || o.customerName === rawParentName))
+                                                                        .sort((a, b) => {
+                                                                            const aLeadMatch = a.leadJobName && activeLeadJobName && a.leadJobName === activeLeadJobName;
+                                                                            const bLeadMatch = b.leadJobName && activeLeadJobName && b.leadJobName === activeLeadJobName;
+                                                                            if (aLeadMatch && !bLeadMatch) return -1;
+                                                                            if (!aLeadMatch && bLeadMatch) return 1;
                                                                             return 0;
-                                                                        };
+                                                                        })[0];
 
+                                                                    if (internalOption) {
+                                                                        let internalValues = pricingData.allValues[parentName];
+                                                                        if (!internalValues) internalValues = pricingData.allValues[rawParentName];
                                                                         const internalPrice = lookupInternal(internalValues, internalOption.id);
-
-                                                                        // If internal price found, use it as fallback
-                                                                        if (internalPrice > 0) {
+                                                                        if (internalPrice !== null && internalPrice > 0) {
                                                                             price = internalPrice;
-                                                                            hasExplicitValue = true; // Treat as explicit for display
+                                                                            hasExplicitValue = true;
                                                                         }
                                                                     }
                                                                 }
-                                                            }
-                                                        }
 
-                                                        // Finalize Price for Display Logic
-                                                        if (price === null) price = 0;
+                                                                // Strategy 2: Scan ALL customer buckets for a matching option+job price
+                                                                if (price === null && pricingData.allValues) {
+                                                                    const myEditableJobs = pricingData.access?.editableJobs || [];
+                                                                    for (const [bucketCustomer, bucketValues] of Object.entries(pricingData.allValues)) {
+                                                                        if (bucketCustomer === selectedCustomer) continue; // Skip current tab
+                                                                        const bucketJob = pricingData.jobs.find(j =>
+                                                                            j.itemName === bucketCustomer ||
+                                                                            j.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === bucketCustomer
+                                                                        );
+                                                                        const isScopeBucket = bucketJob && myEditableJobs.includes(bucketJob.itemName);
+                                                                        if (!isScopeBucket) continue;
 
-                                                        // Hide if Empty, Not Newest, Not Base Price
-                                                        // ONLY suppress legacy default options ('Price', 'Optional') when they
-                                                        // are empty AND not the newest — user-created named options always show.
-                                                        const isDefault = (opt.name === 'Price' || opt.name === 'Optional');
-                                                        const isEmpty = (price <= 0.01 && !hasExplicitValue); // Treat 0 as empty ONLY if implicit
-                                                        const isNotNewest = opt.id !== maxId;
+                                                                        // Find ALL matching options in this bucket (same name + same job context)
+                                                                        // IMPROVED: Prioritize options matching active lead branch
+                                                                        const matchingOptions = pricingData.options
+                                                                            .filter(o => o.name === opt.name && o.itemName === job.itemName && o.customerName === bucketCustomer)
+                                                                            .sort((a, b) => {
+                                                                                const aLeadMatch = a.leadJobName && activeLeadJobName && a.leadJobName === activeLeadJobName;
+                                                                                const bLeadMatch = b.leadJobName && activeLeadJobName && b.leadJobName === activeLeadJobName;
+                                                                                if (aLeadMatch && !bLeadMatch) return -1;
+                                                                                if (!aLeadMatch && bLeadMatch) return 1;
+                                                                                return 0;
+                                                                            });
 
-                                                        if (isDefault && isEmpty && isNotNewest) return;
-                                                        // NOTE: Do NOT blanket-hide custom options just because they have
-                                                        // no price yet — that caused 2nd/3rd options to appear "replaced".
-
-                                                        // Push cloned option with effective Price for display
-                                                        groupMap[job.id].options.push({ ...opt, effectivePrice: price });
-                                                    }
-                                                });
-                                            });
-
-                                            // HIERARCHICAL SORTING LOGIC
-                                            const hierarchyResults = [];
-                                            const processedIds = new Set();
-                                            const groupList = Object.values(groupMap);
-
-                                            // Identify Roots (Jobs with no parent in the filtered set)
-                                            // The filtered set is `contextFilteredJobs`
-                                            // We build a map of ID -> Children
-                                            const idMap = new Map();
-                                            contextFilteredJobs.forEach(j => idMap.set(j.id, j));
-
-                                            const childrenMap = new Map();
-                                            contextFilteredJobs.forEach(j => {
-                                                if (j.parentId && idMap.has(j.parentId)) {
-                                                    if (!childrenMap.has(j.parentId)) childrenMap.set(j.parentId, []);
-                                                    childrenMap.get(j.parentId).push(j);
-                                                }
-                                            });
-
-                                            // Recursive function to build hierarchy list
-                                            const buildList = (job, level) => {
-                                                if (processedIds.has(job.id)) return;
-                                                processedIds.add(job.id);
-
-                                                const group = groupMap[job.id];
-                                                if (group) {
-                                                    group.level = level;
-                                                    hierarchyResults.push(group);
-                                                }
-
-                                                const children = childrenMap.get(job.id) || [];
-                                                children.sort((a, b) => a.id - b.id); // Stable sort by ID
-                                                children.forEach(c => buildList(c, level + 1));
-                                            };
-
-                                            // Start with Roots
-                                            contextFilteredJobs.forEach(j => {
-                                                if (!j.parentId || !idMap.has(j.parentId)) {
-                                                    buildList(j, 0);
-                                                }
-                                            });
-
-                                            // Handle any orphans (loops or disconnected parts not found by roots?)
-                                            if (hierarchyResults.length < groupList.length) {
-                                                groupList.forEach(g => {
-                                                    if (!processedIds.has(g.job.id)) {
-                                                        g.level = 0;
-                                                        hierarchyResults.push(g);
-                                                    }
-                                                });
-                                            }
-
-                                            return hierarchyResults.map(group => {
-                                                const job = group.job;
-                                                // Group Display (Job Header)
-
-                                                // Determine Heading Name (Show "Lead Job" if it is the Lead, else ItemName)
-                                                let groupName = job.itemName;
-                                                if (job.isLead) {
-                                                    groupName = `${job.itemName} (Lead Job)`;
-                                                }
-
-                                                // Determine Editable Status (Step 1816)
-                                                // Provision: Enter own price ONLY. Sub-jobs are VIEW ONLY.
-                                                // Logic: must be in editableJobs to actually modify.
-                                                const isExplicityEditable = pricingData.access.editableJobs.includes(job.itemName);
-                                                const canEditSection = pricingData.access.hasLeadAccess || isExplicityEditable;
-
-                                                return (
-                                                    <React.Fragment key={job.id}>
-                                                        {/* Group Header */}
-                                                        <tr style={{ background: '#e2e8f0' }}>
-                                                            <td colSpan={2} style={{
-                                                                padding: '6px 12px',
-                                                                fontWeight: 'bold',
-                                                                fontSize: '11px',
-                                                                color: '#475569',
-                                                                textTransform: 'uppercase',
-                                                                paddingLeft: `${(group.level || 0) * 20 + 12}px`
-                                                            }}>
-                                                                {group.level > 0 && <span style={{ marginRight: '6px', color: '#dc2626', fontWeight: 'bold', fontSize: '16px' }}>↳</span>}
-                                                                {groupName} Options
-                                                            </td>
-                                                        </tr>
-                                                        {group.options.map(option => {
-                                                            const key = `${option.id}_${job.id}`;
-                                                            const canEditRow = canEditSection; // Simplified
-
-                                                            // Determine Display Value: Use Effective Price if Calculated (Fallback), else State
-                                                            let displayValue = '';
-                                                            if (option.effectivePrice && option.effectivePrice > 0.01) {
-                                                                displayValue = option.effectivePrice;
-                                                            } else {
-                                                                displayValue = values[key] !== undefined ? values[key] : '';
-                                                            }
-
-                                                            return (
-                                                                <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
-                                                                    <td style={{ padding: '6px 12px', fontWeight: '500', color: '#1e293b', fontSize: '13px' }}>{option.name}</td>
-                                                                    <td style={{ padding: '4px 8px', textAlign: 'left', width: '150px' }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '4px', marginLeft: '0px' }}>
-                                                                            <input
-                                                                                type="text"
-                                                                                inputMode="decimal"
-                                                                                // Show formatted value when not focused, raw value when focused
-                                                                                value={
-                                                                                    focusedCell === `${option.id}_${job.id}`
-                                                                                        ? (displayValue === '' ? '' : String(displayValue))
-                                                                                        : formatPrice(displayValue)
-                                                                                }
-                                                                                onFocus={() => setFocusedCell(`${option.id}_${job.id}`)}
-                                                                                onBlur={() => setFocusedCell(null)}
-                                                                                onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
-                                                                                disabled={!canEditRow}
-                                                                                placeholder="0"
-                                                                                style={{
-                                                                                    width: '100%',
-                                                                                    maxWidth: '130px',
-                                                                                    padding: '4px 6px',
-                                                                                    border: '1px solid #e2e8f0',
-                                                                                    borderRadius: '4px',
-                                                                                    fontSize: '13px',
-                                                                                    textAlign: 'right',
-                                                                                    backgroundColor: canEditRow ? '#fff' : '#f1f5f9',
-                                                                                    color: '#1e293b',
-                                                                                    opacity: 1,
-                                                                                    cursor: canEditRow ? 'text' : 'not-allowed'
-                                                                                }}
-                                                                            />
-                                                                            {canEditRow && (
-                                                                                <button
-                                                                                    onClick={() => deleteOption(option.id)}
-                                                                                    style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}
-                                                                                >
-                                                                                    <Trash2 size={16} />
-                                                                                </button>
-                                                                            )}
-                                                                        </div>
-                                                                    </td>
-                                                                </tr>
-                                                            );
-                                                        })}
-                                                        {/* Add Option Row for this Group */}
-                                                        {canEditSection && (
-                                                            <tr style={{ background: '#f8fafc' }}>
-                                                                <td style={{ padding: '4px 12px' }}>
-                                                                    <input
-                                                                        type="text"
-                                                                        placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
-                                                                        value={newOptionNames[groupName] || ''}
-                                                                        onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
-                                                                        onKeyDown={(e) => {
-                                                                            if (e.key === 'Enter') {
-                                                                                addOption(groupName); // addOption still uses Name
+                                                                        for (const mOpt of matchingOptions) {
+                                                                            const found = lookupInternal(bucketValues, mOpt.id);
+                                                                            if (found !== null && found > 0) {
+                                                                                price = found;
+                                                                                hasExplicitValue = true;
+                                                                                break;
                                                                             }
-                                                                        }}
-                                                                        style={{
-                                                                            width: '100%',
-                                                                            padding: '4px 8px',
-                                                                            border: '1px solid #cbd5e1',
-                                                                            borderRadius: '4px',
-                                                                            fontSize: '13px'
-                                                                        }}
-                                                                    />
-                                                                </td>
-                                                                <td style={{ padding: '8px 12px', textAlign: 'center' }}>
-                                                                    <button
-                                                                        onClick={() => addOption(groupName)}
-                                                                        disabled={!newOptionNames[groupName]}
-                                                                        style={{
-                                                                            padding: '6px 12px',
-                                                                            background: newOptionNames[groupName] ? 'white' : '#f1f5f9',
-                                                                            color: newOptionNames[groupName] ? '#0284c7' : '#94a3b8',
-                                                                            border: '1px solid #cbd5e1',
-                                                                            borderRadius: '4px',
-                                                                            cursor: newOptionNames[groupName] ? 'pointer' : 'default',
-                                                                            display: 'inline-flex',
-                                                                            alignItems: 'center',
-                                                                            gap: '4px',
-                                                                            fontSize: '12px'
-                                                                        }}
-                                                                    >
-                                                                        <Plus size={14} /> Add
-                                                                    </button>
+                                                                        }
+                                                                        if (price !== null && price > 0) break;
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            // Finalize Price for Display Logic
+                                                            if (price === null) price = 0;
+
+                                                            // Hide if Empty, Not Newest, Not Base Price
+                                                            const isDefault = (opt.name === 'Price' || opt.name === 'Optional');
+                                                            const isEmpty = (price <= 0.01 && !hasExplicitValue); // Treat 0 as empty ONLY if implicit
+                                                            const isNotNewest = opt.id !== maxId;
+
+                                                            if (isDefault && isEmpty && isNotNewest) return;
+
+                                                            // Push cloned option with effective Price for display
+                                                            groupMap[job.id].options.push({ ...opt, effectivePrice: price });
+                                                        }
+                                                    });
+                                                });
+
+                                                // HIERARCHICAL SORTING LOGIC
+                                                const hierarchyResults = [];
+                                                const processedIds = new Set();
+                                                const groupList = Object.values(groupMap);
+
+                                                const idMap = new Map();
+                                                contextFilteredJobs.forEach(j => idMap.set(j.id, j));
+
+                                                const childrenMap = new Map();
+                                                contextFilteredJobs.forEach(j => {
+                                                    if (j.parentId && idMap.has(j.parentId)) {
+                                                        if (!childrenMap.has(j.parentId)) childrenMap.set(j.parentId, []);
+                                                        childrenMap.get(j.parentId).push(j);
+                                                    }
+                                                });
+
+                                                const buildList = (job, level) => {
+                                                    if (processedIds.has(job.id)) return;
+                                                    processedIds.add(job.id);
+
+                                                    const group = groupMap[job.id];
+                                                    if (group) {
+                                                        group.level = level;
+                                                        hierarchyResults.push(group);
+                                                    }
+
+                                                    const children = childrenMap.get(job.id) || [];
+                                                    children.sort((a, b) => a.id - b.id);
+                                                    children.forEach(c => buildList(c, level + 1));
+                                                };
+
+                                                contextFilteredJobs.forEach(j => {
+                                                    if (!j.parentId || !idMap.has(j.parentId)) {
+                                                        buildList(j, 0);
+                                                    }
+                                                });
+
+                                                if (hierarchyResults.length < groupList.length) {
+                                                    groupList.forEach(g => {
+                                                        if (!processedIds.has(g.job.id)) {
+                                                            g.level = 0;
+                                                            hierarchyResults.push(g);
+                                                        }
+                                                    });
+                                                }
+
+                                                return hierarchyResults.map(group => {
+                                                    const job = group.job;
+                                                    let groupName = job.itemName;
+                                                    if (job.isLead) {
+                                                        groupName = `${job.itemName} (Lead Job)`;
+                                                    }
+
+                                                    const isExplicityEditable = pricingData.access.editableJobs.includes(job.itemName);
+                                                    const canEditSection = pricingData.access.canEditAll || isExplicityEditable;
+
+                                                    return (
+                                                        <React.Fragment key={job.id}>
+                                                            <tr style={{ background: '#e2e8f0' }}>
+                                                                <td colSpan={2} style={{
+                                                                    padding: '6px 12px',
+                                                                    fontWeight: 'bold',
+                                                                    fontSize: '11px',
+                                                                    color: '#475569',
+                                                                    textTransform: 'uppercase',
+                                                                    paddingLeft: `${(group.level || 0) * 20 + 12}px`
+                                                                }}>
+                                                                    {group.level > 0 && <span style={{ marginRight: '6px', color: '#dc2626', fontWeight: 'bold', fontSize: '16px' }}>↳</span>}
+                                                                    {groupName} Options
                                                                 </td>
                                                             </tr>
-                                                        )}
-                                                        {/* Spacer Row */}
-                                                        <tr><td colSpan={2} style={{ height: '8px' }}></td></tr>
-                                                    </React.Fragment>
-                                                );
-                                            });
-                                        })()}
-                                    </tbody>
-                                </table>
-                                {/* Actions Footer - Cleaned up */}
-                                <div style={{ padding: '16px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-start', alignItems: 'center', background: '#f8fafc' }}>
-                                    <button
-                                        onClick={saveAll}
-                                        disabled={saving}
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '6px',
-                                            padding: '10px 20px',
-                                            background: 'white',
-                                            color: '#1e293b',
-                                            border: '1px solid #cbd5e1',
-                                            borderRadius: '4px',
-                                            cursor: 'pointer',
-                                            fontWeight: '600'
-                                        }}
-                                    >
-                                        <Save size={16} /> {saving ? 'Saving...' : 'Save All Prices'}
-                                    </button>
-                                </div>
-                            </>
+                                                            {group.options.map(option => {
+                                                                const key = `${option.id}_${job.id}`;
+                                                                const canEditRow = canEditSection;
+
+                                                                let displayValue = '';
+                                                                if (values[key] !== undefined && values[key] !== '') {
+                                                                    displayValue = values[key];
+                                                                } else if (option.effectivePrice && option.effectivePrice > 0.01) {
+                                                                    displayValue = option.effectivePrice;
+                                                                } else if (values[key] === 0 || values[key] === '0') {
+                                                                    displayValue = 0;
+                                                                } else {
+                                                                    displayValue = '';
+                                                                }
+
+                                                                return (
+                                                                    <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                                                                        <td style={{ padding: '6px 12px', fontWeight: '500', color: '#1e293b', fontSize: '13px' }}>{option.name}</td>
+                                                                        <td style={{ padding: '4px 8px', textAlign: 'left', width: '150px' }}>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '4px', marginLeft: '0px' }}>
+                                                                                <input
+                                                                                    type="text"
+                                                                                    inputMode="decimal"
+                                                                                    value={
+                                                                                        focusedCell === `${option.id}_${job.id}`
+                                                                                            ? (displayValue === '' ? '' : String(displayValue))
+                                                                                            : formatPrice(displayValue)
+                                                                                    }
+                                                                                    onFocus={() => setFocusedCell(`${option.id}_${job.id}`)}
+                                                                                    onBlur={() => setFocusedCell(null)}
+                                                                                    onChange={(e) => handleValueChange(option.id, job.id, e.target.value)}
+                                                                                    disabled={!canEditRow}
+                                                                                    placeholder="0"
+                                                                                    style={{
+                                                                                        width: '100%',
+                                                                                        maxWidth: '130px',
+                                                                                        padding: '4px 6px',
+                                                                                        border: '1px solid #e2e8f0',
+                                                                                        borderRadius: '4px',
+                                                                                        fontSize: '13px',
+                                                                                        textAlign: 'right',
+                                                                                        backgroundColor: canEditRow ? '#fff' : '#f1f5f9',
+                                                                                        color: '#1e293b',
+                                                                                        opacity: 1,
+                                                                                        cursor: canEditRow ? 'text' : 'not-allowed'
+                                                                                    }}
+                                                                                />
+                                                                                {canEditRow && (
+                                                                                    <button
+                                                                                        onClick={() => deleteOption(option.id)}
+                                                                                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}
+                                                                                    >
+                                                                                        <Trash2 size={16} />
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+                                                                        </td>
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                            {canEditSection && (
+                                                                <tr style={{ background: '#f8fafc' }}>
+                                                                    <td style={{ padding: '4px 12px' }}>
+                                                                        <input
+                                                                            type="text"
+                                                                            placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
+                                                                            value={newOptionNames[groupName] || ''}
+                                                                            onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
+                                                                            onKeyDown={(e) => {
+                                                                                if (e.key === 'Enter') {
+                                                                                    addOption(groupName);
+                                                                                }
+                                                                            }}
+                                                                            style={{
+                                                                                width: '100%',
+                                                                                padding: '4px 8px',
+                                                                                border: '1px solid #cbd5e1',
+                                                                                borderRadius: '4px',
+                                                                                fontSize: '13px'
+                                                                            }}
+                                                                        />
+                                                                    </td>
+                                                                    <td style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                                                        <button
+                                                                            onClick={() => addOption(groupName)}
+                                                                            disabled={!newOptionNames[groupName]}
+                                                                            style={{
+                                                                                padding: '6px 12px',
+                                                                                background: newOptionNames[groupName] ? 'white' : '#f1f5f9',
+                                                                                color: newOptionNames[groupName] ? '#0284c7' : '#94a3b8',
+                                                                                border: '1px solid #cbd5e1',
+                                                                                borderRadius: '4px',
+                                                                                cursor: newOptionNames[groupName] ? 'pointer' : 'default',
+                                                                                display: 'inline-flex',
+                                                                                alignItems: 'center',
+                                                                                gap: '4px',
+                                                                                fontSize: '12px'
+                                                                            }}
+                                                                        >
+                                                                            <Plus size={14} /> Add
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            )}
+                                                            <tr><td colSpan={2} style={{ height: '8px' }}></td></tr>
+                                                        </React.Fragment>
+                                                    );
+                                                });
+                                            })()}
+                                        </tbody>
+                                    </table>
+                                    {/* Actions Footer */}
+                                    <div style={{ padding: '16px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-start', alignItems: 'center', background: '#f8fafc' }}>
+                                        <button
+                                            onClick={saveAll}
+                                            disabled={saving}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                padding: '10px 20px',
+                                                background: 'white',
+                                                color: '#1e293b',
+                                                border: '1px solid #cbd5e1',
+                                                borderRadius: '4px',
+                                                cursor: 'pointer',
+                                                fontWeight: '600'
+                                            }}
+                                        >
+                                            <Save size={16} /> {saving ? 'Saving...' : 'Save All Prices'}
+                                        </button>
+                                    </div>
+                                </>
+                            )
                         )}
                     </div>
                 )

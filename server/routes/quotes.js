@@ -294,21 +294,31 @@ router.get('/list/pending', async (req, res) => {
                 // Filter flatList by ScopedJobIDs (User's responsibility)
                 const scopedJobIDsStr = (enq.ScopedJobIDs || '').toString().split(',').map(id => id.trim()).filter(Boolean);
                 const scopedJobIDsSet = new Set(scopedJobIDsStr);
+                const scopedJobs = flatList.filter(j => scopedJobIDsSet.has(j.ID.toString()));
+
+                // Fix childrenMap keys to be strings for consistent lookup
+                const stringChildrenMap = {};
+                Object.entries(childrenMap).forEach(([k, v]) => {
+                    stringChildrenMap[k.toString()] = v;
+                });
 
                 // Identify all IDs that are descendants of scoped IDs
                 const validIDs = new Set();
                 const collectDescendants = (id) => {
-                    validIDs.add(id.toString());
-                    const children = childrenMap[id] || [];
+                    const idStr = id.toString();
+                    if (validIDs.has(idStr)) return;
+                    validIDs.add(idStr);
+                    const children = stringChildrenMap[idStr] || [];
                     children.forEach(c => collectDescendants(c.ID));
                 };
                 scopedJobIDsStr.forEach(id => collectDescendants(id));
 
-                // Indentation adjustment
+                const filteredFlatList = flatList.filter(job => validIDs.has(job.ID.toString()));
+
+                // Indentation adjustment: use the minimum level among visible jobs (to make first job L1)
                 let minLevel = 0;
-                const scopedJobs = flatList.filter(j => scopedJobIDsSet.has(j.ID.toString()));
-                if (scopedJobs.length > 0) {
-                    minLevel = Math.min(...scopedJobs.map(j => j.level || 0));
+                if (filteredFlatList.length > 0) {
+                    minLevel = Math.min(...filteredFlatList.map(j => j.level || 0));
                 }
 
                 const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -326,8 +336,6 @@ router.get('/list/pending', async (req, res) => {
                     // Keep if it's NOT a job name. Internal customers are handled separately via aggregatedPricing.
                     return !jobNameSetNorm.has(cNorm);
                 });
-
-                const filteredFlatList = flatList.filter(job => validIDs.has(job.ID.toString()));
 
                 // Pre-calculate Individual (Self) Prices (Latest Only) - STRICTLY Internal
                 const selfPrices = {};
@@ -370,7 +378,15 @@ router.get('/list/pending', async (req, res) => {
                     const totalVal = selfPrices[job.ID] || 0;
                     const updatedAt = updateDates[job.ID];
                     const displayLevel = Math.max(0, (job.level || 0) - minLevel);
-                    const displayName = job.LeadJobCode ? `${job.ItemName} (${job.LeadJobCode})` : job.ItemName;
+
+                    const displayName = (() => {
+                        let displayCode = job.LeadJobCode;
+                        const isRoot = !job.ParentID || job.ParentID === '0' || job.ParentID === 0;
+                        if (!displayCode && (displayLevel === 0 || isRoot)) {
+                            displayCode = 'L1';
+                        }
+                        return displayCode ? `${job.ItemName} (${displayCode})` : job.ItemName;
+                    })();
 
                     return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${displayLevel}`;
                 }).join(';;');
@@ -399,22 +415,39 @@ router.get('/list/pending', async (req, res) => {
                     .map(([name, val]) => `${name}|${val.toFixed(2)}`)
                     .join(';;');
 
-                // Final Customer List is External + any Internal Parent who received pricing
-                const finalCustomerSet = new Set(externalCustomers);
-                Object.keys(aggregatedPricing).forEach(k => finalCustomerSet.add(k));
+                // Determine if ALL scoped jobs are subjobs (have a parent).
+                // If so, suppress external customers — subjobs only show their root (parent) job name.
+                const scopedAreSubjobs = scopedJobs.length > 0 &&
+                    scopedJobs.every(j => j.ParentID && j.ParentID != '0' && j.ParentID != 0);
 
-                // EXPLICIT FILTER: Remove any existing customer name that is a sub-job
-                // or if it matches the current user's division (for specific user view)
                 const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
-                const finalCustomers = Array.from(finalCustomerSet).filter(c => {
-                    const cNorm = normalize(c);
-                    // Provision: Keep any customer that has actual pricing aggregation (Parent Jobs)
-                    if (aggregatedPricing[c]) return true;
 
-                    if (jobNameSetNorm.has(cNorm)) return false; // Filter subjob names that don't have pricing for us
-                    if (userDivisionKey && cNorm.includes(userDivisionKey)) return false; // Filter own division
-                    return true;
-                });
+                let finalCustomers;
+                if (scopedAreSubjobs) {
+                    // Subjob context: ONLY show the root/parent job name — suppress all external customers.
+                    // internalCustomer is the root job's ItemName (e.g. "Civil Project").
+                    finalCustomers = [internalCustomer].filter(c => {
+                        const cNorm = normalize(c);
+                        // Don't show user's own division as a customer
+                        if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                        return true;
+                    });
+                } else {
+                    // Lead job context: External customers + internal parent jobs with pricing
+                    const finalCustomerSet = new Set(externalCustomers);
+                    Object.keys(aggregatedPricing).forEach(k => finalCustomerSet.add(k));
+
+                    finalCustomers = Array.from(finalCustomerSet).filter(c => {
+                        const cNorm = normalize(c);
+                        // Keep if it has pricing aggregation (parent job names)
+                        if (aggregatedPricing[c]) return true;
+                        // Filter out subjob names without pricing
+                        if (jobNameSetNorm.has(cNorm)) return false;
+                        // Filter out own division
+                        if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                        return true;
+                    });
+                }
 
                 const fullCustomerName = finalCustomers.join(', ');
 
@@ -585,6 +618,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         };
         let availableProfiles = [];
         let divisionsHierarchy = []; // Declare at top level for response
+        let userIsSubjobUser = false; // True if user's scope items all have a ParentID
 
         let resolvedItems = [];
         let rawItems = [];
@@ -653,6 +687,10 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                             accessRoots.add(curr.ItemName);
                         });
                         divisionsList = Array.from(accessRoots).sort();
+
+                        // Determine if user is a subjob user (all their directly-assigned items have a ParentID)
+                        userIsSubjobUser = userScopeItems.every(item => item.ParentID && item.ParentID !== '0' && item.ParentID !== 0);
+                        console.log(`[Quote API] userIsSubjobUser=${userIsSubjobUser}, scopeItems:`, userScopeItems.map(i => `${i.ItemName}(ParentID=${i.ParentID})`));
                     } else {
                         // If no assignments, keep default (empty list will be returned if next checks fail)
                         divisionsList = [];
@@ -817,7 +855,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 if (row.CustomerName) {
                     // Split by comma and clean
                     row.CustomerName.split(',').forEach(c => {
-                        const trimmed = c.replace(/,+$/, '').trim();
+                        const trimmed = c.replace(/[,.]+$/g, '').trim();
                         if (trimmed) {
                             customerOptions.push(trimmed);
                         }
@@ -828,7 +866,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             // Add main enquiry customer if not already in the list
             if (enquiry.CustomerName) {
                 enquiry.CustomerName.split(',').forEach(c => {
-                    const trimmed = c.replace(/,+$/, '').trim();
+                    const trimmed = c.replace(/[,.]+$/g, '').trim();
                     if (trimmed) {
                         // Check for existence case-insensitively
                         const exists = customerOptions.some(existing => existing.toLowerCase() === trimmed.toLowerCase());
@@ -885,6 +923,36 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             });
             customerOptions = uniqueOptions;
 
+            // --- SUBJOB SCOPE FILTER ---
+            // If the user's directly-assigned jobs are ALL subjobs (have a parent),
+            // suppress external customers. Only show the root/parent job name.
+            // Only applies when a specific user is requesting (not admin/all).
+            const reqUserEmail = (req.query.userEmail || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
+            if (reqUserEmail && rawItems && rawItems.length > 0) {
+                // Find items directly assigned to this user
+                const scopeItemsForFilter = rawItems.filter(item => {
+                    const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
+                    const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
+                    return normalizedMails.includes(reqUserEmail);
+                });
+
+                const allScopedAreSubjobs = scopeItemsForFilter.length > 0 &&
+                    scopeItemsForFilter.every(item => item.ParentID && item.ParentID != '0' && item.ParentID != 0);
+
+                console.log(`[Quote API] User=${reqUserEmail}, scopeItems=${scopeItemsForFilter.length}, allScopedAreSubjobs=${allScopedAreSubjobs}`);
+                console.log(`[Quote API] scopeItemsForFilter:`, scopeItemsForFilter.map(i => `${i.ItemName}(ParentID=${i.ParentID})`));
+
+                if (allScopedAreSubjobs) {
+                    // Build the set of all job names (ItemName clean forms) from rawItems
+                    const jobNamesSet = new Set(rawItems.map(r => String(r.ItemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()));
+
+                    // Only keep entries that are job names (internal) — filter out external customers
+                    customerOptions = customerOptions.filter(opt => jobNamesSet.has(String(opt || '').trim().toLowerCase()));
+
+                    console.log(`[Quote API] Subjob user — stripped external customers. Remaining:`, customerOptions);
+                }
+            }
+
             console.log('[Quote API] Final customerOptions:', customerOptions);
         } catch (err) {
             console.error('[Quote API] Error fetching Customer options:', err);
@@ -917,6 +985,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 commonMailIds: item.CommonMailIds || ''
             })),
             quoteNumber: 'Draft',
+            userIsSubjobUser,   // True if user's jobs are all subjobs (not lead job)
             divisionsHierarchy  // Return full hierarchy
         });
     } catch (err) {

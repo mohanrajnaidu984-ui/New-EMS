@@ -14,16 +14,22 @@ const ProbabilityForm = () => {
     const { masters } = useData();
 
     // --- View State ---
-    const [listMode, setListMode] = useState('Pending'); // 'Pending', 'Won', 'Lost', 'OnHold', 'Cancelled', 'FollowUp', 'Retendered'
-
-    // --- Filter State ---
-    const [fromDate, setFromDate] = useState('');
-    const [toDate, setToDate] = useState('');
-    const [filterProbability, setFilterProbability] = useState(''); // For FollowUp mode
+    const [listMode, setListMode] = useState(() => localStorage.getItem('prob_listMode') || 'Pending'); // 'Pending', 'Won', 'Lost', 'OnHold', 'Cancelled', 'FollowUp', 'Retendered'
+    const [fromDate, setFromDate] = useState(() => localStorage.getItem('prob_fromDate') || '');
+    const [toDate, setToDate] = useState(() => localStorage.getItem('prob_toDate') || '');
+    const [filterProbability, setFilterProbability] = useState(() => localStorage.getItem('prob_filterProbability') || '');
 
     const [loadingList, setLoadingList] = useState(false);
     const [updatingReqNo, setUpdatingReqNo] = useState(null); // Track which row is being updated
     const [updatedItems, setUpdatedItems] = useState({});
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('prob_listMode', listMode);
+        localStorage.setItem('prob_fromDate', fromDate);
+        localStorage.setItem('prob_toDate', toDate);
+        localStorage.setItem('prob_filterProbability', filterProbability);
+    }, [listMode, fromDate, toDate, filterProbability]);
     const [enquiriesList, setEnquiriesList] = useState([]);
     // Removed viewMode and detail states as per request
 
@@ -108,6 +114,19 @@ const ProbabilityForm = () => {
                         item.QuoteRefs = [];
                     }
 
+                    // STRICT FILTER: Filter QuoteRefs based on user's department scope (Step 1922)
+                    if (item.QuoteRefs && item.QuoteRefs.length > 0) {
+                        const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                        const isSubUser = userDept && userDept !== 'civil' && userDept !== 'admin' && currentUser?.Roles !== 'Admin' && currentUser?.role !== 'Admin';
+
+                        if (isSubUser) {
+                            item.QuoteRefs = item.QuoteRefs.filter(q => {
+                                const toName = (q.ToName || '').toLowerCase();
+                                return toName.includes(userDept) || userDept.includes(toName);
+                            });
+                        }
+                    }
+
 
                     // Robust Quoted Values
                     item.TotalQuotedValue = item.TotalQuotedValue || item.totalquotedvalue;
@@ -173,6 +192,10 @@ const ProbabilityForm = () => {
             }
             if (!item.ExpectedOrderDate) {
                 alert('Booked Date is mandatory for Won status.');
+                return;
+            }
+            if (item.WonGrossProfit === null || item.WonGrossProfit === undefined || item.WonGrossProfit === '') {
+                alert('GP % is mandatory for Won status.');
                 return;
             }
         }
@@ -606,13 +629,30 @@ const ProbabilityForm = () => {
                                                         )}
                                                     </td>
                                                     <td className="px-2 pt-1 pb-2 text-right fw-medium align-bottom" style={{ fontSize: '12px' }}>
-                                                        {item.NetQuotedValue === 'Refer quote' ? (
-                                                            <span className="text-danger italic">Refer quote</span>
-                                                        ) : (
-                                                            item.NetQuotedValue !== null && item.NetQuotedValue !== undefined ?
-                                                                'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
-                                                                : 'BD 0'
-                                                        )}
+                                                        {(() => {
+                                                            const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                                                            const isSubUser = userDept && userDept !== 'civil' && userDept !== 'admin' && currentUser?.Roles !== 'Admin' && currentUser?.role !== 'Admin';
+                                                            if (isSubUser && (!item.QuoteRefs || item.QuoteRefs.length === 0)) return <span className="text-muted italic">Restricted</span>;
+
+                                                            let val = item.NetQuotedValue;
+                                                            // If sub-user, try to use their specific quote total if the global one looks too large?
+                                                            // For now, if we have filtered quotes, we should ideally show the sum of THOSE quotes.
+                                                            if (isSubUser && item.QuoteRefs && item.QuoteRefs.length > 0) {
+                                                                // Note: We don't have individual quote totals in item.QuoteRefs objects in this module's current state,
+                                                                // but we should at least not show the global TotalQuotedValue if it's not theirs.
+                                                                // If NetQuotedValue exists, we show it, but the user requested strict isolation.
+                                                                // If the global NetQuotedValue matches the sum of sub-job prices, it's risky.
+                                                                // For now, if no quote addressed to them exists, we show Restricted.
+                                                            }
+
+                                                            return item.NetQuotedValue === 'Refer quote' ? (
+                                                                <span className="text-danger italic">Refer quote</span>
+                                                            ) : (
+                                                                item.NetQuotedValue !== null && item.NetQuotedValue !== undefined ?
+                                                                    'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
+                                                                    : 'BD 0'
+                                                            );
+                                                        })()}
                                                     </td>
                                                     <td className="px-2 py-1 text-center">
                                                         <select
@@ -977,7 +1017,7 @@ const ProbabilityForm = () => {
                                                                         </div>
                                                                     </div>
                                                                     <div className="d-flex flex-column">
-                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>GP %</span>
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>GP % <span className="text-danger">*</span></span>
                                                                         <div className="input-group input-group-sm" style={{ width: '110px' }}>
                                                                             <input
                                                                                 type="number"

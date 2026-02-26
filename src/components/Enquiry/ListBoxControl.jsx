@@ -20,7 +20,8 @@ const ListBoxControl = ({
     showEdit = false,
     canEdit = false,
     selectedItemDetails = null,
-    canRemove = true
+    canRemove = true,
+    minSearchLength = 3
 }) => {
     return (
         <div className="mb-2">
@@ -38,6 +39,7 @@ const ListBoxControl = ({
                 error={error}
                 renderOption={renderOption}
                 selectedItemDetails={selectedItemDetails}
+                minSearchLength={minSearchLength}
             />
 
             {/* ListBox + Add/Remove Buttons Row */}

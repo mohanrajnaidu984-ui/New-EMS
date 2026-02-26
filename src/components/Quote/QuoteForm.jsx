@@ -92,6 +92,15 @@ const numberToWordsBHD = (num) => {
 };
 
 const normalize = (s) => (s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+const normalizeName = normalize;
+const formatDate = (date) => (date instanceof Date ? date.toISOString().split('T')[0] : '');
+
+const parsePrice = (v) => {
+    if (v === null || v === undefined) return 0;
+    if (typeof v === 'number') return v;
+    const clean = String(v).replace(/[^\d.]/g, '');
+    return parseFloat(clean) || 0;
+};
 
 const tableStyles = `
     .clause-content table {
@@ -246,6 +255,21 @@ const QuoteForm = () => {
 
     // Pricing Data
     const [pricingData, setPricingData] = useState(null);
+
+    // Unified Jobs Pool for consistent rendering and calculation (Step 1240)
+    const jobsPool = React.useMemo(() => {
+        const hierarchy = enquiryData?.divisionsHierarchy || [];
+        const pricingJobs = pricingData?.jobs || [];
+        return pricingJobs.length > 0 ? pricingJobs : hierarchy.map(d => ({
+            id: d.id || d.ItemID || d.ID,
+            parentId: d.parentId || d.ParentID,
+            itemName: d.itemName || d.ItemName || d.DivisionName,
+            leadJobCode: d.leadJobCode || d.LeadJobCode,
+            companyLogo: d.companyLogo,
+            companyName: d.companyName,
+            departmentName: d.departmentName
+        }));
+    }, [pricingData, enquiryData]);
     const [pricingSummary, setPricingSummary] = useState([]);
     const [grandTotal, setGrandTotal] = useState(0);
     const [hasPricedOptional, setHasPricedOptional] = useState(false);
@@ -295,210 +319,312 @@ const QuoteForm = () => {
 
     // Memoized Tabs Calculation
     const calculatedTabs = React.useMemo(() => {
-        // Guard: At least enquiryData must exist
-        if (!enquiryData) return [];
+        try {
+            // Guard: At least enquiryData must exist
+            if (!enquiryData) return [];
 
-        let jobsList = [];
-        let leadJobId = null;
-        let leadPrefix = (enquiryData.leadJobPrefix || '').toUpperCase();
+            let jobsList = [];
+            let leadJobId = null;
+            let leadPrefix = (enquiryData.leadJobPrefix || '').toUpperCase();
 
-        // Find the active lead job object (allowing sub-jobs as lead context)
-        const findLeadJob = (pool) => pool.find(j => {
-            const jName = (j.itemName || '').toUpperCase();
-            const cleanJName = jName.replace(/^(L\d+\s*-\s*)/, '').trim();
-            return jName === leadPrefix || cleanJName === leadPrefix || jName.startsWith(leadPrefix + ' -') || (j.leadJobCode && j.leadJobCode.toUpperCase() === leadPrefix);
-        });
-
-        if (pricingData && pricingData.jobs && pricingData.jobs.length > 0) {
-            jobsList = pricingData.jobs;
-            leadJobId = findLeadJob(jobsList)?.id;
-        } else if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
-            jobsList = enquiryData.divisionsHierarchy.map(d => ({
-                id: d.id || d.ItemID,
-                parentId: d.parentId || d.ParentID,
-                itemName: d.itemName || d.ItemName || d.DivisionName,
-                leadJobCode: d.leadJobCode || d.LeadJobCode,
-                companyLogo: d.companyLogo,
-                companyName: d.companyName,
-                departmentName: d.departmentName
-            }));
-            leadJobId = findLeadJob(jobsList)?.id;
-        } else if (enquiryData.divisions) {
-            jobsList = enquiryData.divisions.map((d, i) => ({ id: `div_${i}`, itemName: d }));
-            const leadJob = jobsList.find(j => (j.itemName || '').toUpperCase().includes(leadPrefix) || leadPrefix.includes((j.itemName || '').toUpperCase()));
-            leadJobId = leadJob?.id;
-        }
-
-        // --- Resolved Lead Code for Quote Number Comparison (Robust Walk-up) ---
-        const currentLeadCode = (() => {
-            const curr = (enquiryData.leadJobPrefix || '').toUpperCase();
-            if (!curr) return '';
-            if (curr.match(/^L\d+/)) return curr.split('-')[0].trim();
-
-            // Resolve from jobsList
-            let job = jobsList.find(j => String(j.id || j.ItemID) === String(leadJobId));
-            if (!job && curr) {
-                const target = curr.trim();
-                job = jobsList.find(j => (j.itemName || '').toUpperCase().trim() === target);
-            }
-
-            if (job) {
-                // Walk up to Root to find the L-code
-                let root = job;
-                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
-                    const parent = jobsList.find(p => String(p.id || p.ItemID) === String(root.parentId));
-                    if (parent) root = parent;
-                    else break;
-                }
-                if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
-                if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
-            }
-            return curr;
-        })();
-
-        if (jobsList.length === 0) return [];
-
-        const userAccess = pricingData?.access || {};
-        const accessibleJobs = jobsList.filter(j => {
-            // --- BRANCH FILTER: Job must belong to the currently selected Lead Job's hierarchy ---
-            const isLeadJobSelf = String(j.id) === String(leadJobId);
-            let isInThisBranch = isLeadJobSelf;
-
-            if (!isInThisBranch) {
-                let curr = j;
-                while (curr && curr.parentId && curr.parentId !== '0' && curr.parentId !== 0) {
-                    if (String(curr.parentId) === String(leadJobId)) {
-                        isInThisBranch = true;
-                        break;
-                    }
-                    curr = jobsList.find(sj => sj.id === curr.parentId || sj.ItemID === curr.parentId);
-                    if (!curr) break;
-                }
-            }
-
-            if (!isInThisBranch) return false;
-
-            // --- 2. PERMISSION FILTER: Only show jobs where user is assigned or is a lead ---
-            if (isAdmin) return true;
-
-            const editableNames = (pricingData?.access?.editableJobs || []).map(n => n.trim().toLowerCase());
-            const jName = (j.itemName || j.DivisionName || '').trim().toLowerCase();
-
-            // 2.1 Direct match (is this an assigned job?)
-            if (editableNames.includes(jName)) return true;
-
-            // 2.2 Ancestor check (is user assigned to an ancestor? if so, they manage this sub-tree)
-            let curr = j;
-            while (curr && (curr.parentId || curr.ParentID) && (curr.parentId || curr.ParentID) !== '0' && (curr.parentId || curr.ParentID) !== 0) {
-                const pid = String(curr.parentId || curr.ParentID);
-                const parent = jobsList.find(sj => String(sj.id || sj.ItemID) === pid);
-                if (!parent) break;
-                if (editableNames.includes((parent.itemName || parent.DivisionName || '').trim().toLowerCase())) return true;
-                curr = parent;
-            }
-
-            return false;
-        });
-
-        const leadJobObj = accessibleJobs.find(j => j.id === leadJobId);
-        const leadJobName = leadJobObj ? (leadJobObj.itemName || leadJobObj.DivisionName) : '';
-
-        const seenNames = new Set();
-        if (leadJobName) seenNames.add(leadJobName.trim().toLowerCase());
-
-        const finalTabs = accessibleJobs
-            .filter(job => {
-                const jName = (job.itemName || job.DivisionName || '').trim().toLowerCase();
-                // 1. If this is the lead job, always include it (it's already in seenNames)
-                if (job.id === leadJobId) return true;
-
-                // 2. If name is empty or already seen, skip it
-                if (!jName || seenNames.has(jName)) return false;
-
-                // 3. Mark as seen and include
-                seenNames.add(jName);
-                return true;
-            })
-            .map(job => {
-                const isLead = job.id === leadJobId;
-                let displayName = job.itemName;
-
-                // Clean prefix for display
-                if (leadPrefix && displayName.toUpperCase().startsWith(leadPrefix)) {
-                    displayName = displayName.substring(leadPrefix.length).replace(/^\s*-\s*/, '').trim();
-                }
-                if (!displayName) displayName = job.itemName;
-
-                // Quote Reference Resolution
-                let quoteNo = null;
-                if (toName && existingQuotes.length > 0) {
-                    const tabQuotes = existingQuotes.filter(q => {
-                        const parts = q.QuoteNumber?.split('/') || [];
-                        const qDivCode = parts[1]?.toUpperCase();
-                        const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
-
-                        // Rule: If quote has an L-prefix, it MUST match current lead prefix context to be relevant to this branch.
-                        if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
-
-                        const qJob = jobsList.find(j => {
-                            const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
-                            return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                                (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                                (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                                (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                                (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                                (qDivCode === 'AAC' && jName.includes('AIR'));
-                        });
-
-                        if (!qJob) return false;
-                        const qJobId = qJob.id || qJob.ItemID || qJob.ID;
-                        return String(qJobId) === String(job.id);
-                    });
-
-                    if (tabQuotes.length > 0) {
-                        const sorted = tabQuotes.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
-                        quoteNo = sorted[0].QuoteNumber;
-                    }
-                }
-
-                return {
-                    id: isLead ? 'self' : job.id,
-                    name: isLead ? 'Own Job' : displayName,
-                    label: job.itemName,
-                    companyLogo: job.companyLogo,
-                    companyName: job.companyName,
-                    departmentName: job.departmentName,
-                    isSelf: isLead,
-                    realId: job.id,
-                    parentId: job.parentId,
-                    quoteNo: quoteNo
-                };
+            // Find the active lead job object (allowing sub-jobs as lead context)
+            const findLeadJob = (pool) => pool.find(j => {
+                const jName = (j.itemName || '').toUpperCase();
+                const cleanJName = jName.replace(/^(L\d+\s*-\s*)/, '').trim();
+                return jName === leadPrefix || cleanJName === leadPrefix || jName.startsWith(leadPrefix + ' -') || (j.leadJobCode && j.leadJobCode.toUpperCase() === leadPrefix);
             });
 
-        // Sort Tabs: Lead/Own Job first, then hierarchy
-        finalTabs.sort((a, b) => {
-            if (a.isSelf) return -1;
-            if (b.isSelf) return 1;
-            if (a.realId === b.parentId) return -1;
-            if (b.realId === a.parentId) return 1;
-            return (a.name || '').localeCompare(b.name || '');
-        });
+            if (pricingData && pricingData.jobs && pricingData.jobs.length > 0) {
+                jobsList = pricingData.jobs;
+                leadJobId = findLeadJob(jobsList)?.id;
+            } else if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
+                jobsList = enquiryData.divisionsHierarchy.map(d => ({
+                    id: d.id || d.ItemID,
+                    parentId: d.parentId || d.ParentID,
+                    itemName: d.itemName || d.ItemName || d.DivisionName,
+                    leadJobCode: d.leadJobCode || d.LeadJobCode,
+                    companyLogo: d.companyLogo,
+                    companyName: d.companyName,
+                    departmentName: d.departmentName
+                }));
+                leadJobId = findLeadJob(jobsList)?.id;
+            } else if (enquiryData.divisions) {
+                jobsList = enquiryData.divisions.map((d, i) => ({ id: `div_${i}`, itemName: d }));
+                const leadJob = jobsList.find(j => (j.itemName || '').toUpperCase().includes(leadPrefix) || leadPrefix.includes((j.itemName || '').toUpperCase()));
+                leadJobId = leadJob?.id;
+            }
 
-        // Ensure at least one tab is 'Own Job' and is the default 'self' ID
-        if (finalTabs.length > 0 && !finalTabs.some(t => t.id === 'self')) {
-            finalTabs[0].id = 'self';
-            finalTabs[0].name = 'Own Job';
-            finalTabs[0].isSelf = true;
+            // --- Resolved Lead Code for Quote Number Comparison (Robust Walk-up) ---
+            const currentLeadCode = (() => {
+                const curr = (enquiryData.leadJobPrefix || '').toUpperCase();
+                if (!curr) return '';
+                if (curr.match(/^L\d+/)) return curr.split('-')[0].trim();
+
+                // Resolve from jobsList
+                let job = jobsList.find(j => String(j.id || j.ItemID) === String(leadJobId));
+                if (!job && curr) {
+                    const target = curr.trim();
+                    job = jobsList.find(j => (j.itemName || '').toUpperCase().trim() === target);
+                }
+
+                if (job) {
+                    // Walk up to Root to find the L-code
+                    let root = job;
+                    let safety = 0;
+                    while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0 && safety < 10) {
+                        const parent = jobsList.find(p => String(p.id || p.ItemID) === String(root.parentId));
+                        if (parent) root = parent;
+                        else break;
+                        safety++;
+                    }
+                    if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                    if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+                }
+                return curr;
+            })();
+
+            if (jobsList.length === 0) return [];
+
+            const userAccess = pricingData?.access || {};
+            const accessibleJobs = jobsList.filter(j => {
+                // --- BRANCH FILTER: Job must belong to the currently selected Lead Job's hierarchy ---
+                const isLeadJobSelf = String(j.id) === String(leadJobId);
+                let isInThisBranch = isLeadJobSelf;
+
+                if (!isInThisBranch) {
+                    let curr = j;
+                    let safety = 0;
+                    let visited = new Set();
+                    while (curr && curr.parentId && curr.parentId !== '0' && curr.parentId !== 0 && safety < 20) {
+                        if (visited.has(String(curr.id))) break;
+                        visited.add(String(curr.id));
+                        if (String(curr.parentId) === String(leadJobId)) {
+                            isInThisBranch = true;
+                            break;
+                        }
+                        const nextParent = jobsList.find(sj => String(sj.id || sj.ItemID) === String(curr.parentId));
+                        if (!nextParent || nextParent === curr) break;
+                        curr = nextParent;
+                        safety++;
+                    }
+                }
+
+                if (!isInThisBranch) return false;
+
+                // --- 2. PERMISSION FILTER: Only show jobs where user is assigned or is a lead ---
+                if (isAdmin) return true;
+
+                // Provision (Step 1922): STRICT ISOLATION. Sub-job users (BMS/Electrical) CANNOT see parents (Civil).
+                const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                const isStrictlyLimited = userDept && !['civil', 'admin'].includes(userDept);
+
+                // Identify if the user owns ANY root job.
+                const userOwnsRoot = jobsList.filter(rj => !rj.parentId || rj.parentId === '0' || rj.parentId === 0)
+                    .some(rj => (pricingData?.access?.editableJobs || []).some(ej => {
+                        const ejNorm = (ej || '').trim().toLowerCase();
+                        const rjNorm = (rj.itemName || rj.DivisionName || '').trim().toLowerCase();
+                        // EXACT MATCH ONLY for Root Ownership to avoid "Electrical" matching "BMS - Electrical"
+                        return ejNorm === rjNorm;
+                    }));
+
+                const jName = (j.itemName || j.DivisionName || '').trim().toLowerCase();
+
+                // Block ancestors if strictly limited OR if user doesn't own root
+                if (isStrictlyLimited || !userOwnsRoot) {
+                    // Check if j is an ancestor of ANY of my assigned scopes.
+                    const isAncestorOfMyScope = (pricingData?.access?.editableJobs || []).some(scopeName => {
+                        const scopeLower = (scopeName || '').trim().toLowerCase();
+                        // Recursive check if j is a parent of scope
+                        let curr = jobsList.find(sj => (sj.itemName || '').trim().toLowerCase() === scopeLower);
+                        while (curr && (curr.parentId || curr.ParentID)) {
+                            const pid = String(curr.parentId || curr.ParentID);
+                            if (pid === String(j.id || j.ItemID)) return true;
+                            curr = jobsList.find(p => String(p.id || p.ItemID) === pid);
+                        }
+                        return false;
+                    });
+
+                    // Also check if j is an ancestor of user's department explicitly
+                    const isAncestorOfDept = (() => {
+                        let myJob = jobsList.find(sj => (sj.itemName || '').trim().toLowerCase().includes(userDept));
+                        if (!myJob) return false;
+                        let curr = myJob;
+                        while (curr && (curr.parentId || curr.ParentID)) {
+                            const pid = String(curr.parentId || curr.ParentID);
+                            if (pid === String(j.id || j.ItemID)) return true;
+                            curr = jobsList.find(p => String(p.id || p.ItemID) === pid);
+                        }
+                        return false;
+                    })();
+
+                    if (isAncestorOfMyScope || isAncestorOfDept) {
+                        console.log(`[calculatedTabs] Filtering out ancestor job for sub-user: ${jName}`);
+                        return false;
+                    }
+                }
+
+                const editableNames = (pricingData?.access?.editableJobs || []).map(n => n.trim().toLowerCase());
+
+                // 2.1 Direct match (is this an assigned job?)
+                if (editableNames.includes(jName)) return true;
+
+                // 2.2 Ancestor check (is user assigned to an ancestor? if so, they manage this sub-tree)
+                let currAncestor = j;
+                let safetyAnc = 0;
+                let visitedAnc = new Set();
+                while (currAncestor && (currAncestor.parentId || currAncestor.ParentID) && safetyAnc < 20) {
+                    const pid = String(currAncestor.parentId || currAncestor.ParentID);
+                    if (pid === '0' || pid === 'undefined') break;
+                    if (visitedAnc.has(pid)) break;
+                    visitedAnc.add(pid);
+
+                    const parent = jobsList.find(sj => String(sj.id || sj.ItemID) === pid);
+                    if (!parent) break;
+                    if (editableNames.includes((parent.itemName || parent.DivisionName || '').trim().toLowerCase())) return true;
+                    currAncestor = parent;
+                    safetyAnc++;
+                }
+
+                return false;
+            });
+
+            const leadJobObj = accessibleJobs.find(j => j.id === leadJobId);
+            const leadJobName = leadJobObj ? (leadJobObj.itemName || leadJobObj.DivisionName) : '';
+
+            const seenNames = new Set();
+            if (leadJobName) seenNames.add(leadJobName.trim().toLowerCase());
+
+            const finalTabs = accessibleJobs
+                .filter(job => {
+                    const jName = (job.itemName || job.DivisionName || '').trim().toLowerCase();
+                    // 1. If this is the lead job, always include it (it's already in seenNames)
+                    if (job.id === leadJobId) return true;
+
+                    // 2. If name is empty or already seen, skip it
+                    if (!jName || seenNames.has(jName)) return false;
+
+                    // 3. Mark as seen and include
+                    seenNames.add(jName);
+                    return true;
+                })
+                .map(job => {
+                    const isLead = job.id === leadJobId;
+                    let displayName = job.itemName;
+
+                    // Clean prefix for display
+                    if (leadPrefix && displayName.toUpperCase().startsWith(leadPrefix)) {
+                        displayName = displayName.substring(leadPrefix.length).replace(/^\s*-\s*/, '').trim();
+                    }
+                    if (!displayName) displayName = job.itemName;
+
+                    // Quote Reference Resolution
+                    let quoteNo = null;
+                    if (toName && existingQuotes.length > 0) {
+                        const tabQuotes = existingQuotes.filter(q => {
+                            const parts = q.QuoteNumber?.split('/') || [];
+                            const qDivCode = parts[1]?.toUpperCase();
+                            const qLeadTag = parts[2] ? parts[2].split('-')[0].toUpperCase() : '';
+
+                            const normalizedQuoteTo = normalize(q.ToName || '');
+                            const normalizedCurrentTo = normalize(toName || '');
+
+                            // CUSTOMER FILTER: Match current selection OR any ancestor (Internal Quoting)
+                            const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+                            const isAncestorMatch = (() => {
+                                let curr = job;
+                                while (curr && (curr.parentId || curr.ParentID)) {
+                                    const p = jobsList.find(pj => String(pj.id || pj.ItemID) === String(curr.parentId || curr.ParentID));
+                                    if (!p) break;
+                                    const pNameNorm = (p.itemName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+                                    if (pNameNorm === normalizedQuoteTo) return true;
+                                    curr = p;
+                                }
+                                return false;
+                            })();
+                            const isSelfMatch = normalize(job.itemName || '') === normalizedQuoteTo;
+                            if (normalizedCurrentTo && !isExactMatch && !isAncestorMatch && !isSelfMatch) return false;
+
+                            const qJob = jobsList.find(j => {
+                                const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                                    (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                                    (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                                    (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                                    (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                    (qDivCode === 'AAC' && jName.includes('AIR'));
+                            });
+
+                            if (!qJob) return false;
+                            const qJobId = qJob.id || qJob.ItemID || qJob.ID;
+                            if (String(qJobId) !== String(job.id)) return false;
+
+                            // Rule: If quote has an L-prefix, it MUST match current lead prefix context to be relevant to this branch.
+                            // Bypass if it matches the current enquiry RequestNo (legacy/global quotes)
+                            const isEnquiryMatch = qLeadTag === String(enquiryData?.enquiry?.RequestNo);
+                            if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode && !isEnquiryMatch) return false;
+
+                            return true;
+                        });
+
+                        if (tabQuotes.length > 0) {
+                            const sorted = tabQuotes.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
+                            quoteNo = sorted[0].QuoteNumber;
+                        }
+                    }
+
+                    return {
+                        id: isLead ? 'self' : job.id,
+                        name: isLead ? 'Own Job' : displayName,
+                        label: job.itemName,
+                        companyLogo: job.companyLogo,
+                        companyName: job.companyName,
+                        departmentName: job.departmentName,
+                        isSelf: isLead,
+                        realId: job.id,
+                        parentId: job.parentId,
+                        quoteNo: quoteNo
+                    };
+                });
+
+            // Sort Tabs: Lead/Own Job first, then hierarchy
+            finalTabs.sort((a, b) => {
+                if (a.isSelf) return -1;
+                if (b.isSelf) return 1;
+                if (a.realId === b.parentId) return -1;
+                if (b.realId === a.parentId) return 1;
+                return (a.name || '').localeCompare(b.name || '');
+            });
+
+            // Ensure at least one tab is 'Own Job' and is the default 'self' ID
+            if (finalTabs.length > 0 && !finalTabs.some(t => t.id === 'self')) {
+                // Determine if there is a lead job that is already in accessibleJobs
+                const leadJobInFinal = finalTabs.find(t => String(t.realId) === String(leadJobId));
+
+                if (leadJobInFinal) {
+                    leadJobInFinal.id = 'self';
+                    leadJobInFinal.name = 'Own Job';
+                    leadJobInFinal.isSelf = true;
+                } else {
+                    // Force the first accessible tab to be 'Own Job'
+                    finalTabs[0].id = 'self';
+                    finalTabs[0].name = 'Own Job';
+                    finalTabs[0].isSelf = true;
+                }
+            }
+
+
+            return finalTabs;
+        } catch (err) {
+            console.error('[calculatedTabs] Error:', err);
+            return [];
         }
-
-        return finalTabs;
     }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, isDescendant]);
 
     // Auto-resolve active tabs based on calculated permissions
     useEffect(() => {
         if (calculatedTabs && calculatedTabs.length > 0) {
             // Fix Quote Tab
-            const currentQuoteTabValid = calculatedTabs.find(t => t.id === activeQuoteTab);
+            const currentQuoteTabValid = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
             if (!currentQuoteTabValid) {
                 console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
                 setActiveQuoteTab(calculatedTabs[0].id);
@@ -511,7 +637,7 @@ const QuoteForm = () => {
     // Sync Company Logo and Details based on Active Pricing Tab
     useEffect(() => {
         if (calculatedTabs && activeQuoteTab) {
-            const activeTab = calculatedTabs.find(t => t.id === activeQuoteTab);
+            const activeTab = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
             if (activeTab) {
                 console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
                 console.log('[QuoteForm]   - Company:', activeTab.companyName, 'Logo:', activeTab.companyLogo);
@@ -540,12 +666,16 @@ const QuoteForm = () => {
 
     // Ref to track if we've already auto-selected for the current tab (prevents overwriting user manual selection)
     const lastAutoSelectRef = useRef({ tab: null, processed: false });
+    // Ref to read current toName without adding it to deps (adding it causes an infinite loop:
+    // toName → pricingData load → AutoSelect re-runs → overwrites toName → repeat)
+    const toNameRef = useRef(toName);
+    useEffect(() => { toNameRef.current = toName; }, [toName]);
 
     // Auto-select customer based on tab navigation (singleness rule)
     useEffect(() => {
         if (!enquiryData || !pricingData || !activeQuoteTab) return;
 
-        // Reset processed flag if tab changes
+        // Reset processed flag if tab OR pricingData changes
         if (lastAutoSelectRef.current.tab !== activeQuoteTab) {
             lastAutoSelectRef.current = { tab: activeQuoteTab, processed: false };
         }
@@ -556,18 +686,19 @@ const QuoteForm = () => {
         // Helper to check hierarchy
         const isDescendantLocal = (childId, parentId) => {
             const hierarchy = enquiryData.divisionsHierarchy || [];
-            let current = hierarchy.find(d => String(d.ItemID) === String(childId));
+            let current = hierarchy.find(d => String(d.ItemID || d.id) === String(childId));
             while (current) {
-                if (String(current.ParentID) === String(parentId)) return true;
-                current = hierarchy.find(d => String(d.ItemID) === String(current.ParentID));
+                if (String(current.ParentID || current.parentId) === String(parentId)) return true;
+                current = hierarchy.find(d => String(d.ItemID || d.id) === String(current.ParentID || current.parentId));
             }
             return false;
         };
 
-        const activeTabObj = (calculatedTabs || []).find(t => t.id === activeQuoteTab);
+        const activeTabObj = (calculatedTabs || []).find(t => String(t.id) === String(activeQuoteTab));
         if (!activeTabObj) return;
 
         const realId = activeTabObj.realId;
+        const currentToName = toNameRef.current; // Read via ref — avoids dep loop
         const allCandidates = (enquiryData.customerOptions || []).map(c => c.trim());
 
         // Identify customers who have at least one price > 0 for this tab's subtree
@@ -585,69 +716,69 @@ const QuoteForm = () => {
             });
         });
 
-        console.log(`[AutoSelect] Tab: ${activeQuoteTab}, RealId: ${realId}, Priced Customers:`, pricedCustomers);
-
-        let targetCustomer = toName;
-        if (pricedCustomers.length === 1) {
-            targetCustomer = pricedCustomers[0];
-        } else if (pricedCustomers.length > 1) {
-            // If current is NOT in the priced list, pick the first one instead of blanking
-            if (!pricedCustomers.includes(toName)) {
-                targetCustomer = pricedCustomers[0];
-            }
-        } else {
-            // No one has pricing yet for this tab
-            // If there's only one customer in total for the enquiry, use it.
-            if (allCandidates.length === 1) {
-                targetCustomer = allCandidates[0];
-            }
-        }
-
-        if (toName !== targetCustomer) {
-            console.log(`[AutoSelect] Updating toName: "${toName}" -> "${targetCustomer}"`);
-            setToName(targetCustomer);
-        }
+        // NOTE: Auto-selection of toName based on pricing is disabled to ensure manual control and clean slate.
+        // The user must manually select a customer even if pricing exists.
 
         // Mark as processed for this tab so we don't run again until tab changes
         lastAutoSelectRef.current.processed = true;
-
-    }, [activeQuoteTab, pricingData, enquiryData, calculatedTabs, toName]); // toName kept to ensure effect runs, but 'processed' guard prevents loop
+    }, [activeQuoteTab, pricingData, enquiryData, calculatedTabs]); // toName intentionally excluded — read via ref above
 
 
 
     // NEW: Sync Attention Of (toAttention) whenever toName or enquiryData changes
+    // NOTE: toAttention is intentionally NOT in the dep array — adding it blocks manual editing by
+    // re-running on every keystroke. We use a ref to track which customer we last resolved for.
+    const lastAttentionResolvedForRef = useRef('');
     useEffect(() => {
         if (!toName || !enquiryData) return;
 
-        // Skip if toAttention is already set (don't override manual edits,
-        // though currently there is no input for it, it might be set by loadQuote/handleCustomerChange)
-        // Since there's no manual input for this, we should always try to resolve it if it's currently empty or N/A
-        if (!toAttention || toAttention === 'N/A') {
-            const target = normalize(toName);
+        // Only run once per customer change (prevents re-firing on every keystroke)
+        if (lastAttentionResolvedForRef.current === toName) return;
+        lastAttentionResolvedForRef.current = toName;
 
-            // 1. Try Exact Match
-            if (enquiryData.customerContacts && enquiryData.customerContacts[toName.trim()]) {
-                const contact = enquiryData.customerContacts[toName.trim()];
-                setToAttention(contact);
-            }
-            // 2. Try Normalized Match
-            else if (enquiryData.customerContacts) {
-                const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === target);
-                if (match) {
-                    const contact = enquiryData.customerContacts[match];
-                    setToAttention(contact);
-                }
-                // 3. Fallback to global enquiry ReceivedFrom
-                else if (enquiryData.enquiry?.ReceivedFrom) {
-                    setToAttention(enquiryData.enquiry.ReceivedFrom);
-                }
-            }
-            else if (enquiryData.enquiry?.ReceivedFrom) {
-                setToAttention(enquiryData.enquiry.ReceivedFrom);
-            }
+        // --- INTERNAL CUSTOMER DETECTION: Clear fields for internal divisions ---
+        const allJobNamesNormSetEffect = new Set(
+            (enquiryData?.divisionsHierarchy || []).map(n =>
+                (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            )
+        );
+        const toNameClean = toName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+        if (allJobNamesNormSetEffect.has(toNameClean)) {
+            // Internal customer — clear attention
+            setToAttention('');
+            return;
         }
 
-    }, [toName, enquiryData, toAttention]);
+        // For external customers: resolve attention from contacts (only auto-fills on customer change)
+        const target = normalize(toName);
+
+        // 1. Try Exact Match
+        if (enquiryData.customerContacts && enquiryData.customerContacts[toName.trim()]) {
+            setToAttention(enquiryData.customerContacts[toName.trim()]);
+        }
+        // 2. Try Normalized Match
+        else if (enquiryData.customerContacts) {
+            const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === target);
+            if (match) {
+                setToAttention(enquiryData.customerContacts[match]);
+            }
+            // 3. Fallback to global enquiry ReceivedFrom
+            else if (enquiryData.enquiry?.ReceivedFrom) {
+                setToAttention(enquiryData.enquiry.ReceivedFrom);
+            } else {
+                setToAttention('');
+            }
+        }
+        else if (enquiryData.enquiry?.ReceivedFrom) {
+            setToAttention(enquiryData.enquiry.ReceivedFrom);
+        } else {
+            setToAttention('');
+        }
+
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [toName, enquiryData]); // toAttention intentionally excluded — see note above
+
+
 
     // Load Pricing Data when enquiry and customer are selected
     useEffect(() => {
@@ -821,78 +952,35 @@ const QuoteForm = () => {
         if (!enquiryData) return;
 
         console.log('--- [Customer Options Calculation] START ---');
-        console.log('Lead Job Prefix:', enquiryData.leadJobPrefix);
+        console.log(`[Customer Filter] Lead Job Prefix: ${enquiryData.leadJobPrefix}`);
 
-        // Get user's accessible divisions to exclude from customer list
-        const userEmail = (currentUser?.EmailId || '').toLowerCase();
+        // Robust Detection: Match user to a node in the hierarchy
+        const userEmailNorm = (currentUser?.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+        const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase();
 
-        // 1. Base Options (Enquiry Customers from API)
+        const myNode = (enquiryData.divisionsHierarchy || []).find(n => {
+            const mails = [n.commonMailIds, n.ccMailIds].filter(Boolean).join(',').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+            const nodeNameNorm = (n.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+            return (userEmailNorm && mails.includes(userEmailNorm)) || (userDeptNorm && nodeNameNorm === userDeptNorm);
+        });
+
+        // Determine if we are in Subjob Mode
+        const hasParent = myNode && myNode.parentId && myNode.parentId != '0' && myNode.parentId != 0;
+        const isSubjobUser = enquiryData.userIsSubjobUser === true || hasParent;
+
+        console.log(`[Customer Filter] Detection: BackendFlag=${enquiryData.userIsSubjobUser}, HasParent=${hasParent}, Final=${isSubjobUser}`);
+        if (myNode) console.log(`[Customer Filter] User Matched to Node: ${myNode.itemName}`);
+
+        // 1. Base Options from API
         const rawBase = enquiryData.customerOptions || [];
         const baseOpts = rawBase.map(c => ({ value: c, label: c, type: 'Linked' }));
-        console.log('1. Base Options (API):', baseOpts.map(o => o.value));
 
-        // 2. Internal Options (Calculated relative to CURRENT Lead Job)
-        let internalOpts = [];
-        if (enquiryData.divisionsHierarchy && enquiryData.leadJobPrefix) {
-            const allNodes = enquiryData.divisionsHierarchy;
-            const myJobs = (pricingData?.access?.editableJobs || []).map(j => j.trim().toLowerCase());
-
-            // Step A: Find the Root for the selected prefix
-            let selectedRoot = allNodes.find(n => {
-                const name = n.itemName.toLowerCase();
-                const clean = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                const isRoot = !n.parentId || n.parentId === '0' || n.parentId === 0;
-                // Match either prefix (L1) or full name or clean name
-                return isRoot && (
-                    clean === enquiryData.leadJobPrefix.toLowerCase() ||
-                    name.toLowerCase() === enquiryData.leadJobPrefix.toLowerCase() ||
-                    name.startsWith(enquiryData.leadJobPrefix.toLowerCase() + ' -')
-                );
-            });
-
-            if (selectedRoot) {
-                const rootId = String(selectedRoot.id || selectedRoot.ItemID);
-                console.log('[Customer Filter] Active Root:', selectedRoot.itemName, 'ID:', rootId);
-
-                // Step B: Find User's Job inside this root's branch
-                // We look for a node matching user's editable jobs that descends from the selected root
-                const userJobInBranch = allNodes.find(n => {
-                    if (!myJobs.includes(n.itemName.trim().toLowerCase())) return false;
-
-                    // Recursive ancestor check to verify it belongs to selectedRoot
-                    let curr = n;
-                    while (curr) {
-                        if (String(curr.id || curr.ItemID) === rootId) return true;
-                        const pid = curr.parentId || curr.ParentID;
-                        if (!pid || pid === '0' || pid === 0) break;
-                        curr = allNodes.find(p => String(p.id || p.ItemID) === String(pid));
-                    }
-                    return false;
-                });
-
-                if (userJobInBranch) {
-                    console.log(`[Customer Filter] Found User Job in Branch: ${userJobInBranch.itemName}`);
-                    const pid = userJobInBranch.parentId || userJobInBranch.ParentID;
-                    if (pid && pid !== '0' && pid !== 0) {
-                        const parent = allNodes.find(p => String(p.id || p.ItemID) === String(pid));
-                        if (parent) {
-                            const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                            if (cleanParent && cleanParent !== 'Root') {
-                                console.log('[Customer Filter] Parent identified:', cleanParent);
-                                internalOpts.push({ value: cleanParent, label: cleanParent, type: 'Internal Division' });
-                            }
-                        }
-                    } else {
-                        console.log('[Customer Filter] User job is the Lead Job (Root) - No internal parent.');
-                    }
-                } else if (isAdmin) {
-                    // ADMIN FALLBACK: If no specific job assigned but they selected a root, 
-                    // we assume they act as Lead unless they are deep.
-                    // (Admins usually work as Lead on roots)
-                }
-            }
-        }
-        console.log('2. Internal Options (calculated):', internalOpts.map(o => o.value));
+        // 2. All job names from hierarchy (for internal/external distinction)
+        const allJobNamesNorm = new Set(
+            (enquiryData.divisionsHierarchy || []).map(n =>
+                (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            )
+        );
 
         // 3. Pricing Context Customers
         let pricingOpts = [];
@@ -902,52 +990,142 @@ const QuoteForm = () => {
         if (pricingData?.extraCustomers) {
             pricingOpts = [...pricingOpts, ...pricingData.extraCustomers.map(c => ({ value: c, label: c, type: 'Linked' }))];
         }
-        console.log('3. Pricing Options:', pricingOpts.map(o => o.value));
 
         // 4. Merge & Deduplicate
-        const allOpts = [...baseOpts, ...internalOpts, ...pricingOpts];
+        const allOpts = [...baseOpts, ...pricingOpts];
         const uniqueMap = new Map();
-
         allOpts.forEach(item => {
             if (!item.value) return;
-            const key = item.value.toLowerCase().replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-            if (!uniqueMap.has(key)) {
-                uniqueMap.set(key, item);
-            }
+            const key = item.value.toLowerCase()
+                .replace(/[\u200B-\u200D\uFEFF]/g, '')
+                .replace(/[,.]+$/g, '')
+                .trim();
+            if (!uniqueMap.has(key)) uniqueMap.set(key, item);
         });
-
         const uniqueOptions = Array.from(uniqueMap.values());
 
-        // 5. STRICTION LOGIC: 
-        // Mode A (Sub Job): User has an internal parent in this branch -> Show ONLY Parent.
-        // Mode B (Lead Job): User is at the root of this branch -> Show ONLY External.
+        // --- ENHANCEMENT: Explicitly add parent job to candidates for sub-job users ---
+        if (isSubjobUser) {
+            const hierarchy = enquiryData.divisionsHierarchy || [];
+            // Use myNode (global user node) to find potential parents
+            const pid = myNode?.parentId || myNode?.ParentID;
+            const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(pid));
+            if (parent) {
+                const pName = parent.itemName || parent.DivisionName || parent.ItemName || '';
+                if (pName && !uniqueMap.has(pName.toLowerCase().trim())) {
+                    uniqueOptions.push({ value: pName, label: pName, type: 'Internal Division' });
+                }
+            }
+        }
 
-        const isSubJobMode = internalOpts.length > 0;
-        const parentName = isSubJobMode ? internalOpts[0].value : '';
-        const parentNorm = parentName.toLowerCase().trim();
-        const allJobNamesNorm = new Set((enquiryData.divisionsHierarchy || []).map(n => n.itemName.toLowerCase().trim()));
+        // 5. EXTENDED FILTER LOGIC:
+        // Identify active Lead Job
+        const selectedLeadPrefix = (enquiryData.leadJobPrefix || '').toUpperCase();
+        const activeLeadJob = (enquiryData.divisionsHierarchy || []).find(j => {
+            const name = (j.itemName || j.DivisionName || '').toUpperCase();
+            const code = (j.leadJobCode || j.LeadJobCode || '').toUpperCase();
+            return name === selectedLeadPrefix || (selectedLeadPrefix && (name.startsWith(selectedLeadPrefix + ' -') || code === selectedLeadPrefix));
+        });
 
-        console.log(`[Customer Filter] Final Logic: IsSubJob=${isSubJobMode}, Parent=${parentName || 'None'}`);
+        const activeLeadId = activeLeadJob ? (activeLeadJob.id || activeLeadJob.ItemID) : null;
+
+        // Find the user's specific node WITHIN the active branch
+        const myNodeInBranch = (enquiryData.divisionsHierarchy || []).find(n => {
+            // Check if this node matches user's division/context
+            const isMyType = myNode && (n.itemName === myNode.itemName);
+            if (!isMyType) return false;
+
+            // Check if it belongs to the selected branch
+            if (!activeLeadId) return false;
+            if (String(n.id || n.ItemID) === String(activeLeadId)) return true;
+
+            let curr = n;
+            let safety = 0;
+            while (curr && (curr.parentId || curr.ParentID) && safety < 10) {
+                const pid = String(curr.parentId || curr.ParentID);
+                if (pid === String(activeLeadId)) return true;
+                curr = (enquiryData.divisionsHierarchy || []).find(p => String(p.id || p.ItemID) === pid);
+                safety++;
+            }
+            return false;
+        });
+
+        const isOwnDivisionSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
 
         const filteredOptions = uniqueOptions.filter(opt => {
-            const valNorm = opt.value.toLowerCase().trim();
+            const valNorm = (opt.value || '').toLowerCase().trim();
+            // Deep Clean for internal matching
+            const cleanValNorm = valNorm
+                .replace(/^(l\d+|sub job)\s*-\s*/i, '')
+                .replace(/\(own job\)/gi, '')
+                .trim()
+                .toLowerCase();
+            const isJobName = allJobNamesNorm.has(cleanValNorm);
 
-            if (isSubJobMode) {
-                // RULE 1: Sub Job mode -> only its parent job
-                return valNorm === parentNorm;
+            // Lead job "Own Job" means user's OWN division is selected as the branch root
+            const isOwnDivisionSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
+
+            if (isOwnDivisionSelected) {
+                // 1. If leadjob is own job then only to appear external customer names, not any internal job
+                return !isJobName;
             } else {
-                // RULE 2: Lead Job mode -> only external customers
-                // Hide any name that is actually an internal division/job
-                if (allJobNamesNorm.has(valNorm)) return false;
-                return true;
+                // 2. If leadjob is internal job then only parent job as customer name not any external customer
+                if (!isJobName) return false; // Hide all external
+
+                // Show ONLY the direct parent job in the hierarchy
+                if (myNodeInBranch) {
+                    const parentId = myNodeInBranch.parentId || myNodeInBranch.ParentID;
+                    const parentNode = (enquiryData.divisionsHierarchy || []).find(p => String(p.id || p.ItemID) === String(parentId));
+                    if (parentNode) {
+                        const parentNameNorm = (parentNode.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                        if (cleanValNorm === parentNameNorm) return true;
+                    }
+                }
+                return false;
             }
         });
 
-        console.log('--- Final Filtered Options ---', filteredOptions.map(o => o.value));
+        console.log(`[Customer Filter] Final Filtered Count: ${filteredOptions.length}`, filteredOptions);
         setEnquiryCustomerOptions(filteredOptions);
         console.log('--- [Customer Options Calculation] END ---');
+        // NOTE: pricingData?.customers / extraCustomers intentionally excluded from deps.
+        // Including them causes a loop: pricingData load → options rebuild → auto-select → handleCustomerChange → pricingData reload.
+        // The options are seeded once from enquiryData which already contains the relevant customer list.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [enquiryData?.userIsSubjobUser, enquiryData?.divisionsHierarchy, enquiryData?.customerOptions, enquiryData?.leadJobPrefix, currentUser]);
 
-    }, [enquiryData?.leadJobPrefix, enquiryData?.divisionsHierarchy, enquiryData?.customerOptions, currentUser, pricingData?.access?.editableJobs, pricingData?.customers, pricingData?.extraCustomers]);
+    // Auto-select or Clear Customer Name when Lead Job Change (via enquiryCustomerOptions)
+    useEffect(() => {
+        // Only run if we have enquiryData
+        if (!enquiryData) return;
+
+        const currentToName = toNameRef.current;
+        console.log(`[Customer Selection Effect] Options: ${enquiryCustomerOptions?.length}, Current: "${currentToName}"`);
+
+        // If no options available, clear selection to avoid stale data
+        if (!enquiryCustomerOptions || enquiryCustomerOptions.length === 0) {
+            if (currentToName) {
+                console.log('[Customer Selection Effect] No options available, clearing toName');
+                setToName('');
+                handleCustomerChange(null);
+            }
+            return;
+        }
+
+        // If current toName is already valid for the new option set — leave it alone
+        const isCurrentValid = enquiryCustomerOptions.some(opt => opt.value === currentToName);
+        if (isCurrentValid) {
+            console.log(`[Customer Selection Effect] Current "${currentToName}" is valid — no change.`);
+            return;
+        }
+
+        // If current is NOT valid, or if it's already blank, keep it blank to satisfy user request for clear selection on context change
+        if (currentToName) {
+            console.log(`[Customer Selection Effect] Current customer "${currentToName}" is not valid for this context, clearing.`);
+            handleCustomerChange(null);
+        }
+    }, [enquiryCustomerOptions]);
+
 
     // Handle Metadata Selections
     const handleSelectSignatory = (e) => {
@@ -979,11 +1157,17 @@ const QuoteForm = () => {
     const handleCustomerChange = (selectedOption) => {
         const selectedName = selectedOption ? selectedOption.value : '';
         console.log('[handleCustomerChange] Selected:', selectedName);
-        console.log('[handleCustomerChange] Customers List Size:', customersList.length);
+
+        // Only reset if effectively changed (prevents auto-selection from clearing active quote)
+        if (normalize(selectedName) === normalize(toName)) {
+            console.log('[handleCustomerChange] Customer name unchanged (normalized), skipping reset.');
+            return;
+        }
 
         setToName(selectedName);
         setQuoteId(null); // Reset ID so auto-load can kick in for new customer
         setQuoteDate(''); // Reset date to blank for new customer selection
+
 
         if (!selectedName) {
             setToAddress('');
@@ -996,6 +1180,33 @@ const QuoteForm = () => {
             return;
         }
 
+        // --- INTERNAL CUSTOMER DETECTION ---
+        // An internal customer is a job/division name (e.g. "Electrical", "BMS") rather than an external company.
+        // For internal customers: keep address/phone/email/attention blank.
+        const isInternalOption = selectedOption?.type === 'Internal Division';
+        const allJobNamesNormSet = new Set(
+            (enquiryData?.divisionsHierarchy || []).map(n =>
+                (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+            )
+        );
+        const selectedNameClean = selectedName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+        const isInternalByName = allJobNamesNormSet.has(selectedNameClean);
+        const isInternal = isInternalOption || isInternalByName;
+
+        if (isInternal) {
+            console.log('[handleCustomerChange] Internal customer detected — clearing address/attention fields.');
+            setToAddress('');
+            setToPhone('');
+            setToEmail('');
+            setToAttention('');
+            // Still reload pricing for this internal customer
+            if (enquiryData) {
+                loadPricingData(enquiryData.enquiry.RequestNo, selectedName);
+            }
+            return;
+        }
+
+        // --- EXTERNAL CUSTOMER: Look up contact details ---
         // Set Attention of (ReceivedFrom) for the selected customer
         console.log('[handleCustomerChange] Looking up customer:', selectedName);
         console.log('[handleCustomerChange] customerContacts available:', enquiryData?.customerContacts);
@@ -1010,7 +1221,7 @@ const QuoteForm = () => {
             }
             // 2. Try normalized match
             else {
-                const match = Object.keys(enquiryData.customerContacts).find(k => normalizeName(k) === targetNorm);
+                const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === targetNorm);
                 if (match) {
                     setToAttention(enquiryData.customerContacts[match]);
                     console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
@@ -1084,6 +1295,7 @@ const QuoteForm = () => {
         }
     };
 
+
     const handleProfileChange = (e) => {
         const code = e.target.value; // Using Department Code as unique identifier? Or DivisionCode?
         // Ideally combination, but for now assuming unique Dept Code or we check both if needed.
@@ -1143,8 +1355,14 @@ const QuoteForm = () => {
                 pData.allValues = groupedValues;
 
                 // Set active values for current view customer using normalized key
-                // This ensures 'Civil Project ' matches 'Civil Project'
-                pData.values = groupedValues[normalize(cxName || '')] || {};
+                // ENHANCEMENT: Merge with 'Main' values as fallback to prevent 0.000 prices for roots (Step 1353)
+                const currentCustKey = normalize(cxName || '');
+                const mainKey = normalize('Main');
+
+                pData.values = {
+                    ...(groupedValues[mainKey] || {}),
+                    ...(groupedValues[currentCustKey] || {})
+                };
 
                 // --- HIERARCHY STABILITY (Step 1385) ---
                 // If the pricing module hasn't identified jobs (e.g. fresh enquiry), 
@@ -1152,9 +1370,9 @@ const QuoteForm = () => {
                 if (!pData.jobs || pData.jobs.length === 0) {
                     console.log('[Pricing Fetch] No jobs from API, falling back to Enquiry Hierarchy');
                     pData.jobs = (enquiryData?.divisionsHierarchy || []).map(d => ({
-                        id: d.ItemID,
-                        parentId: d.ParentID,
-                        itemName: d.DivisionName,
+                        id: d.id || d.ItemID || d.ItemIDVal,
+                        parentId: d.parentId || d.ParentID || d.ParentIDVal,
+                        itemName: d.itemName || d.DivisionName || d.ItemName,
                         visible: true,
                         editable: true
                     }));
@@ -1271,12 +1489,23 @@ const QuoteForm = () => {
         const userScopes = data.access?.editableJobs || [];
 
         // Effective Scopes: Use Override if present, otherwise User's Editable Jobs
-        const effectiveScopes = overrideScope ? [overrideScope] : userScopes;
-        const hasLimitedAccess = !!overrideScope || (!data.access?.hasLeadAccess && userScopes.length > 0);
+        const effectiveScopes = (overrideScope ? [overrideScope] : userScopes).map(s => (s || '').trim().toLowerCase());
+
+        // Provision (Step 1922 Fix): Strictly identify if the user is a "Sub-Job User"
+        // They are LIMITED if they have an editable job scope that DOES NOT include the root Lead Job.
+        const rootJobs = jobsPool.filter(j => !j.parentId || j.parentId === '0' || j.parentId === 0);
+        const hasRootAccess = rootJobs.some(rj => effectiveScopes.some(s => {
+            const rName = (rj.itemName || rj.DivisionName || '').trim().toLowerCase();
+            return rName === s || rName.includes(s) || s.includes(rName);
+        }));
+
+        const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+        const isStrictlyLimited = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
+
+        const hasLimitedAccess = !!overrideScope || isStrictlyLimited || (!data.access?.canEditAll && !hasRootAccess && userScopes.length > 0);
 
         const allowedQuoteIds = new Set();
-        // Fallback: If pricing module hasn't identified jobs, use Enquiry Divisions Hierarchy
-        const jobsPool = (data.jobs && data.jobs.length > 0) ? data.jobs : (enquiryData?.divisionsHierarchy || []);
+        // Use unified jobsPool memo
 
         if (hasLimitedAccess && jobsPool.length > 0) {
             // 1. Find Scope Root Jobs
@@ -1300,7 +1529,6 @@ const QuoteForm = () => {
                     }
                 });
             }
-            console.log('[calculateSummary] Limited Access Quote Scoping:', { effectiveScopes, allowedIds: Array.from(allowedQuoteIds) });
         }
 
         const groups = {};
@@ -1308,43 +1536,110 @@ const QuoteForm = () => {
         // BRANCH ISOLATION (Step 2293)
         // Identify IDs that belong to the current Lead Job Prefix to avoid branch cross-contamination
         const branchIds = new Set();
-        const branchPrefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
-        if (branchPrefix && jobsPool.length > 0) {
-            const rootJob = jobsPool.find(j => {
+        const activeTabObj = (calculatedTabs || []).find(t => String(t.id) === String(activeQuoteTab));
+        const branchPrefixRaw = (activeTabObj?.label || activeTabObj?.name || enquiryData?.leadJobPrefix || '').toUpperCase();
+        const branchPrefix = branchPrefixRaw.replace(/^(L\d+\s*-\s*)/, '').trim();
+
+        let rootJob = null;
+        if (activeTabObj?.realId) {
+            rootJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId));
+        } else if (branchPrefix && jobsPool.length > 0) {
+            rootJob = jobsPool.find(j => {
                 const name = (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
                 const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
-                return name === branchPrefix || clean === branchPrefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix);
+                return name === branchPrefix || clean === branchPrefix || name === branchPrefixRaw || clean === branchPrefixRaw || (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix);
             });
-            if (rootJob) {
-                branchIds.add(String(rootJob.id || rootJob.ItemID || rootJob.ID));
-                let changed = true;
-                while (changed) {
-                    changed = false;
-                    jobsPool.forEach(j => {
-                        const jId = String(j.id || j.ItemID || j.ID);
-                        const pId = String(j.parentId || j.ParentID || j.ParentID);
-                        if (jId && !branchIds.has(jId) && branchIds.has(pId)) {
-                            branchIds.add(jId);
-                            changed = true;
-                        }
-                    });
-                }
+        }
+
+        if (rootJob) {
+            branchIds.add(String(rootJob.id || rootJob.ItemID || rootJob.ID));
+            let changed = true;
+            while (changed) {
+                changed = false;
+                jobsPool.forEach(j => {
+                    const jId = String(j.id || j.ItemID || j.ID);
+                    const pId = String(j.parentId || j.ParentID || j.ParentID);
+                    if (jId && !branchIds.has(jId) && branchIds.has(pId)) {
+                        branchIds.add(jId);
+                        changed = true;
+                    }
+                });
             }
         }
         console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
 
-        // DEDUPLICATE OPTIONS (Step 1560)
-        // If multiple options with the same name/item exist (e.g. one for 'Main' and one for 'Civil Project'),
-        // we should only process the most relevant one to prevent double counting.
+        // DEDUPLICATE OPTIONS (Step 1560 + Lead Job Fix)
+        // Multiple options with the same name/itemName can exist for DIFFERENT lead jobs
+        // (e.g. Option-1 for BMS under "Civil Project" lead vs "BMS" lead both stored against customer "Electrical").
+        // The active lead job is in enquiryData.leadJobPrefix — we must prefer the option whose
+        // leadJobName matches this to ensure the correct OptionID (and thus price) is used.
+        // Resolve the actual Lead Job for this branch (Step 825 Fix)
+        const actualLeadJob = (() => {
+            if (!rootJob) return null;
+            let curr = rootJob;
+            const selPrefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+            while (curr) {
+                const name = (curr.itemName || curr.DivisionName || '').toUpperCase();
+                const code = (curr.leadJobCode || curr.LeadJobCode || '').toUpperCase();
+                // Match the lead job prefix from header
+                if (code === selPrefix || name === selPrefix || (selPrefix && name.startsWith(selPrefix + ' -'))) return curr;
+                // If it's a root job (no parent), it's the lead for its branch
+                if (!curr.parentId || curr.parentId === '0' || curr.parentId === 0) return curr;
+                curr = jobsPool.find(j => String(j.id || j.ItemID) === String(curr.parentId || curr.ParentID));
+            }
+            return null;
+        })();
+
+        const activeLead = actualLeadJob ? normalizeCust(actualLeadJob.itemName || actualLeadJob.DivisionName) : normalizeCust(branchPrefix);
+        const activeLeadFull = actualLeadJob ? normalizeCust(actualLeadJob.itemName || actualLeadJob.DivisionName) : normalizeCust(branchPrefixRaw);
+
+        // RESOLVE VALUES FOR ACTIVE CUSTOMER (Step 1612)
+        // Correct bucket from data.allValues based on activeCustomer.
+        const activeCustKey = normalizeCust(activeCustomer);
+        const mainKey = normalizeCust('Main');
+        const effectiveValuesLookup = (data.allValues)
+            ? { ...(data.allValues[mainKey] || {}), ...(data.allValues[activeCustKey] || {}) }
+            : (data.values || {});
+
+        // Helper to check if an option ID has any non-zero prices in current values
+        const hasEffectivePrice = (optId) => {
+            const checkVals = (vals) => {
+                if (!vals) return false;
+                return Object.values(vals).some(v => String(v.OptionID) === String(optId) && parseFloat(v.Price) > 0);
+            };
+
+            if (checkVals(effectiveValuesLookup)) return true;
+
+            // Also check all job names as potential internal customers
+            if (data.allValues) {
+                const jobNames = (jobsPool || []).map(j => normalizeCust(j.itemName || j.DivisionName));
+                if (jobNames.some(name => checkVals(data.allValues[name]))) return true;
+            }
+
+            return false;
+        };
+
+
         const uniqueOptions = [];
         const seenOptions = new Set();
 
-        // Sort options so specific customer matches come first
         const sortedOptions = [...data.options].sort((a, b) => {
-            const aMatch = normalizeCust(a.customerName) === normalizeCust(activeCustomer);
-            const bMatch = normalizeCust(b.customerName) === normalizeCust(activeCustomer);
-            if (aMatch && !bMatch) return -1;
-            if (!aMatch && bMatch) return 1;
+            const aHasPrice = hasEffectivePrice(a.id || a.ID);
+            const bHasPrice = hasEffectivePrice(b.id || b.ID);
+
+            const aLeadMatch = activeLead && normalizeCust(a.leadJobName) === activeLead;
+            const bLeadMatch = activeLead && normalizeCust(b.leadJobName) === activeLead;
+
+            const aCustMatch = normalizeCust(a.customerName) === normalizeCust(activeCustomer);
+            const bCustMatch = normalizeCust(b.customerName) === normalizeCust(activeCustomer);
+            if (aHasPrice && !bHasPrice) return -1;
+            if (!aHasPrice && bHasPrice) return 1;
+
+            if (aLeadMatch && !bLeadMatch) return -1;
+            if (!aLeadMatch && bLeadMatch) return 1;
+
+            if (aCustMatch && !bCustMatch) return -1;
+            if (!aCustMatch && bCustMatch) return 1;
             return 0;
         });
 
@@ -1357,7 +1652,44 @@ const QuoteForm = () => {
         });
 
         uniqueOptions.forEach(opt => {
-            console.log(`[calculateSummary] Processing option:`, opt.name, 'itemName:', opt.itemName, 'customerName:', opt.customerName);
+
+            // LEAD JOB FILTER: If an active lead is set, skip options whose leadJobName is a MISMATCH.
+            // This prevents double-counting when the same option (e.g. "Option-1" for BMS, customer "Electrical")
+            // is stored for multiple lead contexts (leadJobName="Civil Project" AND leadJobName="BMS").
+            // We only process the one that belongs to the currently active lead job.
+            // LEAD JOB FILTER: Only skip if the option's leadJobName is COMPLETELY unrelated to our branch.
+            // (e.g. A quote for Enquiry 53 - Civil shouldn't show options from Enquiry 54 - HVAC).
+            if ((activeLead || activeLeadFull) && opt.leadJobName) {
+                const optLead = normalizeCust(opt.leadJobName);
+                if (optLead !== activeLead && optLead !== activeLeadFull) {
+                    const optLeadJob = jobsPool.find(j => normalizeCust(j.itemName || j.DivisionName) === optLead);
+                    const optLeadId = optLeadJob ? String(optLeadJob.id || optLeadJob.ItemID || optLeadJob.ID) : null;
+
+                    if (optLeadId && !branchIds.has(optLeadId)) {
+                        // ALLOW ANCESTORS (Step 421 FIX): 
+                        // If the option's lead is an ANCESTOR of our current tab's branch, allow it.
+                        // (e.g. Electrical prices saved under Civil lead context should show in Electrical tab)
+                        const rootJobId = rootJob ? String(rootJob.id || rootJob.ItemID || rootJob.ID) : null;
+                        const isAncestorOfRoot = (() => {
+                            if (!rootJobId) return false;
+                            if (rootJobId === optLeadId) return true; // Direct match
+                            let curr = rootJob;
+                            while (curr && (curr.parentId || curr.ParentID)) {
+                                const pid = String(curr.parentId || curr.ParentID);
+                                if (pid === optLeadId) return true;
+                                curr = jobsPool.find(pj => String(pj.id || pj.ItemID) === pid);
+                            }
+                            return false;
+                        })();
+
+                        if (!isAncestorOfRoot) {
+                            console.log(`[calculateSummary] Skipping unrelated branch option "${opt.name}" (leadJobName="${opt.leadJobName}")`);
+                            return;
+                        }
+                    }
+                }
+            }
+
 
             // 0. Customer Filter
             // Only filter out if option has a customerName AND it doesn't match the active customer
@@ -1365,7 +1697,7 @@ const QuoteForm = () => {
             const optCust = normalizeCust(opt.customerName);
             const activeCust = normalizeCust(activeCustomer);
 
-            const isCustomerMatch = (!opt.customerName || optCust === activeCust || optCust === 'main' || (() => {
+            const isCustomerMatch = (!activeCust || !opt.customerName || optCust === activeCust || optCust === 'main' || (() => {
                 // HIERARCHY ALLOWANCE: Allow internal sub-job options to show for parent job customers
                 const activeJob = jobsPool.find(j => normalizeCust(j.itemName || j.DivisionName) === activeCust);
                 if (activeJob) {
@@ -1406,7 +1738,8 @@ const QuoteForm = () => {
             // 1. Visibility Filter
             let isVisible = false;
             // Check if option is associated with a job, and if that job IS ACCESSIBLE (visible or editable)
-            if (data.access?.hasLeadAccess) {
+            // Provision (Step 3321): Even with lead access, sub-job users CANNOT see parent job prices at any cost.
+            if (data.access?.hasLeadAccess && !hasLimitedAccess) {
                 isVisible = true;
                 console.log(`[calculateSummary] Visible (lead access):`, opt.name);
             } else if (opt.itemName) {
@@ -1416,27 +1749,48 @@ const QuoteForm = () => {
                 console.log(`[calculateSummary] editableJobs:`, data.access?.editableJobs);
                 console.log(`[calculateSummary] visibleJobs:`, data.access?.visibleJobs);
 
-                const isEditable = data.access?.editableJobs?.some(job => {
-                    const jobLower = (job || '').trim().toLowerCase();
+                const isEditable = data.access?.editableJobs?.some(scopeName => {
+                    const scopeLower = (scopeName || '').trim().toLowerCase();
                     const optLower = (opt.itemName || '').trim().toLowerCase();
 
-                    // Try exact match first
-                    if (jobLower === optLower) {
+                    // 1. Direct/Partial Match
+                    if (scopeLower === optLower || scopeLower.includes(optLower) || optLower.includes(scopeLower)) {
                         return true;
                     }
-                    // Then try partial match
-                    return jobLower.includes(optLower) || optLower.includes(jobLower);
+
+                    // 2. DESCENDANT CHECK (Step 425 FIX):
+                    // If the user has access to a parent job (scope), they can see the sub-job option (opt)
+                    const optJob = jobsPool.find(j => (j.itemName || '').trim().toLowerCase() === optLower);
+                    if (optJob) {
+                        let curr = optJob;
+                        while (curr && (curr.parentId || curr.ParentID)) {
+                            const pid = String(curr.parentId || curr.ParentID);
+                            const parent = jobsPool.find(pj => String(pj.id || pj.ItemID) === pid);
+                            if (parent && (parent.itemName || '').trim().toLowerCase() === scopeLower) return true;
+                            curr = parent;
+                        }
+                    }
+                    return false;
                 });
-                const isVisibleJob = data.access?.visibleJobs?.some(job => {
-                    const jobLower = (job || '').trim().toLowerCase();
+                const isVisibleJob = data.access?.visibleJobs?.some(scopeName => {
+                    const scopeLower = (scopeName || '').trim().toLowerCase();
                     const optLower = (opt.itemName || '').trim().toLowerCase();
 
-                    // Try exact match first
-                    if (jobLower === optLower) {
+                    if (scopeLower === optLower || scopeLower.includes(optLower) || optLower.includes(scopeLower)) {
                         return true;
                     }
-                    // Then try partial match
-                    return jobLower.includes(optLower) || optLower.includes(jobLower);
+
+                    const optJob = jobsPool.find(j => (j.itemName || '').trim().toLowerCase() === optLower);
+                    if (optJob) {
+                        let curr = optJob;
+                        while (curr && (curr.parentId || curr.ParentID)) {
+                            const pid = String(curr.parentId || curr.ParentID);
+                            const parent = jobsPool.find(pj => String(pj.id || pj.ItemID) === pid);
+                            if (parent && (parent.itemName || '').trim().toLowerCase() === scopeLower) return true;
+                            curr = parent;
+                        }
+                    }
+                    return false;
                 });
                 isVisible = isEditable || isVisibleJob;
                 console.log(`[calculateSummary] Visibility result for "${opt.name}": isEditable=${isEditable}, isVisibleJob=${isVisibleJob}, isVisible=${isVisible}`);
@@ -1490,10 +1844,26 @@ const QuoteForm = () => {
                     const isEditableDescendant = (() => {
                         if (!hasLimitedAccess) return true;
 
-                        // Rule: I can see myself and my children/descendants.
-                        // I CANNOT see my parent.
+                        // Rule (Step 1922): I can see myself and my children/descendants.
+                        // I CANNOT see my parent or parent's parent.
                         const myJobNames = (data.access?.editableJobs || []).map(n => normalizeName(n));
                         const currentJobName = normalizeName(job.itemName);
+
+                        // If current job is an ANCESTOR of any of my scopes, block it.
+                        const isStrictParent = (data.access?.editableJobs || []).some(scopeName => {
+                            const scopeJob = jobsPool.find(j => normalizeName(j.itemName || j.DivisionName) === normalizeName(scopeName));
+                            if (!scopeJob) return false;
+
+                            // Check if job is ancestor of scopeJob
+                            let curr = scopeJob;
+                            while (curr && (curr.parentId || curr.ParentID)) {
+                                const pid = String(curr.parentId || curr.ParentID);
+                                if (pid === String(job.id || job.ItemID)) return true;
+                                curr = jobsPool.find(p => String(p.id || p.ItemID) === pid);
+                            }
+                            return false;
+                        });
+                        if (isStrictParent) return false;
 
                         if (myJobNames.includes(currentJobName)) return true;
 
@@ -1527,8 +1897,8 @@ const QuoteForm = () => {
                     // IMPACT: Resolves 'Hidden Price' (Step 1189) by checking explicit price first.
                     const key = `${opt.id}_${job.id}`;
                     const nameKey = `${opt.id}_${job.itemName}`;
-                    let val = data.values[key] || data.values[nameKey];
-                    let price = val ? parseFloat(val.Price || 0) : 0;
+                    let val = effectiveValuesLookup[key] || effectiveValuesLookup[nameKey];
+                    let price = val ? parsePrice(val.Price || 0) : 0;
 
                     // Only enforce scoping if price is 0 (to prevent double counting)
                     if (price <= 0) {
@@ -1551,44 +1921,37 @@ const QuoteForm = () => {
                     // FALLBACK CHAIN: Parent Customers -> Main -> Generic
                     if (price <= 0 && data.allValues) {
                         const fallbackCandidates = [];
-                        // ONLY add parent names as candidates if the active customer is also an internal job (Step 2293)
-                        const isInternalCustomer = jobsPool.some(j => normalizeCust(j.itemName || j.DivisionName) === normalizeCust(activeCustomer));
-
-                        if (isInternalCustomer) {
-                            let pId = job.parentId || job.ParentID;
-                            while (pId && pId !== '0' && pId !== 0) {
-                                const pJob = jobsPool.find(j => (j.id || j.ItemID) === pId);
-                                if (pJob) {
-                                    fallbackCandidates.push((pJob.itemName || pJob.DivisionName).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim());
-                                    pId = pJob.parentId || pJob.ParentID;
-                                } else break;
-                            }
-                        } else {
-                            // EXTERNAL CUSTOMER FALLBACK:
-                            // When quoting to an external customer (e.g. Ministry of Housing),
-                            // sub-jobs often price their work to an internal lead (e.g. Electrical → Civil Project).
-                            // Add ALL internal job names as fallback candidates so those prices are found.
-                            jobsPool.forEach(j => {
-                                const jName = (j.itemName || j.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                if (jName) fallbackCandidates.push(jName);
-                            });
+                        let pId = job.parentId || job.ParentID;
+                        while (pId && pId !== '0' && pId !== 0) {
+                            const pJob = jobsPool.find(j => (j.id || j.ItemID) === pId);
+                            if (pJob) {
+                                fallbackCandidates.push((pJob.itemName || pJob.DivisionName).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim());
+                                pId = pJob.parentId || pJob.ParentID;
+                            } else break;
                         }
+                        jobsPool.forEach(j => {
+                            const jName = (j.itemName || j.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            if (jName && !fallbackCandidates.includes(jName)) fallbackCandidates.push(jName);
+                        });
                         fallbackCandidates.push('Main');
 
                         for (const candName of fallbackCandidates) {
                             const candKey = normalizeCust(candName);
                             const vals = data.allValues[candKey];
                             if (vals) {
-                                // Find the option for this item under the fallback customer
-                                const iOpt = data.options.find(o =>
-                                    o.name === opt.name &&
-                                    o.itemName === job.itemName &&
-                                    normalizeCust(o.customerName) === candKey
-                                );
+                                const iOpt = data.options
+                                    .filter(o => o.name === opt.name && o.itemName === job.itemName && normalizeCust(o.customerName) === candKey)
+                                    .sort((a, b) => {
+                                        const aLead = normalizeCust(a.leadJobName);
+                                        const bLead = normalizeCust(b.leadJobName);
+                                        return (aLead === activeLead && bLead !== activeLead) ? -1 : (aLead !== activeLead && bLead === activeLead) ? 1 : 0;
+                                    })[0];
                                 if (iOpt) {
-                                    const iVal = vals[`${iOpt.id}_${job.id}`] || vals[`${iOpt.id}_${job.itemName}`];
-                                    if (iVal && parseFloat(iVal.Price) > 0) {
-                                        price = parseFloat(iVal.Price);
+                                    const vKey = `${iOpt.id}_${job.id}`;
+                                    const vNameKey = `${iOpt.id}_${job.itemName}`;
+                                    const iVal = vals[vKey] || vals[vNameKey];
+                                    if (iVal && parsePrice(iVal.Price) > 0) {
+                                        price = parsePrice(iVal.Price);
                                         break;
                                     }
                                 }
@@ -1596,19 +1959,14 @@ const QuoteForm = () => {
                         }
                     }
 
-                    if (price > 0) {
-                        console.log(`[calculateSummary]   Job "${job.itemName}": ${price}`);
-                    }
                     // DISTRIBUTE TO JOB GROUP (Deduplicated Aggregate per Group)
                     const jobGroupName = job.itemName;
                     if (!groups[jobGroupName]) {
                         groups[jobGroupName] = { total: 0, items: [], hasOptional: false };
                     }
 
-                    // Avoid duplicate items with the same name in the same group (Step 1705 Fix)
                     const existingItem = groups[jobGroupName].items.find(it => it.name === opt.name);
                     if (existingItem) {
-                        // If it's a duplicate entry for the same name/job, keep the highest price
                         if (price > existingItem.total) {
                             groups[jobGroupName].total += (price - existingItem.total);
                             existingItem.total = price;
@@ -1622,15 +1980,9 @@ const QuoteForm = () => {
                         groups[jobGroupName].hasOptional = true;
                         if (opt.name === 'Optional') foundPricedOptional = true;
                     } else if (opt.name === 'Base Price') {
-                        // Add to Grand Total if Job is Active
                         const isThisJobActive = activeJobs.length === 0 || activeJobs.includes(job.itemName);
-                        if (isThisJobActive) {
-                            // Only add if we haven't already added a 'Base Price' for this specific job group
-                            // Note: Grand total calculation remains trickier if jobs overlap name-wise.
-                            // For simplicity, we assume one 'Base Price' per group is the standard.
-                            if (!existingItem) {
-                                calculatedGrandTotal += price;
-                            }
+                        if (isThisJobActive && !existingItem) {
+                            calculatedGrandTotal += price;
                         }
                     }
                     userHasEnteredPrice = true;
@@ -1818,10 +2170,12 @@ const QuoteForm = () => {
                 tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; padding-left: 20px;">${item.name}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
             });
 
-            // Add Group Total ONLY if > 1 item
+            // INDIVIDUAL TOTALS REMOVED (Step 871 Fix)
+            /*
             if (grp.items.length > 1) {
                 tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">Total ${cleanedName}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">BD ${grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
             }
+            */
 
             // Accumulate filtered total (Base Price Only for Grand Total)
             grp.items.forEach(item => {
@@ -1831,8 +2185,8 @@ const QuoteForm = () => {
             });
         });
 
-        if (!foundPricedOptional && htmlGrandTotal > 0) {
-            tableHtml += `<tr style="background:#f8fafc; font-weight:700;"><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Grand Total</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+        if (htmlGrandTotal > 0) {
+            tableHtml += `<tr style="background:#f8fafc; font-weight:700;"><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Grand Total (Base Price)</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
         }
         tableHtml += '</tbody></table>';
 
@@ -2146,11 +2500,11 @@ const QuoteForm = () => {
         // Ensure data is loaded
         if (!pricingData && !enquiryData) return;
 
-        const activeTabObj = calculatedTabs.find(t => t.id === activeQuoteTab);
+        const activeTabObj = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
         if (!activeTabObj) return;
 
         const activeTabRealId = activeTabObj.realId;
-        const jobsPool = (pricingData?.jobs && pricingData.jobs.length > 0) ? pricingData.jobs : (enquiryData?.divisionsHierarchy || []);
+        // Use global jobsPool memo (Step 1240)
 
         console.log('[AutoLoad] Checking quotes for tab:', activeTabObj.label, 'ID:', activeTabRealId);
 
@@ -2182,35 +2536,56 @@ const QuoteForm = () => {
             return prefix;
         })();
 
-        const tabQuotes = existingQuotes.filter(q => {
-            // 1. Customer Context Match
-            const normalizedQuoteTo = normalize(q.ToName);
-            const normalizedCurrentTo = normalize(toName);
-            const isMainOrGeneric = !normalizedQuoteTo || normalizedQuoteTo === 'main' || normalizedQuoteTo === 'generic';
+        let tabQuotes = existingQuotes.filter(q => {
+            const normalizedQuoteTo = normalize(q.ToName || '');
+            const normalizedCurrentTo = normalize(toName || '');
 
-            // Check if context is internal
-            const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.ItemName || d.DivisionName));
-            const currentIsInternal = mJobs.includes(normalizedCurrentTo);
-            const quoteIsInternal = mJobs.includes(normalizedQuoteTo) || isMainOrGeneric;
+            const qJobObj = jobsPool.find(j => {
+                const parts = q.QuoteNumber?.split('/') || [];
+                const qDivCode = parts[1]?.toUpperCase();
+                const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                    (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                    (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                    (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                    (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                    (qDivCode === 'AAC' && jName.includes('AIR'));
+            });
 
-            if (currentIsInternal) {
-                if (!quoteIsInternal && normalizedQuoteTo !== normalizedCurrentTo) return false;
-            } else {
-                if (!isMainOrGeneric &&
-                    normalizedQuoteTo !== normalizedCurrentTo &&
-                    !normalizedQuoteTo.startsWith(normalizedCurrentTo + '-') &&
-                    !normalizedCurrentTo.startsWith(normalizedQuoteTo + '-')) return false;
+            // CUSTOMER FILTER: Match current selection OR any ancestor (Internal Quoting)
+            const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+
+            const isInternalCurrent = jobsPool.some(j => normalize(j.itemName || '') === normalizedCurrentTo);
+            const isFuzzyAllowed = normalizedCurrentTo && isInternalCurrent;
+
+            const isAncestorMatch = isFuzzyAllowed && (() => {
+                const tabJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId));
+                if (!tabJob) return false;
+                let curr = tabJob;
+                while (curr && (curr.parentId || curr.ParentID)) {
+                    const p = jobsPool.find(pj => String(pj.id || pj.ItemID) === String(curr.parentId || curr.ParentID));
+                    if (!p) break;
+                    const pNameNorm = normalize(p.itemName || '');
+                    if (pNameNorm === normalizedQuoteTo) return true;
+                    curr = p;
+                }
+                return false;
+            })();
+            const isSelfMatch = isFuzzyAllowed && normalize(qJobObj?.itemName || '') === normalizedQuoteTo;
+
+            // STRICT REQUIREMENT: If No Customer is selected, do not auto-load any individual quote.
+            // This preserves the 'Blank' state on initial search and manual clear.
+            if (!normalizedCurrentTo) {
+                console.log('[AutoLoad] No customer selected, skipping specific quote match.');
+                return false;
             }
 
-            // 2. Hierarchy & Branch Match
+            if (!isExactMatch && !isAncestorMatch && !isSelfMatch) return false;
+
             const parts = q.QuoteNumber?.split('/') || [];
             const qDivCode = parts[1]?.toUpperCase();
-            const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
+            const qLeadTag = parts[2] ? parts[2].split('-')[0].toUpperCase() : '';
 
-            // Strict Branch Isolation: L1 quotes shouldn't load in L2 context
-            if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
-
-            // Simplified match as per render block
             const qJob = jobsPool.find(j => {
                 const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
                 return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
@@ -2223,9 +2598,14 @@ const QuoteForm = () => {
 
             if (!qJob) return activeTabObj.isSelf;
             const qJobId = qJob.id || qJob.ItemID || qJob.ID;
+            if (String(qJobId) !== String(activeTabRealId)) return false;
 
-            // Strict Match: Auto-load only if it's an exact match for this subjob/tab
-            return String(qJobId) === String(activeTabRealId);
+            // Branch Isolation: L1 quotes shouldn't load in L2 context
+            // Bypass if it matches the current enquiry RequestNo (legacy/global quotes)
+            const isEnquiryMatch = qLeadTag === String(enquiryData?.enquiry?.RequestNo);
+            if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode && !isEnquiryMatch) return false;
+
+            return true;
         });
 
         if (tabQuotes.length > 0) {
@@ -2255,6 +2635,13 @@ const QuoteForm = () => {
                 setSubject('');
                 setCustomerReference('');
             }
+
+            // ALWAYS recalculate summary when switching tabs to ensure the sidebar summary matches the active branch,
+            // even if no previous quote was found to load.
+            if (pricingData) {
+                console.log('[AutoLoad] Recalculating summary for branch-specific view on tab:', activeQuoteTab);
+                calculateSummary(pricingData, selectedJobs, toName);
+            }
         }
     }, [activeQuoteTab, calculatedTabs, existingQuotes, toName]);
 
@@ -2269,13 +2656,14 @@ const QuoteForm = () => {
         if (!subject || !subject.trim()) missingFields.push('Subject');
         if (!preparedBy || !preparedBy.trim()) missingFields.push('Prepared By');
         if (!signatory || !signatory.trim()) missingFields.push('Signatory');
+        if (!customerReference || !customerReference.trim()) missingFields.push('Customer Reference');
 
         if (missingFields.length > 0) {
             alert(`Please fill the following mandatory fields before proceeding:\n\n• ${missingFields.join('\n• ')}`);
             return false;
         }
         return true;
-    }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory]);
+    }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory, customerReference]);
 
     const handleRevise = async () => {
         console.log('[handleRevise] Starting revision process. QuoteId:', quoteId);
@@ -2314,12 +2702,9 @@ const QuoteForm = () => {
                 setQuoteId(data.id);
                 setQuoteNumber(data.quoteNumber);
 
-                // Clear metadata for revision (User request Step 1440)
-                setQuoteDate('');
-                setValidityDays('');
-                setPreparedBy('');
-                setSignatory('');
-                setSignatoryDesignation('');
+                // Note: Metadata is NOT cleared anymore to allow immediate viewing/working with the new revision.
+                // Re-calculating existing quotes will pull the latest list.
+
 
                 // Wait a moment for DB commit, then refresh the quotes list
                 console.log('[handleRevise] Waiting 500ms for DB commit...');
@@ -2392,13 +2777,19 @@ const QuoteForm = () => {
         setSuggestions([]);
         setShowSuggestions(false);
         setLoading(true);
+        setPricingData(null); // Reset pricing data to clear stale access rights
         setExistingQuotes([]);
         setPendingFiles([]); // Clear queue
         setToName('');
+        setToAddress('');
+        setToPhone('');
+        setToEmail('');
         setToAttention('');
         setPreparedBy('');
         setSignatory('');
         setSignatoryDesignation('');
+        setQuoteId(null);
+        setQuoteNumber('');
 
         try {
             const userEmail = currentUser?.EmailId || '';
@@ -2407,6 +2798,10 @@ const QuoteForm = () => {
                 const data = await res.json();
                 setEnquiryData(data);
                 fetchExistingQuotes(enq.RequestNo);
+
+                // Fetch Pricing Data (even without customer) to get initial Access Rights & Hierarchy
+                loadPricingData(enq.RequestNo, '');
+
                 setQuoteNumber(data.quoteNumber);
                 setQuoteId(null); // New quote
 
@@ -2506,7 +2901,7 @@ const QuoteForm = () => {
 
                 if (availableDivisions.length === 0 && data.divisionsHierarchy && data.divisionsHierarchy.length > 0) {
                     // Use ALL nodes in hierarchy as potential Lead Job context
-                    availableDivisions = data.divisionsHierarchy.map(r => r.itemName);
+                    availableDivisions = data.divisionsHierarchy.map(r => r.itemName || r.DivisionName);
                     console.log('[QuoteForm] Using all divisionsHierarchy nodes for Lead Job selection:', availableDivisions);
                 }
 
@@ -2547,11 +2942,9 @@ const QuoteForm = () => {
 
                 setPreparedByOptions(data.preparedByOptions || []);
 
-                // Map customer options for CreatableSelect: Include ONLY Enquiry Customers + Parent Customer (Base)
-                const uniqueCustomerOptions = (data.customerOptions || []).map(c => ({ value: c, label: c, type: 'Linked' }));
+                // Signatory and Prepared By calculations moved to Signatory state
+                // Customer options are handled by the useEffect for consistency
 
-                // Initial Set (Effect will update dynamically based on hierarchy)
-                setEnquiryCustomerOptions(uniqueCustomerOptions);
 
                 // Ensure state update triggers effect
                 // (enquiryData update below handles it)
@@ -2578,22 +2971,8 @@ const QuoteForm = () => {
                 setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
 
-                // 3b. Smart Default Customer Selection
-                // Priority: 
-                // 1. If only one customer option is available, use it.
-                // 2. If enq object (from Pending Updates table) has a customer, use it ONLY if it's a single customer.
-                let defaultCustomer = '';
-                const availableOptions = (data.customerOptions || []).map(c => c.trim());
-
-                // Stricter check: only auto-select if exactly one option AND it doesn't look like a combined list (no commas)
-                if (availableOptions.length === 1 && !availableOptions[0].includes(',')) {
-                    defaultCustomer = availableOptions[0];
-                } else {
-                    // If multiple options OR a single option with commas, don't auto-select.
-                    // This forces the user to pick one, keeping the UI "blank" as requested.
-                    defaultCustomer = '';
-                }
-
+                // Reset Customer Selection to ensure a clean slate (User must select manually)
+                const defaultCustomer = '';
                 setToName(defaultCustomer);
                 // Final Data Update to Ensure all modifications (Lead Job Logic, etc.) are reflected in State
                 setEnquiryData({ ...data });
@@ -2633,6 +3012,7 @@ const QuoteForm = () => {
                         }
                     }
                 } else {
+                    setToName('');
                     setToAddress('');
                     setToPhone('');
                     setToEmail('');
@@ -2933,15 +3313,15 @@ const QuoteForm = () => {
                 }
             }
 
-            // APPLY OVERRIDE (Priority: Trade Content > Tab Context > Base)
-            if (isPlumbing) effectiveDivisionCode = 'PLFF';
+            // APPLY OVERRIDE (Priority: Tab Context > Trade Content > Base)
+            if (tabDivision) {
+                effectiveDivisionCode = tabDivision;
+                console.log(`[getQuotePayload] Using Tab-based Division: ${tabDivision}`);
+            } else if (isPlumbing) effectiveDivisionCode = 'PLFF';
             else if (isBMS) effectiveDivisionCode = 'BMS';
             else if (isElec) effectiveDivisionCode = 'ELE';
             else if (isFire) effectiveDivisionCode = 'FPE';
-            else if (tabDivision) {
-                effectiveDivisionCode = tabDivision;
-                console.log(`[getQuotePayload] Using Tab-based Division: ${tabDivision}`);
-            } else if (isCivil) effectiveDivisionCode = 'CVLP';
+            else if (isCivil) effectiveDivisionCode = 'CVLP';
             else effectiveDivisionCode = baseDiv;
 
             console.log(`[getQuotePayload] FINAL Division Code: ${effectiveDivisionCode} (isElec:${isElec}, isBMS:${isBMS}, isPlumb:${isPlumbing})`);
@@ -2971,10 +3351,15 @@ const QuoteForm = () => {
                 if (node) {
                     // 2. Walk up to Root
                     let root = node;
-                    while (root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                    let rootSafety = 0;
+                    let rootVisited = new Set();
+                    while (root.parentId && root.parentId !== '0' && root.parentId !== 0 && rootSafety < 20) {
+                        if (rootVisited.has(String(root.id || root.ItemID))) break;
+                        rootVisited.add(String(root.id || root.ItemID));
                         const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(root.parentId));
                         if (parent) root = parent;
                         else break;
+                        rootSafety++;
                     }
                     // 3. Return Root's L code if present
                     if (root.leadJobCode) return root.leadJobCode;
@@ -3060,10 +3445,15 @@ const QuoteForm = () => {
                             });
                             if (job) {
                                 let root = job;
-                                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                                let safe = 0;
+                                let vis = new Set();
+                                while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0 && safe < 20) {
+                                    if (vis.has(String(root.id || root.ItemID))) break;
+                                    vis.add(String(root.id || root.ItemID));
                                     const parent = hierarchy.find(p => String(p.id || p.ItemID) === String(root.parentId));
                                     if (parent) root = parent;
                                     else break;
+                                    safe++;
                                 }
                                 if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
                                 if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
@@ -3458,203 +3848,121 @@ const QuoteForm = () => {
                                 )}
                             </div>
 
-                            {/* 2. Lead Job Selector */}
+                            {/* Lead Job Dropdown */}
                             <div style={{ flex: 1 }}>
-                                <div style={{ position: 'relative', width: '100%' }}>
-                                    <select
-                                        style={{
-                                            width: '100%',
-                                            padding: '8px 12px',
-                                            borderRadius: '6px',
-                                            border: '1px solid #e2e8f0',
-                                            background: enquiryData ? 'white' : '#f1f5f9',
-                                            color: '#334155',
-                                            fontWeight: '500',
-                                            fontSize: '13px',
-                                            appearance: 'none',
-                                            paddingRight: '30px',
-                                            cursor: enquiryData ? 'pointer' : 'not-allowed'
-                                        }}
-                                        disabled={!enquiryData || ((!enquiryData.divisions || enquiryData.divisions.length === 0) && (!enquiryData.divisionsHierarchy || enquiryData.divisionsHierarchy.length === 0))}
-                                        value={(() => {
-                                            if (!enquiryData || !enquiryData.leadJobPrefix) return '';
+                                <div style={{ position: 'relative' }}>
+                                    {(() => {
+                                        if (!enquiryData) return (
+                                            <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
+                                                <option>Select Lead Job</option>
+                                            </select>
+                                        );
 
-                                            // Try to find in divisions first
-                                            if (enquiryData.divisions && enquiryData.divisions.length > 0) {
-                                                const found = enquiryData.divisions.find(d => d.startsWith(enquiryData.leadJobPrefix));
-                                                if (found) return found;
-                                            }
+                                        // 1. Get all potential lead jobs (roots)
+                                        let allLeadJobs = enquiryData.divisions || [];
+                                        if (allLeadJobs.length === 0 && enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
+                                            allLeadJobs = enquiryData.divisionsHierarchy
+                                                .filter(j => !(j.parentId || j.ParentID) || (j.parentId || j.ParentID) == '0' || (j.parentId || j.ParentID) == 0)
+                                                .map(r => r.itemName || r.DivisionName);
+                                        } else if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
+                                            const rootNames = new Set(
+                                                enquiryData.divisionsHierarchy
+                                                    .filter(j => !(j.parentId || j.ParentID) || (j.parentId || j.ParentID) == '0' || (j.parentId || j.ParentID) == 0)
+                                                    .map(j => j.itemName || j.DivisionName)
+                                            );
+                                            const filtered = allLeadJobs.filter(name => rootNames.has(name));
+                                            if (filtered.length > 0) allLeadJobs = filtered;
+                                        }
 
-                                            // Try divisionsHierarchy as fallback
-                                            if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
-                                                const roots = enquiryData.divisionsHierarchy.filter(j => !j.parentId);
-                                                const found = roots.find(r => r.itemName.startsWith(enquiryData.leadJobPrefix));
-                                                if (found) return found.itemName;
-                                            }
+                                        const uniqueLeadJobs = [...new Set(allLeadJobs)];
 
-                                            return enquiryData.leadJobPrefix || '';
-                                        })()}
-                                        onChange={(e) => {
-                                            const val = e.target.value;
-                                            setQuoteId(null); // Reset so auto-load can find correct latest for this job context
-                                            // Simple detection: If starts with L\d, assume L\d is prefix.
-                                            // Else (Sub Job or Custom Division), use Full Name as "Prefix" (Identifier).
-                                            if (val.match(/^L\d+/)) {
-                                                const prefix = val.split('-')[0].trim();
-                                                setEnquiryData(prev => ({ ...prev, leadJobPrefix: prefix }));
-                                            } else {
-                                                setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
-                                            }
-                                        }}
-                                    >
-                                        <option value="" disabled>Select Lead Job</option>
-                                        {/* Filter lead jobs based on user access from pricing data */}
-                                        {(() => {
-                                            console.log('[Quote Lead Job Render] enquiryData:', enquiryData);
-                                            console.log('[Quote Lead Job Render] divisions:', enquiryData?.divisions);
-                                            console.log('[Quote Lead Job Render] divisionsHierarchy:', enquiryData?.divisionsHierarchy);
-
-                                            if (!enquiryData) {
-                                                console.log('[Quote Lead Job Render] No enquiryData - returning null');
-                                                return null;
-                                            }
-
-                                            // Get all divisions
-                                            // FALLBACK: If divisions is empty but divisionsHierarchy exists, extract roots
-                                            let allLeadJobs = enquiryData.divisions || [];
-
-                                            if (allLeadJobs.length === 0 && enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
-                                                // Extract ONLY roots (Lead Jobs)
-                                                // User Request: "only lead job name should show"
-                                                allLeadJobs = enquiryData.divisionsHierarchy
-                                                    .filter(j => !j.parentId || j.parentId == '0' || j.parentId == 0)
-                                                    .map(r => r.itemName);
-                                                console.log('[Quote Lead Job Render] Using hierarchy roots:', allLeadJobs);
-                                            } else if (enquiryData.divisionsHierarchy && enquiryData.divisionsHierarchy.length > 0) {
-                                                // Even if we have divisions, filter them to ensure they are ROOTS if hierarchy is available
-                                                const rootNames = new Set(
-                                                    enquiryData.divisionsHierarchy
-                                                        .filter(j => !j.parentId || j.parentId == '0' || j.parentId == 0)
-                                                        .map(j => j.itemName)
-                                                );
-                                                const filtered = allLeadJobs.filter(name => rootNames.has(name));
-                                                if (filtered.length > 0) {
-                                                    allLeadJobs = filtered;
-                                                    console.log('[Quote Lead Job Render] Filtered divisions to roots:', allLeadJobs);
-                                                }
-                                            }
-
-                                            console.log('[Quote Lead Job Render] allLeadJobs:', allLeadJobs);
-                                            if (allLeadJobs.length === 0) {
-                                                console.log('[Quote Lead Job Render] No lead jobs available - returning null');
-                                                // Fallback to show something if we filtered everything out?
-                                                // Maybe show original list if roots are empty?
-                                                if (enquiryData.divisions && enquiryData.divisions.length > 0) {
-                                                    console.log('[Quote Lead Job Render] Root filter result empty, falling back to all divisions');
-                                                    allLeadJobs = enquiryData.divisions;
-                                                } else {
-                                                    return null;
-                                                }
-                                            }
-
-                                            // Deduplicate Lead Jobs (Step Fix: Duplicate Key Issue)
-                                            const uniqueLeadJobs = [...new Set(allLeadJobs)];
-
-                                            // If no pricing data loaded yet, show all
-                                            if (!pricingData || !pricingData.access) {
-                                                return uniqueLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
-                                            }
-
-                                            // Filter based on user access
-                                            const visibleLeadJobs = uniqueLeadJobs.filter(leadJob => {
-                                                // Extract lead job name (e.g., "L1 - Civil Project" -> "Civil Project")
+                                        // 2. Filter based on user access (Pricing Data)
+                                        let visibleLeadJobs = [];
+                                        if (pricingData && pricingData.access) {
+                                            visibleLeadJobs = uniqueLeadJobs.filter(leadJob => {
                                                 const leadJobName = leadJob.replace(/^L\d+\s*-\s*/, '').trim();
-
-                                                // If user is Admin, show all lead jobs.
-                                                // otherwise, stricter filtering applies even if hasLeadAccess is true (as leads should only see their own scope)
-                                                if (currentUser?.role === 'Admin' || currentUser?.Roles === 'Admin') return true;
-
-                                                // STRICT DEPARTMENT CHECK:
-                                                // If User has a Department defined (e.g. "Civil", "MEP"), enforce it strictly against Lead Job Name.
-                                                // This prevents "Civil" users from seeing "BMS" or "Electrical" lead jobs even if backend logic accidentally grants visibility.
-                                                const userDept = (currentUser?.Department || '').trim().toLowerCase();
                                                 const jobNameLower = leadJobName.toLowerCase();
 
-                                                if (userDept) {
-                                                    if (userDept === 'civil' && !jobNameLower.includes('civil')) return false;
-                                                    // Add other department checks if needed, but Civil is the specific request.
-                                                    // Generally, if userDept exists and doesn't partially match the job name, we might want to hide it
-                                                    // UNLESS they are explicitly added to that job via granular permissions below.
-                                                    // But for LEAD JOB selection, strict alignment is preferred.
-                                                }
+                                                if (currentUser?.role === 'Admin' || currentUser?.Roles === 'Admin') return true;
 
-                                                // Check if user has access to this lead job or any of its sub-jobs
-                                                const visibleJobs = pricingData.access.visibleJobs || [];
-                                                const editableJobs = pricingData.access.editableJobs || [];
+                                                const userDept = (currentUser?.Department || '').trim().toLowerCase();
 
-                                                // Check if the lead job itself is in visible/editable jobs
-                                                const hasLimitedAccess = !pricingData?.access?.hasLeadAccess && (pricingData?.access?.editableJobs?.length > 0);
-                                                if (hasLimitedAccess) {
-                                                    const editableNames = (pricingData.access.editableJobs || []).map(n => n.trim().toLowerCase());
-                                                    const currentName = leadJobName.toLowerCase();
-                                                    const isEditableScope = editableNames.some(acc => currentName === acc || currentName.includes(acc) || acc.includes(currentName));
-                                                    if (isEditableScope) return true;
+                                                // Hard Filter: Explicitly exclude civil from non-civil and vice-versa if it's a root mismatch
+                                                if (userDept && userDept === 'civil' && !jobNameLower.includes('civil')) return false;
 
-                                                    // Also check if any of our editable jobs are descendants of this lead job name 
-                                                    // (This allows selecting "Electrical" if "Electrical" is a root lead job)
-                                                } else {
-                                                    if (visibleJobs.includes(leadJobName) || editableJobs.includes(leadJobName)) return true;
-                                                    if (visibleJobs.includes(leadJob) || editableJobs.includes(leadJob)) return true;
-                                                }
-
-                                                // Check if any of user's accessible jobs are descendants of this lead job
-                                                // Use job hierarchy from pricing data if available
-                                                if (pricingData.jobs && pricingData.jobs.length > 0) {
-                                                    // Find the lead job in the jobs array
-                                                    const leadJobObj = pricingData.jobs.find(j =>
-                                                        j.itemName === leadJob || j.itemName === leadJobName
-                                                    );
-
-                                                    if (!leadJobObj) return false;
-
-                                                    // Get all accessible job names
-                                                    const accessibleJobs = [...new Set([...visibleJobs, ...editableJobs])];
-
-                                                    // Helper function to check if a job is a descendant of the lead job
-                                                    const isDescendantOf = (jobName, ancestorId) => {
-                                                        const job = pricingData.jobs.find(j => j.itemName === jobName);
-                                                        if (!job) return false;
-
-                                                        // Direct child
-                                                        if (job.parentId === ancestorId) return true;
-
-                                                        // Check if parent is a descendant (recursive)
-                                                        if (job.parentId) {
-                                                            const parent = pricingData.jobs.find(j => j.id === job.parentId);
-                                                            if (parent) {
-                                                                return isDescendantOf(parent.itemName, ancestorId);
-                                                            }
-                                                        }
-
-                                                        return false;
-                                                    };
-
-                                                    // Check if any accessible job is a descendant of this lead job
-                                                    return accessibleJobs.some(jobName => isDescendantOf(jobName, leadJobObj.id));
-                                                }
-
-                                                // Fallback: Check if any sub-jobs are accessible (less precise)
-                                                const hasAccessibleSubJobs = enquiryData.divisions.some(div => {
-                                                    if (div.trim().startsWith('L')) return false;
-                                                    return visibleJobs.includes(div) || editableJobs.includes(div);
+                                                // Find the actual root job object in pricingData
+                                                const rootJob = (pricingData.jobs || []).find(j => {
+                                                    const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
+                                                    const name = (j.itemName || j.DivisionName || j.ItemName || '').toLowerCase();
+                                                    return isRoot && (name === jobNameLower || name === leadJob.toLowerCase());
                                                 });
 
-                                                return hasAccessibleSubJobs;
-                                            });
+                                                if (!rootJob) return false;
 
-                                            return visibleLeadJobs.map(div => <option key={div} value={div}>{div}</option>);
-                                        })()}
-                                    </select>
+                                                // 2.1 Direct Visibility Match
+                                                if (rootJob.visible || rootJob.editable) return true;
+
+                                                // 2.2 Hierarchy Match (is any accessible job a descendant of THIS root?)
+                                                const isDescendantOfRoot = (job) => {
+                                                    const pId = String(job.parentId || '');
+                                                    if (!pId || pId === '0' || pId === 'undefined') return false;
+                                                    if (pId === String(rootJob.id)) return true;
+
+                                                    const parent = pricingData.jobs.find(pj => String(pj.id) === pId);
+                                                    if (parent) return isDescendantOfRoot(parent);
+                                                    return false;
+                                                };
+
+                                                const hasAccessibleTarget = (pricingData.jobs || []).some(j => (j.visible || j.editable) && isDescendantOfRoot(j));
+                                                return hasAccessibleTarget;
+                                            });
+                                        }
+
+                                        // 3. Determine Selected Value
+                                        let selectedValue = '';
+                                        if (enquiryData.leadJobPrefix) {
+                                            const prefix = String(enquiryData.leadJobPrefix).toLowerCase();
+                                            const found = (visibleLeadJobs || []).find(v => {
+                                                const vStr = String(v || '').toLowerCase();
+                                                return vStr === prefix || vStr.startsWith(prefix);
+                                            });
+                                            if (found) selectedValue = found;
+                                        }
+
+                                        console.log('[Quote Lead Job Render] State:', {
+                                            prefix: enquiryData.leadJobPrefix,
+                                            options: visibleLeadJobs,
+                                            selected: selectedValue
+                                        });
+
+                                        return (
+                                            <select
+                                                style={{
+                                                    width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
+                                                    background: 'white', color: '#334155', fontWeight: '500',
+                                                    fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
+                                                }}
+                                                value={selectedValue}
+                                                onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    setQuoteId(null);
+                                                    handleCustomerChange(null); // Clear customer selection on Lead Job change
+                                                    if (val.match(/^L\d+/)) {
+                                                        const prefix = val.split('-')[0].trim();
+                                                        setEnquiryData(prev => ({ ...prev, leadJobPrefix: prefix }));
+                                                    } else {
+                                                        setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
+                                                    }
+                                                }}
+                                            >
+                                                <option value="" disabled>Select Lead Job</option>
+                                                {visibleLeadJobs.map(div => {
+                                                    const cleanName = div.replace(/^L\d+\s*-\s*/, '').trim();
+                                                    return <option key={div} value={div}>{cleanName}</option>;
+                                                })}
+                                            </select>
+                                        );
+                                    })()}
                                     <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
                                         <ChevronDown size={14} />
                                     </div>
@@ -3678,7 +3986,7 @@ const QuoteForm = () => {
                                     }}
                                     isDisabled={!enquiryData}
                                     options={enquiryCustomerOptions}
-                                    value={enquiryCustomerOptions.find(opt => opt.value === toName)}
+                                    value={toName ? { label: toName, value: toName } : null}
                                     onChange={(selected) => handleCustomerChange(selected)}
                                     placeholder="Select Customer..."
                                     formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
@@ -3709,7 +4017,7 @@ const QuoteForm = () => {
 
                 {/* Action Buttons & Clear Selection */}
                 {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected */}
-                {enquiryData && enquiryData.leadJobPrefix && toName && (
+                {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
                     <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
 
                         {/* Left Actions: Clear, Save, Revision */}
@@ -3778,9 +4086,8 @@ const QuoteForm = () => {
 
 
 
-                {/* Scrollable Content Area */}
-                {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected (Step 2305) */}
-                {enquiryData && enquiryData.leadJobPrefix && toName ? (
+                {/* Scrollable Content Area: Pricing & Information */}
+                {enquiryData && enquiryData.leadJobPrefix && toName?.trim() ? (
                     <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
 
 
@@ -3825,10 +4132,9 @@ const QuoteForm = () => {
                                         {/* Content for Active Tab */}
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                             {(() => {
-                                                const activeTabObj = tabs.find(t => t.id === activeQuoteTab) || tabs[0];
+                                                const activeTabObj = tabs.find(t => String(t.id) === String(activeQuoteTab)) || tabs[0];
                                                 if (!activeTabObj) return null;
 
-                                                const jobsPool = (pricingData?.jobs && pricingData.jobs.length > 0) ? pricingData.jobs : (enquiryData?.divisionsHierarchy || []);
                                                 const activeTabRealId = activeTabObj.realId;
 
                                                 // Hierarchy Helper
@@ -3844,33 +4150,32 @@ const QuoteForm = () => {
 
                                                 // Filter and Render Previous Quotes
                                                 const filteredQuotes = existingQuotes.filter(q => {
-                                                    const normalizedQuoteTo = normalize(q.ToName);
-                                                    const normalizedCurrentTo = normalize(toName);
-                                                    const isMainOrGeneric = !normalizedQuoteTo || normalizedQuoteTo === 'main' || normalizedQuoteTo === 'generic';
+                                                    const normalizedQuoteTo = normalize(q.ToName || '');
+                                                    const normalizedCurrentTo = normalize(toName || '');
 
-                                                    const mJobs = (enquiryData?.divisionsHierarchy || []).map(d => normalize(d.itemName || d.ItemName || d.DivisionName));
-                                                    const mJobsSet = new Set(mJobs);
-                                                    const currentIsInternal = mJobsSet.has(normalizedCurrentTo);
-                                                    const quoteIsInternal = mJobsSet.has(normalizedQuoteTo) || isMainOrGeneric;
+                                                    const qJobObj = jobsPool.find(j => {
+                                                        const parts = q.QuoteNumber?.split('/') || [];
+                                                        const qDivCode = parts[1]?.toUpperCase();
+                                                        const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                                        return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                                                            (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                                                            (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                                                            (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                                                            (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                                            (qDivCode === 'AAC' && jName.includes('AIR'));
+                                                    });
 
-                                                    if (currentIsInternal) {
-                                                        // For Internal Customer selections (e.g. Civil Project), only show internal quotes
-                                                        if (!quoteIsInternal && normalizedQuoteTo !== normalizedCurrentTo) {
-                                                            return false;
-                                                        }
-                                                    } else {
-                                                        // For External Customer selections, show quotes to them OR internal references
-                                                        if (!quoteIsInternal &&
-                                                            normalizedQuoteTo !== normalizedCurrentTo &&
-                                                            !normalizedQuoteTo.startsWith(normalizedCurrentTo + '-') &&
-                                                            !normalizedCurrentTo.startsWith(normalizedQuoteTo + '-')) {
-                                                            return false;
-                                                        }
-                                                    }
+                                                    // STRICT REQUIREMENT: Match current selection ONLY strictly (Step 1053)
+                                                    const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+
+                                                    // STRICT REQUIREMENT: If No Customer is selected, do not show quotes in the list.
+                                                    if (!normalizedCurrentTo) return false;
+
+                                                    if (!isExactMatch) return false;
 
                                                     const parts = q.QuoteNumber?.split('/') || [];
                                                     const qDivCode = parts[1]?.toUpperCase();
-                                                    const qLeadTag = parts[2]?.includes('-') ? parts[2].split('-')[1].toUpperCase() : '';
+                                                    const qLeadTag = parts[2] ? parts[2].split('-')[0].toUpperCase() : '';
 
                                                     // Resolve current lead code for robust branch isolation
                                                     const currentLeadCode = (() => {
@@ -3898,9 +4203,6 @@ const QuoteForm = () => {
                                                         return prefix;
                                                     })();
 
-                                                    // Branch Isolation: L1 quotes shouldn't show in L2 context
-                                                    if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode) return false;
-
                                                     const qJob = jobsPool.find(j => {
                                                         const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
                                                         return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
@@ -3913,9 +4215,35 @@ const QuoteForm = () => {
 
                                                     if (!qJob) return false;
                                                     const qJobId = qJob.id || qJob.ItemID || qJob.ID;
+                                                    if (String(qJobId) !== String(activeTabRealId)) return false;
 
-                                                    // Strict Match: Each tab only shows quotes belonging to its specific subjob/division
-                                                    return String(qJobId) === String(activeTabRealId);
+                                                    // Branch Isolation: L1 quotes shouldn't show in L2 context
+                                                    // Bypass if it matches the current enquiry RequestNo (legacy/global quotes)
+                                                    const isEnquiryMatch = qLeadTag === String(enquiryData?.enquiry?.RequestNo);
+                                                    if (qLeadTag && currentLeadCode && qLeadTag !== currentLeadCode && !isEnquiryMatch) return false;
+
+                                                    // STRICT ISOLATION: Sub-users CANNOT see parent division quotes (Step 1922)
+                                                    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                                                    const isSubUser = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
+                                                    if (isSubUser) {
+                                                        const isParentCode = qDivCode === 'CVLP' || (qDivCode === 'AAC' && userDept !== 'air');
+                                                        // If it's a parent code and not belonging to current tab, block it
+                                                        const isMySpecificTab = (() => {
+                                                            const tabJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId));
+                                                            if (!tabJob) return false;
+                                                            const jName = (tabJob.itemName || tabJob.ItemName || tabJob.DivisionName || '').toUpperCase();
+                                                            return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
+                                                                (qDivCode === 'BMS' && jName.includes('BMS')) ||
+                                                                (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
+                                                                (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
+                                                                (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                                                (qDivCode === 'AAC' && jName.includes('AIR'));
+                                                        })();
+
+                                                        if (isParentCode && !isMySpecificTab) return false;
+                                                    }
+
+                                                    return true;
                                                 });
 
                                                 // Group revisions
@@ -3928,6 +4256,7 @@ const QuoteForm = () => {
 
                                                 const quoteList = Object.entries(quoteGroups)
                                                     .sort(([a], [b]) => b.localeCompare(a))
+                                                    .slice(0, 1) // Only one quote reference to appear strictly
                                                     .map(([quoteNo, revisions]) => {
                                                         const sorted = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
                                                         const latest = sorted[0];
@@ -4012,7 +4341,36 @@ const QuoteForm = () => {
                                                     if (!job) return activeTabObj.isSelf || tabs.length === 1;
 
                                                     const jobId = job.id || job.ItemID;
-                                                    return jobId === activeTabRealId || isDescendant(jobId, activeTabRealId);
+                                                    const activeTabIdStr = String(activeTabRealId);
+                                                    const jobIdStr = String(jobId);
+
+                                                    // STRICT VISIBILITY: Show myself or my descendants.
+                                                    // NEVER show my ancestors (parents/lead job) if I am a sub-job tab.
+                                                    // Provision (Step 1922): Sub-division users NEVER see ancestors in the summary.
+                                                    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                                                    const isStrictlyLimited = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
+
+                                                    if (isStrictlyLimited) {
+                                                        const isAncestorOfActive = (() => {
+                                                            let curr = activeTabObj.realId ? jobsPool.find(j => String(j.id || j.ItemID) === String(activeTabObj.realId)) : null;
+                                                            if (!curr) return false;
+                                                            while (curr && (curr.parentId || curr.ParentID)) {
+                                                                const pid = String(curr.parentId || curr.ParentID);
+                                                                if (pid === jobIdStr) return true;
+                                                                curr = jobsPool.find(pj => String(pj.id || pj.ItemID) === pid);
+                                                            }
+                                                            return false;
+                                                        })();
+                                                        if (isAncestorOfActive) {
+                                                            console.log(`[Sidebar Summary] Blocking ancestor price display for ${grp.name}`);
+                                                            return false;
+                                                        }
+                                                    }
+
+                                                    if (jobIdStr === activeTabIdStr) return true;
+
+                                                    // Only show descendants
+                                                    return isDescendant(jobId, activeTabRealId);
                                                 });
 
                                                 return (
@@ -4084,6 +4442,17 @@ const QuoteForm = () => {
                             </div>
 
                             <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Customer Reference <span style={{ color: '#ef4444' }}>*</span></label>
+                                <input
+                                    type="text"
+                                    value={customerReference}
+                                    onChange={(e) => setCustomerReference(e.target.value)}
+                                    placeholder="Your Ref / LPO Number..."
+                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                />
+                            </div>
+
+                            <div style={{ marginBottom: '10px' }}>
                                 <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
                                 <input
                                     type="text"
@@ -4136,6 +4505,52 @@ const QuoteForm = () => {
                                         input: (base) => ({ ...base, margin: 0, padding: 0 }),
                                     }}
                                 />
+                            </div>
+
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Signatory Designation</label>
+                                <input
+                                    type="text"
+                                    value={signatoryDesignation}
+                                    onChange={(e) => setSignatoryDesignation(e.target.value)}
+                                    placeholder="Signatory's Title..."
+                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                />
+                            </div>
+
+                            <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '15px 0' }} />
+                            <h5 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Recipient Info (Optional Override):</h5>
+
+                            <div style={{ marginBottom: '10px' }}>
+                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>To Address</label>
+                                <textarea
+                                    value={toAddress}
+                                    onChange={(e) => setToAddress(e.target.value)}
+                                    rows={2}
+                                    placeholder="Client Address..."
+                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px' }}
+                                />
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Phone</label>
+                                    <input
+                                        type="text"
+                                        value={toPhone}
+                                        onChange={(e) => setToPhone(e.target.value)}
+                                        style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                    />
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Email</label>
+                                    <input
+                                        type="email"
+                                        value={toEmail}
+                                        onChange={(e) => setToEmail(e.target.value)}
+                                        style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                    />
+                                </div>
                             </div>
                         </div>
 
@@ -4310,8 +4725,24 @@ const QuoteForm = () => {
                         </div>
                     </div>
                 ) : (
-                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '13px', fontStyle: 'italic', padding: '20px', textAlign: 'center' }}>
-                        Please select Enquiry, Lead Job, and Customer to continue.
+                    <div style={{
+                        flex: 1,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '40px',
+                        textAlign: 'center',
+                        color: '#64748b',
+                        background: '#f8fafc'
+                    }}>
+                        <div style={{ marginBottom: '16px', color: '#cbd5e1' }}>
+                            <FolderOpen size={48} />
+                        </div>
+                        <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#475569', marginBottom: '8px' }}>No Customer Selected</h3>
+                        <p style={{ fontSize: '13px', maxWidth: '200px' }}>
+                            Please select a customer from the dropdown above to view pricing and create a quote.
+                        </p>
                     </div>
                 )}
             </div>
@@ -4410,7 +4841,7 @@ const QuoteForm = () => {
                                                         {renderQSH('ProjectName', 'Project Name', { minWidth: '234px' })}
                                                         {renderQSH('CustomerName', 'Customer Name')}
                                                         {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices</th>
+                                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                                         {renderQSH('ClientName', 'Client Name', { minWidth: '200px' })}
                                                         {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
                                                     </tr>
@@ -4523,7 +4954,7 @@ const QuoteForm = () => {
                                                                             alignItems: 'center',
                                                                             gap: '4px'
                                                                         }}>
-                                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
+                                                                            {level > 0 && !name.includes('(L1)') && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
                                                                             <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
                                                                             <span style={{
                                                                                 color: isUpdated ? '#166534' : '#94a3b8',
@@ -4563,10 +4994,27 @@ const QuoteForm = () => {
                             </div>
                         )}
                     </div>
-                ) : (!enquiryData.leadJobPrefix || !toName) ? (
-                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontStyle: 'italic', padding: '40px', background: 'rgba(255,255,255,0.5)', borderRadius: '12px', border: '1px dashed #e2e8f0', margin: '20px' }}>
-                        <div style={{ fontSize: '15px', fontWeight: '500', marginBottom: '8px', color: '#64748b' }}>Scope Selection Incomplete</div>
-                        <div>Please select a <strong>Lead Job</strong> and <strong>Customer</strong> to view the quote preview.</div>
+                ) : (!enquiryData.leadJobPrefix || !toName?.trim()) ? (
+                    <div style={{
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '40px',
+                        textAlign: 'center',
+                        color: '#64748b',
+                        background: 'white',
+                        borderRadius: '8px',
+                        border: '1px solid #e2e8f0'
+                    }}>
+                        <div style={{ marginBottom: '16px', color: '#cbd5e1' }}>
+                            <Plus size={48} />
+                        </div>
+                        <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#475569', marginBottom: '8px' }}>New Quote Preview</h3>
+                        <p style={{ fontSize: '13px', maxWidth: '300px' }}>
+                            Once a customer and lead job are selected, you can preview the generated quote here.
+                        </p>
                     </div>
                 ) : (
                     <>
@@ -4991,7 +5439,7 @@ const QuoteForm = () => {
                 )
                 }
             </div>
-        </div>
+        </div >
     );
 };
 

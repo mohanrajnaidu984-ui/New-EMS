@@ -13,11 +13,11 @@ const SalesReport = () => {
     const { currentUser } = useAuth();
     const [isRestricted, setIsRestricted] = useState(false);
 
-    const [year, setYear] = useState('2026');
-    const [quarter, setQuarter] = useState('All');
-    const [company, setCompany] = useState('All');
-    const [division, setDivision] = useState('All');
-    const [role, setRole] = useState('All');
+    const [year, setYear] = useState(() => localStorage.getItem('reports_year') || '2026');
+    const [quarter, setQuarter] = useState(() => localStorage.getItem('reports_quarter') || 'All');
+    const [company, setCompany] = useState(() => localStorage.getItem('reports_company') || 'All');
+    const [division, setDivision] = useState(() => localStorage.getItem('reports_division') || 'All');
+    const [role, setRole] = useState(() => localStorage.getItem('reports_role') || 'All');
     const [loading, setLoading] = useState(false);
     const [reportData, setReportData] = useState({
         targetVsActual: [
@@ -98,6 +98,15 @@ const SalesReport = () => {
             setRole('All');
         }
     }, [division, isRestricted]);
+
+    // -- Persistence --
+    useEffect(() => {
+        localStorage.setItem('reports_year', year);
+        localStorage.setItem('reports_quarter', quarter);
+        localStorage.setItem('reports_company', company);
+        localStorage.setItem('reports_division', division);
+        localStorage.setItem('reports_role', role);
+    }, [year, quarter, company, division, role]);
 
     const fetchFilters = async (selectedCompany, selectedDivision) => {
         try {
@@ -294,12 +303,18 @@ const SalesReport = () => {
     const funnelData = funnelStages.map(stage => {
         // Find matching data from API or default to 0
         const found = (reportData.probabilityFunnel || []).find(item => {
-            // Match logic: standardizing backend names if slight variation exists
-            // Assuming backend returns standard names, or we match by probability range
-            // For safety, let's match roughly by probability or exact name if available
             if (item.ProbabilityPercentage === stage.probability) return true;
-            // Fallback string match
-            return item.ProbabilityName && item.ProbabilityName.toLowerCase().includes(stage.name.split(' ')[0].toLowerCase());
+            if (!item.ProbabilityName) return false;
+
+            const itemNameLower = item.ProbabilityName.toLowerCase();
+            const stageNameLower = stage.name.toLowerCase();
+
+            // Precise word match for 'High Chance' to avoid matching 'Very High Chance'
+            if (stage.name === "High Chance") {
+                return itemNameLower.includes("high chance") && !itemNameLower.includes("very high chance");
+            }
+
+            return itemNameLower.includes(stageNameLower);
         });
 
         return {
@@ -710,8 +725,8 @@ const SalesReport = () => {
                             </div>
 
                             {/* Chart Section */}
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px' }}>
-                                <ResponsiveContainer width="100%" height="100%">
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px', height: '180px' }}>
+                                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={180}>
                                     <BarChart data={targetVsActualData} margin={{ top: 25, right: 10, left: 5, bottom: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                         <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: '#E0E0E0' }} />
@@ -793,9 +808,9 @@ const SalesReport = () => {
                             </div>
 
                             {/* Prospect Pie Section */}
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px', position: 'relative' }}>
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px', height: '180px', position: 'relative' }}>
                                 {/* Heading removed as requested */}
-                                <ResponsiveContainer width="100%" height="100%">
+                                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={180}>
                                     <PieChart>
                                         <Pie
                                             data={prospectPieData}
@@ -854,8 +869,8 @@ const SalesReport = () => {
                                         </button>
                                     ))}
                                 </div>
-                                <div className="flex-grow-1" style={{ width: '100%', minHeight: '150px' }}>
-                                    <ResponsiveContainer width="100%" height="100%">
+                                <div className="flex-grow-1" style={{ width: '100%', minHeight: '150px', height: '150px' }}>
+                                    <ResponsiveContainer width="100%" height="100%" minHeight={150}>
                                         <BarChart data={itemWiseData.length > 0 ? itemWiseData : []} margin={{ top: 50, right: 5, left: 10, bottom: 0 }}>
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                             <XAxis dataKey="name" angle={-45} textAnchor="end" height={60} interval={0} tick={{ fontSize: 8, fill: '#E0E0E0' }} axisLine={false} tickLine={false} />
@@ -917,7 +932,7 @@ const SalesReport = () => {
                                 </div>
 
                                 <div className="flex-grow-1" style={{ width: '100%', minHeight: 0 }}>
-                                    <ResponsiveContainer width="100%" height="100%">
+                                    <ResponsiveContainer width="100%" height="100%" minHeight={180}>
                                         <PieChart>
                                             <Pie
                                                 data={(reportData.itemWiseStats || []).map(item => {
@@ -983,7 +998,7 @@ const SalesReport = () => {
                         {/* 1. Top 10 Customers */}
                         <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Customer's job booked</h6>
-                            <ResponsiveContainer width="100%" height="100%">
+                            <ResponsiveContainer width="100%" height="100%" minHeight={200}>
                                 <BarChart data={topCustomersData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                     <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} interval={0} tick={{ fontSize: 9, fill: '#E0E0E0' }} tickFormatter={(val) => val.length > 20 ? val.substring(0, 20) + '..' : val} axisLine={false} tickLine={false} />
@@ -1004,7 +1019,7 @@ const SalesReport = () => {
                         {/* 2. Top 10 Projects */}
                         <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Projects' Job booked</h6>
-                            <ResponsiveContainer width="100%" height="100%">
+                            <ResponsiveContainer width="100%" height="100%" minHeight={200}>
                                 <BarChart data={topProjectsData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                     <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} interval={0} tick={{ fontSize: 9, fill: '#E0E0E0' }} tickFormatter={(val) => val.length > 20 ? val.substring(0, 20) + '..' : val} axisLine={false} tickLine={false} />
@@ -1028,7 +1043,7 @@ const SalesReport = () => {
                         {/* 3. Top 10 Clients */}
                         <div className="card shadow-sm border-0 p-2" style={{ flex: '0 0 calc(50% - 0.375rem)', maxWidth: 'calc(50% - 0.375rem)', minHeight: '220px' }}>
                             <h6 className="fw-bold small mb-0 ms-2 text-start" style={{ color: '#34D399' }}>Top 10 Client's Job booked</h6>
-                            <ResponsiveContainer width="100%" height="100%">
+                            <ResponsiveContainer width="100%" height="100%" minHeight={200}>
                                 <BarChart data={topClientsData} margin={{ top: 60, right: 5, left: 40, bottom: 15 }}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
                                     <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} interval={0} tick={{ fontSize: 9, fill: '#E0E0E0' }} tickFormatter={(val) => val.length > 20 ? val.substring(0, 20) + '..' : val} axisLine={false} tickLine={false} />
@@ -1058,8 +1073,8 @@ const SalesReport = () => {
                             }}
                         >
                             <h6 className="fw-bold small mb-2 text-start" style={{ color: '#34D399' }}>Sales Pipeline</h6>
-                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px' }}>
-                                <ResponsiveContainer width="100%" height="100%">
+                            <div className="flex-grow-1" style={{ width: '100%', minHeight: '180px', height: '180px' }}>
+                                <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={180}>
                                     <FunnelChart margin={{ top: 10, bottom: 10, left: 120, right: 10 }} style={{ outline: 'none' }}>
                                         <defs>
                                             <linearGradient id="gradP1" x1="0" y1="0" x2="0" y2="1">
