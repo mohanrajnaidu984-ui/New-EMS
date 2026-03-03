@@ -77,10 +77,11 @@ export const DataProvider = ({ children }) => {
                 const contractors = custData.filter(c => c.Category === 'Contractor').map(c => c.CompanyName);
                 const clients = custData.filter(c => c.Category === 'Client').map(c => c.CompanyName);
                 const consultants = custData.filter(c => c.Category === 'Consultant').map(c => c.CompanyName);
+                const allDistinctCustomers = [...new Set(custData.map(c => c.CompanyName).filter(Boolean))].sort(new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare);
 
                 setMasters(prev => ({
                     ...prev,
-                    existingCustomers: contractors,
+                    existingCustomers: allDistinctCustomers,
                     clientNames: clients,
                     consultantNames: consultants,
                     customers: custData,

@@ -957,11 +957,21 @@ const QuoteForm = () => {
         // Robust Detection: Match user to a node in the hierarchy
         const userEmailNorm = (currentUser?.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
         const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase();
+        const editableNames = (pricingData?.access?.editableJobs || []).map(n => String(n).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase());
 
         const myNode = (enquiryData.divisionsHierarchy || []).find(n => {
             const mails = [n.commonMailIds, n.ccMailIds].filter(Boolean).join(',').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-            const nodeNameNorm = (n.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-            return (userEmailNorm && mails.includes(userEmailNorm)) || (userDeptNorm && nodeNameNorm === userDeptNorm);
+            const nodeNameNorm = (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+            
+            if (userEmailNorm && mails.includes(userEmailNorm)) return true;
+            if (editableNames.includes(nodeNameNorm)) return true;
+            
+            if (userDeptNorm) {
+                if (nodeNameNorm === userDeptNorm) return true;
+                if (nodeNameNorm.includes(userDeptNorm) && userDeptNorm.length > 2) return true;
+                if (userDeptNorm.includes(nodeNameNorm.replace(' project', '').trim()) && nodeNameNorm.length > 2) return true;
+            }
+            return false;
         });
 
         // Determine if we are in Subjob Mode
@@ -1050,8 +1060,17 @@ const QuoteForm = () => {
             return false;
         });
 
-        const isOwnDivisionSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
-
+        const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
+        let isLeadJobSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
+        
+        if (activeLeadJob) {
+             const activeLeadNorm = (activeLeadJob.itemName || activeLeadJob.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+             if (editableNames.includes(activeLeadNorm)) isLeadJobSelected = true;
+        }
+        
+        // Lead job "Own Job" means user's OWN division is selected as the branch root
+        // If Admin, they always act as the Lead Job owner.
+        const isOwnDivisionSelected = isAdmin ? true : isLeadJobSelected;
         const filteredOptions = uniqueOptions.filter(opt => {
             const valNorm = (opt.value || '').toLowerCase().trim();
             // Deep Clean for internal matching
@@ -1061,9 +1080,6 @@ const QuoteForm = () => {
                 .trim()
                 .toLowerCase();
             const isJobName = allJobNamesNorm.has(cleanValNorm);
-
-            // Lead job "Own Job" means user's OWN division is selected as the branch root
-            const isOwnDivisionSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
 
             if (isOwnDivisionSelected) {
                 // 1. If leadjob is own job then only to appear external customer names, not any internal job
@@ -1080,6 +1096,11 @@ const QuoteForm = () => {
                         const parentNameNorm = (parentNode.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
                         if (cleanValNorm === parentNameNorm) return true;
                     }
+                }
+                // Fallback: If for some reason parent isn't found and they DON'T have a mapped node, let them quote the lead job
+                if (!myNodeInBranch && activeLeadJob) {
+                    const leadNameNorm = (activeLeadJob.itemName || activeLeadJob.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                    if (cleanValNorm === leadNameNorm) return true;
                 }
                 return false;
             }
@@ -2547,6 +2568,7 @@ const QuoteForm = () => {
                     (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
                     (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
                     (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                    (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
                     (qDivCode === 'AAC' && jName.includes('AIR'));
             });
 
@@ -2591,6 +2613,7 @@ const QuoteForm = () => {
                     (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
                     (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
                     (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                    (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
                     (qDivCode === 'AAC' && jName.includes('AIR'));
             });
 
@@ -3215,6 +3238,7 @@ const QuoteForm = () => {
             let isBMS = false;
             let isElec = false;
             let isFire = false;
+            let isHVAC = false;
 
             // 0. PRIORITY: Check User's Primary Editable Scope (Prevents Sub-Job Override)
             // If user is "Electrical" with BMS as sub-job, we want "ELE" not "BMS"
@@ -3238,11 +3262,14 @@ const QuoteForm = () => {
                 } else if (up.includes('BMS')) {
                     isBMS = true;
                     console.log('[getQuotePayload] User Primary Scope: BMS');
+                } else if (up.includes('HVAC') || up.includes('AIR CONDITIONING') || up.includes('AC')) {
+                    isHVAC = true;
+                    console.log('[getQuotePayload] User Primary Scope: HVAC');
                 }
             }
 
             // 1. Check Selected Jobs (Only if no primary scope detected)
-            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS) {
+            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS && !isHVAC) {
                 if (selectedJobs && selectedJobs.length > 0) {
                     selectedJobs.forEach(job => {
                         const up = job.toUpperCase();
@@ -3251,12 +3278,13 @@ const QuoteForm = () => {
                         else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
                         else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
                         else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
+                        else if (up.includes('HVAC') || up.includes('AIR CONDITIONING') || up.includes('AC')) isHVAC = true;
                     });
                 }
             }
 
             // 2. Check Pricing Summary (Visible Groups on UI) - ONLY if no primary scope detected
-            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS) {
+            if (!isElec && !isPlumbing && !isCivil && !isFire && !isBMS && !isHVAC) {
                 if (pricingSummary && pricingSummary.length > 0) {
                     pricingSummary.forEach(grp => {
                         const up = grp.name.toUpperCase();
@@ -3265,7 +3293,8 @@ const QuoteForm = () => {
                         else if (up.includes('CIVIL') || up.includes('CVLP')) isCivil = true;
                         else if (up.includes('ELECTRICAL') || up.includes('ELE')) isElec = true;
                         else if (up.includes('FIRE') || up.includes('FPE')) isFire = true;
-                        console.log(`[getQuotePayload] Inspecting Group: ${grp.name} -> Plumb:${isPlumbing}, BMS:${isBMS}, Civil:${isCivil}`);
+                        else if (up.includes('HVAC') || up.includes('AIR CONDITIONING') || up.includes('AC')) isHVAC = true;
+                        console.log(`[getQuotePayload] Inspecting Group: ${grp.name} -> Plumb:${isPlumbing}, BMS:${isBMS}, Civil:${isCivil}, HVAC:${isHVAC}`);
                     });
                 }
             } else {
@@ -3307,6 +3336,7 @@ const QuoteForm = () => {
                     else if (up.includes('CIVIL') || up.includes('CVLP')) tabDivision = 'CVLP';
                     else if (up.includes('ELECTRICAL') || up.includes('ELE') || up.includes('ELECT')) tabDivision = 'ELE';
                     else if (up.includes('FIRE') || up.includes('FPE')) tabDivision = 'FPE';
+                    else if (up.includes('HVAC')) tabDivision = 'HVP';
                     else if (up.includes('AIR CONDITIONING') || up.includes('AAC')) tabDivision = 'AAC';
                 }
             }
@@ -3319,10 +3349,11 @@ const QuoteForm = () => {
             else if (isBMS) effectiveDivisionCode = 'BMS';
             else if (isElec) effectiveDivisionCode = 'ELE';
             else if (isFire) effectiveDivisionCode = 'FPE';
+            else if (isHVAC) effectiveDivisionCode = 'HVP';
             else if (isCivil) effectiveDivisionCode = 'CVLP';
             else effectiveDivisionCode = baseDiv;
 
-            console.log(`[getQuotePayload] FINAL Division Code: ${effectiveDivisionCode} (isElec:${isElec}, isBMS:${isBMS}, isPlumb:${isPlumbing})`);
+            console.log(`[getQuotePayload] FINAL Division Code: ${effectiveDivisionCode} (isElec:${isElec}, isBMS:${isBMS}, isPlumb:${isPlumbing}, isHVAC:${isHVAC})`);
             // ---------------------------------------------------------
         }
 
@@ -3797,6 +3828,59 @@ const QuoteForm = () => {
     };
 
 
+    const computedPreparedByOptions = React.useMemo(() => {
+        let base = [];
+        
+        const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase().replace(' project', '');
+        if (userDeptNorm && usersList) {
+            usersList.forEach(u => {
+                const dNorm = (u.Department || '').trim().toLowerCase().replace(' project', '');
+                if (dNorm && userDeptNorm && (dNorm === userDeptNorm || dNorm.includes(userDeptNorm) || userDeptNorm.includes(dNorm))) {
+                    base.push({ value: u.FullName, label: u.FullName, type: 'Dept' });
+                }
+            });
+        }
+        
+        return base.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
+    }, [usersList, currentUser]);
+
+    const computedSignatoryOptions = React.useMemo(() => {
+        if (!enquiryData || !enquiryData.divisionEmails) return [];
+        
+        let activeItemName = '';
+        const activeTabObj = calculatedTabs?.find(t => String(t.id) === String(activeQuoteTab));
+        if (activeTabObj) {
+            const tabJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId));
+            if (tabJob) activeItemName = (tabJob.itemName || tabJob.ItemName || tabJob.DivisionName || '').toLowerCase();
+        }
+        
+        const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase().replace(' project', '');
+        if (!activeItemName) activeItemName = userDeptNorm || '';
+
+        const cleanActive = activeItemName.replace(/^(l\d+|sub job)\s*-\s*/, '').replace(/-\d+$/, '').trim();
+        
+        const divisionMatch = enquiryData.divisionEmails.find(d => {
+            const dNorm = (d.itemName || '').toLowerCase().replace(/^(l\d+|sub job)\s*-\s*/, '').replace(/-\d+$/, '').trim();
+            return cleanActive && dNorm && (dNorm === cleanActive || dNorm.includes(cleanActive) || cleanActive.includes(dNorm));
+        });
+        
+        if (divisionMatch && divisionMatch.ccMailIds) {
+            const ccMails = divisionMatch.ccMailIds.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+            const ccMailsList = ccMails.split(',').map(m => m.trim()).filter(Boolean);
+            
+            let filteredUsers = usersList.filter(u => {
+                const uMail = (u.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
+                return uMail && ccMailsList.includes(uMail);
+            }).map(u => ({ value: u.FullName, label: u.FullName, designation: u.Designation }));
+            
+            if (filteredUsers.length > 0) {
+                return filteredUsers.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
+            }
+        }
+        
+        return [];
+    }, [enquiryData, calculatedTabs, activeQuoteTab, jobsPool, usersList, currentUser]);
+
     return (
         <div style={{ display: 'flex', height: 'calc(100vh - 80px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
@@ -4225,6 +4309,7 @@ const QuoteForm = () => {
                                                             (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
                                                             (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
                                                             (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                                            (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
                                                             (qDivCode === 'AAC' && jName.includes('AIR'));
                                                     });
 
@@ -4252,6 +4337,7 @@ const QuoteForm = () => {
                                                                 (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
                                                                 (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
                                                                 (qDivCode === 'FPE' && jName.includes('FIRE')) ||
+                                                                (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
                                                                 (qDivCode === 'AAC' && jName.includes('AIR'));
                                                         })();
 
@@ -4489,7 +4575,7 @@ const QuoteForm = () => {
                                 <CreatableSelect
                                     isClearable
                                     onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
-                                    options={preparedByOptions}
+                                    options={computedPreparedByOptions}
                                     value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
                                     placeholder="Select or Type Name..."
                                     styles={{
@@ -4511,7 +4597,7 @@ const QuoteForm = () => {
                                             setSignatoryDesignation(newValue.designation);
                                         }
                                     }}
-                                    options={signatoryOptions}
+                                    options={computedSignatoryOptions}
                                     value={signatory ? { label: signatory, value: signatory } : null}
                                     placeholder="Select or Type Signatory..."
                                     styles={{
@@ -5279,12 +5365,12 @@ const QuoteForm = () => {
                             boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
                             maxWidth: '800px',
                             margin: '0 auto',
-                            minHeight: '290mm' // Ensures it looks like at least one page
+                            minHeight: '280mm' // Ensures it looks like at least one page
                         }}>
 
                             {/* Page 1 Container */}
                             <div className="page-one" style={{
-                                minHeight: '275mm',
+                                minHeight: '260mm',
                                 display: 'flex',
                                 flexDirection: 'column',
                                 position: 'relative'
@@ -5365,17 +5451,17 @@ const QuoteForm = () => {
                                 </div> {/* End of Flex-1 Content */}
 
                                 {/* Bottom Section (Signature + Footer) */}
-                                <div style={{ marginTop: 'auto' }}>
+                                <div style={{ marginTop: 'auto', pageBreakInside: 'avoid' }}>
 
                                     {/* Signature Section */}
-                                    <div style={{ marginTop: '50px' }}>
+                                    <div style={{ marginTop: '30px' }}>
                                         <div style={{ marginBottom: '40px' }}>For {quoteCompanyName || enquiryData.companyDetails?.name || 'Almoayyed Contracting'},</div>
                                         <div style={{ fontWeight: '600' }}>{signatory || 'N/A'}</div>
                                         <div style={{ fontSize: '13px', color: '#64748b' }}>{signatoryDesignation || ''}</div>
                                     </div>
 
                                     {/* Footer */}
-                                    <div className="footer-section" style={{ marginTop: '40px', paddingTop: '20px', borderTop: '1px solid #e2e8f0', fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
+                                    <div className="footer-section" style={{ marginTop: '30px', paddingTop: '15px', borderTop: '1px solid #e2e8f0', fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
                                         <div>{footerDetails?.name || enquiryData.companyDetails?.name || 'Almoayyed Contracting'}</div>
                                         <div>{footerDetails?.address || enquiryData.companyDetails?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
                                         <div>

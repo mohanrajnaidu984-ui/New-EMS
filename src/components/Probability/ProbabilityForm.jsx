@@ -51,7 +51,8 @@ const ProbabilityForm = () => {
                 fromDate: fromDate || '',
                 toDate: toDate || '',
                 probability: filterProbability || '',
-                userEmail: currentUser?.EmailId || currentUser?.email || ''
+                userEmail: currentUser?.EmailId || currentUser?.email || '',
+                userDepartment: currentUser?.Department || ''
             });
 
             const url = `${API_BASE}/api/probability/list?${queryParams}`;
@@ -114,7 +115,10 @@ const ProbabilityForm = () => {
                         item.QuoteRefs = [];
                     }
 
+                    /* 
                     // STRICT FILTER: Filter QuoteRefs based on user's department scope (Step 1922)
+                    // REMOVED: This was incorrectly matching user department with customer name (ToName).
+                    // Backend already filters FilteredQuoteRefs based on division/email access.
                     if (item.QuoteRefs && item.QuoteRefs.length > 0) {
                         const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                         const isSubUser = userDept && userDept !== 'civil' && userDept !== 'admin' && currentUser?.Roles !== 'Admin' && currentUser?.role !== 'Admin';
@@ -126,6 +130,7 @@ const ProbabilityForm = () => {
                             });
                         }
                     }
+                    */
 
 
                     // Robust Quoted Values

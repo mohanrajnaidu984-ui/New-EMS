@@ -30,7 +30,6 @@ const SalesReport = () => {
         topCustomers: [],
         topProjects: [],
         topClients: [],
-        topClients: [],
         probabilityFunnel: [],
         itemWiseStats: []
     });
@@ -232,9 +231,20 @@ const SalesReport = () => {
                 .catch(err => {
                     console.error("Failed to fetch user access details", err);
                     // Fallback to client check if API fails
-                    const RESTRICTED_ROLES = ['Sales Engineer', 'Estimation Engineer', 'Quantity Surveyor'];
-                    const userDesignation = currentUser.Designation || currentUser.designation;
-                    if (RESTRICTED_ROLES.includes(userDesignation)) {
+                    const RESTRICTED_ROLES = [
+                        'Sales Engineer', 
+                        'Estimation Engineer', 
+                        'Quantity Surveyor', 
+                        'Estimator', 
+                        'Quantity Specialist', 
+                        'Quantity Survey Specialist', 
+                        'Cost Analysit', 
+                        'Costing Specialist', 
+                        'Estimation Specialist',
+                        'Estimaton Specialist'
+                    ];
+                    const userDesignation = currentUser.Designation || currentUser.designation || '';
+                    if (RESTRICTED_ROLES.some(r => userDesignation.toLowerCase().includes(r.toLowerCase()))) {
                         setIsRestricted(true);
                         // Try to lock with what we have
                         if (currentUser.Department) {

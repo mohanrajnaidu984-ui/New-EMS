@@ -201,9 +201,12 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         } else {
             for (const priceValue of enqPrices) {
                 // Check if this price value belongs to one of the user's jobs
-                const belongsToMyJob =
-                    (priceValue.EnquiryForID && myJobIds.has(priceValue.EnquiryForID)) ||
-                    (priceValue.EnquiryForItem && myJobNames.has(priceValue.EnquiryForItem));
+                let belongsToMyJob = false;
+                if (priceValue.EnquiryForID && priceValue.EnquiryForID != 0 && priceValue.EnquiryForID != '0') {
+                    belongsToMyJob = myJobIds.has(priceValue.EnquiryForID);
+                } else {
+                    belongsToMyJob = priceValue.EnquiryForItem && myJobNames.has(priceValue.EnquiryForItem);
+                }
 
                 if (belongsToMyJob && priceValue.Price && priceValue.Price > 0) {
                     // Found at least one valid price for the user's division - NOT pending!
@@ -312,8 +315,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 let bestRow = null;
                 for (const opt of opts) {
                     const pRows = enqPrices.filter(p => p.OptionID == opt.OptionID);
-                    let row = pRows.find(p => p.EnquiryForID && String(p.EnquiryForID) === String(jobId));
-                    if (!row) row = pRows.find(p => p.EnquiryForItem === job.ItemName);
+                    let row = pRows.find(p => p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0' && String(p.EnquiryForID) === String(jobId));
+                    if (!row) row = pRows.find(p => (!p.EnquiryForID || p.EnquiryForID == 0 || p.EnquiryForID == '0') && p.EnquiryForItem === job.ItemName);
 
                     if (row && row.Price > 0) {
                         if (!bestRow || new Date(row.UpdatedAt) > new Date(bestRow.UpdatedAt)) {

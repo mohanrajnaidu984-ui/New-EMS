@@ -27,7 +27,7 @@ const upload = multer({ storage: storage });
 // GET /api/quotes/lists/metadata - Fetch lists for dropdowns
 router.get('/lists/metadata', async (req, res) => {
     try {
-        const usersResult = await sql.query`SELECT FullName, Designation, EmailId FROM Master_ConcernedSE WHERE Status = 'Active' ORDER BY FullName`;
+        const usersResult = await sql.query`SELECT FullName, Designation, EmailId, Department FROM Master_ConcernedSE WHERE Status = 'Active' ORDER BY FullName`;
         const customersResult = await sql.query`SELECT CompanyName, Address1, Address2, Phone1, Phone2, FaxNo, EmailId FROM Master_CustomerName WHERE Status = 'Active' ORDER BY CompanyName`;
         res.json({ users: usersResult.recordset, customers: customersResult.recordset });
     } catch (err) {
@@ -350,13 +350,13 @@ router.get('/list/pending', async (req, res) => {
                 const updateDates = {};
                 flatList.forEach(job => {
                     const matches = enqPrices.filter(p =>
-                        (p.EnquiryForID && p.EnquiryForID.toString() == job.ID.toString())
+                        (p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0' && String(p.EnquiryForID) === String(job.ID))
                     );
 
                     // Fallback to ItemName match if ID is lost/changed on enquiry update
                     let finalMatches = matches;
                     if (finalMatches.length === 0) {
-                        finalMatches = enqPrices.filter(p => p.EnquiryForItem && p.EnquiryForItem.toString().trim() === job.ItemName.toString().trim());
+                        finalMatches = enqPrices.filter(p => (!p.EnquiryForID || p.EnquiryForID == 0 || p.EnquiryForID == '0') && p.EnquiryForItem && p.EnquiryForItem.toString().trim() === job.ItemName.toString().trim());
                     }
 
                     const sortedMatches = [...finalMatches].sort((a, b) => new Date(b.UpdatedAt) - new Date(a.UpdatedAt));
@@ -943,8 +943,24 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             // If the user's directly-assigned jobs are ALL subjobs (have a parent),
             // suppress external customers. Only show the root/parent job name.
             // Only applies when a specific user is requesting (not admin/all).
-            const reqUserEmail = (req.query.userEmail || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
-            if (reqUserEmail && rawItems && rawItems.length > 0) {
+            const reqUserEmailRaw = req.query.userEmail || '';
+            const reqUserEmail = reqUserEmailRaw.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
+            
+            let isAdminUser = false;
+            try {
+                if (reqUserEmailRaw) {
+                    const userRoleResult = await sql.query`SELECT Roles, role FROM Master_Users WHERE EmailId = ${reqUserEmailRaw} OR EmailId = ${reqUserEmail}`;
+                    if (userRoleResult.recordset.length > 0) {
+                        const row = userRoleResult.recordset[0];
+                        const r = row.Roles || row.role;
+                        if (r === 'Admin' || r === 'Admins') {
+                            isAdminUser = true;
+                        }
+                    }
+                }
+            } catch(e) { console.error('Error checking user role for subjob filter', e); }
+
+            if (!isAdminUser && reqUserEmail && rawItems && rawItems.length > 0) {
                 // Find items directly assigned to this user
                 const scopeItemsForFilter = rawItems.filter(item => {
                     const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();

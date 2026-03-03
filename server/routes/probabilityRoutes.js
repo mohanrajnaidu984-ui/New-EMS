@@ -10,7 +10,8 @@ const { sql } = require('../dbConfig');
 // &fromDate=... &toDate=... &probability=...
 router.get('/list', async (req, res) => {
     try {
-        const { mode, fromDate, toDate, probability, userEmail } = req.query;
+        const { mode, fromDate, toDate, probability, userEmail: rawEmail, userDepartment } = req.query;
+        const userEmail = rawEmail ? rawEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim() : '';
         console.log(`[Probability API V5] Fetching list. Mode: ${mode}, User: ${userEmail}`);
         let query = `
             SELECT
@@ -36,7 +37,7 @@ router.get('/list', async (req, res) => {
                                     FROM EnquiryPricingValues pv
                                     JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
                                     -- Fix JOIN to handle prefixes like "L1 - "
-                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '% - ' + mef.ItemName)
+                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '%- ' + mef.ItemName OR pv.EnquiryForItem LIKE '%-' + mef.ItemName)
                                     WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
@@ -45,19 +46,21 @@ router.get('/list', async (req, res) => {
                                         (
                                             ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                             OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                            OR mef.ItemName = @userDepartment
                                         )
                                         OR
                                         -- Hierarchy: User has access to the Parent job of this specific item (Subjob)
                                         EXISTS (
                                             SELECT 1 FROM EnquiryFor child
                                             JOIN EnquiryFor parent ON child.ParentID = parent.ID
-                                            JOIN Master_EnquiryFor pmef ON (parent.ItemName = pmef.ItemName OR parent.ItemName LIKE '% - ' + pmef.ItemName)
-                                            WHERE (pv.EnquiryForItem = child.ItemName OR pv.EnquiryForItem LIKE '% - ' + child.ItemName)
+                                            JOIN Master_EnquiryFor pmef ON (parent.ItemName = pmef.ItemName OR parent.ItemName LIKE '%- ' + pmef.ItemName OR parent.ItemName LIKE '%-' + pmef.ItemName)
+                                            WHERE (pv.EnquiryForItem = child.ItemName OR pv.EnquiryForItem LIKE '%- ' + child.ItemName OR pv.EnquiryForItem LIKE '%-' + child.ItemName)
                                             AND child.RequestNo = E.RequestNo
                                             AND parent.RequestNo = E.RequestNo
                                             AND (
                                                 ',' + REPLACE(REPLACE(ISNULL(pmef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                                 OR ',' + REPLACE(REPLACE(ISNULL(pmef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                OR pmef.ItemName = @userDepartment
                                             )
                                         )
                                         OR
@@ -92,7 +95,7 @@ router.get('/list', async (req, res) => {
                                     SELECT MAX(pv.Price) as MaxItemPrice
                                     FROM EnquiryPricingValues pv
                                     JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '% - ' + mef.ItemName)
+                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '%- ' + mef.ItemName OR pv.EnquiryForItem LIKE '%-' + mef.ItemName)
                                     WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
@@ -100,7 +103,7 @@ router.get('/list', async (req, res) => {
                                         -- Net Quoted: ONLY strict user affiliation
                                         ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                         OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                        OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                        OR mef.ItemName = @userDepartment
                                     )
                                     GROUP BY pv.EnquiryForItem
                                 ) t
@@ -236,6 +239,7 @@ router.get('/list', async (req, res) => {
         if (toDate) request.input('toDate', sql.Date, toDate);
         if (probability) request.input('probability', sql.VarChar, probability);
         request.input('userEmail', sql.NVarChar, userEmail || '');
+        request.input('userDepartment', sql.NVarChar, userDepartment || '');
         request.input('now', sql.DateTime, now);
 
         const result = await request.query(query.replace(/GETDATE\(\)/g, '@now'));
