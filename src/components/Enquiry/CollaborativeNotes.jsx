@@ -282,6 +282,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                                 <div className="list-group list-group-flush">
                                     {filteredUsers.map(u => (
                                         <button
+                                            type="button"
                                             key={u.ID}
                                             className="list-group-item list-group-item-action py-2 small"
                                             onClick={() => selectUser(u.FullName)}
@@ -293,7 +294,7 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                             </div>
                         )}
                     </div>
-                    <button className="btn btn-primary" onClick={handlePost} disabled={loading || !newNote.trim()}>
+                    <button type="button" className="btn btn-primary" onClick={handlePost} disabled={loading || !newNote.trim()}>
                         {loading ? 'Posting...' : 'Post'}
                     </button>
                 </div>

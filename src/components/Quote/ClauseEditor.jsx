@@ -46,7 +46,6 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 config={config}
                 tabIndex={1} // tabIndex of textarea
                 onBlur={newContent => onChange(newContent)}
-                onChange={newContent => onChange(newContent)}
             />
             <style>
                 {`

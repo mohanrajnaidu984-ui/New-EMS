@@ -180,7 +180,8 @@ const HierarchyBuilder = ({
                     <div style={{ marginLeft: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         {showEdit && onEditItem && (
                             <button
-                                onClick={() => onEditItem(item)}
+                                type="button"
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onEditItem(item); }}
                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3b82f6', display: 'flex', padding: 0 }}
                                 title="Edit Item"
                             >
@@ -189,7 +190,8 @@ const HierarchyBuilder = ({
                         )}
                         {(canRemove && (!canRemoveItem || canRemoveItem(item))) && (
                             <button
-                                onClick={() => handleRemoveItem(item)}
+                                type="button"
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRemoveItem(item); }}
                                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', display: 'flex', padding: 0 }}
                                 title="Remove"
                             >
@@ -257,7 +259,8 @@ const HierarchyBuilder = ({
                         </select>
                         {showNew && onNew && (
                             <button
-                                onClick={onNew}
+                                type="button"
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onNew(e); }}
                                 className="btn btn-sm btn-outline-success"
                                 style={{ padding: '4px 8px', display: 'flex', alignItems: 'center', gap: '4px' }}
                                 title="Add New Scope"

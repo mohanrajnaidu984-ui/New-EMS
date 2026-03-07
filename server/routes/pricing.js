@@ -241,12 +241,30 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
 
         // Collect External Customers
-        let externalCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+        // Collect External Customers and Deduplicate
+        const rawExternal = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+        const externalCustomers = [];
+        const normSet = new Set();
+        
+        rawExternal.forEach(c => {
+            const norm = c.replace(/[.,\s]+$/, '').toLowerCase();
+            if (!normSet.has(norm)) {
+                externalCustomers.push(c);
+                normSet.add(norm);
+            }
+        });
 
         // Collect Alternative (Option) Customers
         const optionCustomers = new Set();
         enqOptions.forEach(o => {
-            if (o.CustomerName) optionCustomers.add(o.CustomerName.trim());
+            if (o.CustomerName) {
+                const c = o.CustomerName.trim();
+                const norm = c.replace(/[.,\s]+$/, '').toLowerCase();
+                if (!normSet.has(norm)) {
+                    optionCustomers.add(c);
+                    normSet.add(norm);
+                }
+            }
         });
 
         const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
@@ -269,7 +287,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         } else {
             // Lead job context: External customers + internal jobs with pricing options
             const finalSet = new Set(externalCustomers);
-            optionCustomers.forEach(c => finalSet.add(c));
+
+            optionCustomers.forEach(c => {
+                finalSet.add(c);
+            });
 
             finalCustomers = Array.from(finalSet).filter(c => {
                 const cNorm = normalize(c);
@@ -807,7 +828,7 @@ router.get('/:requestNo', async (req, res) => {
                 consultantName: enquiry.ConsultantName
             },
             extraCustomers: extraCustomers
-                .map(c => (c.CustomerName || '').replace(/[,.]+$/g, '').trim()) // Normalize names
+                .map(c => (c.CustomerName || '').replace(/,+$/g, '').trim()) // Normalize names
                 .filter(name => {
                     const cleanName = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
                     return name && !excludedNames.has(name) && !excludedNames.has(cleanName);
@@ -815,7 +836,7 @@ router.get('/:requestNo', async (req, res) => {
             customers: customers,
             activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim())))
                 ? (customers.length > 0 ? customers[0] : '')
-                : (activeCustomerName || '').replace(/[,.]+$/g, '').trim(),
+                : (activeCustomerName || '').replace(/,+$/g, '').trim(),
             leadJob: leadJobItem,
             jobs: jobs.map(j => ({
                 id: j.ID,

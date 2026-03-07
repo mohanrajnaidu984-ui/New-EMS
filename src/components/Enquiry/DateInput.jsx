@@ -96,6 +96,8 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
                 ref={datePickerRef}
                 type="date"
                 value={value}
+                min={props.min}
+                max={props.max}
                 onChange={handleDatePickerChange}
                 style={{
                     position: 'absolute',

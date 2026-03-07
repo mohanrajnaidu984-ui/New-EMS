@@ -1132,7 +1132,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             const formatDate = (d) => {
                 if (!d) return '';
                 try {
-                    return new Date(d).toISOString().split('T')[0];
+                    const date = new Date(d);
+                    const offset = date.getTimezoneOffset() * 60000;
+                    return new Date(date.getTime() - offset).toISOString().split('T')[0];
                 } catch (e) { return ''; }
             };
 

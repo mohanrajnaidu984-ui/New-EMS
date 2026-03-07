@@ -166,8 +166,7 @@ router.get('/list', async (req, res) => {
                 AND (E.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR E.Status IS NULL OR E.Status = '')
                 AND EXISTS(
                     SELECT 1 FROM EnquiryQuotes Q 
-                    WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) 
-                    AND DATEDIFF(day, Q.QuoteDate, GETDATE()) >= 0
+                    WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                 )
             `;
         } else if (mode === 'Won') {

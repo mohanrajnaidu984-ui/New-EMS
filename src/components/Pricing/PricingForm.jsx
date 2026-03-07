@@ -245,8 +245,9 @@ const PricingForm = () => {
                     .filter(s => s && s.length > 0 && s !== '(Not Assigned)')
                     .filter(s => {
                         // STRICT FILTER: Only include if explicitly in Master/Extra OR is an Internal Parent
-                        const isMaster = (data.enquiry.customerName || '').includes(s);
-                        const isExtra = (data.extraCustomers || []).some(ec => ec.includes(s));
+                        const masterList = (data.enquiry.customerName || '').split(',').map(c => c.trim());
+                        const isMaster = masterList.includes(s);
+                        const isExtra = (data.extraCustomers || []).some(ec => (ec || '').split(',').map(c => c.trim()).includes(s));
                         const isInternal = internalParentCustomers.includes(s);
                         return isMaster || isExtra || isInternal;
                     });
@@ -479,8 +480,12 @@ const PricingForm = () => {
                     // Ensure displayed customers are ONLY those currently valid in Enquiry or Internal Parents
                     // This hides stale customers that might still exist in the options table
                     data.customers = data.customers.filter(s => {
-                        const isMaster = (data.enquiry?.customerName || '').includes(s);
-                        const isExtra = (data.extraCustomers || []).some(ec => ec && typeof ec === 'string' && ec.includes(s));
+                        const masterList = (data.enquiry?.customerName || '').split(',').map(c => c.trim());
+                        const isMaster = masterList.includes(s);
+                        const isExtra = (data.extraCustomers || []).some(ec => {
+                            if (!ec || typeof ec !== 'string') return false;
+                            return ec.split(',').map(c => c.trim()).includes(s);
+                        });
                         const isInternal = (internalParentCustomers || []).includes(s);
                         return isMaster || isExtra || isInternal;
                     });
@@ -569,10 +574,12 @@ const PricingForm = () => {
                         // 2. Calculate Self Price using the Resolved Option ID
                         const idKey = `${activeOptionId}_${jobId}`;
                         let selfPrice = 0;
+                        let hasFoundPrice = false;
 
                         // Check strict match (Allow 0 to be displayed)
                         if (data.values && data.values[idKey] && parseFloat(data.values[idKey].Price) >= 0) {
                             selfPrice = parseFloat(data.values[idKey].Price);
+                            hasFoundPrice = true;
                         } else {
                             // Fallbacks (Name/Clean)
                             const job = data.jobs.find(j => j.id === jobId);
@@ -580,17 +587,45 @@ const PricingForm = () => {
                                 const nameKey = `${activeOptionId}_${job.itemName}`;
                                 if (data.values && data.values[nameKey] && parseFloat(data.values[nameKey].Price) >= 0) {
                                     selfPrice = parseFloat(data.values[nameKey].Price);
+                                    hasFoundPrice = true;
                                 } else {
                                     const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
                                     const cleanKey = `${activeOptionId}_${cleanName}`;
                                     if (data.values && data.values[cleanKey] && parseFloat(data.values[cleanKey].Price) >= 0) {
                                         selfPrice = parseFloat(data.values[cleanKey].Price);
+                                        hasFoundPrice = true;
+                                    }
+                                }
+
+                                // GLOBAL FALLBACK (Step 1142 FIX): If still 0, scan all other customer buckets!
+                                if ((!hasFoundPrice || selfPrice <= 0) && data.allValues) {
+                                    for (const custKey in data.allValues) {
+                                        const custBucket = data.allValues[custKey];
+                                        // We need TO FIND the option ID in this bucket that corresponds to the same NAME and JOB
+                                        const peerOpt = data.options.find(o =>
+                                            o.customerName === custKey &&
+                                            o.name === rootOpt?.name &&
+                                            o.itemName === job.itemName
+                                        );
+                                        if (peerOpt) {
+                                            const peerKey = `${peerOpt.id}_${jobId}`;
+                                            const peerVal = custBucket[peerKey] || custBucket[`${peerOpt.id}_${job.itemName}`];
+                                            if (peerVal && parseFloat(peerVal.Price) > 0) {
+                                                selfPrice = parseFloat(peerVal.Price);
+                                                hasFoundPrice = true;
+                                                console.log(`[Pricing Persistence] PROMOTING price ${selfPrice} for job ${job.itemName} from bucket ${custKey} to current view`);
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
                         // 3. Sum Children (Pass the ORIGINAL Root Option Name logic down)
+                        // DISABLED: User explicitly requested that parent jobs should ONLY show their net value 
+                        // and NOT accumulate subjob values to prevent duplicated pricing (Step 1531).
+                        /*
                         const children = data.jobs.filter(j => j.parentId === jobId);
                         let childrenSum = 0;
                         children.forEach(c => {
@@ -613,8 +648,9 @@ const PricingForm = () => {
                             // We pass rootOptionId again, let the next recursion resolve its own best ID
                             childrenSum += getRecursivePrice(rootOptionId, c.id, new Set(visited));
                         });
+                        */
 
-                        return selfPrice + childrenSum;
+                        return selfPrice;
                     };
 
 
@@ -625,6 +661,12 @@ const PricingForm = () => {
                             // -------------------------------------------------------------
                             const jobLeadName = findLeadJobName(job);
                             const optLeadName = opt.leadJobName;
+
+                            // FIX (Step 1231): ONLY initialize values for the current customer tab.
+                            // Broadly initializing all matching options caused saveAll to try and 
+                            // update/duplicate records for external customers (like Ithbat) 
+                            // while viewing internal tabs (like Civil Project).
+                            if (opt.customerName !== activeCust) return;
 
                             let isMatch = false;
                             if (opt.itemName === job.itemName) {
@@ -1210,69 +1252,95 @@ const PricingForm = () => {
     // Dynamic Customer Tabs Filter (Step 1727)
     const displayedCustomers = React.useMemo(() => {
         if (!pricingData || !selectedLeadId) return [];
-        // Admins/Managers see everything
-        if (pricingData.access?.canEditAll) return pricingData.customers || [];
+        // Admins/Managers early out removed - properly evaluated below
 
         const myJobs = pricingData.access.editableJobs || [];
         const selectedJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
         if (!selectedJob) return [];
 
         // 1. Identify External Customers (Main + Extra)
-        const externalCustomers = [
-            ...(pricingData.enquiry?.customerName || '').split(','),
-            ...(pricingData.extraCustomers || []).flatMap(c => (c || '').split(','))
-        ].map(s => s.trim()).filter(Boolean);
+        const masterList = (pricingData.enquiry?.customerName || '').split(',').map(c => c.trim()).filter(Boolean);
+        const extraList = (pricingData.extraCustomers || []).flatMap(c => (c || '').split(',')).map(c => c.trim()).filter(Boolean);
+        const externalCustomers = [...masterList, ...extraList];
 
-        // 2. Identify Role for THIS selection
-        const isLeadForThisSelection = myJobs.includes(selectedJob.itemName);
-
-        // 3. Identify Parent Customers (subjob logic)
-        const parentCustomers = new Set();
-        if (!isLeadForThisSelection) {
-            myJobs.forEach(myJobName => {
-                const jobObj = pricingData.jobs.find(j => j.itemName === myJobName);
-                if (jobObj) {
-                    // Check if descendant of selectedLeadJob
-                    let isDescendant = false;
-                    let curr = jobObj;
-                    while (curr && curr.parentId) {
-                        if (curr.parentId == selectedLeadId) {
-                            isDescendant = true;
-                            break;
-                        }
-                        curr = pricingData.jobs.find(j => j.id == curr.parentId);
-                    }
-
-                    if (isDescendant) {
-                        const parentObj = pricingData.jobs.find(p => p.id == jobObj.parentId);
-                        if (parentObj) {
-                            // Clean name as per heuristic (Step 1727)
-                            const cleanP = parentObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                            parentCustomers.add(cleanP);
-                        }
+        // 2. Identify jobs in the current Lead Job's tree
+        const treeJobs = new Set([Number(selectedLeadId)]);
+        let changed = true;
+        while (changed) {
+            changed = false;
+            pricingData.jobs.forEach(j => {
+                if (j.parentId !== null && j.parentId !== undefined) {
+                    const pId = Number(j.parentId || j.ParentID);
+                    const id = Number(j.id || j.ID);
+                    if (treeJobs.has(pId) && !treeJobs.has(id)) {
+                        treeJobs.add(id);
+                        changed = true;
                     }
                 }
             });
         }
 
-        // 4. Return filtered list: External (if Lead) OR Parent (if Sub)
-        return (pricingData.customers || []).filter(cName => {
+        // 3. Parent Jobs (Internal Customers) and Root Status in THIS Tree
+        const parentCustomers = new Set();
+        let amIRootInTree = false;
+
+        if (pricingData?.jobs) {
+            pricingData.jobs.forEach(jobObj => {
+                if (!treeJobs.has(Number(jobObj.id || jobObj.ID))) return;
+
+                myJobs.forEach(assignedName => {
+                    const cleanAssigned = assignedName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                    const cleanJob = jobObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+
+                    if (cleanJob === cleanAssigned) {
+                        if (Number(jobObj.id || jobObj.ID) === Number(selectedLeadId)) {
+                            amIRootInTree = true;
+                        }
+
+                        const pId = jobObj.parentId || jobObj.ParentID;
+                        if (pId && pId !== '0' && pId !== 0) {
+                            const parentObj = pricingData.jobs.find(p => Number(p.id || p.ID) === Number(pId));
+                            if (parentObj) {
+                                const cleanP = parentObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                parentCustomers.add(cleanP);
+                            }
+                        }
+                    }
+                });
+            });
+        }
+
+        const allPossibleCustomers = [...new Set([
+            ...externalCustomers,
+            ...Array.from(parentCustomers)
+        ])];
+
+        return allPossibleCustomers.filter(cName => {
             const cleanC = cName.trim();
-            // LEAD ACCESS: If user is assigned to the root of THIS selection, show external customers
-            if (isLeadForThisSelection) {
-                return externalCustomers.includes(cleanC);
-            } else if (parentCustomers.size > 0) {
-                // INTERNAL VIEW: Show parent jobs as customers (Sales to other divisions)
-                // NEW (Step 453): Filter out any tab that is one of my own assigned divisions
-                // "the customer name tab should be only its parent division"
-                const isMyOwnJob = myJobs.includes(cleanC) || myJobs.some(mj => mj.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === cleanC);
-                return parentCustomers.has(cleanC) && !isMyOwnJob;
+
+            if (pricingData.access?.canEditAll) {
+                const isExternal = externalCustomers.includes(cleanC);
+                const isInternalParent = pricingData.jobs.some(j => {
+                    if (!treeJobs.has(Number(j.id || j.ID))) return false;
+                    const pId = j.parentId || j.ParentID;
+                    if (!pId || pId === '0' || pId === 0) return false;
+                    const parent = pricingData.jobs.find(p => Number(p.id || p.ID) === Number(pId));
+                    return parent && parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === cleanC;
+                });
+                return isExternal || isInternalParent;
             }
-            // Fallback for Users with global Lead Access but No specific assignment to this root
-            if (pricingData.access?.hasLeadAccess) {
-                return externalCustomers.includes(cleanC);
+
+            // ENHANCED LOGIC
+            if (amIRootInTree) {
+                // If user is a Lead Job in this tree, they can see External Customers and their Parents (if they also own Subjobs in this tree)
+                if (externalCustomers.includes(cleanC)) return true;
+                if (parentCustomers.has(cleanC)) return true;
+                return false;
+            } else {
+                // If user is strictly a Sub-Job user in this tree, they ONLY see their parent(s)
+                if (parentCustomers.has(cleanC)) return true;
+                return false;
             }
-            return false;
         });
     }, [pricingData, selectedLeadId, pricingData?.access?.editableJobs]); // Added editableJobs to ensure refresh on permission change
 

@@ -1,13 +1,9 @@
-const { connectDB, sql } = require('./dbConfig');
-
-async function run() {
-    await connectDB();
-    const res = await sql.query`
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_NAME = 'EnquiryMaster'
-    `;
-    console.log(res.recordset.map(c => c.COLUMN_NAME).join(', '));
-    process.exit();
-}
-run();
+const { sql, dbConfig } = require('./dbConfig');
+sql.connect(dbConfig, err => {
+    if (err) return console.error(err);
+    new sql.Request().query("SELECT TOP 1 * FROM EnquiryPricingOptions", (err, res) => {
+        if (err) console.error(err);
+        else console.log(Object.keys(res.recordset[0]));
+        sql.close();
+    });
+});

@@ -82,7 +82,7 @@ const SearchableSelectControl = ({
                                     border: '1px solid #dee2e6',
                                     backgroundColor: '#fff'
                                 }}
-                                onClick={onNew}
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onNew && onNew(); }}
                                 title="Add New"
                             >
                                 New
@@ -100,7 +100,7 @@ const SearchableSelectControl = ({
                                     backgroundColor: '#fff',
                                     borderLeft: 'none'
                                 }}
-                                onClick={onEdit}
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onEdit && onEdit(); }}
                                 disabled={!canEdit}
                                 title="Edit Selected"
                             >

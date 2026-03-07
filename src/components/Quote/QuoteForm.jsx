@@ -102,6 +102,39 @@ const parsePrice = (v) => {
     return parseFloat(clean) || 0;
 };
 
+// Global Helper for Division Code Mapping
+const matchDivisionCode = (qDivCode, jName) => {
+    if (!qDivCode || !jName) return false;
+    const q = qDivCode.toUpperCase();
+    const j = jName.toUpperCase();
+    return (q === 'ELE' && j.includes('ELECTRICAL')) ||
+        (q === 'BMS' && j.includes('BMS')) ||
+        (q === 'PLFF' && (j.includes('PLUMBING') || j.includes('FIRE'))) ||
+        (q === 'CVLP' && (j.includes('CIVIL') || j.includes('CONCRETE'))) ||
+        (q === 'FPE' && j.includes('FIRE')) ||
+        (q === 'HVP' && (j.includes('HVAC') || j.includes('AIR CONDITIONING'))) ||
+        (q === 'AAC' && j.includes('AIR'));
+};
+
+const isDescendant = (childId, ancestorId, pool) => {
+    if (!childId || !ancestorId || !pool) return false;
+    const child = pool.find(j => String(j.id || j.ItemID || j.ID) === String(childId));
+    if (!child) return false;
+    const pid = child.parentId || child.ParentID || child.parentId;
+    if (!pid || pid === '0' || pid === 0 || pid === 'undefined') return false;
+    if (String(pid) === String(ancestorId)) return true;
+    // Recursive check with safety
+    let curr = child;
+    let safety = 0;
+    while (curr && (curr.parentId || curr.ParentID) && safety < 10) {
+        const pId = String(curr.parentId || curr.ParentID);
+        if (pId === String(ancestorId)) return true;
+        curr = pool.find(pj => String(pj.id || pj.ItemID || pj.ID) === pId);
+        safety++;
+    }
+    return false;
+};
+
 const tableStyles = `
     .clause-content table {
         width: 100% !important;
@@ -533,9 +566,9 @@ const QuoteForm = () => {
                             const isAncestorMatch = (() => {
                                 let curr = job;
                                 while (curr && (curr.parentId || curr.ParentID)) {
-                                    const p = jobsList.find(pj => String(pj.id || pj.ItemID) === String(curr.parentId || curr.ParentID));
+                                    const p = jobsList.find(pj => String(pj.id || pj.ItemID || pj.ID) === String(curr.parentId || curr.ParentID));
                                     if (!p) break;
-                                    const pNameNorm = (p.itemName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+                                    const pNameNorm = normalize(p.itemName || '');
                                     if (pNameNorm === normalizedQuoteTo) return true;
                                     curr = p;
                                 }
@@ -546,17 +579,29 @@ const QuoteForm = () => {
 
                             const qJob = jobsList.find(j => {
                                 const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
-                                return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                                    (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                                    (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                                    (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                                    (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                                    (qDivCode === 'AAC' && jName.includes('AIR'));
+                                if (!matchDivisionCode(qDivCode, jName)) return false;
+
+                                // Robustness (Step 3591): Prefer the job that is actually related to the current tab hierarchy
+                                const jId = String(j.id || j.ItemID || j.ID);
+                                const currentTabId = String(job.id || job.ItemID || job.ID);
+                                return jId === currentTabId || isDescendant(jId, currentTabId, jobsList);
+                            }) || jobsList.find(j => {
+                                const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                return matchDivisionCode(qDivCode, jName);
                             });
 
                             if (!qJob) return false;
                             const qJobId = qJob.id || qJob.ItemID || qJob.ID;
-                            if (String(qJobId) !== String(job.id)) return false;
+
+                            // STRICT Tab Isolation: Respective division should show ONLY its quote ref, not others (Report 5)
+                            const isMatch = String(qJobId) === String(job.id);
+
+                            // DEBUG Log for Quote matching process (Step 1121)
+                            if (job.itemName.includes('HVAC')) {
+                                console.log('[Quote Match Debug] Tab:', job.itemName, 'Quote:', q.QuoteNumber, 'Match Result:', isMatch, { qJobId, jobId: job.id, isDivMatch: matchDivisionCode(qDivCode, job.itemName) });
+                            }
+
+                            if (!isMatch) return false;
 
                             // Rule: If quote has an L-prefix, it MUST match current lead prefix context to be relevant to this branch.
                             // Bypass if it matches the current enquiry RequestNo (legacy/global quotes)
@@ -595,22 +640,73 @@ const QuoteForm = () => {
                 return (a.name || '').localeCompare(b.name || '');
             });
 
-            // Ensure at least one tab is 'Own Job' and is the default 'self' ID
-            if (finalTabs.length > 0 && !finalTabs.some(t => t.id === 'self')) {
-                // Determine if there is a lead job that is already in accessibleJobs
-                const leadJobInFinal = finalTabs.find(t => String(t.realId) === String(leadJobId));
-
-                if (leadJobInFinal) {
-                    leadJobInFinal.id = 'self';
-                    leadJobInFinal.name = 'Own Job';
-                    leadJobInFinal.isSelf = true;
-                } else {
-                    // Force the first accessible tab to be 'Own Job'
+            // Ensure one tab is 'self' (default selection)
+            const leadJobInFinal = finalTabs.find(t => String(t.realId) === String(leadJobId));
+            if (leadJobInFinal) {
+                leadJobInFinal.id = 'self';
+                leadJobInFinal.name = 'Own Job';
+                leadJobInFinal.isSelf = true;
+            } else {
+                const leadJobObj = jobsList.find(j => String(j.id || j.ItemID || j.ID) === String(leadJobId));
+                if (leadJobObj) {
+                    finalTabs.unshift({
+                        id: 'self',
+                        name: 'Own Job',
+                        label: leadJobObj.itemName,
+                        companyLogo: leadJobObj.companyLogo,
+                        companyName: leadJobObj.companyName,
+                        departmentName: leadJobObj.departmentName,
+                        isSelf: true,
+                        realId: leadJobObj.id,
+                        parentId: leadJobObj.parentId,
+                        quoteNo: null
+                    });
+                } else if (finalTabs.length > 0) {
                     finalTabs[0].id = 'self';
                     finalTabs[0].name = 'Own Job';
                     finalTabs[0].isSelf = true;
                 }
             }
+
+            // REDUNDANCY FIX (Step 1238): Sub-job users expect THEIR job to be "Own Job"
+            // If user is not Admin and doesn't own the Root, find their specific job and make it "Own Job".
+            if (!isAdmin && pricingData?.access?.editableJobs) {
+                const editableNames = pricingData.access.editableJobs.map(n => n.trim().toLowerCase());
+                const userOwnsRoot = finalTabs.some(t => (!t.parentId || t.parentId === 0 || t.parentId === '0') && editableNames.includes((t.label || '').trim().toLowerCase()));
+
+                if (!userOwnsRoot) {
+                    const myTab = finalTabs.find(t => editableNames.includes((t.label || '').trim().toLowerCase()));
+                    const leadTab = finalTabs.find(t => t.isSelf);
+
+                    if (myTab && leadTab && myTab !== leadTab) {
+                        // Rename leadTab back to its real name
+                        leadTab.isSelf = false;
+                        leadTab.id = leadTab.realId;
+                        leadTab.name = leadTab.label;
+
+                        // Make myTab the 'Own Job'
+                        myTab.isSelf = true;
+                        myTab.id = 'self';
+                        myTab.name = 'Own Job';
+                    }
+                }
+            }
+
+            // STRICT ISOLATION (Step 1267): Only show Own Job and its children
+            if (!isAdmin) {
+                const selfTab = finalTabs.find(t => t.isSelf);
+                if (selfTab) {
+                    const selfRealId = String(selfTab.realId);
+                    const filtered = finalTabs.filter(t => {
+                        if (t.isSelf) return true;
+                        return isDescendant(String(t.realId), selfRealId, jobsList);
+                    });
+                    finalTabs.splice(0, finalTabs.length, ...filtered);
+                }
+            }
+
+            // Final Sort: Ensure 'Own Job' (self) is first
+            finalTabs.sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : 0));
 
 
             return finalTabs;
@@ -962,10 +1058,10 @@ const QuoteForm = () => {
         const myNode = (enquiryData.divisionsHierarchy || []).find(n => {
             const mails = [n.commonMailIds, n.ccMailIds].filter(Boolean).join(',').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
             const nodeNameNorm = (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-            
+
             if (userEmailNorm && mails.includes(userEmailNorm)) return true;
             if (editableNames.includes(nodeNameNorm)) return true;
-            
+
             if (userDeptNorm) {
                 if (nodeNameNorm === userDeptNorm) return true;
                 if (nodeNameNorm.includes(userDeptNorm) && userDeptNorm.length > 2) return true;
@@ -1062,12 +1158,12 @@ const QuoteForm = () => {
 
         const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
         let isLeadJobSelected = myNodeInBranch && String(myNodeInBranch.id || myNodeInBranch.ItemID) === String(activeLeadId);
-        
+
         if (activeLeadJob) {
-             const activeLeadNorm = (activeLeadJob.itemName || activeLeadJob.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-             if (editableNames.includes(activeLeadNorm)) isLeadJobSelected = true;
+            const activeLeadNorm = (activeLeadJob.itemName || activeLeadJob.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+            if (editableNames.includes(activeLeadNorm)) isLeadJobSelected = true;
         }
-        
+
         // Lead job "Own Job" means user's OWN division is selected as the branch root
         // If Admin, they always act as the Lead Job owner.
         const isOwnDivisionSelected = isAdmin ? true : isLeadJobSelected;
@@ -1665,7 +1761,10 @@ const QuoteForm = () => {
         });
 
         sortedOptions.forEach(opt => {
-            const key = `${normalizeCust(opt.name)}_${normalizeCust(opt.itemName)}`;
+            // FIX (Step 1083 / 1115): Include leadJobName AND customerName in the key to prevent 
+            // deduplicating namesake options from different branches OR customers.
+            // We need all customer variants to ensure fallback logic can find priced options.
+            const key = `${normalizeCust(opt.name)}_${normalizeCust(opt.itemName)}_${normalizeCust(opt.leadJobName || '')}_${normalizeCust(opt.customerName || '')}`;
             if (!seenOptions.has(key)) {
                 uniqueOptions.push(opt);
                 seenOptions.add(key);
@@ -1956,26 +2055,57 @@ const QuoteForm = () => {
                         });
                         fallbackCandidates.push('Main');
 
+                        // Strategy 1: Standard Candidates (Hierarchy, Main)
                         for (const candName of fallbackCandidates) {
                             const candKey = normalizeCust(candName);
                             const vals = data.allValues[candKey];
                             if (vals) {
-                                const iOpt = data.options
-                                    .filter(o => o.name === opt.name && o.itemName === job.itemName && normalizeCust(o.customerName) === candKey)
+                                const matchingOpts = data.options
+                                    .filter(o => o.name === opt.name && (o.itemName || null) === (job.itemName || null))
                                     .sort((a, b) => {
                                         const aLead = normalizeCust(a.leadJobName);
                                         const bLead = normalizeCust(b.leadJobName);
                                         return (aLead === activeLead && bLead !== activeLead) ? -1 : (aLead !== activeLead && bLead === activeLead) ? 1 : 0;
-                                    })[0];
-                                if (iOpt) {
+                                    });
+
+                                for (const iOpt of matchingOpts) {
                                     const vKey = `${iOpt.id}_${job.id}`;
                                     const vNameKey = `${iOpt.id}_${job.itemName}`;
                                     const iVal = vals[vKey] || vals[vNameKey];
                                     if (iVal && parsePrice(iVal.Price) > 0) {
                                         price = parsePrice(iVal.Price);
+                                        console.log(`[calculateSummary] FALLBACK MATCH for job ${job.itemName}: Found price ${price} using Option ${iOpt.id} from candidate ${candKey}`);
                                         break;
                                     }
                                 }
+                                if (price > 0) break;
+                            }
+                        }
+
+                        // Strategy 2: GLOBAL SCAN (Step 1136 FIX) - If still 0, look in ANY customer bucket
+                        // This handles prices entered for external customers (like Ithbat) when quoting internally.
+                        if (price <= 0) {
+                            for (const bucketKey in data.allValues) {
+                                const vals = data.allValues[bucketKey];
+                                const matchingOpts = data.options
+                                    .filter(o => o.name === opt.name && (o.itemName || null) === (job.itemName || null))
+                                    .sort((a, b) => {
+                                        const aLead = normalizeCust(a.leadJobName);
+                                        const bLead = normalizeCust(b.leadJobName);
+                                        return (aLead === activeLead && bLead !== activeLead) ? -1 : (aLead !== activeLead && bLead === activeLead) ? 1 : 0;
+                                    });
+
+                                for (const iOpt of matchingOpts) {
+                                    const vKey = `${iOpt.id}_${job.id}`;
+                                    const vNameKey = `${iOpt.id}_${job.itemName}`;
+                                    const iVal = vals[vKey] || vals[vNameKey];
+                                    if (iVal && parsePrice(iVal.Price) > 0) {
+                                        price = parsePrice(iVal.Price);
+                                        console.log(`[calculateSummary] GLOBAL FALLBACK for job ${job.itemName}: Found price ${price} in bucket ${bucketKey}`);
+                                        break;
+                                    }
+                                }
+                                if (price > 0) break;
                             }
                         }
                     }
@@ -2563,13 +2693,7 @@ const QuoteForm = () => {
                 const parts = q.QuoteNumber?.split('/') || [];
                 const qDivCode = parts[1]?.toUpperCase();
                 const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
-                return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                    (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                    (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                    (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                    (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                    (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
-                    (qDivCode === 'AAC' && jName.includes('AIR'));
+                return matchDivisionCode(qDivCode, jName);
             });
 
             // CUSTOMER FILTER: Match current selection OR any ancestor (Internal Quoting)
@@ -3357,9 +3481,27 @@ const QuoteForm = () => {
             // ---------------------------------------------------------
         }
 
+        // Resolve department code from the active tab's profile (for sub-job users like HVAC)
+        // so the quote ref uses HVAC's own company code (e.g. AAC) not the lead job's code.
+        let effectiveDeptCode = enquiryData.companyDetails?.departmentCode || 'AAC';
+        if (activeQuoteTab && calculatedTabs && enquiryData.availableProfiles) {
+            const activeTabObj = calculatedTabs.find(t => t.id === activeQuoteTab) || calculatedTabs[0];
+            if (activeTabObj && activeTabObj.label) {
+                const tabLabelNorm = (activeTabObj.label || '').toLowerCase().trim();
+                const matchingProfile = (enquiryData.availableProfiles || []).find(p => {
+                    const pName = (p.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                    return pName === tabLabelNorm || (p.itemName || '').toLowerCase().trim() === tabLabelNorm;
+                });
+                if (matchingProfile && matchingProfile.departmentCode) {
+                    effectiveDeptCode = matchingProfile.departmentCode;
+                    console.log(`[getQuotePayload] Using tab profile departmentCode: ${effectiveDeptCode} for tab: ${activeTabObj.label}`);
+                }
+            }
+        }
+
         return {
             divisionCode: effectiveDivisionCode,
-            departmentCode: enquiryData.companyDetails?.departmentCode || '',
+            departmentCode: effectiveDeptCode,
             leadJobPrefix: (() => {
                 const curr = enquiryData.leadJobPrefix || '';
                 if (!curr) return '';
@@ -3830,7 +3972,7 @@ const QuoteForm = () => {
 
     const computedPreparedByOptions = React.useMemo(() => {
         let base = [];
-        
+
         const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase().replace(' project', '');
         if (userDeptNorm && usersList) {
             usersList.forEach(u => {
@@ -3840,44 +3982,44 @@ const QuoteForm = () => {
                 }
             });
         }
-        
+
         return base.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
     }, [usersList, currentUser]);
 
     const computedSignatoryOptions = React.useMemo(() => {
         if (!enquiryData || !enquiryData.divisionEmails) return [];
-        
+
         let activeItemName = '';
         const activeTabObj = calculatedTabs?.find(t => String(t.id) === String(activeQuoteTab));
         if (activeTabObj) {
             const tabJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId));
             if (tabJob) activeItemName = (tabJob.itemName || tabJob.ItemName || tabJob.DivisionName || '').toLowerCase();
         }
-        
+
         const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase().replace(' project', '');
         if (!activeItemName) activeItemName = userDeptNorm || '';
 
         const cleanActive = activeItemName.replace(/^(l\d+|sub job)\s*-\s*/, '').replace(/-\d+$/, '').trim();
-        
+
         const divisionMatch = enquiryData.divisionEmails.find(d => {
             const dNorm = (d.itemName || '').toLowerCase().replace(/^(l\d+|sub job)\s*-\s*/, '').replace(/-\d+$/, '').trim();
             return cleanActive && dNorm && (dNorm === cleanActive || dNorm.includes(cleanActive) || cleanActive.includes(dNorm));
         });
-        
+
         if (divisionMatch && divisionMatch.ccMailIds) {
             const ccMails = divisionMatch.ccMailIds.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
             const ccMailsList = ccMails.split(',').map(m => m.trim()).filter(Boolean);
-            
+
             let filteredUsers = usersList.filter(u => {
                 const uMail = (u.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
                 return uMail && ccMailsList.includes(uMail);
             }).map(u => ({ value: u.FullName, label: u.FullName, designation: u.Designation }));
-            
+
             if (filteredUsers.length > 0) {
                 return filteredUsers.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
             }
         }
-        
+
         return [];
     }, [enquiryData, calculatedTabs, activeQuoteTab, jobsPool, usersList, currentUser]);
 
@@ -4219,16 +4361,7 @@ const QuoteForm = () => {
 
                                                 const activeTabRealId = activeTabObj.realId;
 
-                                                // Hierarchy Helper
-                                                const isDescendant = (childId, ancestorId, pool = null) => {
-                                                    const p = pool || jobsPool;
-                                                    const child = p.find(j => String(j.id || j.ItemID || j.ID) === String(childId));
-                                                    if (!child) return false;
-                                                    const pid = child.parentId || child.ParentID;
-                                                    if (String(pid) === String(ancestorId)) return true;
-                                                    if (pid && pid !== '0' && pid !== 0) return isDescendant(pid, ancestorId, p);
-                                                    return false;
-                                                };
+                                                // Hierarchy filter removed (using global isDescendant)
 
                                                 // Filter and Render Previous Quotes
                                                 const filteredQuotes = existingQuotes.filter(q => {
@@ -4239,12 +4372,7 @@ const QuoteForm = () => {
                                                         const parts = q.QuoteNumber?.split('/') || [];
                                                         const qDivCode = parts[1]?.toUpperCase();
                                                         const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
-                                                        return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                                                            (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                                                            (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                                                            (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                                                            (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                                                            (qDivCode === 'AAC' && jName.includes('AIR'));
+                                                        return matchDivisionCode(qDivCode, jName);
                                                     });
 
                                                     const activeTabAncestors = [];
@@ -4304,13 +4432,12 @@ const QuoteForm = () => {
 
                                                     const qJob = jobsPool.find(j => {
                                                         const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
-                                                        return (qDivCode === 'ELE' && jName.includes('ELECTRICAL')) ||
-                                                            (qDivCode === 'BMS' && jName.includes('BMS')) ||
-                                                            (qDivCode === 'PLFF' && jName.includes('PLUMBING')) ||
-                                                            (qDivCode === 'CVLP' && jName.includes('CIVIL')) ||
-                                                            (qDivCode === 'FPE' && jName.includes('FIRE')) ||
-                                                            (qDivCode === 'HVP' && (jName.includes('HVAC') || jName.includes('AIR CONDITIONING'))) ||
-                                                            (qDivCode === 'AAC' && jName.includes('AIR'));
+                                                        if (!matchDivisionCode(qDivCode, jName)) return false;
+                                                        // Robustness (Step 4341): Prefer the exact job ID if we're on its tab
+                                                        return String(j.id || j.ItemID || j.ID) === String(activeTabRealId);
+                                                    }) || jobsPool.find(j => {
+                                                        const jName = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                                                        return matchDivisionCode(qDivCode, jName);
                                                     });
 
                                                     if (!qJob) return false;
@@ -4437,41 +4564,37 @@ const QuoteForm = () => {
 
                                                 // Filter Pricing Summary
                                                 const filteredPricing = pricingSummary.filter(grp => {
-                                                    const job = jobsPool.find(j => (j.itemName || j.DivisionName) === grp.name);
-                                                    // Show 'General' / Unknown jobs on the first tab ('Own Job')
-                                                    if (!job) return activeTabObj.isSelf || tabs.length === 1;
+                                                    const grpNameNorm = (grp.name || '').trim().toLowerCase();
+                                                    // Robustness (Step 4488): Check ALL jobs matching this name for hierarchy relevance
+                                                    const matchingJobs = jobsPool.filter(j => (j.itemName || j.DivisionName || '').trim().toLowerCase() === grpNameNorm);
+                                                    if (matchingJobs.length === 0) return activeTabObj.isSelf || tabs.length === 1;
 
-                                                    const jobId = job.id || job.ItemID;
-                                                    const activeTabIdStr = String(activeTabRealId);
-                                                    const jobIdStr = String(jobId);
+                                                    const isRelevant = matchingJobs.some(job => {
+                                                        const jId = job.id || job.ItemID || job.ID;
+                                                        return String(jId) === String(activeTabRealId) || isDescendant(jId, activeTabRealId, jobsPool);
+                                                    });
 
-                                                    // STRICT VISIBILITY: Show myself or my descendants.
-                                                    // NEVER show my ancestors (parents/lead job) if I am a sub-job tab.
-                                                    // Provision (Step 1922): Sub-division users NEVER see ancestors in the summary.
+                                                    if (!isRelevant) return false;
+
+                                                    // STRICT VISIBILITY: Block ancestors if strictly limited
                                                     const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                                                     const isStrictlyLimited = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
 
                                                     if (isStrictlyLimited) {
-                                                        const isAncestorOfActive = (() => {
-                                                            let curr = activeTabObj.realId ? jobsPool.find(j => String(j.id || j.ItemID) === String(activeTabObj.realId)) : null;
-                                                            if (!curr) return false;
+                                                        const isActualAncestor = matchingJobs.some(job => {
+                                                            const jobIdStr = String(job.id || job.ItemID || job.ID);
+                                                            let curr = activeTabObj.realId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId)) : null;
                                                             while (curr && (curr.parentId || curr.ParentID)) {
                                                                 const pid = String(curr.parentId || curr.ParentID);
                                                                 if (pid === jobIdStr) return true;
-                                                                curr = jobsPool.find(pj => String(pj.id || pj.ItemID) === pid);
+                                                                curr = jobsPool.find(pj => String(pj.id || pj.ItemID || pj.ID) === pid);
                                                             }
                                                             return false;
-                                                        })();
-                                                        if (isAncestorOfActive) {
-                                                            console.log(`[Sidebar Summary] Blocking ancestor price display for ${grp.name}`);
-                                                            return false;
-                                                        }
+                                                        });
+                                                        if (isActualAncestor) return false;
                                                     }
 
-                                                    if (jobIdStr === activeTabIdStr) return true;
-
-                                                    // Only show descendants
-                                                    return isDescendant(jobId, activeTabRealId);
+                                                    return true;
                                                 });
 
                                                 return (

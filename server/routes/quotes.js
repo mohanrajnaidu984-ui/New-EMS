@@ -746,28 +746,37 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                         (userDepartment && itemNameLower.includes(userDepartment)) ||
                         (userFullName && normalizedMails.includes(userFullName));
 
-                    if (userIsDirectlyAssigned && (masterData.DivisionCode || masterData.DepartmentCode)) {
-                        const profile = {
-                            code: masterData.DepartmentCode || 'ACC',
-                            departmentCode: masterData.DepartmentCode || 'ACC',
-                            divisionCode: masterData.DivisionCode || 'GEN',
-                            name: masterData.CompanyName,
-                            logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
-                            address: masterData.Address,
-                            phone: masterData.Phone,
-                            fax: masterData.FaxNo,
-                            email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
-                            itemName: item.ItemName, // Explicitly use the transaction item name
-                            id: item.ID
-                        };
+                    const profile = {
+                        code: masterData.DepartmentCode || 'AAC',
+                        departmentCode: masterData.DepartmentCode || 'AAC',
+                        divisionCode: masterData.DivisionCode || 'GEN',
+                        name: masterData.CompanyName || cleanName,
+                        logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
+                        address: masterData.Address || '',
+                        phone: masterData.Phone || '',
+                        fax: masterData.FaxNo || '',
+                        email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
+                        itemName: item.ItemName, // Explicitly use the transaction item name
+                        id: item.ID
+                    };
 
-                        // Avoid duplicates in availableProfiles based on Div/Dept
-                        const exists = availableProfiles.find(p => p.divisionCode === profile.divisionCode && p.code === profile.code);
-                        if (!exists) {
-                            availableProfiles.push(profile);
-                        }
+                    // Add to availableProfiles for ALL jobs (sub-jobs need this to pull internal address)
+                    // Avoid duplicates in availableProfiles based on Div/Dept & itemName
+                    const exists = availableProfiles.find(p => p.itemName === profile.itemName);
+                    if (!exists) {
+                        availableProfiles.push(profile);
                     }
                 } else {
+                    // Fallback profile if missing from Master to at least have a record
+                    availableProfiles.push({
+                        itemName: item.ItemName,
+                        id: item.ID,
+                        name: cleanName,
+                        address: '',
+                        phone: '',
+                        fax: '',
+                        email: ''
+                    });
                     resolvedItems.push(item);
                 }
             }
@@ -945,7 +954,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             // Only applies when a specific user is requesting (not admin/all).
             const reqUserEmailRaw = req.query.userEmail || '';
             const reqUserEmail = reqUserEmailRaw.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
-            
+
             let isAdminUser = false;
             try {
                 if (reqUserEmailRaw) {
@@ -958,7 +967,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                         }
                     }
                 }
-            } catch(e) { console.error('Error checking user role for subjob filter', e); }
+            } catch (e) { console.error('Error checking user role for subjob filter', e); }
 
             if (!isAdminUser && reqUserEmail && rawItems && rawItems.length > 0) {
                 // Find items directly assigned to this user
