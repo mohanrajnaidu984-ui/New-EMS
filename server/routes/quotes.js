@@ -388,7 +388,17 @@ router.get('/list/pending', async (req, res) => {
                     const displayLevel = Math.max(0, (job.level || 0) - minLevel);
 
                     const displayName = (() => {
-                        let displayCode = job.LeadJobCode;
+                        // Inherit LeadJobCode from root ancestor
+                        let root = job;
+                        let visited = new Set();
+                        while (root.ParentID && root.ParentID != 0 && root.ParentID != '0' && !visited.has(root.ID)) {
+                            const p = enqJobs.find(j => j.ID == root.ParentID);
+                            if (!p) break;
+                            visited.add(root.ID);
+                            root = p;
+                        }
+
+                        let displayCode = root.LeadJobCode;
                         const isRoot = !job.ParentID || job.ParentID === '0' || job.ParentID === 0;
                         if (!displayCode && (displayLevel === 0 || isRoot)) {
                             displayCode = 'L1';
@@ -423,39 +433,37 @@ router.get('/list/pending', async (req, res) => {
                     .map(([name, val]) => `${name}|${val.toFixed(2)}`)
                     .join(';;');
 
-                // Determine if ALL scoped jobs are subjobs (have a parent).
-                // If so, suppress external customers — subjobs only show their root (parent) job name.
-                const scopedAreSubjobs = scopedJobs.length > 0 &&
-                    scopedJobs.every(j => j.ParentID && j.ParentID != '0' && j.ParentID != 0);
-
+                // New logic: parent customer for subjobs, external customer for lead jobs
+                let finalCustomerSet = new Set();
                 const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
 
-                let finalCustomers;
-                if (scopedAreSubjobs) {
-                    // Subjob context: ONLY show the root/parent job name — suppress all external customers.
-                    // internalCustomer is the root job's ItemName (e.g. "Civil Project").
-                    finalCustomers = [internalCustomer].filter(c => {
-                        const cNorm = normalize(c);
-                        // Don't show user's own division as a customer
-                        if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
-                        return true;
+                if (scopedJobs.length > 0) {
+                    scopedJobs.forEach(job => {
+                        const hasParent = job.ParentID && job.ParentID != '0' && job.ParentID != 0;
+                        if (hasParent) {
+                            // Rule: parent customer name (if ownjob is subjob)
+                            const parent = enqJobs.find(pj => pj.ID == job.ParentID);
+                            if (parent) {
+                                const cleanParent = parent.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                if (cleanParent && (!userDivisionKey || !normalize(cleanParent).includes(userDivisionKey))) {
+                                    finalCustomerSet.add(cleanParent);
+                                }
+                            }
+                        } else {
+                            // Rule: external customer name (if ownjob is leadjob)
+                            externalCustomers.forEach(c => {
+                                if (c && (!userDivisionKey || !normalize(c).includes(userDivisionKey))) {
+                                    finalCustomerSet.add(c);
+                                }
+                            });
+                        }
                     });
                 } else {
-                    // Lead job context: External customers + internal parent jobs with pricing
-                    const finalCustomerSet = new Set(externalCustomers);
-                    Object.keys(aggregatedPricing).forEach(k => finalCustomerSet.add(k));
-
-                    finalCustomers = Array.from(finalCustomerSet).filter(c => {
-                        const cNorm = normalize(c);
-                        // Keep if it has pricing aggregation (parent job names)
-                        if (aggregatedPricing[c]) return true;
-                        // Filter out subjob names without pricing
-                        if (jobNameSetNorm.has(cNorm)) return false;
-                        // Filter out own division
-                        if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
-                        return true;
-                    });
+                    // Fallback
+                    externalCustomers.forEach(c => finalCustomerSet.add(c));
                 }
+
+                const finalCustomers = Array.from(finalCustomerSet);
 
                 const fullCustomerName = finalCustomers.join(', ');
 
@@ -544,7 +552,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
             SELECT ID, QuoteNumber, QuoteDate, ToName, ToAddress, ToPhone, ToEmail, 
                    Subject, CustomerReference, ValidityDays, PreparedBy, PreparedByEmail,
                    Signatory, SignatoryDesignation, Status, RevisionNo, TotalAmount, QuoteNo,
-                   RequestNo, CreatedAt, UpdatedAt,
+                   RequestNo, CreatedAt, UpdatedAt, OwnJob, LeadJob,
                    ShowScopeOfWork, ShowBasisOfOffer, ShowExclusions, ShowPricingTerms,
                    ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
                    ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
@@ -599,17 +607,22 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         let customerDetails = null;
         if (enquiry.CustomerName) {
             try {
-                const customerResult = await sql.query`
-                    SELECT * FROM Master_CustomerName 
-                    WHERE CompanyName = ${enquiry.CustomerName}
-                `;
-                if (customerResult.recordset.length > 0) {
-                    customerDetails = customerResult.recordset[0];
-                    // Polyfill Address for frontend
-                    customerDetails.Address = [customerDetails.Address1, customerDetails.Address2].filter(Boolean).join('\n');
-                    console.log('[Quote API] Customer details found');
-                } else {
-                    console.log('[Quote API] Customer details not found for:', enquiry.CustomerName);
+                const customerNames = enquiry.CustomerName.split(',').map(c => c.trim());
+                for (const name of customerNames) {
+                    const customerResult = await sql.query`
+                        SELECT * FROM Master_CustomerName 
+                        WHERE CompanyName = ${name}
+                    `;
+                    if (customerResult.recordset.length > 0) {
+                        customerDetails = customerResult.recordset[0];
+                        // Polyfill Address for frontend
+                        customerDetails.Address = [customerDetails.Address1, customerDetails.Address2].filter(Boolean).join('\n');
+                        console.log('[Quote API] Customer details found for:', name);
+                        break; // Stop at first match
+                    }
+                }
+                if (!customerDetails) {
+                    console.log('[Quote API] Customer details not found for any of:', enquiry.CustomerName);
                 }
             } catch (err) {
                 console.error('[Quote API] Error fetching Customer details:', err);
@@ -634,12 +647,14 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             // 1. Fetch raw items with Hierarchy (Join Master to get Default Assignments)
             // Use REPLACE/STUFF or logic to match both "L1 - Civil Project" and "Civil Project"
             const rawItemsResult = await sql.query`
-                SELECT EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, MEF.CommonMailIds, MEF.CCMailIds 
+                SELECT EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, MEF.CommonMailIds, MEF.CCMailIds, MEF.DepartmentName,
+                       MEF.DivisionCode, MEF.DepartmentCode
                 FROM EnquiryFor EF
                 LEFT JOIN Master_EnquiryFor MEF ON (
                     EF.ItemName = MEF.ItemName OR 
-                    (EF.ItemName LIKE 'L[0-9] - %' AND SUBSTRING(EF.ItemName, 6, LEN(EF.ItemName)) = MEF.ItemName) OR
-                    (EF.ItemName LIKE 'Sub Job - %' AND SUBSTRING(EF.ItemName, 11, LEN(EF.ItemName)) = MEF.ItemName)
+                    EF.ItemName LIKE '% - ' + MEF.ItemName OR
+                    EF.ItemName LIKE '%- ' + MEF.ItemName OR
+                    EF.ItemName LIKE MEF.ItemName + ' %'
                 )
                 WHERE EF.RequestNo = ${requestNo}`;
             rawItems = rawItemsResult.recordset;
@@ -718,7 +733,10 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 itemName: r.ItemName,
                 commonMailIds: r.CommonMailIds,
                 ccMailIds: r.CCMailIds,
-                leadJobCode: r.LeadJobCode
+                leadJobCode: r.LeadJobCode,
+                departmentName: r.DepartmentName || '',
+                divisionCode: r.DivisionCode || '',
+                departmentCode: r.DepartmentCode || ''
             }));
 
             // 2. Resolve Master Details for EACH item (handling prefixes)
@@ -731,8 +749,14 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 let masterData = masterRes.recordset[0];
 
                 if (masterData) {
-                    // Prioritize Transaction Data (item) over Master Data for ItemName (to keep L1/L2 prefixes)
-                    resolvedItems.push({ ...masterData, ...item });
+                    // ROBUST MERGE: Prioritize master data for contact fields if not in join
+                    resolvedItems.push({
+                        ...masterData,
+                        ...item,
+                        CCMailIds: item.CCMailIds || masterData.CCMailIds,
+                        CommonMailIds: item.CommonMailIds || masterData.CommonMailIds,
+                        DepartmentName: item.DepartmentName || masterData.DepartmentName
+                    });
 
                     // Only add to available profiles IF the user is DIRECTLY assigned to this division
                     const normalizedUser = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
@@ -780,6 +804,46 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     resolvedItems.push(item);
                 }
             }
+            // --- PROACTIVE FIX (Step 4488): Always include the profile matching the user's own department ---
+            if (userEmail) {
+                try {
+                    const normalizedLookupEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+                    console.log(`[Quote API Profile] Looking up department for: ${normalizedLookupEmail} (original: ${userEmail})`);
+
+                    const userRes = await sql.query`SELECT Department FROM Master_ConcernedSE WHERE EmailId = ${normalizedLookupEmail}`;
+                    const userDept = userRes.recordset.length > 0 ? userRes.recordset[0].Department : null;
+                    console.log(`[Quote API Profile] Resolved Department: "${userDept}"`);
+
+                    if (userDept) {
+                        const masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${userDept}`;
+                        const masterData = masterRes.recordset[0];
+                        if (masterData) {
+                            const profile = {
+                                code: masterData.DepartmentCode || 'AAC',
+                                departmentCode: masterData.DepartmentCode || 'AAC',
+                                divisionCode: masterData.DivisionCode || 'GEN',
+                                name: masterData.CompanyName || userDept,
+                                logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
+                                address: masterData.Address || '',
+                                phone: masterData.Phone || '',
+                                fax: masterData.FaxNo || '',
+                                email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
+                                itemName: userDept,
+                            };
+                            const existingIndex = availableProfiles.findIndex(p => p.itemName === profile.itemName);
+                            if (existingIndex !== -1) {
+                                availableProfiles[existingIndex] = { ...availableProfiles[existingIndex], isPersonalProfile: true };
+                            } else {
+                                availableProfiles.push(profile);
+                            }
+
+                            // --- LOCK BRANDING TO USER (Step 4488) ---
+                            console.log(`[Quote API] ENFORCING branding lock to user profile: ${profile.name} (${profile.itemName})`);
+                            companyDetails = { ...profile, isPersonalProfile: true };
+                        }
+                    }
+                } catch (e) { console.error('Error adding personal profile:', e); }
+            }
 
             // 3. Find Lead Job Default (Prioritize L1, then first available)
             let leadItem = resolvedItems.find(r => r.ItemName && r.ItemName.startsWith('L1')) || resolvedItems.find(r => r.LeadJobCode === 'L1') || resolvedItems[0];
@@ -810,7 +874,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 companyDetails = availableProfiles[0];
             }
 
-            console.log(`[Quote API] Found ${divisionsList.length} divisions. Default Profile: ${companyDetails.divisionCode}`);
+            console.log(`[Quote API] Found ${divisionsList.length} divisions. Resolved items: ${resolvedItems.length}. Default Profile: ${companyDetails.divisionCode}`);
         } catch (err) {
             console.error('[Quote API] Error fetching EnquiryFor:', err);
         }
@@ -948,53 +1012,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             });
             customerOptions = uniqueOptions;
 
-            // --- SUBJOB SCOPE FILTER ---
-            // If the user's directly-assigned jobs are ALL subjobs (have a parent),
-            // suppress external customers. Only show the root/parent job name.
-            // Only applies when a specific user is requesting (not admin/all).
-            const reqUserEmailRaw = req.query.userEmail || '';
-            const reqUserEmail = reqUserEmailRaw.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
-
-            let isAdminUser = false;
-            try {
-                if (reqUserEmailRaw) {
-                    const userRoleResult = await sql.query`SELECT Roles, role FROM Master_Users WHERE EmailId = ${reqUserEmailRaw} OR EmailId = ${reqUserEmail}`;
-                    if (userRoleResult.recordset.length > 0) {
-                        const row = userRoleResult.recordset[0];
-                        const r = row.Roles || row.role;
-                        if (r === 'Admin' || r === 'Admins') {
-                            isAdminUser = true;
-                        }
-                    }
-                }
-            } catch (e) { console.error('Error checking user role for subjob filter', e); }
-
-            if (!isAdminUser && reqUserEmail && rawItems && rawItems.length > 0) {
-                // Find items directly assigned to this user
-                const scopeItemsForFilter = rawItems.filter(item => {
-                    const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
-                    const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
-                    return normalizedMails.includes(reqUserEmail);
-                });
-
-                const allScopedAreSubjobs = scopeItemsForFilter.length > 0 &&
-                    scopeItemsForFilter.every(item => item.ParentID && item.ParentID != '0' && item.ParentID != 0);
-
-                console.log(`[Quote API] User=${reqUserEmail}, scopeItems=${scopeItemsForFilter.length}, allScopedAreSubjobs=${allScopedAreSubjobs}`);
-                console.log(`[Quote API] scopeItemsForFilter:`, scopeItemsForFilter.map(i => `${i.ItemName}(ParentID=${i.ParentID})`));
-
-                if (allScopedAreSubjobs) {
-                    // Build the set of all job names (ItemName clean forms) from rawItems
-                    const jobNamesSet = new Set(rawItems.map(r => String(r.ItemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()));
-
-                    // Only keep entries that are job names (internal) — filter out external customers
-                    customerOptions = customerOptions.filter(opt => jobNamesSet.has(String(opt || '').trim().toLowerCase()));
-
-                    console.log(`[Quote API] Subjob user — stripped external customers. Remaining:`, customerOptions);
-                }
-            }
-
             console.log('[Quote API] Final customerOptions:', customerOptions);
+
         } catch (err) {
             console.error('[Quote API] Error fetching Customer options:', err);
             // Deduplicate even in error case to prevent UI noise
@@ -1022,8 +1041,9 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             leadJobPrefix,
             divisionEmails: resolvedItems.map(item => ({
                 itemName: item.ItemName,
-                ccMailIds: [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(','),
-                commonMailIds: item.CommonMailIds || ''
+                ccMailIds: item.CCMailIds || '',
+                commonMailIds: item.CommonMailIds || '',
+                departmentName: item.DepartmentName || ''
             })),
             quoteNumber: 'Draft',
             userIsSubjobUser,   // True if user's jobs are all subjobs (not lead job)
@@ -1059,6 +1079,9 @@ router.get('/:requestNo', async (req, res) => {
 // POST /api/quotes - Create a new quote
 router.post('/', async (req, res) => {
     try {
+        const fs = require('fs');
+        fs.appendFileSync('quote_creation.log', `[${new Date().toISOString()}] Received Payload: ${JSON.stringify(req.body, null, 2)}\n\n`);
+
         const {
             divisionCode,
             departmentCode,
@@ -1099,7 +1122,11 @@ router.post('/', async (req, res) => {
             toName = '',
             toAddress = '',
             toPhone = '',
-            toEmail = ''
+            toEmail = '',
+            toFax = '',
+            toAttention = '',
+            leadJob = '',
+            ownJob = ''
         } = req.body;
 
         const customClausesJson = JSON.stringify(customClauses);
@@ -1109,32 +1136,63 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'Request number is required' });
         }
 
-        const dept = departmentCode || "GEN";
-        const division = divisionCode || "AAC";
+        let dept = departmentCode || "AAC";
+        let division = divisionCode || "GEN";
+
+        // --- BACKEND IDENTITY ENFORCEMENT (User Requirement: Use Mail ID for Codes) ---
+        if (preparedByEmail) {
+            try {
+                const normalizedUser = preparedByEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+                const userRes = await sql.query`SELECT Department FROM Master_ConcernedSE WHERE EmailId = ${normalizedUser}`;
+                const userDept = userRes.recordset.length > 0 ? userRes.recordset[0].Department : null;
+
+                if (userDept) {
+                    const masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${userDept}`;
+                    const masterData = masterRes.recordset[0];
+                    if (masterData) {
+                        console.log(`[Quote Backend] Forcing identity based on email ${preparedByEmail} -> ${userDept} (${masterData.DivisionCode})`);
+                        dept = masterData.DepartmentCode || dept;
+                        division = masterData.DivisionCode || division;
+                    }
+                }
+            } catch (e) { console.error('[Quote Backend] Identity lookup error:', e); }
+        }
+
+        console.log(`[Quote Creation] req.body.divisionCode: ${divisionCode}, effective division: ${division}`);
+        fs.appendFileSync('quote_creation.log', `[${new Date().toISOString()}] Resolved Dept: ${dept}, Division: ${division}, RequestNo: ${requestNo}\n`);
 
         // --- FETCH LEAD JOB CODE ---
         // Try to find the LeadJobCode for the root item of this enquiry to use in reference
         let finalLeadJobCode = leadJobPrefix;
-        try {
-            // Find Root item LeadJobCode (L1, L2...)
-            const codeResult = await sql.query`
-                SELECT LeadJobCode FROM EnquiryFor 
-                WHERE RequestNo = ${requestNo} AND ParentID IS NULL
-            `;
-            if (codeResult.recordset.length > 0 && codeResult.recordset[0].LeadJobCode) {
-                finalLeadJobCode = codeResult.recordset[0].LeadJobCode;
-            } else {
-                // If no root code, maybe current item code?
-                const itemResult = await sql.query`
+
+        // If leadJobPrefix is already an L-code (L1, L2...), keep it.
+        const isLCode = leadJobPrefix && String(leadJobPrefix).toUpperCase().match(/^L\d+/);
+
+        if (!isLCode) {
+            try {
+                // Find Root item LeadJobCode (L1, L2...)
+                const codeResult = await sql.query`
                     SELECT LeadJobCode FROM EnquiryFor 
-                    WHERE RequestNo = ${requestNo} AND ItemName = ${leadJobPrefix}
+                    WHERE RequestNo = ${requestNo} AND (ParentID IS NULL OR ParentID = '0')
+                    ORDER BY CASE WHEN LeadJobCode = ${leadJobPrefix} THEN 0 ELSE 1 END, ID
                 `;
-                if (itemResult.recordset.length > 0 && itemResult.recordset[0].LeadJobCode) {
-                    finalLeadJobCode = itemResult.recordset[0].LeadJobCode;
+                if (codeResult.recordset.length > 0) {
+                    // Try to find a match for the prefix, otherwise take the first
+                    const match = codeResult.recordset.find(r => r.LeadJobCode === leadJobPrefix) || codeResult.recordset[0];
+                    if (match.LeadJobCode) finalLeadJobCode = match.LeadJobCode;
+                } else {
+                    // If no root code, maybe current item code?
+                    const itemResult = await sql.query`
+                        SELECT LeadJobCode FROM EnquiryFor 
+                        WHERE RequestNo = ${requestNo} AND (ItemName = ${leadJobPrefix} OR LeadJobCode = ${leadJobPrefix})
+                    `;
+                    if (itemResult.recordset.length > 0 && itemResult.recordset[0].LeadJobCode) {
+                        finalLeadJobCode = itemResult.recordset[0].LeadJobCode;
+                    }
                 }
+            } catch (e) {
+                console.error('Error fetching LeadJobCode:', e);
             }
-        } catch (e) {
-            console.error('Error fetching LeadJobCode:', e);
         }
 
         const requestRef = finalLeadJobCode ? `${requestNo}-${finalLeadJobCode}` : requestNo;
@@ -1167,7 +1225,7 @@ router.post('/', async (req, res) => {
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
                 TotalAmount, Status, CustomClauses, ClauseOrder,
-                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, CreatedAt, UpdatedAt
+                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention, LeadJob, OwnJob, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
             VALUES (
@@ -1178,7 +1236,7 @@ router.post('/', async (req, res) => {
                 ${scopeOfWork}, ${basisOfOffer}, ${exclusions}, ${pricingTerms},
                 ${schedule}, ${warranty}, ${responsibilityMatrix}, ${termsConditions}, ${acceptance}, ${billOfQuantity},
                 ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson},
-                ${quoteDate ? quoteDate.split('T')[0] : null}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${now}, ${now}
+                ${quoteDate ? quoteDate.split('T')[0] : null}, ${customerReference}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${toFax || ''}, ${toAttention || ''}, ${leadJob || ''}, ${ownJob || ''}, ${now}, ${now}
             )
         `;
 
@@ -1198,6 +1256,10 @@ router.post('/', async (req, res) => {
 
     } catch (err) {
         console.error('Error creating quote:', err);
+        try {
+            const fs = require('fs');
+            fs.appendFileSync('quote_creation_error.log', `[${new Date().toISOString()}] Error creating quote: ${err.message}\nStack: ${err.stack}\nBody: ${JSON.stringify(req.body)}\n\n`);
+        } catch (logErr) { }
         res.status(500).json({ error: 'Failed to create quote', details: err.message });
     }
 });
@@ -1215,8 +1277,10 @@ router.put('/:id', async (req, res) => {
             totalAmount, status,
             customClauses = [],
             clauseOrder = [],
-            quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail,
-            preparedBy, preparedByEmail
+            quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention,
+            preparedBy, preparedByEmail,
+            leadJob,
+            ownJob
         } = req.body;
 
         const customClausesJson = JSON.stringify(customClauses);
@@ -1259,8 +1323,12 @@ router.put('/:id', async (req, res) => {
         ToAddress = ${toAddress},
         ToPhone = ${toPhone},
         ToEmail = ${toEmail},
+        ToFax = ${toFax || ''},
+        ToAttention = ${toAttention || ''},
         PreparedBy = ${preparedBy},
         PreparedByEmail = ${preparedByEmail},
+        LeadJob = ${leadJob || ''},
+        OwnJob = ${ownJob || ''},
         UpdatedAt = ${now}
             WHERE ID = ${id}
         `;
@@ -1287,7 +1355,9 @@ router.post('/:id/revise', async (req, res) => {
             scopeOfWork, basisOfOffer, exclusions, pricingTerms,
             schedule, warranty, responsibilityMatrix, termsConditions, acceptance, billOfQuantity,
             totalAmount, customClauses, clauseOrder,
-            quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail
+            quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail,
+            leadJob,
+            ownJob
         } = req.body;
 
         const cleanQuoteDate = quoteDate ? quoteDate.split('T')[0] : null;
@@ -1339,7 +1409,7 @@ router.post('/:id/revise', async (req, res) => {
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
                 TotalAmount, Status, CustomClauses, ClauseOrder,
-                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, CreatedAt, UpdatedAt
+                QuoteDate, CustomerReference, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, LeadJob, OwnJob, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
             VALUES (
@@ -1377,7 +1447,10 @@ router.post('/:id/revise', async (req, res) => {
                 ${toName !== undefined ? toName : existing.ToName}, 
                 ${toAddress !== undefined ? toAddress : existing.ToAddress}, 
                 ${toPhone !== undefined ? toPhone : existing.ToPhone}, 
-                ${toEmail !== undefined ? toEmail : existing.ToEmail}, ${now}, ${now}
+                ${toEmail !== undefined ? toEmail : existing.ToEmail}, 
+                ${leadJob !== undefined ? leadJob : existing.LeadJob},
+                ${ownJob !== undefined ? ownJob : existing.OwnJob},
+                ${now}, ${now}
             )
         `;
 
