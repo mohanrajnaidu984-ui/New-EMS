@@ -3,6 +3,7 @@ const router = express.Router();
 const sql = require('mssql');
 const path = require('path');
 const fs = require('fs');
+const { getHierarchyMetadata } = require('../services/hierarchyService');
 const multer = require('multer');
 
 // Configure Multer Storage for Quote Attachments
@@ -246,11 +247,18 @@ router.get('/list/pending', async (req, res) => {
 
             // Fetch Jobs
             const jobsRes = await sql.query(`
-                SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode
+                SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, MEF.CommonMailIds, MEF.CCMailIds
                 FROM EnquiryFor EF
+                LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
                 WHERE EF.RequestNo IN (${requestNos})
             `);
-            const allJobs = jobsRes.recordset;
+            const allEnqJobs = jobsRes.recordset;
+
+            // Fetch Extra Customers (EnquiryCustomer table)
+            const extraCustRes = await sql.query(`
+                SELECT RequestNo, CustomerName FROM EnquiryCustomer WHERE RequestNo IN (${requestNos})
+            `);
+            const allExtraCustomers = extraCustRes.recordset;
 
             // Fetch Prices
             // Fetch Prices - Only Latest Per Job/Customer
@@ -270,17 +278,45 @@ router.get('/list/pending', async (req, res) => {
             `);
             const allPrices = pricesRes.recordset;
 
-            console.log(`[API] Found ${allJobs.length} jobs and ${allPrices.length} prices for ${enquiries.length} enquiries.`);
+
+            console.log(`[API] Found ${allEnqJobs.length} jobs and ${allPrices.length} prices for ${enquiries.length} enquiries.`);
+
+            const { getHierarchyMetadata, filterJobsByDepartment } = require('../services/hierarchyService');
 
             // Map subjob prices for each enquiry
             const mappedEnquiries = enquiries.map(enq => {
                 const enqRequestNo = enq.RequestNo?.toString().trim();
                 if (!enqRequestNo) return null;
 
-                const enqJobs = allJobs.filter(j => j.RequestNo?.toString().trim() == enqRequestNo);
+                // Merge primary and extra customers
+                let combinedCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+                allExtraCustomers
+                    .filter(ec => ec.RequestNo == enqRequestNo)
+                    .forEach(ec => {
+                        const names = ec.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                        names.forEach(n => {
+                            if (!combinedCustomers.includes(n)) combinedCustomers.push(n);
+                        });
+                    });
+                enq.CustomerName = combinedCustomers.join(', ');
+
+                const enqJobs = allEnqJobs.filter(j => j.RequestNo?.toString().trim() == enqRequestNo);
                 const enqPrices = allPrices.filter(p => p.RequestNo?.toString().trim() == enqRequestNo);
 
-                // Build hierarchy
+                // --- NEW: Use Shared Hierarchy Service ---
+                const metaMap = getHierarchyMetadata(enqJobs, enq.CustomerName);
+
+                // Visibility Filtering (for ScopedJobIDs calculation)
+                const visibleJobs = filterJobsByDepartment(enqJobs, {
+                    userDepartment,
+                    isAdmin,
+                    isCreator: userFullName && enq.CreatedBy && userFullName.toLowerCase().trim() === enq.CreatedBy.toLowerCase().trim(),
+                    isConcernedSE: false, // Not available here easily without extra query
+                    userEmail,
+                    userFullName
+                });
+                const visibleIds = new Set(visibleJobs.map(j => String(j.ID)));
+
                 const childrenMap = {};
                 enqJobs.forEach(j => {
                     if (j.ParentID && j.ParentID != '0') {
@@ -289,41 +325,20 @@ router.get('/list/pending', async (req, res) => {
                     }
                 });
 
-                const roots = enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
+                const roots = enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0).sort((a,b) => a.ID - b.ID);
                 const flatList = [];
-                const traverse = (job, level) => {
-                    flatList.push({ ...job, level });
-                    const children = childrenMap[job.ID] || [];
-                    children.sort((a, b) => a.ID - b.ID);
-                    children.forEach(child => traverse(child, level + 1));
+                const traverse = (job, depth) => {
+                    const meta = metaMap[job.ID] || { level: 1, depth: 0, rootCode: 'L1' };
+                    flatList.push({ ...job, level: meta.level, depth: meta.depth, rootCode: meta.rootCode });
+                    const children = (childrenMap[job.ID] || []).sort((a, b) => a.ID - b.ID);
+                    children.forEach(child => traverse(child, depth + 1));
                 };
                 roots.forEach(root => traverse(root, 0));
 
-                // Filter flatList by ScopedJobIDs (User's responsibility)
-                const scopedJobIDsStr = (enq.ScopedJobIDs || '').toString().split(',').map(id => id.trim()).filter(Boolean);
-                const scopedJobIDsSet = new Set(scopedJobIDsStr);
-                const scopedJobs = flatList.filter(j => scopedJobIDsSet.has(j.ID.toString()));
+                // Final filtered list for this user
+                const filteredFlatList = flatList.filter(job => visibleIds.has(String(job.ID)));
 
-                // Fix childrenMap keys to be strings for consistent lookup
-                const stringChildrenMap = {};
-                Object.entries(childrenMap).forEach(([k, v]) => {
-                    stringChildrenMap[k.toString()] = v;
-                });
-
-                // Identify all IDs that are descendants of scoped IDs
-                const validIDs = new Set();
-                const collectDescendants = (id) => {
-                    const idStr = id.toString();
-                    if (validIDs.has(idStr)) return;
-                    validIDs.add(idStr);
-                    const children = stringChildrenMap[idStr] || [];
-                    children.forEach(c => collectDescendants(c.ID));
-                };
-                scopedJobIDsStr.forEach(id => collectDescendants(id));
-
-                const filteredFlatList = flatList.filter(job => validIDs.has(job.ID.toString()));
-
-                // Indentation adjustment: use the minimum level among visible jobs (to make first job L1)
+                // Indentation adjustment: use the minimum level among visible jobs
                 let minLevel = 0;
                 if (filteredFlatList.length > 0) {
                     minLevel = Math.min(...filteredFlatList.map(j => j.level || 0));
@@ -337,133 +352,75 @@ router.get('/list/pending', async (req, res) => {
                 const internalCustomerNorm = normalize(internalCustomer);
                 const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
 
-                // Filter enq.CustomerName (External Customers only, hide subjobs)
+                // Filter enq.CustomerName (External Customers only)
                 let externalCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
-                externalCustomers = externalCustomers.filter(c => {
-                    const cNorm = normalize(c);
-                    // Keep if it's NOT a job name. Internal customers are handled separately via aggregatedPricing.
-                    return !jobNameSetNorm.has(cNorm);
-                });
+                externalCustomers = externalCustomers.filter(c => !jobNameSetNorm.has(normalize(c)));
 
-                // Pre-calculate Individual (Self) Prices (Latest Only) - STRICTLY Internal
+                // Self Prices
                 const selfPrices = {};
                 const updateDates = {};
                 flatList.forEach(job => {
-                    const matches = enqPrices.filter(p =>
-                        (p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0' && String(p.EnquiryForID) === String(job.ID))
-                    );
-
-                    // Fallback to ItemName match if ID is lost/changed on enquiry update
-                    let finalMatches = matches;
+                    let finalMatches = enqPrices.filter(p => String(p.EnquiryForID) === String(job.ID));
                     if (finalMatches.length === 0) {
-                        finalMatches = enqPrices.filter(p => (!p.EnquiryForID || p.EnquiryForID == 0 || p.EnquiryForID == '0') && p.EnquiryForItem && p.EnquiryForItem.toString().trim() === job.ItemName.toString().trim());
+                        finalMatches = enqPrices.filter(p => p.EnquiryForItem && p.EnquiryForItem.toString().trim() === job.ItemName.toString().trim());
                     }
-
                     const sortedMatches = [...finalMatches].sort((a, b) => new Date(b.UpdatedAt) - new Date(a.UpdatedAt));
-
-                    // For Subjob Prices tree, strictly use the internal customer view or divisions
+                    
                     let priceRow = sortedMatches.find(p => p.Price > 0 && p.CustomerName && (
                         normalize(p.CustomerName) === internalCustomerNorm ||
                         jobNameSetNorm.has(normalize(p.CustomerName))
                     ));
-
                     if (!priceRow) priceRow = sortedMatches.find(p => p.Price > 0);
-                    if (!priceRow && sortedMatches.length > 0) priceRow = sortedMatches[0];
-
+                    
                     selfPrices[job.ID] = priceRow ? parseFloat(priceRow.Price || 0) : 0;
                     updateDates[job.ID] = priceRow ? priceRow.UpdatedAt : null;
                 });
-
-                // Recursive Sum function
-                const getRecursivePrice = (jobID) => {
-                    let total = selfPrices[jobID] || 0;
-                    const children = childrenMap[jobID] || [];
-                    children.forEach(c => { total += getRecursivePrice(c.ID); });
-                    return total;
-                };
 
                 const subJobPrices = filteredFlatList.map(job => {
                     const totalVal = selfPrices[job.ID] || 0;
                     const updatedAt = updateDates[job.ID];
                     const displayLevel = Math.max(0, (job.level || 0) - minLevel);
-
-                    const displayName = (() => {
-                        // Inherit LeadJobCode from root ancestor
-                        let root = job;
-                        let visited = new Set();
-                        while (root.ParentID && root.ParentID != 0 && root.ParentID != '0' && !visited.has(root.ID)) {
-                            const p = enqJobs.find(j => j.ID == root.ParentID);
-                            if (!p) break;
-                            visited.add(root.ID);
-                            root = p;
-                        }
-
-                        let displayCode = root.LeadJobCode;
-                        const isRoot = !job.ParentID || job.ParentID === '0' || job.ParentID === 0;
-                        if (!displayCode && (displayLevel === 0 || isRoot)) {
-                            displayCode = 'L1';
-                        }
-                        return displayCode ? `${job.ItemName} (${displayCode})` : job.ItemName;
-                    })();
-
+                    const displayName = `${job.ItemName} (${job.rootCode || 'L1'})`;
                     return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${displayLevel}`;
                 }).join(';;');
 
-                // Aggregate PricingCustomerDetails (Hide Subjobs, Aggregate to Root)
-                let aggregatedPricing = {};
-                if (enq.PricingCustomerDetails) {
-                    enq.PricingCustomerDetails.split(';;').forEach(p => {
-                        const parts = p.split('|');
-                        const name = parts[0]?.trim();
-                        const val = parseFloat(parts[1]) || 0;
-                        if (!name) return;
+                // Customer Resolution Logic
+                let finalCustomerSet = new Set();
+                const cleanOwnJob = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
 
-                        const nameNorm = normalize(name);
-                        if (jobNameSetNorm.has(nameNorm)) {
-                            // It's a job name (Internal) -> keep as original name (Parent Job)
-                            aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
-                        } else {
-                            // It's an external customer
-                            aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
+                if (filteredFlatList.length > 0) {
+                    const minLevel = Math.min(...filteredFlatList.map(j => (metaMap[j.ID] && metaMap[j.ID].level) || 99));
+                    const topJobs = filteredFlatList.filter(j => ((metaMap[j.ID] && metaMap[j.ID].level) || 99) === minLevel);
+                    
+                    topJobs.forEach(job => {
+                        if (metaMap[job.ID] && metaMap[job.ID].customer) {
+                            const custs = metaMap[job.ID].customer.split(',').map(c => c.trim()).filter(Boolean);
+                            custs.forEach(c => finalCustomerSet.add(c));
                         }
                     });
                 }
 
-                const finalPricingStr = Object.entries(aggregatedPricing)
-                    .map(([name, val]) => `${name}|${val.toFixed(2)}`)
-                    .join(';;');
+                // Add Alternative Customers from Pricing Options (Options with prices)
+                enqPrices.forEach(p => {
+                    if (p.CustomerName) {
+                        const custs = p.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                        custs.forEach(c => finalCustomerSet.add(c));
+                    }
+                });
 
-                // New logic: parent customer for subjobs, external customer for lead jobs
-                let finalCustomerSet = new Set();
+                const myJobNamesRaw = new Set(filteredFlatList.map(j => normalize(cleanOwnJob(j.ItemName))));
                 const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
 
-                if (scopedJobs.length > 0) {
-                    scopedJobs.forEach(job => {
-                        const hasParent = job.ParentID && job.ParentID != '0' && job.ParentID != 0;
-                        if (hasParent) {
-                            // Rule: parent customer name (if ownjob is subjob)
-                            const parent = enqJobs.find(pj => pj.ID == job.ParentID);
-                            if (parent) {
-                                const cleanParent = parent.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                                if (cleanParent && (!userDivisionKey || !normalize(cleanParent).includes(userDivisionKey))) {
-                                    finalCustomerSet.add(cleanParent);
-                                }
-                            }
-                        } else {
-                            // Rule: external customer name (if ownjob is leadjob)
-                            externalCustomers.forEach(c => {
-                                if (c && (!userDivisionKey || !normalize(c).includes(userDivisionKey))) {
-                                    finalCustomerSet.add(c);
-                                }
-                            });
-                        }
-                    });
-                } else {
-                    // Fallback
-                    externalCustomers.forEach(c => finalCustomerSet.add(c));
-                }
+                let finalCustomers = Array.from(finalCustomerSet).filter(c => {
+                    const cNorm = normalize(cleanOwnJob(c));
+                    if (myJobNamesRaw.has(cNorm)) return false;
+                    if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                    return true;
+                });
 
-                const finalCustomers = Array.from(finalCustomerSet);
+                if (finalCustomers.length === 0) {
+                    finalCustomers = [internalCustomer];
+                }
 
                 const fullCustomerName = finalCustomers.join(', ');
 
@@ -472,14 +429,14 @@ router.get('/list/pending', async (req, res) => {
                     console.log(`[DEBUG 51] JobSet:`, Array.from(jobNameSetNorm));
                     console.log(`[DEBUG 51] Final Customer Set:`, Array.from(finalCustomerSet));
                     console.log(`[DEBUG 51] Final Customers Array:`, finalCustomers);
-                    console.log(`[DEBUG 51] Final Pricing Str:`, finalPricingStr);
+                    console.log(`[DEBUG 51] Final Pricing Str:`, enq.PricingCustomerDetails);
                 }
 
                 return {
                     RequestNo: enq.RequestNo,
                     ProjectName: enq.ProjectName,
                     CustomerName: fullCustomerName,
-                    PricingCustomerDetails: finalPricingStr,
+                    PricingCustomerDetails: enq.PricingCustomerDetails,
                     ClientName: enq.ClientName || enq.clientname || '-',
                     ConsultantName: enq.ConsultantName || enq.consultantname || '-',
                     EnquiryDate: enq.EnquiryDate,
@@ -675,100 +632,62 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
             divisionsList = rawItems.map(r => r.ItemName); // Default all
 
-            if (userEmail) {
-                // Fetch User Role and Department
-                const userRes = await sql.query`SELECT Roles, Department, FullName FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
-                const userRole = userRes.recordset.length > 0 ? userRes.recordset[0].Roles : '';
-                const userDepartment = userRes.recordset.length > 0 && userRes.recordset[0].Department ? userRes.recordset[0].Department.trim().toLowerCase() : '';
-                const userFullName = userRes.recordset.length > 0 && userRes.recordset[0].FullName ? userRes.recordset[0].FullName.trim().toLowerCase() : '';
-                const isAdmin = userRole === 'Admin';
+            const { getHierarchyMetadata, filterJobsByDepartment } = require('../services/hierarchyService');
+            
+            // Build hierarchy metadata
+            const metaMap = getHierarchyMetadata(rawItems, enquiry.CustomerName);
 
-                if (!isAdmin) {
-                    const normalizedUser = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-                    const userPrefix = normalizedUser.split('@')[0];
+            // Filter Divisions based on User Access (Scope)
+            const userRes = await sql.query`SELECT Roles, Department, FullName FROM Master_ConcernedSE WHERE EmailId = ${userEmail}`;
+            const userRole = userRes.recordset.length > 0 ? userRes.recordset[0].Roles : '';
+            const userDepartment = userRes.recordset.length > 0 && userRes.recordset[0].Department ? userRes.recordset[0].Department.trim() : '';
+            const userFullName = userRes.recordset.length > 0 && userRes.recordset[0].FullName ? userRes.recordset[0].FullName.trim() : '';
+            const isAdmin = userRole === 'Admin';
 
-                    // Find items explicitly assigned to user
-                    const userScopeItems = rawItems.filter(item => {
-                        const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
-                        const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
-                        const itemNameLower = item.ItemName.toLowerCase().trim();
+            const userScopeItems = filterJobsByDepartment(rawItems, {
+                userDepartment,
+                isAdmin,
+                isCreator: enquiry.CreatedBy && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim(),
+                isConcernedSE: false, // Potentially add if needed
+                userEmail,
+                userFullName
+            });
 
-                        return normalizedMails.includes(normalizedUser) ||
-                            (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@'))) ||
-                            (userDepartment && itemNameLower.includes(userDepartment)) ||
-                            (userFullName && normalizedMails.includes(userFullName));
-                    });
-
-                    if (userScopeItems.length > 0) {
-                        const accessRoots = new Set();
-                        userScopeItems.forEach(scopeItem => {
-                            // Add the assigned sub-job itself (allows quoting to parent)
-                            accessRoots.add(scopeItem.ItemName);
-
-                            let curr = scopeItem;
-                            // Traverse up to Root and add it (allows viewing whole project)
-                            while (curr.ParentID) {
-                                const p = getParent(curr.ParentID);
-                                if (p) curr = p;
-                                else break;
-                            }
-                            accessRoots.add(curr.ItemName);
-                        });
-                        divisionsList = Array.from(accessRoots).sort();
-
-                        // Determine if user is a subjob user (all their directly-assigned items have a ParentID)
-                        userIsSubjobUser = userScopeItems.every(item => item.ParentID && item.ParentID !== '0' && item.ParentID !== 0);
-                        console.log(`[Quote API] userIsSubjobUser=${userIsSubjobUser}, scopeItems:`, userScopeItems.map(i => `${i.ItemName}(ParentID=${i.ParentID})`));
-                    } else {
-                        // If no assignments, keep default (empty list will be returned if next checks fail)
-                        divisionsList = [];
-                    }
-                }
-            }
+            // divisionsList used for the Scope selection
+            divisionsList = userScopeItems.map(j => j.ItemName);
+            userIsSubjobUser = userScopeItems.every(item => item.ParentID && item.ParentID !== '0' && item.ParentID !== 0);
 
             // Hierarchy Structure for Frontend Logic
-            divisionsHierarchy = rawItems.map(r => ({
-                id: r.ID,
-                parentId: r.ParentID,
-                itemName: r.ItemName,
-                commonMailIds: r.CommonMailIds,
-                ccMailIds: r.CCMailIds,
-                leadJobCode: r.LeadJobCode,
-                departmentName: r.DepartmentName || '',
-                divisionCode: r.DivisionCode || '',
-                departmentCode: r.DepartmentCode || ''
-            }));
+            divisionsHierarchy = rawItems.map(r => {
+                const meta = metaMap[r.ID] || { level: 1, rootCode: 'L1', customer: enquiry.CustomerName };
+                return {
+                    id: r.ID,
+                    parentId: r.ParentID,
+                    itemName: r.ItemName,
+                    commonMailIds: r.CommonMailIds,
+                    ccMailIds: r.CCMailIds,
+                    leadJobCode: meta.rootCode,
+                    level: meta.level,
+                    customer: meta.customer,
+                    departmentName: r.DepartmentName || '',
+                    divisionCode: r.DivisionCode || '',
+                    departmentCode: r.DepartmentCode || ''
+                };
+            });
 
-            // 2. Resolve Master Details for EACH item (handling prefixes)
+            // 2. Resolve Master Details for EACH item
             for (const item of rawItems) {
-                let itemName = item.ItemName;
-                let cleanName = itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim(); // Remove "L1 - ", "L2 - "
-
-                // Try to find in Master
-                let masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${itemName} OR ItemName = ${cleanName}`;
+                let cleanName = item.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                let masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${item.ItemName} OR ItemName = ${cleanName}`;
                 let masterData = masterRes.recordset[0];
 
                 if (masterData) {
-                    // ROBUST MERGE: Prioritize master data for contact fields if not in join
                     resolvedItems.push({
-                        ...masterData,
-                        ...item,
+                        ...masterData, ...item,
                         CCMailIds: item.CCMailIds || masterData.CCMailIds,
                         CommonMailIds: item.CommonMailIds || masterData.CommonMailIds,
                         DepartmentName: item.DepartmentName || masterData.DepartmentName
                     });
-
-                    // Only add to available profiles IF the user is DIRECTLY assigned to this division
-                    const normalizedUser = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-                    const userPrefix = normalizedUser.split('@')[0];
-                    const mails = [item.CommonMailIds, item.CCMailIds].filter(Boolean).join(',').toLowerCase();
-                    const normalizedMails = mails.replace(/@almcg\.com/g, '@almoayyedcg.com');
-                    const itemNameLower = item.ItemName.toLowerCase().trim();
-
-                    const userIsDirectlyAssigned = normalizedMails.includes(normalizedUser) ||
-                        (userPrefix && normalizedMails.split(',').some(m => m.trim().startsWith(userPrefix + '@'))) ||
-                        (userDepartment && itemNameLower.includes(userDepartment)) ||
-                        (userFullName && normalizedMails.includes(userFullName));
 
                     const profile = {
                         code: masterData.DepartmentCode || 'AAC',
@@ -780,254 +699,103 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                         phone: masterData.Phone || '',
                         fax: masterData.FaxNo || '',
                         email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
-                        itemName: item.ItemName, // Explicitly use the transaction item name
+                        itemName: item.ItemName,
                         id: item.ID
                     };
-
-                    // Add to availableProfiles for ALL jobs (sub-jobs need this to pull internal address)
-                    // Avoid duplicates in availableProfiles based on Div/Dept & itemName
-                    const exists = availableProfiles.find(p => p.itemName === profile.itemName);
-                    if (!exists) {
+                    if (!availableProfiles.find(p => p.itemName === profile.itemName)) {
                         availableProfiles.push(profile);
                     }
                 } else {
-                    // Fallback profile if missing from Master to at least have a record
-                    availableProfiles.push({
-                        itemName: item.ItemName,
-                        id: item.ID,
-                        name: cleanName,
-                        address: '',
-                        phone: '',
-                        fax: '',
-                        email: ''
-                    });
+                    availableProfiles.push({ itemName: item.ItemName, id: item.ID, name: cleanName });
                     resolvedItems.push(item);
                 }
             }
-            // --- PROACTIVE FIX (Step 4488): Always include the profile matching the user's own department ---
-            if (userEmail) {
-                try {
-                    const normalizedLookupEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-                    console.log(`[Quote API Profile] Looking up department for: ${normalizedLookupEmail} (original: ${userEmail})`);
 
-                    const userRes = await sql.query`SELECT Department FROM Master_ConcernedSE WHERE EmailId = ${normalizedLookupEmail}`;
-                    const userDept = userRes.recordset.length > 0 ? userRes.recordset[0].Department : null;
-                    console.log(`[Quote API Profile] Resolved Department: "${userDept}"`);
-
-                    if (userDept) {
-                        const masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${userDept}`;
-                        const masterData = masterRes.recordset[0];
-                        if (masterData) {
-                            const profile = {
-                                code: masterData.DepartmentCode || 'AAC',
-                                departmentCode: masterData.DepartmentCode || 'AAC',
-                                divisionCode: masterData.DivisionCode || 'GEN',
-                                name: masterData.CompanyName || userDept,
-                                logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
-                                address: masterData.Address || '',
-                                phone: masterData.Phone || '',
-                                fax: masterData.FaxNo || '',
-                                email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
-                                itemName: userDept,
-                            };
-                            const existingIndex = availableProfiles.findIndex(p => p.itemName === profile.itemName);
-                            if (existingIndex !== -1) {
-                                availableProfiles[existingIndex] = { ...availableProfiles[existingIndex], isPersonalProfile: true };
-                            } else {
-                                availableProfiles.push(profile);
-                            }
-
-                            // --- LOCK BRANDING TO USER (Step 4488) ---
-                            console.log(`[Quote API] ENFORCING branding lock to user profile: ${profile.name} (${profile.itemName})`);
-                            companyDetails = { ...profile, isPersonalProfile: true };
-                        }
-                    }
-                } catch (e) { console.error('Error adding personal profile:', e); }
-            }
-
-            // 3. Find Lead Job Default (Prioritize L1, then first available)
-            let leadItem = resolvedItems.find(r => r.ItemName && r.ItemName.startsWith('L1')) || resolvedItems.find(r => r.LeadJobCode === 'L1') || resolvedItems[0];
-
-            if (leadItem && leadItem.LeadJobCode) {
-                leadJobPrefix = leadItem.LeadJobCode;
-            } else {
-                leadJobPrefix = leadItem ? leadItem.ItemName.split('-')[0].trim() : '';
-            }
-
-            // 4. Set Initial Company Details from Lead Item
-            if (leadItem && leadItem.DepartmentCode) {
-                const match = leadItem;
-                companyDetails.code = match.DepartmentCode;
-                companyDetails.divisionCode = match.DivisionCode || 'AAC';
-                companyDetails.departmentCode = match.DepartmentCode || '';
-                if (match.CompanyName) companyDetails.name = match.CompanyName;
-                if (match.CompanyLogo) companyDetails.logo = match.CompanyLogo.replace(/\\/g, '/');
-                if (match.Address) companyDetails.address = match.Address;
-                if (match.Phone) companyDetails.phone = match.Phone;
-                if (match.FaxNo) companyDetails.fax = match.FaxNo;
-                if (match.CommonMailIds) {
-                    const emails = match.CommonMailIds.split(',');
-                    if (emails.length > 0) companyDetails.email = emails[0].trim();
+            // Proactive handle Personal Profile
+            if (userDepartment) {
+                const masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${userDepartment}`;
+                const masterData = masterRes.recordset[0];
+                if (masterData) {
+                    const profile = {
+                        code: masterData.DepartmentCode || 'AAC',
+                        departmentCode: masterData.DepartmentCode || 'AAC',
+                        divisionCode: masterData.DivisionCode || 'GEN',
+                        name: masterData.CompanyName || userDepartment,
+                        logo: masterData.CompanyLogo ? masterData.CompanyLogo.replace(/\\/g, '/') : null,
+                        address: masterData.Address || '',
+                        phone: masterData.Phone || '',
+                        fax: masterData.FaxNo || '',
+                        email: masterData.CommonMailIds ? masterData.CommonMailIds.split(',')[0].trim() : '',
+                        itemName: userDepartment,
+                        isPersonalProfile: true
+                    };
+                    companyDetails = profile;
+                    if (!availableProfiles.find(p => p.itemName === profile.itemName)) availableProfiles.push(profile);
                 }
-            } else if (availableProfiles.length > 0) {
-                // Fallback to first available profile if lead item has no details
-                companyDetails = availableProfiles[0];
             }
 
-            console.log(`[Quote API] Found ${divisionsList.length} divisions. Resolved items: ${resolvedItems.length}. Default Profile: ${companyDetails.divisionCode}`);
+            // Lead Job Prefix
+            const l1Job = rawItems.find(r => metaMap[r.ID]?.rootCode === 'L1');
+            leadJobPrefix = l1Job ? 'L1' : (rawItems[0]?.LeadJobCode || '');
+
+            // 4. Default Company Details if not already set
+            if (!companyDetails.name && availableProfiles.length > 0) companyDetails = availableProfiles[0];
+
         } catch (err) {
-            console.error('[Quote API] Error fetching EnquiryFor:', err);
+            console.error('[Quote API] Error fetching EnquiryFor Hierarchy:', err);
         }
 
         // Get Prepared By Options
         let preparedByOptions = [];
         try {
             const seResult = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
-            seResult.recordset.forEach(row => {
-                if (row.SEName) preparedByOptions.push({ value: row.SEName, label: row.SEName, type: 'SE' });
-            });
-
-            if (enquiry.CreatedBy) {
-                preparedByOptions.push({ value: enquiry.CreatedBy, label: enquiry.CreatedBy, type: 'Creator' });
-            }
-            // Add emails from default list if needed, or rely on frontend
+            seResult.recordset.forEach(row => { if (row.SEName) preparedByOptions.push({ value: row.SEName, label: row.SEName, type: 'SE' }); });
+            if (enquiry.CreatedBy) preparedByOptions.push({ value: enquiry.CreatedBy, label: enquiry.CreatedBy, type: 'Creator' });
             preparedByOptions = preparedByOptions.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
-        } catch (err) {
-            console.error('[Quote API] Error fetching Prepared By options:', err);
-        }
+        } catch (err) {}
 
-        // Get Customer Options with ReceivedFrom contacts
+        // Get Customer Options
         let customerOptions = [];
-        let customerContacts = {}; // Map customer names to their ReceivedFrom contacts
+        let customerContacts = {};
         try {
-            // Get customers from EnquiryCustomer table
-            const customerResult = await sql.query`
-                SELECT CustomerName 
-                FROM EnquiryCustomer 
-                WHERE RequestNo = ${requestNo}
-            `;
-
-            // Get ReceivedFrom contacts from ReceivedFrom table
-            const receivedFromResult = await sql.query`
-                SELECT ContactName, CompanyName 
-                FROM ReceivedFrom 
-                WHERE RequestNo = ${requestNo}
-            `;
-
-            console.log('[Quote API] ReceivedFrom records:', receivedFromResult.recordset);
-
-            // Build customerContacts mapping from ReceivedFrom table
-            receivedFromResult.recordset.forEach(row => {
-                if (row.CompanyName && row.ContactName) {
-                    // Clean trailing commas and trim
-                    const company = row.CompanyName.replace(/,+$/, '').trim();
-                    const contact = row.ContactName.trim();
-
-                    // If this company already has contacts, append with comma
-                    if (customerContacts[company]) {
-                        customerContacts[company] += ', ' + contact;
-                    } else {
-                        customerContacts[company] = contact;
-                    }
-                }
+            // Enquiry Customer context
+            if (enquiry.CustomerName) {
+                enquiry.CustomerName.split(',').forEach(c => {
+                    const t = c.trim(); if (t) { customerOptions.push(t); if (enquiry.ReceivedFrom) customerContacts[t] = enquiry.ReceivedFrom; }
+                });
+            }
+            const ecRes = await sql.query`SELECT CustomerName FROM EnquiryCustomer WHERE RequestNo = ${requestNo}`;
+            ecRes.recordset.forEach(row => {
+                if (row.CustomerName) row.CustomerName.split(',').forEach(c => { const t = c.trim(); if (t && !customerOptions.includes(t)) customerOptions.push(t); });
             });
 
-            // Helper to check if a customer already has a contact (normalized)
-            const hasContact = (cust) => {
-                const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-                const target = norm(cust);
-                return Object.keys(customerContacts).some(k => norm(k) === target);
-            };
-
-            // Process EnquiryCustomer records
-            customerResult.recordset.forEach(row => {
-                if (row.CustomerName) {
-                    // Split by comma and clean
-                    row.CustomerName.split(',').forEach(c => {
-                        const trimmed = c.replace(/[,.]+$/g, '').trim();
-                        if (trimmed) {
-                            customerOptions.push(trimmed);
+            rawItems.forEach(item => {
+                const meta = metaMap[item.ID];
+                if (meta && meta.customer) {
+                    const custs = meta.customer.split(',').map(c => c.trim()).filter(Boolean);
+                    custs.forEach(c => {
+                        const cleanParent = c.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                        if (cleanParent && !customerOptions.includes(cleanParent)) {
+                            customerOptions.push(cleanParent);
                         }
                     });
                 }
             });
-
-            // Add main enquiry customer if not already in the list
-            if (enquiry.CustomerName) {
+            customerOptions = [...new Set(customerOptions)];
+            
+            // Remove the user's "Own Job" (scope items) from the final Customer Dropdown list
+            const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const cleanOwnJob = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
+            const myJobNamesRaw = new Set(userScopeItems.map(j => normalize(cleanOwnJob(j.ItemName))));
+            
+            customerOptions = customerOptions.filter(c => !myJobNamesRaw.has(normalize(cleanOwnJob(c))));
+            
+            if (customerOptions.length === 0 && enquiry.CustomerName) {
                 enquiry.CustomerName.split(',').forEach(c => {
-                    const trimmed = c.replace(/[,.]+$/g, '').trim();
-                    if (trimmed) {
-                        // Check for existence case-insensitively
-                        const exists = customerOptions.some(existing => existing.toLowerCase() === trimmed.toLowerCase());
-                        if (!exists) {
-                            customerOptions.push(trimmed);
-                        }
-                        // Use the main enquiry's ReceivedFrom ONLY if no specific contact exists for this customer
-                        if (!hasContact(trimmed) && enquiry.ReceivedFrom) {
-                            customerContacts[trimmed] = enquiry.ReceivedFrom;
-                            console.log(`[Quote API] Mapped main customer "${trimmed}" to ReceivedFrom: "${enquiry.ReceivedFrom}"`);
-                        }
-                    }
+                    const t = c.trim(); if (t && !customerOptions.includes(t)) customerOptions.push(t);
                 });
             }
-
-            // --- HIERARCHY LOGIC: Add Parent Jobs as Internal Customers (mimic Pricing Module) ---
-            if (rawItems && rawItems.length > 0) {
-                // 1. Explicitly identify and add the ROOT job
-                const rootItem = rawItems.find(r => !r.ParentID || r.ParentID == '0' || r.ParentID == 0);
-                if (rootItem) {
-                    const cleanRoot = String(rootItem.ItemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                    const exists = customerOptions.some(existing => String(existing || '').toLowerCase() === cleanRoot.toLowerCase());
-                    if (cleanRoot && !exists) {
-                        customerOptions.push(cleanRoot);
-                    }
-                }
-
-                // 2. Add other intermediate parent jobs
-                rawItems.forEach(item => {
-                    if (item.ParentID && item.ParentID != '0') {
-                        const pid = String(item.ParentID);
-                        const parent = rawItems.find(p => String(p.ID) === pid);
-                        if (parent) {
-                            const cleanParent = String(parent.ItemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                            const exists = customerOptions.some(existing => String(existing || '').toLowerCase() === cleanParent.toLowerCase());
-
-                            if (cleanParent && !exists) {
-                                customerOptions.push(cleanParent);
-                            }
-                        }
-                    }
-                });
-            }
-
-            // Final Deduplication (Case-insensitive)
-            const uniqueOptions = [];
-            const seenOptions = new Set();
-            customerOptions.forEach(opt => {
-                const lower = String(opt || '').trim().toLowerCase();
-                if (lower && !seenOptions.has(lower)) {
-                    seenOptions.add(lower);
-                    uniqueOptions.push(opt);
-                }
-            });
-            customerOptions = uniqueOptions;
-
-            console.log('[Quote API] Final customerOptions:', customerOptions);
-
-        } catch (err) {
-            console.error('[Quote API] Error fetching Customer options:', err);
-            // Deduplicate even in error case to prevent UI noise
-            const uniqueOptions = [];
-            const seenOptions = new Set();
-            customerOptions.forEach(opt => {
-                const lower = String(opt || '').trim().toLowerCase();
-                if (lower && !seenOptions.has(lower)) {
-                    seenOptions.add(lower);
-                    uniqueOptions.push(opt);
-                }
-            });
-            customerOptions = uniqueOptions;
-        }
+        } catch (err) {}
 
         res.json({
             enquiry,
@@ -1046,8 +814,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 departmentName: item.DepartmentName || ''
             })),
             quoteNumber: 'Draft',
-            userIsSubjobUser,   // True if user's jobs are all subjobs (not lead job)
-            divisionsHierarchy  // Return full hierarchy
+            userIsSubjobUser,
+            divisionsHierarchy
         });
     } catch (err) {
         console.error('[Quote API] Fatal Error in enquiry-data route:', err);

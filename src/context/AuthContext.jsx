@@ -23,6 +23,7 @@ export const AuthProvider = ({ children }) => {
                 userData.Roles = 'Admin';
                 userData.role = 'Admin';
             }
+            if (userData.FullName && !userData.name) userData.name = userData.FullName;
             setCurrentUser(userData);
         }
     }, []);
@@ -32,6 +33,9 @@ export const AuthProvider = ({ children }) => {
         if (finalUserData.EmailId?.toLowerCase() === 'ranigovardhan@gmail.com' || finalUserData.email?.toLowerCase() === 'ranigovardhan@gmail.com') {
             finalUserData.Roles = 'Admin';
             finalUserData.role = 'Admin';
+        }
+        if (finalUserData.FullName && !finalUserData.name) {
+            finalUserData.name = finalUserData.FullName;
         }
         setCurrentUser(finalUserData);
         localStorage.setItem('currentUser', JSON.stringify(finalUserData));

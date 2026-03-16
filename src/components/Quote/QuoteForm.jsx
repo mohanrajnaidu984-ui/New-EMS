@@ -2043,7 +2043,9 @@ const QuoteForm = () => {
                     }
 
                     // FALLBACK CHAIN: Parent Customers -> Main -> Generic
-                    if (price <= 0 && data.allValues) {
+                    // IMPORTANT: For Base Price we do NOT auto-copy values from other customers.
+                    // Default should remain 0 unless explicitly entered for that customer/job.
+                    if (price <= 0 && data.allValues && opt.name !== 'Base Price') {
                         const fallbackCandidates = [];
                         let pId = job.parentId || job.ParentID;
                         while (pId && pId !== '0' && pId !== 0) {

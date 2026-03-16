@@ -217,7 +217,7 @@ const PricingForm = () => {
                             const parent = data.jobs.find(p => p.id === job.parentId);
                             if (parent) {
                                 // Clean the parent name (remove L1/L2 prefixes) to use as Customer Name
-                                const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                const cleanParent = parent.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                                 if (!internalParentCustomers.includes(cleanParent)) {
                                     internalParentCustomers.push(cleanParent);
                                 }
@@ -271,26 +271,30 @@ const PricingForm = () => {
                     return current.itemName;
                 };
 
-                // 1. Collect all unique (ItemName, OptionName, LeadJobName) tuples from existing options
-                // This ensures that if "Option-1" exists for BMS in one customer, it is propagated to all customers.
-                // 1. Collect all unique Option Names used anywhere in this Enquiry (Across all branches)
-                const allUniqueNames = new Set();
+                // 1. Collect unique Option Names PER (ItemName, LeadJobName) context
+                // This ensures that if "Option-1" is added to BMS in one customer, it propagates to other customers FOR BMS ONLY.
+                const scopedUniqueNames = {}; // key: "itemName|leadJobName" -> Set of unique names
                 if (data.options) {
                     data.options.forEach(o => {
-                        allUniqueNames.add(o.name);
+                        const scopeKey = `${o.itemName}|${o.leadJobName || 'null'}`;
+                        if (!scopedUniqueNames[scopeKey]) scopedUniqueNames[scopeKey] = new Set();
+                        scopedUniqueNames[scopeKey].add(o.name);
                     });
                 }
-
+ 
                 // 2. Build the full set of (ItemName, OptionName, LeadJobName) that SHOULD exist
                 const uniqueOptions = [];
                 const seenUo = new Set();
-
+ 
                 if (data.jobs) {
                     data.jobs.forEach(j => {
                         const ljName = findLeadJobName(j);
-                        const names = new Set(allUniqueNames);
+                        const scopeKey = `${j.itemName}|${ljName || 'null'}`;
+                        
+                        // Use names specific to this job context, plus defaults
+                        const names = new Set(scopedUniqueNames[scopeKey] || []);
                         names.add('Base Price'); // Ensure Base Price always exists
-
+ 
                         names.forEach(name => {
                             const key = `${j.itemName}|${name}|${ljName}`;
                             if (!seenUo.has(key)) {
@@ -439,7 +443,7 @@ const PricingForm = () => {
                                 const nameKey = `${v.OptionID}_${job.itemName}`;
                                 groupedValues[cust][nameKey] = v;
 
-                                const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                const cleanName = job.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                                 const cleanKey = `${v.OptionID}_${cleanName}`;
                                 groupedValues[cust][cleanKey] = v;
                             } else {
@@ -709,7 +713,7 @@ const PricingForm = () => {
 
                 // Auto-Select First VISIBLE Lead Job
                 if (data.jobs) {
-                    const hasPrefix = data.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
+                    const hasPrefix = false; // Disabled name-based heuristic. Use hierarchy instead.
 
                     // FIX: Use ID-based visible flag set by backend to avoid name-collision
                     // (e.g. root BMS and child BMS share the same itemName)
@@ -723,8 +727,7 @@ const PricingForm = () => {
 
                     const roots = data.jobs.filter(j =>
                         !j.parentId &&
-                        isTreeVisibleById(j.id) &&
-                        (!hasPrefix || /^L\d+\s-\s/.test(j.itemName))
+                        isTreeVisibleById(j.id)
                     );
 
                     if (roots.length > 0) {
@@ -831,15 +834,15 @@ const PricingForm = () => {
         }
 
         const currentValues = { ...values }; // Capture current state
-
         try {
             // Deleted all linked IDs in parallel
             const promises = idsToDelete.map(id =>
                 fetch(`${API_BASE}/api/pricing/option/${id}`, { method: 'DELETE' })
             );
-            await Promise.all(promises);
-
-            if (true) { // Assuming success if no catch
+            const results = await Promise.all(promises);
+            const allOk = results.every(r => r.ok);
+ 
+            if (allOk) {
                 // Remove the deleted option's values from currentValues to prevent stale keys
                 const cleanedValues = Object.keys(currentValues).reduce((acc, key) => {
                     const parts = key.split('_');
@@ -849,31 +852,35 @@ const PricingForm = () => {
                     }
                     return acc;
                 }, {});
-
+ 
                 loadPricing(pricingData.enquiry.requestNo, selectedCustomer, cleanedValues);
+            } else {
+                console.error('Some delete requests failed');
+                alert('Failed to delete option. Please try again.');
             }
         } catch (err) {
             console.error('Error deleting option:', err);
+            alert('Error deleting option: ' + err.message);
         }
     };
 
-    // Format a numeric value as ###,###,###.### (up to 3 decimal places, no trailing zeros)
+    // Format a numeric value as ###,###,###.### (up to 3 decimal places, no forced trailing zeros)
     const formatPrice = (val) => {
         if (val === '' || val === undefined || val === null) return '';
         const num = parseFloat(val);
         if (isNaN(num)) return '';
-        // Use locale string with max 3 decimal places, no trailing zeros
+        // Show thousand separators, up to 3 decimals, but do NOT pad with zeros
         return num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
     };
 
-    // Update cell value — always strip commas and store as plain float
+    // Update cell value — always strip commas and store as raw string
+    // Parsing to float is done only where needed (displayPrice, saveAll, etc.)
     const handleValueChange = (optionId, jobId, value) => {
         const key = `${optionId}_${jobId}`;
         const stripped = String(value).replace(/,/g, ''); // remove commas the user may paste
-        const floatVal = parseFloat(stripped);
         setValues(prev => ({
             ...prev,
-            [key]: stripped === '' ? '' : (isNaN(floatVal) ? '' : floatVal)
+            [key]: stripped
         }));
     };
 
@@ -983,7 +990,7 @@ const PricingForm = () => {
                         (o.itemName === rootJob.itemName)
                     );
                     if (!specificOpt) {
-                        const cleanJobName = rootJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                        const cleanJobName = rootJob.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                         specificOpt = pricingData.options.find(o =>
                             o.name === rootOpt.name &&
                             o.customerName === rootOpt.customerName &&
@@ -1043,7 +1050,7 @@ const PricingForm = () => {
                                 );
                                 // Try Clean Match
                                 if (!sOpt) {
-                                    const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                    const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                                     sOpt = pricingData.options.find(o =>
                                         o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === cleanPJobName
                                     );
@@ -1105,7 +1112,7 @@ const PricingForm = () => {
                             o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === pJob.itemName
                         );
                         if (!sOpt) {
-                            const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                            const cleanPJobName = pJob.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                             sOpt = pricingData.options.find(o =>
                                 o.name === pOpt.name && o.customerName === pOpt.customerName && o.itemName === cleanPJobName
                             );
@@ -1195,12 +1202,36 @@ const PricingForm = () => {
         try {
             // Batch saving (Concurrent requests)
             for (const item of valuesToSave) {
+                let actualOptionId = item.optionId;
+
+                // Auto-create virtual Base Price options in DB before saving value
+                if (typeof actualOptionId === 'string' && actualOptionId.startsWith('vbase_')) {
+                    const res = await fetch(`${API_BASE}/api/pricing/option`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            requestNo: requestNo,
+                            optionName: 'Base Price',
+                            itemName: item.enquiryForItem,
+                            customerName: item.customerName,
+                            leadJobName: item.leadJobName
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.success && data.option) {
+                        actualOptionId = data.option.ID || data.option.id;
+                    } else {
+                        console.error('Failed to create virtual base option:', data);
+                        continue; // Skip saving value if option creation fails
+                    }
+                }
+
                 const p = fetch(`${API_BASE}/api/pricing/value`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         requestNo: requestNo,
-                        optionId: item.optionId,
+                        optionId: actualOptionId,
                         enquiryForItem: item.enquiryForItem,
                         enquiryForId: item.enquiryForId, // NEW FIELD
                         price: item.price,
@@ -1289,8 +1320,8 @@ const PricingForm = () => {
                 if (!treeJobs.has(Number(jobObj.id || jobObj.ID))) return;
 
                 myJobs.forEach(assignedName => {
-                    const cleanAssigned = assignedName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-                    const cleanJob = jobObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                    const cleanAssigned = assignedName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                    const cleanJob = jobObj.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
 
                     if (cleanJob === cleanAssigned) {
                         if (Number(jobObj.id || jobObj.ID) === Number(selectedLeadId)) {
@@ -1301,7 +1332,7 @@ const PricingForm = () => {
                         if (pId && pId !== '0' && pId !== 0) {
                             const parentObj = pricingData.jobs.find(p => Number(p.id || p.ID) === Number(pId));
                             if (parentObj) {
-                                const cleanP = parentObj.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                                const cleanP = parentObj.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                                 parentCustomers.add(cleanP);
                             }
                         }
@@ -1325,7 +1356,7 @@ const PricingForm = () => {
                     const pId = j.parentId || j.ParentID;
                     if (!pId || pId === '0' || pId === 0) return false;
                     const parent = pricingData.jobs.find(p => Number(p.id || p.ID) === Number(pId));
-                    return parent && parent.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === cleanC;
+                    return parent && parent.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() === cleanC;
                 });
                 return isExternal || isInternalParent;
             }
@@ -1414,30 +1445,33 @@ const PricingForm = () => {
             }
 
             // 3. Special Case: Electrical <-> BMS
-            if (optItemName.includes('BMS') && editable.some(e => e.includes('Electrical'))) return true;
+            // Special Case removed to favor hierarchy logic (Step 2045)
+            // if (optItemName.includes('BMS') && editable.some(e => e.includes('Electrical'))) return true;
 
             return false;
         };
 
         const results = pricingData.options.filter(o => {
             // LEAD JOB SCOPING (Step 1013)
-            // Ensure option belongs to the currently viewed Lead Job logic
+            // Ensure option belongs to the currently viewed Lead Job logic.
+            // For full Lead Job users, enforce strict leadJobName match.
+            // For pure sub‑job users (no hasLeadAccess), rely on hierarchy tree only.
             if (activeLeadName) {
-                if (o.leadJobName) {
-                    // Strict Match (New Data)
+                const isLeadUser = pricingData.access?.hasLeadAccess;
+                if (o.leadJobName && isLeadUser) {
+                    // Strict Match only for Lead Job users so that L1/L2 branches stay separated.
                     if (o.leadJobName !== activeLeadName) return false;
                 } else {
-                    // Legacy Fallback: Tree Match
-                    // If option item is NOT in the current Lead Job's hierarchy, hide it
-                    // This prevents "BMS" from L1 appearing in L2 if L2 matches "BMS" 
-                    // (Actually, if Shared Sub-Job, it might legitimately appear? 
-                    //  User wants SEPARATION. So we enforce strict tree.)
-                    if (o.itemName && !leadScope.has(o.itemName)) return false;
+                    // Legacy / hierarchy-based scoping:
+                    // If option item is NOT in the current Lead Job's hierarchy, hide it.
+                    if (o.itemName && !leadScope.has(o.itemName) && o.itemName !== activeLeadName) return false;
                 }
             }
 
-            // Sub-Job User: Show options if they are Editable OR if they are part of the current View Hierarchy (Read-Only)
-            const isScopeMatch = pricingData.access.hasLeadAccess || isRelatedToEditable(o.itemName) || (activeLeadName && leadScope.has(o.itemName));
+            // Sub-Job User: Show options if Editable, or in view hierarchy (read-only), or in backend visibleJobs (global hierarchy visibility)
+            const visibleJobNames = pricingData.access?.visibleJobs || [];
+            const isInVisibleJobs = o.itemName && visibleJobNames.includes(o.itemName);
+            const isScopeMatch = pricingData.access.hasLeadAccess || isRelatedToEditable(o.itemName) || (activeLeadName && leadScope.has(o.itemName)) || isInVisibleJobs;
 
             // Strict Customer Match (Option must belong to the active tab)
             const isCustomerMatch = o.customerName === selectedCustomer;
@@ -1453,7 +1487,30 @@ const PricingForm = () => {
             return false;
         });
 
-        // ENSURE "Base Price" row is ALWAYS present for the lead job in the active customer tab
+        // Get all jobs in the selected Lead Job's branch (lead + all descendants)
+        const getBranchJobs = (rootId, allJobs) => {
+            const ids = new Set([Number(rootId)]);
+            let changed = true;
+            while (changed) {
+                changed = false;
+                allJobs.forEach(j => {
+                    const pId = j.parentId != null ? Number(j.parentId) : (j.ParentID != null ? Number(j.ParentID) : null);
+                    const id = Number(j.id || j.ID);
+                    if (pId != null && pId !== 0 && ids.has(pId) && !ids.has(id)) {
+                        ids.add(id);
+                        changed = true;
+                    }
+                });
+            }
+            return (allJobs || []).filter(j => ids.has(Number(j.id || j.ID)));
+        };
+
+        const branchJobs = selectedLeadId && pricingData?.jobs ? getBranchJobs(selectedLeadId, pricingData.jobs) : [];
+        const cleanName = (name) => (name || '').replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+        const editableClean = (editable || []).map(n => cleanName(n));
+        const userDepartmentExistsInBranch = branchJobs.some(job => editableClean.includes(cleanName(job.itemName)));
+
+        // ENSURE "Base Price" row is present for the lead job in the active customer tab (existing behaviour)
         const leadJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
         if (leadJob && selectedCustomer && !results.some(o => o.name === 'Base Price' && o.itemName === leadJob.itemName)) {
             results.push({
@@ -1464,6 +1521,36 @@ const PricingForm = () => {
                 isSimulated: true
             });
         }
+
+        // When user's department exists in branch: ensure Base Price row for each editable job in branch
+        if (userDepartmentExistsInBranch && selectedCustomer) {
+            branchJobs.forEach(job => {
+                if (!editableClean.includes(cleanName(job.itemName))) return;
+                if (results.some(o => o.name === 'Base Price' && cleanName(o.itemName) === cleanName(job.itemName))) return;
+                results.push({
+                    id: 'simulated_base_' + job.id + '_' + Date.now(),
+                    name: 'Base Price',
+                    itemName: job.itemName,
+                    customerName: selectedCustomer,
+                    isSimulated: true
+                });
+            });
+        }
+        // Global hierarchy visibility: ensure Base Price row for visible (read-only) descendant jobs in branch
+        const visibleJobNamesSet = new Set((pricingData.access?.visibleJobs || []).map(n => cleanName(n)));
+        branchJobs.forEach(job => {
+            const jobClean = cleanName(job.itemName);
+            if (editableClean.includes(jobClean)) return; // already added above
+            if (!visibleJobNamesSet.has(jobClean)) return;
+            if (results.some(o => o.name === 'Base Price' && cleanName(o.itemName) === jobClean)) return;
+            results.push({
+                id: 'simulated_base_ro_' + job.id + '_' + Date.now(),
+                name: 'Base Price',
+                itemName: job.itemName,
+                customerName: selectedCustomer,
+                isSimulated: true
+            });
+        });
 
         return results;
     }, [pricingData, selectedCustomer, selectedLeadId]);
@@ -1899,7 +1986,7 @@ const PricingForm = () => {
                             // Filter roots based on visible assignments (e.g., Department Scope)
                             const visibleScope = pricingData.access?.visibleJobs || [];
                             // Heuristic: If hierarchy uses "L# -" prefixes, only show those as roots (hide orphans)
-                            const hasPrefix = pricingData.jobs.some(j => !j.parentId && /^L\d+\s-\s/.test(j.itemName));
+                            const hasPrefix = false; // Disabled heuristic to support all Lead Job names
 
                             // FIX: Use ID-based visibility flag (set by backend per job) to avoid
                             // confusing same-named jobs at different levels (e.g. root BMS vs child BMS)
@@ -1918,9 +2005,7 @@ const PricingForm = () => {
                             const roots = pricingData.jobs.filter(j => {
                                 // 1. Must be a Root
                                 if (j.parentId) return false;
-                                // 2. Must match Prefix Heuristic
-                                if (hasPrefix && !/^L\d+\s-\s/.test(j.itemName)) return false;
-                                // 3. Must be Visible (ID-based, not name-based)
+                                // 2. Visible Check (ID-based)
                                 if (!isTreeVisibleById(j.id)) return false;
 
                                 return true;
@@ -1957,7 +2042,7 @@ const PricingForm = () => {
                                         <option value="">Select Lead Job...</option>
                                         {roots.map(r => {
                                             // Fix regex to remove prefix (replace with empty string)
-                                            const cleanName = r.itemName.replace(/^(L\d+\s-\s)+/, '');
+                                            const cleanName = r.itemName.replace(/^(L\d+)?\s*-?\s*/, '');
                                             return <option key={r.id} value={r.id}>{cleanName || r.itemName}</option>;
                                         })}
                                     </select>
@@ -2034,7 +2119,7 @@ const PricingForm = () => {
                                                         return set;
                                                     };
 
-                                                    const validIds = getFullScope(selectedLeadId, pricingData.jobs);
+                                                    const validIds = getFullScope(Number(selectedLeadId), pricingData.jobs);
                                                     targetJobs = visibleJobs.filter(j => validIds.has(j.id));
                                                 }
 
@@ -2071,12 +2156,20 @@ const PricingForm = () => {
                                                 // we restrict them to their assigned scope.
                                                 const myJobs = pricingData.access.editableJobs || [];
                                                 const selectedJobObj = pricingData.jobs?.find(j => j.id == selectedLeadId);
-                                                const isLeadForThisSelection = selectedJobObj && myJobs.includes(selectedJobObj.itemName);
+                                                const isLeadForThisSelection = selectedJobObj && myJobs.some(mj => {
+                                                    const cleanMJ = mj.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                                                    const cleanSJ = selectedJobObj.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                                                    return cleanMJ === cleanSJ;
+                                                });
 
                                                 // Always include descendants of editable jobs for "Subjob View"
                                                 const getMyTotalScope = (names) => {
                                                     const ids = new Set();
-                                                    const startJobs = pricingData.jobs.filter(j => names.includes(j.itemName));
+                                                    const cleanNames = names.map(n => n.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase());
+                                                    const startJobs = pricingData.jobs.filter(j => {
+                                                        const cleanJ = j.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                                                        return cleanNames.includes(cleanJ);
+                                                    });
                                                     startJobs.forEach(sj => {
                                                         ids.add(sj.id);
                                                         let changedInner = true;
@@ -2102,13 +2195,26 @@ const PricingForm = () => {
                                                     ? null // Admins or True Lead Jobs have global scope
                                                     : getMyTotalScope(myJobs);
 
-                                                // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
+                                                // Step 4: Final Filter: Intersection of LeadJobScope and TabScope
+                                                // IMPORTANT: When on an internal tab (contextJob found), tabAllowedIds already
+                                                // restricts the view to that job and its children. Do NOT additionally filter
+                                                // by user scope — doing so removes the contextJob itself (e.g. HVAC Project)
+                                                // from the results, leaving an empty grid with no Base Price rows.
+                                                // User scope is used ONLY for editability (canEditSection), not visibility here.
+                                                //
+                                                // When on an external customer tab (tabAllowedIds is null), apply scope filter
+                                                // to avoid showing unrelated department prices.
+
                                                 let contextFilteredJobs = targetJobs.filter(j => {
                                                     // A. Tab Filter: If we are in an internal/parent tab, only show that job and its children
                                                     if (tabAllowedIds && !tabAllowedIds.has(j.id)) return false;
 
-                                                    // B. Scope Filter: Non-admins only see their assigned tree
-                                                    if (myScopeIds && !myScopeIds.has(j.id)) return false;
+                                                    // B. Scope Filter (RELAXED):
+                                                    // For internal/job tabs (where tabAllowedIds is set), we already limited
+                                                    // to that job and its children, so we do NOT additionally filter by myScopeIds.
+                                                    // For external customer tabs (no tabAllowedIds), keep using myScopeIds to
+                                                    // avoid showing unrelated departments.
+                                                    if (!tabAllowedIds && myScopeIds && !myScopeIds.has(j.id)) return false;
 
                                                     return true;
                                                 });
@@ -2120,6 +2226,7 @@ const PricingForm = () => {
                                                 // Determine Lead Job for sorting
                                                 const activeLeadJob = pricingData.jobs.find(j => j.id === selectedLeadId) || targetJobs.find(j => j.isLead);
 
+                                                // --- START OPTION ASSIGNMENT ---
                                                 // Assign Options to Groups
                                                 // NOTE: Exclude simulated options (e.g. 'Base Price' placeholder with Date.now() id)
                                                 // from maxId, otherwise every real option becomes 'isNotNewest' and gets hidden.
@@ -2128,23 +2235,27 @@ const PricingForm = () => {
                                                     return opt.id > max ? opt.id : max;
                                                 }, 0);
 
-                                                filteredOptions.forEach(opt => {
-                                                    contextFilteredJobs.forEach(job => {
-                                                        let match = false;
+                                                // Assign Options to Groups
+                                                contextFilteredJobs.forEach(job => {
+                                                    const cleanJobName = (job.itemName || '').replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                                                    const jobOptions = (filteredOptions || []).filter(opt => {
                                                         const activeLeadJobName = activeLeadJob ? activeLeadJob.itemName : null;
-
-                                                        if (!opt.itemName) {
-                                                            match = (job.id === selectedLeadId); // Null scope -> Matches Current Lead
-                                                        } else if (opt.itemName === 'Lead Job') {
-                                                            match = (job.id === selectedLeadId);
-                                                        } else if (opt.itemName === job.itemName) {
-                                                            match = true;
-                                                        } else if (activeLeadJobName && opt.itemName === `${activeLeadJobName} / Lead Job`) {
-                                                            match = true;
-                                                        }
-
-                                                        if (match) {
-                                                            const key = `${opt.id}_${job.id}`;
+                                                        if (!opt.itemName || opt.itemName === 'Lead Job') return Number(job.id) === Number(selectedLeadId);
+                                                        if (activeLeadJobName && opt.itemName === `${activeLeadJobName} / Lead Job` && Number(job.id) === Number(selectedLeadId)) return true;
+                                                        const cleanOptItem = opt.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
+                                                        return cleanOptItem === cleanJobName;
+                                                    });
+                                                    if (!jobOptions.some(o => o.name === 'Base Price')) {
+                                                        const existingBase = (pricingData.options || []).find(o => 
+                                                            o.name === 'Base Price' && o.customerName === selectedCustomer &&
+                                                            (o.itemName === job.itemName || (o.itemName && o.itemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase() === cleanJobName))
+                                                        );
+                                                        if (existingBase) jobOptions.push({ ...existingBase });
+                                                        else jobOptions.push({ id: `vbase_${job.id}`, name: 'Base Price', itemName: job.itemName, customerName: selectedCustomer, isVirtual: true });
+                                                    }
+                                                    jobOptions.forEach(opt => {
+                                                        const activeLeadJobName = activeLeadJob ? activeLeadJob.itemName : null;
+                                                        const key = `${opt.id}_${job.id}`;
                                                             let price = null; // Default to NULL (Missing) to differentiate from 0
                                                             let hasExplicitValue = false;
 
@@ -2187,8 +2298,13 @@ const PricingForm = () => {
 
                                                             const isMissing = (price === null);
 
-                                                            // FIX: Trigger fallback whenever price is MISSING (not just shouldForceInternal).
-                                                            if ((isMissing || shouldForceInternal) && pricingData.allValues) {
+                                                            // IMPORTANT: For Base Price we do NOT auto-copy values from other
+                                                            // customers/buckets. Default should stay 0 until user explicitly enters it.
+                                                            const allowFallback = opt.name !== 'Base Price';
+
+                                                            // FIX: Trigger fallback whenever price is MISSING (not just shouldForceInternal),
+                                                            // but only for non-Base options.
+                                                            if (allowFallback && (isMissing || shouldForceInternal) && pricingData.allValues) {
                                                                 const lookupInternal = (dataSet, optionId) => {
                                                                     if (!dataSet) return null;
                                                                     const iKey = `${optionId}_${job.id}`;
@@ -2277,7 +2393,6 @@ const PricingForm = () => {
 
                                                             // Push cloned option with effective Price for display
                                                             groupMap[job.id].options.push({ ...opt, effectivePrice: price });
-                                                        }
                                                     });
                                                 });
 

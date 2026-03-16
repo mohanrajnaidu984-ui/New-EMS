@@ -497,22 +497,15 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
                                                     ? total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
                                                     : (row.TotalQuotedPrice ? Number(row.TotalQuotedPrice).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : '-');
 
-                                                // Sort: L1 (Civil) -> Electrical -> BMS -> Others
+                                                // Sort: By RootCode (L1, L2) then by level
                                                 const sortedBreakdown = [...breakdown].sort((a, b) => {
-                                                    const nameA = (a?.EnquiryForItem || "").toLowerCase();
-                                                    const nameB = (b?.EnquiryForItem || "").toLowerCase();
-
-                                                    const getPriority = (n) => {
-                                                        if (n.includes('l1') || n.includes('civil')) return 1;
-                                                        if (n.includes('electrical')) return 2;
-                                                        if (n.includes('bms')) return 3;
-                                                        return 4;
-                                                    };
-
-                                                    const pA = getPriority(nameA);
-                                                    const pB = getPriority(nameB);
-                                                    if (pA !== pB) return pA - pB;
-                                                    return nameA.localeCompare(nameB);
+                                                    const codeA = (a?.RootCode || "L1");
+                                                    const codeB = (b?.RootCode || "L1");
+                                                    if (codeA !== codeB) return codeA.localeCompare(codeB, undefined, { numeric: true });
+                                                    
+                                                    const depthA = a?.Depth || 0;
+                                                    const depthB = b?.Depth || 0;
+                                                    return depthA - depthB;
                                                 });
 
                                                 return (
@@ -527,19 +520,19 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
                                                             <div style={{ fontSize: '0.75rem' }}>
                                                                 {sortedBreakdown.length > 0 ? sortedBreakdown.map((item, i) => {
                                                                     const itemName = item?.EnquiryForItem || "Unknown";
-                                                                    const isL1 = itemName.toLowerCase().includes('l1');
-                                                                    const isBMS = itemName.toLowerCase().includes('bms');
+                                                                    const rootCode = item?.RootCode || 'L1';
+                                                                    const depth = item?.Depth || 0;
                                                                     const price = Number(item?.Price || 0);
 
-                                                                    // Visual indents
-                                                                    const indent = isBMS ? '20px' : (isL1 ? '0px' : '0px');
+                                                                    // Visual indents based on depth
+                                                                    const indent = `${depth * 20}px`;
 
                                                                     return (
                                                                         <div key={i} className="mb-1 text-nowrap" style={{ paddingLeft: indent }}>
-                                                                            {!isL1 && <span className="text-muted me-1">↳</span>}
-                                                                            <span className={`fw-bold ${isL1 ? 'text-dark' : 'text-secondary'}`}>{itemName}: </span>
+                                                                            {depth > 0 && <span className="text-muted me-1">↳</span>}
+                                                                            <span className={`fw-bold ${depth === 0 ? 'text-dark' : 'text-secondary'}`}>{itemName} ({rootCode}): </span>
                                                                             {price > 0 ? (
-                                                                                <span className={`px-1 rounded ${isL1 ? 'bg-success bg-opacity-10 text-success' : 'bg-light text-dark border'}`}>
+                                                                                <span className={`px-1 rounded ${depth === 0 ? 'bg-success bg-opacity-10 text-success' : 'bg-light text-dark border'}`}>
                                                                                     {price.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                                                                                 </span>
                                                                             ) : (

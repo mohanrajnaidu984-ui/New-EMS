@@ -4,6 +4,7 @@ const router = express.Router();
 const sql = require('mssql');
 const fs = require('fs');
 const path = require('path');
+const { getHierarchyMetadata, filterJobsByDepartment } = require('../services/hierarchyService');
 
 // Debug log file
 const debugLogPath = path.join(__dirname, 'pricing_debug.log');
@@ -34,7 +35,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
 
     if (pendingOnly) {
-        baseQuery += ` AND (E.Status IN ('Open', 'Enquiry', 'Priced', 'Estimated', 'Quote') OR E.Status IS NULL OR E.Status = '') `;
+        // Include all non-terminal statuses so Pending Updates matches what user sees in search (e.g. Pricing, Pending)
+        baseQuery += ` AND (E.Status IN ('Open', 'Enquiry', 'Priced', 'Estimated', 'Quote', 'Pricing', 'Pending', 'Quoted', 'Submitted') OR E.Status IS NULL OR E.Status = '') `;
     }
 
     if (search) {
@@ -89,8 +91,32 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     `);
     const allPrices = pricesRes.recordset;
 
-    // 7. Map and Process
+    // 7. Fetch Additional Customers (EnquiryCustomer table)
+    const extraCustomersRes = await sql.query(`
+        SELECT RequestNo, CustomerName 
+        FROM EnquiryCustomer 
+        WHERE RequestNo IN (${requestNosList})
+    `);
+    const allExtraCustomers = extraCustomersRes.recordset;
+
+    // 8. Map and Process
     return enquiries.map(enq => {
+        // Merge primary and extra customers
+        let combinedCustomers = (enq.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+        allExtraCustomers
+            .filter(ec => ec.RequestNo == enq.RequestNo)
+            .forEach(ec => {
+                const names = ec.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                names.forEach(n => {
+                    if (!combinedCustomers.includes(n)) combinedCustomers.push(n);
+                });
+            });
+        enq.CustomerName = combinedCustomers.join(', ');
+
+        if (enq.RequestNo == '14') {
+            console.log(`[DEBUG 14] Combined Customers: "${enq.CustomerName}"`);
+        }
+
         const enqJobsRaw = allJobs.filter(j => j.RequestNo == enq.RequestNo);
         const seenIds = new Set();
         const enqJobs = [];
@@ -104,47 +130,28 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const enqOptions = allOptions.filter(o => o.RequestNo == enq.RequestNo);
         const enqPrices = allPrices.filter(p => p.RequestNo == enq.RequestNo);
 
-        let myJobs = [];
         const isCreator = userFullName && enq.CreatedBy && userFullName.toLowerCase().trim() === enq.CreatedBy.toLowerCase().trim();
         const isConcernedSE = concernedRequestNos.has(enq.RequestNo);
 
-        if (isAdmin) {
-            myJobs = enqJobs;
-        } else {
-            // Check assignments
-            enqJobs.forEach(job => {
-                const emails = [job.CommonMailIds, job.CCMailIds].filter(Boolean).join(',');
-                const emailsLower = emails.toLowerCase();
-                const userEmailLower = userEmail.toLowerCase();
-
-                // Extract username from email (part before @)
-                const userEmailUsername = userEmailLower.split('@')[0];
-
-                // Match if either full email or username is found OR job ItemName matches User Department
-                const isMatch = emailsLower.includes(userEmailLower) ||
-                    emailsLower.split(',').some(e => e.trim() === userEmailUsername) ||
-                    (userDepartment && job.ItemName.toLowerCase().trim().includes(userDepartment)) ||
-                    (userFullName && emailsLower.includes(userFullName.toLowerCase()));
-
-                console.log(`[Pricing] Job "${job.ItemName}" - Emails: "${emails}" - Match: ${isMatch}`);
-
-                if (isMatch) {
-                    if (!myJobs.find(x => x.ID === job.ID)) {
-                        myJobs.push(job);
-                    }
-                }
-            });
-        }
-
+        // --- NEW: Use Shared Hierarchy Service ---
+        const myJobs = filterJobsByDepartment(enqJobs, {
+            userDepartment,
+            isAdmin,
+            isCreator,
+            isConcernedSE,
+            userEmail,
+            userFullName
+        });
 
         if (myJobs.length === 0) {
-            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out - no matching jobs for user ${userEmail}`);
-            console.log(`[Pricing]   Total jobs in enquiry: ${enqJobs.length}`);
-            console.log(`[Pricing]   User is admin: ${isAdmin}, is creator: ${isCreator}, is concerned SE: ${isConcernedSE}`);
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out - no matching jobs for user ${userEmail} (department: ${userDepartment || '(none)'})`);
             return null;
         }
 
-        // Recursively build visible set
+        // Get full metadata for all jobs in this enquiry
+        const metaMap = getHierarchyMetadata(enqJobs, enq.CustomerName);
+
+        // Recursively build visible set (Self + Children)
         let visibleJobs = new Set();
         let queue = [...myJobs];
         let processed = new Set();
@@ -158,7 +165,13 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             children.forEach(c => { if (!processed.has(String(c.ID))) queue.push(c); });
         }
 
-        // Build Display String
+        // Visual Roots (Only the highest visible nodes)
+        const visualRoots = enqJobs.filter(j => 
+            visibleJobs.has(String(j.ID)) && 
+            (!j.ParentID || String(j.ParentID) === '0' || !visibleJobs.has(String(j.ParentID)))
+        );
+
+        // Build flat list for rendering tree
         const childrenMap = {};
         enqJobs.forEach(j => {
             if (j.ParentID && String(j.ParentID) !== '0') {
@@ -168,68 +181,78 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             }
         });
 
-        const allVisibleJobs = enqJobs.filter(j => visibleJobs.has(String(j.ID))).sort((a, b) => a.ID - b.ID);
-        const visualRoots = allVisibleJobs.filter(j => !j.ParentID || String(j.ParentID) === '0' || !visibleJobs.has(String(j.ParentID)));
-
         const flatList = [];
-        const traverse = (job, level) => {
-            flatList.push({ ...job, level });
-            const children = childrenMap[String(job.ID)] || [];
-            children.sort((a, b) => a.ID - b.ID);
-            children.forEach(child => { if (visibleJobs.has(String(child.ID))) traverse(child, level + 1); });
+        const traverse = (job, depth) => {
+            flatList.push({ ...job, depth });
+            const children = (childrenMap[String(job.ID)] || []).sort((a, b) => a.ID - b.ID);
+            children.forEach(child => { if (visibleJobs.has(String(child.ID))) traverse(child, depth + 1); });
         };
-
         visualRoots.forEach(root => traverse(root, 0));
 
-        // CORRECT LOGIC: An enquiry is pending for a division if NONE of the customers have prices entered
-        // Once AT LEAST ONE customer has a price > 0 for the division, it's NOT pending
-        let hasPendingItems = true; // Assume pending until we find at least one valid price
+        // CORRECT LOGIC: An enquiry is pending for a division if ANY of the user's
+        // jobs in the enquiry do NOT yet have a price > 0.
+        // Only when ALL relevant jobs are priced do we remove it from the pending list.
+        let hasPendingItems = true; // default: pending until proven fully priced
 
         // Get IDs and names of user's assigned jobs
         const myJobIds = new Set(myJobs.map(j => j.ID));
         const myJobNames = new Set(myJobs.map(j => j.ItemName));
+        const stripL = (name) => (name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+        const myJobNamesNorm = new Set(myJobs.map(j => stripL(j.ItemName)));
 
         console.log(`[Pricing] Enquiry ${enq.RequestNo} - Checking pending for user jobs:`, Array.from(myJobNames));
         logToFile(`Enquiry ${enq.RequestNo} - Checking pending for user jobs: ${JSON.stringify(Array.from(myJobNames))}`);
 
-        // Strategy: Check if there's AT LEAST ONE price value > 0 for the user's jobs
-        // If we find even one valid price, the enquiry is NOT pending for this division
+        // Track which of the user's jobs already have at least one price > 0 (by ID and by normalized name)
+        const pricedJobIds = new Set();
+        const pricedJobNamesNorm = new Set();
 
-        // If user has no jobs in this enquiry, it's not pending for them
-        if (myJobs.length === 0) {
-            hasPendingItems = false;
-        } else {
-            for (const priceValue of enqPrices) {
-                // Check if this price value belongs to one of the user's jobs
-                let belongsToMyJob = false;
-                if (priceValue.EnquiryForID && priceValue.EnquiryForID != 0 && priceValue.EnquiryForID != '0') {
-                    belongsToMyJob = myJobIds.has(priceValue.EnquiryForID);
-                } else {
-                    belongsToMyJob = priceValue.EnquiryForItem && myJobNames.has(priceValue.EnquiryForItem);
-                }
+        for (const priceValue of enqPrices) {
+            let belongsToMyJob = false;
+            let jobIdMatch = null;
 
-                if (belongsToMyJob && priceValue.Price && priceValue.Price > 0) {
-                    // Found at least one valid price for the user's division - NOT pending!
-                    console.log(`[Pricing] Enquiry ${enq.RequestNo} - ✓ NOT PENDING: Found price ${priceValue.Price} for job (OptionID: ${priceValue.OptionID})`);
-                    logToFile(`Enquiry ${enq.RequestNo} - ✓ NOT PENDING: Found price ${priceValue.Price} for job (OptionID: ${priceValue.OptionID})`);
-                    hasPendingItems = false;
-                    break; // Found a valid price, no need to check further
+            if (priceValue.EnquiryForID && priceValue.EnquiryForID != 0 && priceValue.EnquiryForID != '0') {
+                if (myJobIds.has(priceValue.EnquiryForID)) {
+                    belongsToMyJob = true;
+                    jobIdMatch = priceValue.EnquiryForID;
                 }
+            }
+
+            // Fallback: match by ItemName (exact or normalized so "HVAC Project" matches "L2 - HVAC Project")
+            if (!belongsToMyJob && priceValue.EnquiryForItem) {
+                if (myJobNames.has(priceValue.EnquiryForItem)) belongsToMyJob = true;
+                else if (myJobNamesNorm.has(stripL(priceValue.EnquiryForItem))) belongsToMyJob = true;
+            }
+
+            if (belongsToMyJob && priceValue.Price && priceValue.Price > 0) {
+                if (jobIdMatch != null) {
+                    pricedJobIds.add(jobIdMatch);
+                }
+                pricedJobNamesNorm.add(stripL(priceValue.EnquiryForItem));
             }
         }
 
-        // If we didn't find any valid prices (and they have jobs), log it as pending
+        // Determine if all of the user's jobs are priced (use normalized name match)
+        const allPriced = myJobs.every(j => {
+            if (pricedJobIds.has(j.ID)) return true;
+            if (pricedJobNamesNorm.has(stripL(j.ItemName))) return true;
+            return false;
+        });
+
+        hasPendingItems = !allPriced;
+
         if (hasPendingItems) {
-            console.log(`[Pricing] Enquiry ${enq.RequestNo} - ⚠️ PENDING: No prices found for user's division`);
-            logToFile(`Enquiry ${enq.RequestNo} - ⚠️ PENDING: No prices found for user's division`);
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} - ⚠️ PENDING: At least one job for this division has no price`);
+            logToFile(`Enquiry ${enq.RequestNo} - ⚠️ PENDING: At least one job for this division has no price`);
+        } else {
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} - ✓ NOT PENDING: All jobs for this division are priced`);
+            logToFile(`Enquiry ${enq.RequestNo} - ✓ NOT PENDING: All jobs for this division are priced`);
         }
 
         // Build a quick map: optionId -> option row (for joining)
         const optionMap = {};
         enqOptions.forEach(o => { optionMap[o.OptionID] = o; });
 
-        const jobMap = {};
-        enqJobs.forEach(j => jobMap[j.ID] = j);
 
         const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
         const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
@@ -270,60 +293,112 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
         const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
 
-        let finalCustomers;
-        if (scopedAreSubjobs) {
-            // Subjob context: Identify parents of my scoped jobs
-            const parentSet = new Set();
-            myJobs.forEach(j => {
-                if (j.ParentID && jobMap[j.ParentID]) parentSet.add(jobMap[j.ParentID].ItemName);
-            });
-            if (parentSet.size === 0) parentSet.add(internalCustomer);
+        // -------------------------------------------------------------
+        // CUSTOMER RESOLUTION (EMS Consolidated Logic)
+        // -------------------------------------------------------------
+        const stripPrefix = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
 
-            finalCustomers = Array.from(parentSet).filter(c => {
-                const cNorm = normalize(c);
-                if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
-                return true;
+        // Own job names (normalized, without L-codes / "Sub Job" prefixes)
+        // IMPORTANT: Own Job is the user's department job (e.g. "BMS Project"), not every
+        // job they can see. Derive it primarily from department keyword; fall back to
+        // myJobs if nothing matches.
+        const deptKey = (userDepartment || '').toLowerCase().replace(' project', '').trim();
+        let ownJobs = [];
+        if (deptKey) {
+            ownJobs = enqJobs.filter(j => {
+                const nameClean = stripPrefix(j.ItemName || '').toLowerCase();
+                return nameClean.includes(deptKey);
             });
-        } else {
-            // Lead job context: External customers + internal jobs with pricing options
-            const finalSet = new Set(externalCustomers);
+        }
+        if (ownJobs.length === 0) {
+            ownJobs = myJobs;
+        }
 
-            optionCustomers.forEach(c => {
-                finalSet.add(c);
-            });
+        const ownJobNamesNorm = new Set(
+            ownJobs.map(j => normalize(stripPrefix(j.ItemName || '')))
+        );
 
-            finalCustomers = Array.from(finalSet).filter(c => {
-                const cNorm = normalize(c);
-                // Filter out own division if it's listed as a customer
-                if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
-                // Only keep job names if they are actually listed in options (handled by Set addition above)
-                return true;
+        // Map of ID -> Job for quick lookup
+        const jobById = {};
+        enqJobs.forEach(j => { jobById[String(j.ID)] = j; });
+
+        const customerSet = new Set();
+
+        // Rule 1: Parent jobs where Own Job appears as sub-job
+        enqJobs.forEach(job => {
+            const jobNorm = normalize(stripPrefix(job.ItemName || ''));
+            const hasParent = job.ParentID && job.ParentID != '0' && job.ParentID != 0;
+            if (!hasParent) return;
+            if (!ownJobNamesNorm.has(jobNorm)) return;
+
+            // Resolve parent name from job map first
+            const parent = jobById[String(job.ParentID)];
+            if (parent && parent.ItemName) {
+                const parentNameClean = stripPrefix(parent.ItemName);
+                if (parentNameClean) customerSet.add(parentNameClean);
+            }
+            // Fallback: use hierarchy metadata customer (parent job name) for this job
+            const meta = metaMap[job.ID];
+            if (meta && meta.customer) {
+                const custClean = stripPrefix(String(meta.customer).trim());
+                if (custClean && !ownJobNamesNorm.has(normalize(custClean))) customerSet.add(custClean);
+            }
+        });
+
+        // Rule 2: If Own Job also appears as a Lead Job, include all external enquiry customers
+        const ownAsLead = enqJobs.some(j => {
+            const isLead = !j.ParentID || j.ParentID == '0' || j.ParentID == 0;
+            const jNorm = normalize(stripPrefix(j.ItemName || ''));
+            return isLead && ownJobNamesNorm.has(jNorm);
+        });
+
+        if (ownAsLead) {
+            externalCustomers.forEach(c => {
+                const clean = stripPrefix(c);
+                if (clean) customerSet.add(clean);
             });
+        }
+
+        // Rule 3: Remove Own Job from customers and de-duplicate
+        let finalCustomers = Array.from(customerSet).filter(c => {
+            const cNorm = normalize(stripPrefix(c));
+            // Own Job must never appear as a Customer (Rule 4)
+            if (ownJobNamesNorm.has(cNorm)) return false;
+            return true;
+        });
+
+        // Fallback: if nothing resolved, use internal customer
+        if (finalCustomers.length === 0) {
+            finalCustomers = [stripPrefix(internalCustomer)];
         }
 
         const fullCustomerName = finalCustomers.join(', ');
 
+        if (enq.RequestNo == '14') {
+            console.log(`[DEBUG 14] Final Customers: "${fullCustomerName}" (customerSet size: ${customerSet.size})`);
+        }
+
         const displayItems = [];
 
-        const getDivisionPrice = (jobId, optionName) => {
-            const job = jobMap[jobId];
-            if (!job) return { price: 0, updatedAt: null };
+        const getDivisionPrice = (jobId, optionName, jobItemName) => {
+            const meta = metaMap[jobId];
+            if (!meta) return { price: 0, updatedAt: null };
 
-            // 1. Determine Target Customer context (Internal Division logic)
-            // If sub-job, look for price quoted to Parent. If root, look for price quoted to Main Customer.
-            let targetCust = '';
-            if (job.ParentID && jobMap[job.ParentID]) {
-                targetCust = jobMap[job.ParentID].ItemName;
-            } else {
-                targetCust = enq.CustomerName || '';
-            }
-            const cleanTarget = targetCust.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+            // Use the actual job's ItemName for option/price lookup (e.g. "BMS Project"), not root ancestor
+            const itemNameForMatch = (jobItemName || meta.rootAncestorName || '').trim();
+            const rootNameForLead = (meta.rootAncestorName || '').trim();
 
-            // 2. Find and Filter matching options
-            const candidates = enqOptions.filter(o =>
-                o.OptionName === optionName &&
-                (o.ItemName === job.ItemName || !o.ItemName)
-            );
+            // 1. Determine Target Customer context using Hierarchy Service result
+            const cleanTarget = (meta.customer || '').trim().toLowerCase();
+
+            // 2. Find options that belong to THIS job and branch: match ItemName and optionally LeadJobName (root)
+            const candidates = enqOptions.filter(o => {
+                if (o.OptionName !== optionName) return false;
+                const oItem = (o.ItemName || '').trim();
+                if (oItem && oItem !== itemNameForMatch) return false;
+                if (rootNameForLead && (o.LeadJobName || '').trim() && (o.LeadJobName || '').trim() !== rootNameForLead) return false;
+                return true;
+            });
 
             // 3. Find options matching target customer
             const targetCandidates = candidates.filter(o => {
@@ -337,7 +412,11 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 for (const opt of opts) {
                     const pRows = enqPrices.filter(p => p.OptionID == opt.OptionID);
                     let row = pRows.find(p => p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0' && String(p.EnquiryForID) === String(jobId));
-                    if (!row) row = pRows.find(p => (!p.EnquiryForID || p.EnquiryForID == 0 || p.EnquiryForID == '0') && p.EnquiryForItem === job.ItemName);
+
+                    // Fallback: match by this job's ItemName (e.g. "BMS Project"), not root ancestor
+                    if (!row && itemNameForMatch) {
+                        row = pRows.find(p => (p.EnquiryForItem || '').trim() === itemNameForMatch);
+                    }
 
                     if (row && row.Price > 0) {
                         if (!bestRow || new Date(row.UpdatedAt) > new Date(bestRow.UpdatedAt)) {
@@ -364,22 +443,52 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             return { price: 0, updatedAt: null };
         };
 
+        // Strictly Department-Filtered set for Summary UI (to reduce clutter)
+        let summaryVisibleIds = null;
+        if (userDepartment) { 
+            const deptClean = userDepartment.toLowerCase().replace(' project', '').trim();
+            const strictMyJobs = enqJobs.filter(j => {
+                const name = (j.ItemName || '').toLowerCase();
+                return name.includes(deptClean) || deptClean.includes(name);
+            });
+
+            const sIds = new Set();
+            if (strictMyJobs.length > 0) {
+                let sQueue = [...strictMyJobs];
+                let sProcessed = new Set();
+                while (sQueue.length > 0) {
+                    const current = sQueue.pop();
+                    const cid = String(current.ID);
+                    if (sProcessed.has(cid)) continue;
+                    sProcessed.add(cid);
+                    sIds.add(cid);
+                    const children = enqJobs.filter(child => child.ParentID && String(child.ParentID) === cid);
+                    children.forEach(c => sQueue.push(c));
+                }
+            }
+            summaryVisibleIds = sIds;
+            
+        }
+
         flatList.forEach(job => {
+            // APPLY FILTER: Skip jobs not in the strict department scope if filter is active
+            if (summaryVisibleIds && !summaryVisibleIds.has(String(job.ID))) {
+                return;
+            }
+
             const targetOptionNames = ['Base Price', 'Optional'];
 
             targetOptionNames.forEach(optName => {
-                const { price, updatedAt } = getDivisionPrice(job.ID, optName);
+                const { price, updatedAt } = getDivisionPrice(job.ID, optName, job.ItemName);
 
                 if (price > 0 || optName === 'Base Price') {
-                    // Identify L1 explicitly based on tree level (Step 1622)
-                    let displayCode = job.LeadJobCode;
-                    if (!displayCode && (job.level === 0 || !job.ParentID || job.ParentID === '0' || job.ParentID === 0)) {
-                        displayCode = 'L1';
-                    }
-                    const jobLabel = displayCode ? `${job.ItemName} (${displayCode})` : job.ItemName;
+                    const meta = metaMap[job.ID] || { level: 1, rootCode: 'L1' };
+                    
+                    const jobLabel = `${job.ItemName} (${meta.rootCode})`;
                     const displayName = optName === 'Base Price' ? jobLabel : `${jobLabel} (${optName})`;
 
-                    displayItems.push(`${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`);
+                    // Pass displayName, price, date, and DEPTH (for indentation)
+                    displayItems.push(`${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.depth || 0}`);
                 }
             });
         });
@@ -409,7 +518,7 @@ router.get('/list/pending', async (req, res) => {
         res.json(result);
     } catch (err) {
         console.error('Error fetching pending pricing:', err);
-        res.status(500).json({ error: 'Failed' });
+        res.status(500).json({ error: 'Failed', details: err.message });
     }
 });
 
@@ -493,7 +602,7 @@ router.get('/:requestNo', async (req, res) => {
                     mef.CommonMailIds, mef.CCMailIds, mef.CompanyLogo,
                     mef.DepartmentName, mef.CompanyName, mef.Address, mef.Phone, mef.FaxNo
                 FROM EnquiryFor ef
-                LEFT JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName)
+                LEFT JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% ' + mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName)
                 WHERE ef.RequestNo = ${requestNo}
                 ORDER BY ef.ID ASC
             `;
@@ -620,11 +729,11 @@ router.get('/:requestNo', async (req, res) => {
 
             // SMART SCOPE EXPANSION:
             const cleanUserScopes = new Set(userJobItems.map(name =>
-                name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+                name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase()
             ));
 
             jobs.forEach(job => {
-                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim().toLowerCase();
                 if (cleanUserScopes.has(cleanName)) {
                     if (!userJobItems.includes(job.ItemName)) {
                         userJobItems.push(job.ItemName);
@@ -635,7 +744,7 @@ router.get('/:requestNo', async (req, res) => {
 
         // FILTER: Scope Customers based on User Role
         if (leadJobItem && jobs.length > 0) {
-            const clean = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() : '';
+            const clean = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
             const leadJob = jobs.find(j => j.ItemName === leadJobItem);
 
             if (leadJob) {
@@ -743,76 +852,50 @@ router.get('/:requestNo', async (req, res) => {
 
 
 
-        // Determine visible and editable jobs
-        // HIERARCHY LOGIC IMPLEMENTATION
-        let visibleJobs = [];
-        let editableJobs = [];
+        // Determine visible and editable jobs (Global Hierarchy Pricing Visibility)
+        // Rule: editable = user's division only; visible = user's division + all descendants (read-only).
+        const { getHierarchyMetadata, filterJobsByDepartment } = require('../services/hierarchyService');
+        const metaMap = getHierarchyMetadata(jobs, enquiry.CustomerName);
+        
+        const userParams = {
+            userDepartment,
+            isAdmin: userRole === 'Admin',
+            isCreator: enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim(),
+            isConcernedSE: false,
+            userEmail,
+            userFullName
+        };
+        const userScopeNodeList = filterJobsByDepartment(jobs, userParams);
+        // Editable: only jobs in user's division (direct match)
+        const editableNodeList = userParams.isAdmin ? jobs : jobs.filter(job => {
+            const emails = [job.CommonMailIds, job.CCMailIds].filter(Boolean).join(',').toLowerCase();
+            const deptNorm = userDepartment ? userDepartment.toLowerCase().trim().replace(/\s+project\s*$/i, '').trim() : '';
+            const jobNameNorm = (job.ItemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+            return emails.includes(userEmail.toLowerCase()) || (deptNorm && (jobNameNorm.includes(deptNorm) || jobNameNorm.replace(/\s+project\s*$/i, '').includes(deptNorm)));
+        });
+        const editableIds = new Set(editableNodeList.map(j => String(j.ID)));
 
-        // 1. EDIT PERMISSIONS (Strict)
-        let visibleJobIds, editableJobIds;
-        if (userRole === 'Admin') {
-            editableJobs = jobs.map(j => j.ItemName);
-        } else {
-            // Default: Edit what you are assigned (Email matched)
-            editableJobs = [...userJobItems];
+        // Visible: user's scope jobs + all their descendants (so e.g. HVAC sees BMS as read-only)
+        const visibleIds = new Set(userScopeNodeList.map(j => String(j.ID)));
+        const addDescendants = (parentId) => {
+            jobs.filter(j => j.ParentID != null && String(j.ParentID) === String(parentId)).forEach(child => {
+                visibleIds.add(String(child.ID));
+                addDescendants(child.ID);
+            });
+        };
+        userScopeNodeList.forEach(node => addDescendants(node.ID));
 
-            // NOTE: Creators do NOT get implicit edit access to Lead Job anymore.
-            // They must be explicitly assigned to the Lead Job (via Email/Master) to edit it.
-            // This prevents Generic Creators (e.g. 'BMS') from editing 'Civil' Lead Jobs inadvertently.
-        }
+        const visibleJobs = jobs.filter(j => visibleIds.has(String(j.ID))).map(j => j.ItemName);
+        const editableJobs = jobs.filter(j => editableIds.has(String(j.ID))).map(j => j.ItemName);
 
-        // 2. VIEW PERMISSIONS (Tree / Global)
-        const isCreator = (enquiry.CreatedBy && userFullName && enquiry.CreatedBy.toLowerCase().trim() === userFullName.toLowerCase().trim());
-
-        // FIX: Only Admins get global 'View All' access. 
-        // Other users (including Leads/Creators) follow the hierarchical View logic below.
-        const isGlobalView = userRole === 'Admin';
-
-        if (isGlobalView) {
-            console.log('Pricing API: Admin Access -> View All');
-            visibleJobs = jobs.map(j => j.ItemName);
-            visibleJobIds = new Set(jobs.map(j => j.ID));
-        } else {
-            // Standard User: View Assigned + Descendants
-            // Fallback: If Creator has NO assignments, should we show everything or nothing?
-            // Strict approach: Show nothing (or let them add themselves).
-            // But to avoid "Blank Screen" confusion for unassigned Creators, we can grant Lead access IF generic?
-            // User Request was explicit: "Access ONLY View BMS". This implies strictness.
-
-            // ID-Based Traversal for Robustness
-            const selfJobIds = jobs.filter(j => userJobItems.includes(j.ItemName)).map(j => j.ID);
-
-            const getAllDescendantIds = (parentIds, allJobs) => {
-                let descendantIds = [];
-                let queue = [...parentIds];
-                let processed = new Set();
-
-                while (queue.length > 0) {
-                    const currentId = queue.pop();
-                    if (processed.has(currentId)) continue;
-                    processed.add(currentId);
-
-                    const children = allJobs.filter(j => j.ParentID === currentId);
-                    children.forEach(c => {
-                        descendantIds.push(c.ID);
-                        queue.push(c.ID);
-                    });
-                }
-                return descendantIds;
-            };
-
-            const descendantIds = getAllDescendantIds(selfJobIds, jobs);
-            const allVisibleIds = new Set([...selfJobIds, ...descendantIds]);
-
-            visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
-            visibleJobIds = allVisibleIds; // ID Set
-            // UPDATE: User can only edit explicitly assigned jobs. 
-            // Descendants are visible but READ-ONLY (Step 852)
-            const allEditableIds = new Set([...selfJobIds]);
-            editableJobIds = allEditableIds;
-            editableJobs = jobs.filter(j => allEditableIds.has(j.ID)).map(j => j.ItemName);
-
-        }
+        // Update jobs with metadata
+        jobs.forEach(job => {
+            const meta = metaMap[job.ID] || { level: 1, depth: 0, rootCode: 'L1' };
+            job.level = meta.level;
+            job.depth = meta.depth;
+            job.rootCode = meta.rootCode;
+            job.targetCustomer = meta.customer;
+        });
 
         console.log('Final Visible:', visibleJobs);
         console.log('Final Editable:', editableJobs);
@@ -830,11 +913,11 @@ router.get('/:requestNo', async (req, res) => {
             extraCustomers: extraCustomers
                 .map(c => (c.CustomerName || '').replace(/,+$/g, '').trim()) // Normalize names
                 .filter(name => {
-                    const cleanName = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                    const cleanName = name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim();
                     return name && !excludedNames.has(name) && !excludedNames.has(cleanName);
                 }),
             customers: customers,
-            activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim())))
+            activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim())))
                 ? (customers.length > 0 ? customers[0] : '')
                 : (activeCustomerName || '').replace(/,+$/g, '').trim(),
             leadJob: leadJobItem,

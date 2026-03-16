@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { sql } = require('../dbConfig');
+const { getHierarchyMetadata } = require('../services/hierarchyService');
 
 // Helper to construct filter clauses (kept for reference or future use if needed, though active logic is inline below)
 // --- Helper: Apply Access Control Logic ---
@@ -361,49 +362,169 @@ router.get('/enquiries', async (req, res) => {
         if (enquiries.length > 0) {
             const requestNos = enquiries.map(e => e.RequestNo);
 
-            // Fetch pricing values for these requests
-            // Use ROW_NUMBER to get the latest OptionID for each RequestNo AND Item
-            // This ensures we get specific items even if they were saved in a previous option but not the absolute latest one (partial saves)
-            const pricingQuery = `
-                SELECT RequestNo, EnquiryForItem, Price, UpdatedAt
-                FROM (
-                    SELECT 
-                        RequestNo,
-                        EnquiryForItem, 
-                        Price, 
-                        UpdatedAt,
-                        ROW_NUMBER() OVER (PARTITION BY RequestNo, EnquiryForItem ORDER BY OptionID DESC) as rn
-                    FROM EnquiryPricingValues
-                    WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
-                ) t
-                WHERE rn = 1
-            `;
-
             try {
+                // Fetch ALL jobs for these enquiries to build full hierarchy context
+                const jobsResult = await new sql.Request().query(`
+                    SELECT ef.RequestNo, ef.ID, ef.ParentID, ef.ItemName, ef.LeadJobCode, 
+                           mef.CommonMailIds, mef.CCMailIds 
+                    FROM EnquiryFor ef
+                    LEFT JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
+                    WHERE ef.RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                `);
+                const allEnqJobs = jobsResult.recordset;
+                
+                // Fetch Extra Customers (EnquiryCustomer table)
+                const extraCustomersResult = await new sql.Request().query(`
+                    SELECT RequestNo, CustomerName FROM EnquiryCustomer WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                `);
+                const allExtraCustomers = extraCustomersResult.recordset;
+
+                // Build context map per enquiry
+                const enqContext = {};
+                requestNos.forEach(rNo => {
+                    const jobs = allEnqJobs.filter(j => j.RequestNo == rNo);
+                    const enqObj = enquiries.find(e => e.RequestNo == rNo);
+                    
+                    // Merge primary and extra customers
+                    let combinedCustomers = (enqObj.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+                    allExtraCustomers
+                        .filter(ec => ec.RequestNo == rNo)
+                        .forEach(ec => {
+                            const names = ec.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                            names.forEach(n => {
+                                if (!combinedCustomers.includes(n)) combinedCustomers.push(n);
+                            });
+                        });
+                    enqObj.CustomerName = combinedCustomers.join(', ');
+
+                    const metaMap = getHierarchyMetadata(jobs, enqObj.CustomerName);
+                    
+                    const meta = { byId: metaMap, byName: {} };
+                    // Build byName fallback map
+                    Object.entries(metaMap).forEach(([id, m]) => {
+                        const job = jobs.find(j => String(j.ID) === String(id));
+                        if (job && job.ItemName) {
+                            meta.byName[job.ItemName.trim().toLowerCase()] = m;
+                        }
+                    });
+                    enqContext[rNo] = meta;
+                });
+
+                // Fetch alternative customers from Pricing Options
+                const optionRes = await new sql.Request().query(`
+                    SELECT DISTINCT RequestNo, CustomerName 
+                    FROM EnquiryPricingOptions 
+                    WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                    AND CustomerName IS NOT NULL AND CustomerName <> ''
+                `);
+                optionRes.recordset.forEach(row => {
+                    const rNo = row.RequestNo;
+                    if (enqContext[rNo]) {
+                        if (!enqContext[rNo].optionCustomers) enqContext[rNo].optionCustomers = new Set();
+                        // Deduplicate logic matching pricing.js
+                        const names = row.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                        names.forEach(n => enqContext[rNo].optionCustomers.add(n));
+                    }
+                });
+
+                const pricingQuery = `
+                    SELECT RequestNo, EnquiryForItem, Price, UpdatedAt, EnquiryForID
+                    FROM (
+                        SELECT 
+                            RequestNo, EnquiryForItem, Price, UpdatedAt, EnquiryForID,
+                            ROW_NUMBER() OVER (PARTITION BY RequestNo, EnquiryForItem ORDER BY OptionID DESC) as rn
+                        FROM EnquiryPricingValues
+                        WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                    ) t
+                    WHERE rn = 1
+                `;
+
                 const pricingResult = await new sql.Request().query(pricingQuery);
                 const pricingMap = {};
 
                 pricingResult.recordset.forEach(row => {
                     if (!pricingMap[row.RequestNo]) pricingMap[row.RequestNo] = [];
+                    
+                    let meta = { level: 1, depth: 0, rootCode: 'L1' };
+                    if (enqContext[row.RequestNo]) {
+                        const ctx = enqContext[row.RequestNo];
+                        if (row.EnquiryForID && ctx.byId[row.EnquiryForID]) {
+                            meta = ctx.byId[row.EnquiryForID];
+                        } else if (row.EnquiryForItem && ctx.byName[row.EnquiryForItem.trim().toLowerCase()]) {
+                            meta = ctx.byName[row.EnquiryForItem.trim().toLowerCase()];
+                        }
+                    }
+
                     pricingMap[row.RequestNo].push({
                         EnquiryForItem: row.EnquiryForItem,
                         Price: row.Price,
-                        UpdatedAt: row.UpdatedAt
+                        UpdatedAt: row.UpdatedAt,
+                        Level: meta.level,
+                        Depth: meta.depth,
+                        RootCode: meta.rootCode
                     });
                 });
 
-                // Attach to enquiries
+                const { filterJobsByDepartment } = require('../services/hierarchyService');
+                const isAdminUser = userRole ? userRole.toLowerCase().includes('admin') || userRole.toLowerCase().includes('system') : false;
+
                 enquiries.forEach(row => {
-                    // Stringify to match frontend expectation of JSON string
                     row.PricingBreakdown = JSON.stringify(pricingMap[row.RequestNo] || []);
+
+                    // Customer Resolution Logic matching other modules
+                    const jobs = allEnqJobs.filter(j => j.RequestNo == row.RequestNo);
+                    const myJobs = filterJobsByDepartment(jobs, {
+                        userDepartment: '',
+                        isAdmin: isAdminUser,
+                        isCreator: row.CreatedBy && userName ? row.CreatedBy.toLowerCase().trim() === userName.toLowerCase().trim() : false,
+                        isConcernedSE: false, // handeled via email match in helper
+                        userEmail: userEmail,
+                        userFullName: userName
+                    });
+
+                    const parentSet = new Set();
+                    if (myJobs.length > 0 && enqContext[row.RequestNo]) {
+                        const ctx = enqContext[row.RequestNo];
+                        
+                        const minLevel = Math.min(...myJobs.map(j => (ctx.byId[j.ID] && ctx.byId[j.ID].level) || 99));
+                        const topJobs = myJobs.filter(j => ((ctx.byId[j.ID] && ctx.byId[j.ID].level) || 99) === minLevel);
+                        
+                        topJobs.forEach(job => {
+                            if (ctx.byId[job.ID] && ctx.byId[job.ID].customer) {
+                                // Split comma-separated names if needed
+                                const names = ctx.byId[job.ID].customer.split(',').map(c => c.trim()).filter(Boolean);
+                                names.forEach(n => parentSet.add(n));
+                            }
+                        });
+
+                        // Add option customers too
+                        if (ctx.optionCustomers) {
+                            ctx.optionCustomers.forEach(c => parentSet.add(c));
+                        }
+                    }
+
+                    if (parentSet.size > 0) {
+                        const cleanOwnJob = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
+                        const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const myJobNamesRaw = new Set(myJobs.map(j => normalize(cleanOwnJob(j.ItemName))));
+                        const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
+
+                        let finalCustomers = Array.from(parentSet).filter(c => {
+                            const cNorm = normalize(cleanOwnJob(c));
+                            if (myJobNamesRaw.has(cNorm)) return false;
+                            if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                            return true;
+                        });
+
+                        if (finalCustomers.length > 0) {
+                            row.CustomerName = finalCustomers.join(', ');
+                        }
+                    }
                 });
 
             } catch (err) {
                 console.error('Error fetching pricing breakdown:', err);
-                // Fallback to empty array
-                enquiries.forEach(row => {
-                    row.PricingBreakdown = "[]";
-                });
+                enquiries.forEach(row => { row.PricingBreakdown = "[]"; });
             }
         }
 

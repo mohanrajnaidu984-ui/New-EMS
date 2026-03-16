@@ -772,11 +772,9 @@ app.get('/api/enquiries', async (req, res) => {
 app.post('/api/enquiries', async (req, res) => {
     const logFile = path.join(__dirname, 'debug.log');
     const log = (msg) => fs.appendFileSync(logFile, `${new Date().toISOString()} - ${msg}\n`);
-
+    let transaction;
     try {
         log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
-
-        let transaction;
         const {
             SourceOfInfo, EnquiryDate, DueOn, SiteVisitDate,
             SelectedEnquiryTypes, SelectedEnquiryFor,
@@ -2029,6 +2027,18 @@ const initApp = async () => {
                 console.log('ParentID column added.');
             }
 
+            // Check LeadJobCode in EnquiryFor
+            const checkLeadJobCode = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'EnquiryFor' AND COLUMN_NAME = 'LeadJobCode'
+            `;
+            if (checkLeadJobCode.recordset.length === 0) {
+                console.log('Adding LeadJobCode column to EnquiryFor...');
+                await sql.query`ALTER TABLE EnquiryFor ADD LeadJobCode NVARCHAR(50) NULL`;
+                console.log('LeadJobCode column added.');
+            }
+
             // Check LostDate in EnquiryMaster
             const checkLostDate = await sql.query`
                 SELECT COLUMN_NAME 
@@ -2039,6 +2049,18 @@ const initApp = async () => {
                 console.log('Adding LostDate column to EnquiryMaster...');
                 await sql.query`ALTER TABLE EnquiryMaster ADD LostDate DATETIME NULL`;
                 console.log('LostDate column added.');
+            }
+
+            // Check CustomerRefNo in EnquiryMaster
+            const checkCustomerRefNo = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'EnquiryMaster' AND COLUMN_NAME = 'CustomerRefNo'
+            `;
+            if (checkCustomerRefNo.recordset.length === 0) {
+                console.log('Adding CustomerRefNo column to EnquiryMaster...');
+                await sql.query`ALTER TABLE EnquiryMaster ADD CustomerRefNo NVARCHAR(MAX) NULL`;
+                console.log('CustomerRefNo column added.');
             }
 
             // Check if EnquiryNotes table exists
@@ -2059,6 +2081,47 @@ SELECT * FROM sysobjects WHERE name = 'EnquiryNotes' AND xtype = 'U'
     )
                  `;
                 console.log('EnquiryNotes table created.');
+            }
+
+            // Check if EnquiryConsultant table exists
+            const checkConsultantTable = await sql.query`
+                SELECT * FROM sysobjects WHERE name = 'EnquiryConsultant' AND xtype = 'U'
+            `;
+            if (checkConsultantTable.recordset.length === 0) {
+                console.log('Creating EnquiryConsultant table...');
+                await sql.query`
+                    CREATE TABLE EnquiryConsultant(
+                        ID INT IDENTITY(1, 1) PRIMARY KEY,
+                        RequestNo NVARCHAR(50),
+                        ConsultantName NVARCHAR(255)
+                    )
+                `;
+                console.log('EnquiryConsultant table created.');
+            }
+
+            // Check columns in EnquiryQuotes
+            const checkQuoteCols = await sql.query`
+                SELECT COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = 'EnquiryQuotes'
+            `;
+            const quoteCols = checkQuoteCols.recordset.map(r => r.COLUMN_NAME);
+            
+            if (!quoteCols.includes('ToFax')) {
+                console.log('Adding ToFax to EnquiryQuotes...');
+                await sql.query`ALTER TABLE EnquiryQuotes ADD ToFax NVARCHAR(50) NULL`;
+            }
+            if (!quoteCols.includes('ToAttention')) {
+                console.log('Adding ToAttention to EnquiryQuotes...');
+                await sql.query`ALTER TABLE EnquiryQuotes ADD ToAttention NVARCHAR(255) NULL`;
+            }
+            if (!quoteCols.includes('LeadJob')) {
+                console.log('Adding LeadJob to EnquiryQuotes...');
+                await sql.query`ALTER TABLE EnquiryQuotes ADD LeadJob NVARCHAR(MAX) NULL`;
+            }
+            if (!quoteCols.includes('OwnJob')) {
+                console.log('Adding OwnJob to EnquiryQuotes...');
+                await sql.query`ALTER TABLE EnquiryQuotes ADD OwnJob NVARCHAR(MAX) NULL`;
             }
         } catch (schemaErr) {
             console.error('Schema check error:', schemaErr);
