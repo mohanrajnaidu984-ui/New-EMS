@@ -1,0 +1,43 @@
+.dashboard-split-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+.dashboard-left-panel {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    border-right: none;
+    border-bottom: 1px solid #dee2e6;
+    height: 40%;
+    /* On mobile, maybe fixed height or percentage? */
+}
+
+.dashboard-right-panel {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    height: 60%;
+}
+
+@media (min-width: 900px) {
+
+    /* Tablet/Desktop breakpoint */
+    .dashboard-split-container {
+        flex-direction: row;
+    }
+
+    .dashboard-left-panel {
+        width: 40% !important;
+        height: 100%;
+        border-right: 1px solid #dee2e6;
+        border-bottom: none;
+    }
+
+    .dashboard-right-panel {
+        width: 60% !important;
+        height: 100%;
+    }
+}

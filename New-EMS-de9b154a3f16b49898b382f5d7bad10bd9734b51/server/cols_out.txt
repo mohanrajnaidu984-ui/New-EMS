@@ -1,0 +1,20 @@
+﻿[dotenv@17.2.3] injecting env (9) from .env -- tip: ΓÜÖ∩╕Å  specify custom .env file path with { path: '/custom/path/.env' }
+Connected to MSSQL Database
+Master_CustomerName columns: [
+  'ID',          'Category',
+  'CompanyName', 'Address1',
+  'Address2',    'Rating',
+  'Type',        'FaxNo',
+  'Phone1',      'Phone2',
+  'EmailId',     'Website',
+  'Status',      'RequestNo'
+]
+Master_EnquiryFor columns: [
+  'ID',           'ItemName',
+  'CompanyName',  'DepartmentName',
+  'Status',       'CommonMailIds',
+  'CCMailIds',    'RequestNo',
+  'DivisionCode', 'DepartmentCode',
+  'Phone',        'Address',
+  'FaxNo',        'CompanyLogo'
+]

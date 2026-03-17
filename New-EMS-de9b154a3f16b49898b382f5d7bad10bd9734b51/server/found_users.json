@@ -1,0 +1,42 @@
+[
+  {
+    "FullName": "Mahmood Ismail",
+    "EmailId": "ismail@almoayyedcg.com",
+    "Department": "Security Project"
+  },
+  {
+    "FullName": "Binu S Pillai",
+    "EmailId": "binus@almoayyedcg.com",
+    "Department": "Cleaning Maint"
+  },
+  {
+    "FullName": "JISHIL KUMAR UPPUNGAL VIJAYAN\r\n",
+    "EmailId": "maintenance1@almoayyedcg.com",
+    "Department": "HVAC Maint"
+  },
+  {
+    "FullName": "Mohanan Pillai. K",
+    "EmailId": "Mohanan.Pillai@almoayyedcg.com",
+    "Department": "Civil Project"
+  },
+  {
+    "FullName": "Mohanraj Naidu",
+    "EmailId": "mohan.naidu@almoayyedcg.com",
+    "Department": "BMS Project"
+  },
+  {
+    "FullName": "Manoj R Nair",
+    "EmailId": "aidc1@almoayyedcg.com",
+    "Department": "Interiors Project"
+  },
+  {
+    "FullName": "Prasanth Divakaren",
+    "EmailId": "aiqs1@almoayyedcg.com",
+    "Department": "Interiors Project"
+  },
+  {
+    "FullName": "Renji Kunchacko",
+    "EmailId": "aiqs5@almoayyedcg.com",
+    "Department": "Interiors Project"
+  }
+]

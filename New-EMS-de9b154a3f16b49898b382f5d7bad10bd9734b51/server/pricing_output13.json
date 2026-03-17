@@ -1,0 +1,176 @@
+{
+  "hierarchy": [
+    {
+      "ID": 366,
+      "ParentID": null,
+      "ItemName": "Civil Project",
+      "LeadJobCode": "L1"
+    },
+    {
+      "ID": 367,
+      "ParentID": 366,
+      "ItemName": "Electrical Project",
+      "LeadJobCode": null
+    },
+    {
+      "ID": 368,
+      "ParentID": null,
+      "ItemName": "BMS Project",
+      "LeadJobCode": "L2"
+    },
+    {
+      "ID": 369,
+      "ParentID": 366,
+      "ItemName": "Plumbing & Fire Fighting Project",
+      "LeadJobCode": null
+    },
+    {
+      "ID": 370,
+      "ParentID": 366,
+      "ItemName": "HVAC Project",
+      "LeadJobCode": null
+    },
+    {
+      "ID": 371,
+      "ParentID": 370,
+      "ItemName": "BMS Project",
+      "LeadJobCode": null
+    }
+  ],
+  "options": [
+    {
+      "ID": 488,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 489,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 490,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 491,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "BMS Project"
+    },
+    {
+      "ID": 492,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 493,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 494,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "BMS Project"
+    },
+    {
+      "ID": 495,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 496,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 497,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 498,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est.",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 499,
+      "OptionName": "Base Price",
+      "CustomerName": "Ithbat Contracting Est",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 500,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 501,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "BMS Project"
+    },
+    {
+      "ID": 502,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 503,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 504,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "Civil Project"
+    },
+    {
+      "ID": 505,
+      "OptionName": "Base Price",
+      "CustomerName": "Civil Project",
+      "LeadJobName": "Civil Project"
+    }
+  ],
+  "values": [
+    {
+      "ID": 254,
+      "OptionID": 495,
+      "OptionName": "Base Price",
+      "EnquiryForID": 371,
+      "ItemName": "BMS Project",
+      "Price": 2500
+    },
+    {
+      "ID": 255,
+      "OptionID": 494,
+      "OptionName": "Base Price",
+      "EnquiryForID": 368,
+      "ItemName": "BMS Project",
+      "Price": 2600
+    },
+    {
+      "ID": 256,
+      "OptionID": 496,
+      "OptionName": "Base Price",
+      "EnquiryForID": 370,
+      "ItemName": "HVAC Project",
+      "Price": 10000
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+﻿[dotenv@17.2.3] injecting env (9) from .env -- tip: ≡ƒ¢á∩╕Å  run anywhere with `dotenvx run -- yourcommand`
+Connected to MSSQL Database
+User Details: [
+  {
+    "ID": 62,
+    "FullName": "JISHIL KUMAR UPPUNGAL VIJAYAN\r\n",
+    "Designation": "Secretary - AAC MAINTENANCE\r\n",
+    "EmailId": "maintenance1@almoayyedcg.com",
+    "LoginPassword": "$2b$10$l.gln068.3TgDU2wUg1fXe58xMPx5mWAqbRr4e4HrW5QWmP1pBuOm",
+    "Status": "Active",
+    "Department": "AC Maint-HVAC",
+    "Roles": "Enquiry,Pricing,Quote,Probability,Sales Report",
+    "RequestNo": "47",
+    "ProfilePicture": null,
+    "ProfileImage": null,
+    "MobileNumber": "+973 35686850\r\n"
+  }
+]
+Sample Jobs: [
+  {
+    "RequestNo": "17",
+    "ItemName": "HVAC Maint",
+    "CommonMailIds": null,
+    "CCMailIds": null,
+    "DepartmentName": null
+  },
+  {
+    "RequestNo": "21",
+    "ItemName": "AC Maint-HVAC",
+    "CommonMailIds": "maintenance1@almoayyedcg.com",
+    "CCMailIds": "aacmhod@almoayyedcg.com",
+    "DepartmentName": "AC Maint-HVAC"
+  },
+  {
+    "RequestNo": "21",
+    "ItemName": "AC Maint-Elec",
+    "CommonMailIds": "maintenance1@almoayyedcg.com",
+    "CCMailIds": "shajimon@almoayyedcg.com,aacmhod@almoayyedcg.com",
+    "DepartmentName": "AC Maint-Elec"
+  }
+]

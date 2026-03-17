@@ -1,0 +1,278 @@
+[
+  {
+    "COLUMN_NAME": "ID",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "NO"
+  },
+  {
+    "COLUMN_NAME": "RequestNo",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "QuoteNumber",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "QuoteNo",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "RevisionNo",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ValidityDays",
+    "DATA_TYPE": "int",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "PreparedBy",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "PreparedByEmail",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowScopeOfWork",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowBasisOfOffer",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowExclusions",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowPricingTerms",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowSchedule",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowWarranty",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowResponsibilityMatrix",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowTermsConditions",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowAcceptance",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ShowBillOfQuantity",
+    "DATA_TYPE": "bit",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ScopeOfWork",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "BasisOfOffer",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Exclusions",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "PricingTerms",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Schedule",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Warranty",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ResponsibilityMatrix",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "TermsConditions",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Acceptance",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "BillOfQuantity",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "TotalAmount",
+    "DATA_TYPE": "decimal",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Status",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "CustomClauses",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ClauseOrder",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "QuoteDate",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "CustomerReference",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Subject",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "Signatory",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "SignatoryDesignation",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ToName",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ToAddress",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": -1,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ToPhone",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 50,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ToEmail",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 100,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "CreatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "UpdatedAt",
+    "DATA_TYPE": "datetime",
+    "CHARACTER_MAXIMUM_LENGTH": null,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "LeadJob",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "OwnJob",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255,
+    "IS_NULLABLE": "YES"
+  },
+  {
+    "COLUMN_NAME": "ToFax",
+    "DATA_TYPE": "nvarchar",
+    "CHARACTER_MAXIMUM_LENGTH": 255,
+    "IS_NULLABLE": "YES"
+  }
+]

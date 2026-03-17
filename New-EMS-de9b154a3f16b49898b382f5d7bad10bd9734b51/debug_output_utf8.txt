@@ -1,0 +1,248 @@
+﻿[dotenv@17.2.3] injecting env (9) from server\.env -- tip: ΓÜÖ∩╕Å  enable debug logging with { debug: true }
+Connected to MSSQL Database
+ENQUIRY_17_MASTER_START
+[
+  {
+    "CustomerName": "Binaa Al Bahrain",
+    "ProjectName": "Civil Project 5"
+  }
+]
+ENQUIRY_17_MASTER_END
+ENQUIRY_17_JOBS_START
+[
+  {
+    "ID": 390,
+    "ItemName": "Civil Project",
+    "ParentID": null,
+    "LeadJobCode": "L1"
+  },
+  {
+    "ID": 391,
+    "ItemName": "HVAC Project",
+    "ParentID": 390,
+    "LeadJobCode": null
+  },
+  {
+    "ID": 392,
+    "ItemName": "BMS Project",
+    "ParentID": 391,
+    "LeadJobCode": null
+  },
+  {
+    "ID": 393,
+    "ItemName": "Electrical Project",
+    "ParentID": 390,
+    "LeadJobCode": null
+  },
+  {
+    "ID": 394,
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "ParentID": 390,
+    "LeadJobCode": null
+  },
+  {
+    "ID": 395,
+    "ItemName": "HVAC Project",
+    "ParentID": null,
+    "LeadJobCode": "L2"
+  },
+  {
+    "ID": 396,
+    "ItemName": "BMS Project",
+    "ParentID": null,
+    "LeadJobCode": "L3"
+  },
+  {
+    "ID": 397,
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "ParentID": null,
+    "LeadJobCode": "L4"
+  },
+  {
+    "ID": 398,
+    "ItemName": "Interiors Project",
+    "ParentID": null,
+    "LeadJobCode": "L5"
+  },
+  {
+    "ID": 399,
+    "ItemName": "HVAC Maint",
+    "ParentID": 398,
+    "LeadJobCode": null
+  },
+  {
+    "ID": 400,
+    "ItemName": "BMS Project",
+    "ParentID": 399,
+    "LeadJobCode": null
+  }
+]
+ENQUIRY_17_JOBS_END
+ENQUIRY_17_OPTIONS_START
+[
+  {
+    "ID": 548,
+    "OptionName": "Base Price",
+    "CustomerName": "Binaa Al Bahrain",
+    "ItemName": "Civil Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 549,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Project",
+    "ItemName": "BMS Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 550,
+    "OptionName": "Base Price",
+    "CustomerName": "Interiors Project",
+    "ItemName": "HVAC Maint",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 551,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "HVAC Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 552,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Electrical Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 553,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Maint",
+    "ItemName": "BMS Project",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 554,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 555,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Project",
+    "ItemName": "BMS Project",
+    "LeadJobName": "BMS Project"
+  },
+  {
+    "ID": 556,
+    "OptionName": "Base Price",
+    "CustomerName": "Binaa Al Bahrain",
+    "ItemName": "Interiors Project",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 557,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "HVAC Project",
+    "LeadJobName": "HVAC Project"
+  },
+  {
+    "ID": 558,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "LeadJobName": "Plumbing & Fire Fighting Project"
+  },
+  {
+    "ID": 559,
+    "OptionName": "Base Price",
+    "CustomerName": "Binaa Al Bahrain",
+    "ItemName": "Civil Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 560,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Project",
+    "ItemName": "BMS Project",
+    "LeadJobName": "BMS Project"
+  },
+  {
+    "ID": 561,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Maint",
+    "ItemName": "BMS Project",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 562,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "HVAC Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 563,
+    "OptionName": "Base Price",
+    "CustomerName": "Binaa Al Bahrain",
+    "ItemName": "Interiors Project",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 564,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Electrical Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 565,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "LeadJobName": "Plumbing & Fire Fighting Project"
+  },
+  {
+    "ID": 566,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "HVAC Project",
+    "LeadJobName": "HVAC Project"
+  },
+  {
+    "ID": 567,
+    "OptionName": "Base Price",
+    "CustomerName": "Interiors Project",
+    "ItemName": "HVAC Maint",
+    "LeadJobName": "Interiors Project"
+  },
+  {
+    "ID": 568,
+    "OptionName": "Base Price",
+    "CustomerName": "Civil Project",
+    "ItemName": "Plumbing & Fire Fighting Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 569,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Project",
+    "ItemName": "BMS Project",
+    "LeadJobName": "Civil Project"
+  },
+  {
+    "ID": 570,
+    "OptionName": "Base Price",
+    "CustomerName": "HVAC Project",
+    "ItemName": "BMS Project",
+    "LeadJobName": "Interiors Project"
+  }
+]
+ENQUIRY_17_OPTIONS_END
+ENQUIRY_17_VALUES_START
+[]
+ENQUIRY_17_VALUES_END

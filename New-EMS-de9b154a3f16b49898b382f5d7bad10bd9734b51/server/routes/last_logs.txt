@@ -1,0 +1,50 @@
+﻿[2026-03-08T08:58:23.134Z] Enquiry 17 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:58:23.140Z] Enquiry 15 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.142Z] Enquiry 15 - âœ“ NOT PENDING: Found price 20 for job (OptionID: 540)
+[2026-03-08T08:58:23.144Z] Enquiry 15 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:58:23.150Z] Enquiry 13 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.152Z] Enquiry 13 - âœ“ NOT PENDING: Found price 2500 for job (OptionID: 495)
+[2026-03-08T08:58:23.156Z] Enquiry 13 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:58:23.159Z] Enquiry 12 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.161Z] Enquiry 12 - âœ“ NOT PENDING: Found price 5500 for job (OptionID: 481)
+[2026-03-08T08:58:23.165Z] Enquiry 12 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:58:23.169Z] Enquiry 14 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.171Z] Enquiry 14 - âœ“ NOT PENDING: Found price 1 for job (OptionID: 518)
+[2026-03-08T08:58:23.174Z] Enquiry 14 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:58:23.178Z] Enquiry 11 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.180Z] Enquiry 11 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:58:23.184Z] Enquiry 10 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:23.186Z] Enquiry 10 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:58:24.331Z] Enquiry 17 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:58:24.334Z] Enquiry 17 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:06.723Z] Enquiry 17 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.724Z] Enquiry 17 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:06.726Z] Enquiry 17 - Final Customers array: ["Binaa Al Bahrain","HVAC Project","HVAC Maint"]
+[2026-03-08T08:59:06.729Z] Enquiry 15 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.730Z] Enquiry 15 - âœ“ NOT PENDING: Found price 20 for job (OptionID: 540)
+[2026-03-08T08:59:06.731Z] Enquiry 15 - Final Customers array: ["Nass Contracting","HVAC Project"]
+[2026-03-08T08:59:06.732Z] Enquiry 15 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:59:06.733Z] Enquiry 13 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.734Z] Enquiry 13 - âœ“ NOT PENDING: Found price 2500 for job (OptionID: 495)
+[2026-03-08T08:59:06.735Z] Enquiry 13 - Final Customers array: ["Ithbat Contracting Est.","HVAC Project"]
+[2026-03-08T08:59:06.736Z] Enquiry 13 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:59:06.737Z] Enquiry 12 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.738Z] Enquiry 12 - âœ“ NOT PENDING: Found price 5500 for job (OptionID: 481)
+[2026-03-08T08:59:06.739Z] Enquiry 12 - Final Customers array: ["Robin Construction W.L.L","Ithbat Contracting Est.","Electrical Project"]
+[2026-03-08T08:59:06.739Z] Enquiry 12 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:59:06.741Z] Enquiry 14 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.741Z] Enquiry 14 - âœ“ NOT PENDING: Found price 1 for job (OptionID: 518)
+[2026-03-08T08:59:06.742Z] Enquiry 14 - Final Customers array: ["Intercol Contracting Co. Ltd","HVAC Project"]
+[2026-03-08T08:59:06.743Z] Enquiry 14 filtered out - all prices entered for user's division (Status: Quote)
+[2026-03-08T08:59:06.745Z] Enquiry 11 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.746Z] Enquiry 11 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:06.747Z] Enquiry 11 - Final Customers array: ["Cebarco Bahrain","Electrical Project"]
+[2026-03-08T08:59:06.748Z] Enquiry 10 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:06.749Z] Enquiry 10 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:06.750Z] Enquiry 10 - Final Customers array: ["The Benefit Company BSC (c)","Bahrain World Trade Center","HVAC Project"]
+[2026-03-08T08:59:13.338Z] Enquiry 17 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:13.342Z] Enquiry 17 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:13.350Z] Enquiry 17 - Final Customers array: ["Binaa Al Bahrain","HVAC Project","HVAC Maint"]
+[2026-03-08T08:59:16.593Z] Enquiry 17 - Checking pending for user jobs: ["BMS Project"]
+[2026-03-08T08:59:16.596Z] Enquiry 17 - âš ï¸ PENDING: No prices found for user's division
+[2026-03-08T08:59:16.597Z] Enquiry 17 - Final Customers array: ["Binaa Al Bahrain","HVAC Project","HVAC Maint"]
