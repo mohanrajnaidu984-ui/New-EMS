@@ -1,2 +1,0 @@
-﻿[dotenv@17.2.3] injecting env (9) from .env -- tip: ΓÜÖ∩╕Å  override existing env vars with { override: true }
-Connected to MSSQL Database
