@@ -1,0 +1,8 @@
+Var Description; Istance; BACnet Data Type; BACnet Eng. Unit; Read/Write
+; 0; Analog Input; no-units;Read;
+; 0; Positive Integer Value; newton-meters;Read;
+; 0; Binary Input; no-units;Read;
+; 1; Binary Input; no-units;Read;
+; 1; Positive Integer Value; liters;Write;
+; 0; Large Analog Value; bars;Write;
+; 0; Binary Out; no-units;Write;

@@ -792,45 +792,16 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
 
     let whereClause;
     if (pricingScope === 'own') {
-        // OWN-JOB RULE:
-        // Own-job summary:
-        // - CustomerName = customer dropdown
-        // - EnquiryForItem = current user's department resolved from login email
-        //
-        // Subjob summary while on the own-job tab (first tab):
-        // - CustomerName = first tab label
-        // - EnquiryForItem = all descendant subjobs of the own-job node
+        // OWN-JOB RULE (Quote EnquiryPricingValues dimensions):
+        // Own-job summary: CustomerName = customer dropdown; EnquiryForItem = first tab (own-job label).
+        // Subjobs under first tab: EnquiryForItem = each descendant subjob; CustomerName = that row's parent job (EnquiryFor).
         request.input('customerDropdown', sql.NVarChar(500), String(customerDropdown || ''));
-        let ownJobByEmail = '';
-        const normalizedEmail = String(userEmail || '').trim().toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-        if (normalizedEmail) {
-            const ownJobRes = await sql.query`
-                SELECT TOP 1 Department
-                FROM Master_ConcernedSE
-                WHERE
-                    LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = ${normalizedEmail}
-                    OR LOWER(REPLACE(REPLACE(REPLACE(
-                        LEFT(LTRIM(RTRIM(ISNULL(EmailId, ''))), CHARINDEX('@', LTRIM(RTRIM(ISNULL(EmailId, ''))) + '@') - 1),
-                        '.', ''), '-', ''), '_', '')) =
-                       LOWER(REPLACE(REPLACE(REPLACE(
-                        LEFT(${normalizedEmail}, CHARINDEX('@', ${normalizedEmail} + '@') - 1),
-                        '.', ''), '-', ''), '_', ''))
-                ORDER BY CASE
-                    WHEN LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = ${normalizedEmail} THEN 0
-                    ELSE 1
-                END
-            `;
-            ownJobByEmail = (ownJobRes.recordset?.[0]?.Department || '').toString().trim();
-        }
-        request.input('ownJobByEmail', sql.NVarChar(500), String(ownJobByEmail || ''));
 
-        // Compute descendant subjob labels for the own-job node (from EnquiryFor hierarchy).
-        // This is needed to render subjob prices under the own-job tab in Quote.
         const stripEfLabel = (s) => String(s || '')
             .replace(/^(L\d+\s*-\s*|Sub Job\s*-\s*)/i, '')
             .trim();
 
-        let descendantSubjobLabels = [];
+        let subjobPairCondSql = '1=0';
         try {
             const efRes = await sql.query`
                 SELECT ID, ParentID, ItemName
@@ -838,55 +809,62 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
                 WHERE RequestNo = ${requestNo}
             `;
             const efRows = efRes.recordset || [];
-            const ownLabelClean = stripEfLabel(ownJobByEmail);
+            const firstTabStr = String(firstTab || '').trim();
+            const firstTabClean = stripEfLabel(firstTabStr);
 
             const ownIds = new Set(
                 efRows
                     .filter(r =>
-                        stripEfLabel(r.ItemName) === ownLabelClean ||
-                        String(r.ItemName || '').trim() === String(ownJobByEmail || '').trim()
+                        stripEfLabel(r.ItemName) === firstTabClean ||
+                        String(r.ItemName || '').trim() === firstTabStr
                     )
                     .map(r => String(r.ID))
             );
 
-            const descendants = new Set();
-            const collect = (parentId) => {
-                const pid = String(parentId);
-                efRows.forEach(r => {
+            const byId = new Map(efRows.map(r => [String(r.ID), r]));
+            const subjobPairs = [];
+            const seenPairKeys = new Set();
+            const addPair = (itemName, parentName) => {
+                const k = `${itemName}\x1e${parentName}`;
+                if (seenPairKeys.has(k)) return;
+                seenPairKeys.add(k);
+                subjobPairs.push({ itemName, parentName });
+            };
+
+            const walkFrom = (parentId) => {
+                efRows.forEach((r) => {
+                    if (String(r.ParentID) !== String(parentId)) return;
                     const rid = String(r.ID);
-                    const rParent = String(r.ParentID);
-                    if (rParent === pid) {
-                        // Exclude the own node itself
-                        if (!ownIds.has(rid)) {
-                            const lbl = stripEfLabel(r.ItemName);
-                            if (lbl) descendants.add(lbl);
-                        }
-                        collect(rid);
+                    const parentRow = byId.get(String(parentId));
+                    if (!parentRow) return;
+                    if (!ownIds.has(rid)) {
+                        addPair(String(r.ItemName || '').trim(), String(parentRow.ItemName || '').trim());
                     }
+                    walkFrom(rid);
                 });
             };
 
-            ownIds.forEach(id => collect(id));
-            descendantSubjobLabels = Array.from(descendants);
+            ownIds.forEach((id) => walkFrom(id));
+
+            if (subjobPairs.length > 0) {
+                const parts = [];
+                subjobPairs.forEach((pair, i) => {
+                    const inItem = `sjItem_${i}`;
+                    const inParent = `sjParent_${i}`;
+                    request.input(inItem, sql.NVarChar(500), pair.itemName);
+                    request.input(inParent, sql.NVarChar(500), pair.parentName);
+                    parts.push(`(
+                        (v.EnquiryForItem = @${inItem} OR ${itemSql} = @${inItem})
+                        AND (v.CustomerName = @${inParent} OR ${custSql} = @${inParent})
+                    )`);
+                });
+                subjobPairCondSql = parts.join(' OR ');
+            }
         } catch (e) {
-            console.error('Pricing API: Failed to compute subjob descendants for quoteScopedValues:', e);
-            descendantSubjobLabels = [];
+            console.error('Pricing API: Failed to compute subjob parent pairs for quoteScopedValues:', e);
+            subjobPairCondSql = '1=0';
         }
 
-        let subjobCondSql = '1=0';
-        if (descendantSubjobLabels.length > 0) {
-            const parts = [];
-            descendantSubjobLabels.forEach((lbl, i) => {
-                const pName = `subjobName_${i}`;
-                request.input(pName, sql.NVarChar(500), String(lbl));
-                parts.push(`${itemSql} = @${pName}`);
-            });
-            subjobCondSql = parts.join(' OR ');
-        }
-
-        // Final filter:
-        // - Include own-job price rows for (CustomerName = customerDropdown) and (EnquiryForItem = ownJobByEmail)
-        // - Include subjob price rows for (CustomerName = firstTab) and (EnquiryForItem in descendant subjobs)
         whereClause = `
             v.RequestNo = @requestNo
             AND ${leadSql} = @leadClean
@@ -897,36 +875,106 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
                         v.CustomerName = @customerDropdown
                         OR ${custSql} = @customerDropdown
                     )
-                    AND @ownJobByEmail <> ''
+                    AND @firstTab <> ''
                     AND (
-                        v.EnquiryForItem = @ownJobByEmail
-                        OR ${itemSql} = @ownJobByEmail
+                        v.EnquiryForItem = @firstTab
+                        OR ${itemSql} = @firstTab
                     )
                 )
                 OR
-                (
-                    (v.CustomerName = @firstTab OR ${custSql} = @firstTab)
-                    AND (${subjobCondSql})
-                )
+                (${subjobPairCondSql})
             )
         `;
     } else {
         request.input('customerDropdown', sql.NVarChar(500), String(customerDropdown || ''));
         request.input('parentJobName', sql.NVarChar(500), String(parentJobName || ''));
         request.input('activeTab', sql.NVarChar(500), String(activeTab || ''));
-        // SUBJOB RULE:
-        // CustomerName = first tab label, EnquiryForItem = selected tab label.
+
+        const stripEfLabelSub = (s) => String(s || '')
+            .replace(/^(L\d+\s*-\s*|Sub Job\s*-\s*)/i, '')
+            .trim();
+
+        // Nested rows under the selected subjob tab: EnquiryForItem = child; CustomerName = child's parent
+        // (same semantics as own-job branch, but rooted at activeTab instead of first tab).
+        let nestedUnderActiveTabCondSql = '1=0';
+        try {
+            const efResSub = await sql.query`
+                SELECT ID, ParentID, ItemName
+                FROM EnquiryFor
+                WHERE RequestNo = ${requestNo}
+            `;
+            const efRowsSub = efResSub.recordset || [];
+            const activeTabStr = String(activeTab || '').trim();
+            const activeTabClean = stripEfLabelSub(activeTabStr);
+            const byIdSub = new Map(efRowsSub.map((r) => [String(r.ID), r]));
+            const activeTabIds = efRowsSub
+                .filter((r) =>
+                    stripEfLabelSub(r.ItemName) === activeTabClean ||
+                    String(r.ItemName || '').trim() === activeTabStr
+                )
+                .map((r) => String(r.ID));
+
+            const nestedPairs = [];
+            const seenNested = new Set();
+            const addNestedPair = (itemName, parentName) => {
+                const k = `${itemName}\x1e${parentName}`;
+                if (seenNested.has(k)) return;
+                seenNested.add(k);
+                nestedPairs.push({ itemName, parentName });
+            };
+
+            const walkFromActiveTab = (parentId) => {
+                efRowsSub.forEach((r) => {
+                    if (String(r.ParentID) !== String(parentId)) return;
+                    const parentRow = byIdSub.get(String(parentId));
+                    if (!parentRow) return;
+                    addNestedPair(String(r.ItemName || '').trim(), String(parentRow.ItemName || '').trim());
+                    walkFromActiveTab(r.ID);
+                });
+            };
+
+            activeTabIds.forEach((id) => walkFromActiveTab(id));
+
+            if (nestedPairs.length > 0) {
+                const parts = [];
+                nestedPairs.forEach((pair, i) => {
+                    const inItem = `subNestedItem_${i}`;
+                    const inParent = `subNestedParent_${i}`;
+                    request.input(inItem, sql.NVarChar(500), pair.itemName);
+                    request.input(inParent, sql.NVarChar(500), pair.parentName);
+                    parts.push(`(
+                        (v.EnquiryForItem = @${inItem} OR ${itemSql} = @${inItem})
+                        AND (v.CustomerName = @${inParent} OR ${custSql} = @${inParent})
+                    )`);
+                });
+                nestedUnderActiveTabCondSql = parts.join(' OR ');
+            }
+        } catch (e) {
+            console.error('Pricing API: Failed to compute nested pairs for quoteScopedValues (sub scope):', e);
+            nestedUnderActiveTabCondSql = '1=0';
+        }
+
+        // SUBJOB RULE (non-first tab):
+        // (3) CustomerName = first tab, EnquiryForItem = selected subjob tab.
+        // (4) CustomerName = first tab, EnquiryForItem = parent of selected subjob (parentJobName) — legacy.
+        // (5) Each descendant under activeTab in EnquiryFor: EnquiryForItem = child; CustomerName = parent row.
         whereClause = `
             v.RequestNo = @requestNo
-            AND (
-                v.CustomerName = @firstTab
-                OR ${custSql} = @firstTab
-            )
-            AND (
-                v.EnquiryForItem = @activeTab
-                OR ${itemSql} = @activeTab
-            )
             AND ${leadSql} = @leadClean
+            AND (
+                (
+                    (v.CustomerName = @firstTab OR ${custSql} = @firstTab)
+                    AND (v.EnquiryForItem = @activeTab OR ${itemSql} = @activeTab)
+                )
+                OR
+                (
+                    @parentJobName <> N''
+                    AND (v.CustomerName = @firstTab OR ${custSql} = @firstTab)
+                    AND (v.EnquiryForItem = @parentJobName OR ${itemSql} = @parentJobName)
+                )
+                OR
+                (${nestedUnderActiveTabCondSql})
+            )
         `;
     }
 

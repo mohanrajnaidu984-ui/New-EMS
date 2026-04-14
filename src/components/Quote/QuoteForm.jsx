@@ -5,6 +5,9 @@ import { format } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
+import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
+import ListBoxControl from '../Enquiry/ListBoxControl';
+import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
 
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
 console.log("QUOTE FILE LOADED");
@@ -103,6 +106,173 @@ const normalize = (str) => {
         .replace(/[.,]/g, '') // Remove dots and commas for robust matching
         .replace(/\s+/g, ' ');
 };
+/** Same idea as pricing keys: fold punctuation/spacing so "( Bahrain )" matches "(Bahrain)". */
+const normalizeCustomerKey = (s) =>
+    String(s || '')
+        .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+
+const stripQuoteJobPrefix = (name) =>
+    String(name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+
+const collapseSpacesLower = (s) =>
+    String(s || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+/** Server-built map: internal division → Master_ConcernedSE names + default assigned SE for this enquiry. */
+const resolveQuoteInternalAttention = (enquiryData, toName) => {
+    if (!toName || !enquiryData?.internalAttentionByCleanItemName) return null;
+    const map = enquiryData.internalAttentionByCleanItemName;
+    const cl = collapseSpacesLower(stripQuoteJobPrefix(toName));
+    if (map[cl]) return map[cl];
+    const fullLower = collapseSpacesLower(toName);
+    if (map[fullLower]) return map[fullLower];
+    const nk = `__norm_${normalizeCustomerKey(toName)}`;
+    if (map[nk]) return map[nk];
+    const tnk = normalizeCustomerKey(toName);
+    if (tnk) {
+        for (const k of Object.keys(map)) {
+            if (k.startsWith('__norm_')) continue;
+            const kk = normalizeCustomerKey(k);
+            if (!kk) continue;
+            if (kk === tnk || (tnk.length > 3 && (tnk.includes(kk) || kk.includes(tnk)))) return map[k];
+            if (collapseSpacesLower(k) === cl) return map[k];
+        }
+    }
+    const seen = new Set();
+    for (const v of Object.values(map)) {
+        if (!v || typeof v !== 'object' || !Array.isArray(v.options)) continue;
+        const im = String(v.itemName || '');
+        const sig = `${im}|${v.departmentName || ''}`;
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        if (collapseSpacesLower(stripQuoteJobPrefix(im)) === cl) return v;
+        if (normalizeCustomerKey(im) === tnk && tnk) return v;
+    }
+    return null;
+};
+
+/**
+ * Prefer a map entry with non-empty SE options (keys may differ: clean name vs "L56 - …" vs pricing label).
+ */
+const resolveQuoteInternalAttentionFlexible = (enquiryData, toName) => {
+    if (!toName || !enquiryData?.internalAttentionByCleanItemName) return null;
+    const tryHit = (name) => resolveQuoteInternalAttention(enquiryData, name);
+    let hit = tryHit(toName);
+    if (hit?.options?.length) return hit;
+    const t = collapseSpacesLower(stripQuoteJobPrefix(toName));
+    const node = (enquiryData.divisionsHierarchy || []).find(
+        (n) => collapseSpacesLower(stripQuoteJobPrefix(n.itemName || '')) === t
+    );
+    if (node?.itemName) {
+        hit = tryHit(node.itemName);
+        if (hit?.options?.length) return hit;
+    }
+    const map = enquiryData.internalAttentionByCleanItemName;
+    for (const v of Object.values(map)) {
+        if (!v || typeof v !== 'object' || !Array.isArray(v.options) || !v.options.length) continue;
+        const vn = collapseSpacesLower(stripQuoteJobPrefix(v.itemName || ''));
+        if (vn === t) return v;
+    }
+    return tryHit(toName);
+};
+
+const normLooseAttention = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+/** Same rules as attentionSelectOptions: internal = hierarchy / profiles / pricing, or server internalAttention map hit. */
+function isQuoteInternalCustomer(enquiryData, pricingJobs, toName) {
+    if (!toName || !enquiryData) return false;
+    if (resolveQuoteInternalAttention(enquiryData, toName) != null) return true;
+    const toNameClean = collapseSpacesLower(stripQuoteJobPrefix(toName));
+    const toKey = normalizeCustomerKey(toName);
+    const hierarchyClean = new Set(
+        (enquiryData.divisionsHierarchy || []).map((n) =>
+            collapseSpacesLower(stripQuoteJobPrefix(n.itemName || n.DivisionName || ''))
+        )
+    );
+    const profileClean = new Set(
+        (enquiryData.availableProfiles || []).map((p) =>
+            collapseSpacesLower(stripQuoteJobPrefix(p.itemName || ''))
+        )
+    );
+    const pricingClean = new Set(
+        (pricingJobs || [])
+            .filter((j) => j.visible !== false)
+            .map((j) => collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')))
+            .filter(Boolean)
+    );
+    return (
+        hierarchyClean.has(toNameClean) ||
+        profileClean.has(toNameClean) ||
+        [...pricingClean].some(
+            (pc) =>
+                pc === toNameClean ||
+                (toKey &&
+                    (normalizeCustomerKey(pc) === toKey ||
+                        pc.includes(toNameClean) ||
+                        toNameClean.includes(pc)))
+        )
+    );
+}
+
+/** Stable key for "same lead branch" so we only clear the customer when the user actually switches lead. */
+const leadJobChoiceFingerprint = (optionVal) => {
+    const s = String(optionVal || '').trim();
+    const cleaned = s.replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
+    const m = s.match(/^(L\d+)/i);
+    const code = m ? m[1].toUpperCase() : '';
+    return `${code}|${cleaned}`;
+};
+
+/**
+ * `<option value>` uses full division strings (e.g. "L56 - Civil Project") but state often has
+ * clean names ("Civil Project") or L-codes only. Mismatched controlled <select> values confuse
+ * the DOM and can fire onChange — which was wiping the customer via handleCustomerChange(null).
+ */
+const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs, leadJobPrefix) => {
+    const list = visibleLeadJobs || [];
+    if (list.length === 0) return '';
+    const normFull = (x) => String(x || '').trim().toLowerCase();
+    const normClean = (x) => String(x || '').replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
+
+    if (selectedLeadId && pricingJobs?.length) {
+        const found = pricingJobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+        if (found) {
+            const name = String(found.itemName || found.DivisionName || found.ItemName || '');
+            const hit = list.find(
+                (v) =>
+                    normFull(v) === normFull(name) ||
+                    normClean(v) === normClean(name) ||
+                    normFull(v).endsWith(`- ${normClean(name)}`) ||
+                    normFull(name).endsWith(normClean(v))
+            );
+            if (hit) return hit;
+        }
+    }
+
+    if (leadJobPrefix) {
+        const p = String(leadJobPrefix).trim();
+        const pl = p.toLowerCase();
+        let hit = list.find((v) => normFull(v) === pl);
+        if (hit) return hit;
+        hit = list.find((v) => normClean(v) === normClean(p));
+        if (hit) return hit;
+        const codeMatch = pl.match(/^(l\d+)/);
+        if (codeMatch) {
+            const code = codeMatch[1];
+            hit = list.find((v) => normFull(v).startsWith(code));
+            if (hit) return hit;
+        }
+        hit = list.find((v) => normFull(v).startsWith(pl));
+        if (hit) return hit;
+    }
+    return '';
+};
+
 const normalizeName = normalize;
 
 const parsePrice = (v) => {
@@ -138,6 +308,61 @@ const matchDivisionCode = (qDivCode, jName, jDivCode = null) => {
         (q === 'GEN'); // Global fallback for general quotes
 };
 
+/**
+ * Saved EnquiryQuotes.OwnJob is often the creator's department (server overwrites on insert/update),
+ * not the priced branch — so multi-tab views must align rows using QuoteNumber's division segment vs the active tab.
+ */
+const quoteNumberDivisionMatchesTab = (q, activeTabObj, multiTab) => {
+    if (!multiTab || !activeTabObj || !q) return false;
+    const parts = q.QuoteNumber?.split('/') || [];
+    const qDiv = (parts[1] || '').toUpperCase();
+    if (!qDiv || qDiv === 'GEN') return false;
+    const tabLabel = (activeTabObj.label || activeTabObj.name || '').toUpperCase();
+    return matchDivisionCode(qDiv, tabLabel, activeTabObj.divisionCode);
+};
+
+/**
+ * When multiple job tabs exist, division heuristics must use the ACTIVE tab's job (e.g. BMS subjob),
+ * not selectedLeadId (often the parent HVAC lead) — otherwise HVP quotes match the wrong tab.
+ * Searches jobsPool first — pricingData.jobs may omit subjobs that still exist in hierarchy merge.
+ */
+const divisionMatchContextForQuoteTab = (
+    selectedLeadId,
+    pricingData,
+    activeTabRealId,
+    activeTabObj,
+    calculatedTabsLength,
+    jobsPool
+) => {
+    const findJobNode = (realId) => {
+        if (!realId) return null;
+        const want = String(realId);
+        if (Array.isArray(jobsPool) && jobsPool.length) {
+            const j = jobsPool.find((x) => String(x.id || x.ItemID || x.ID) === want);
+            if (j) return j;
+        }
+        if (pricingData?.jobs?.length) {
+            const j = pricingData.jobs.find((x) => String(x.id || x.ItemID) === want);
+            if (j) return j;
+        }
+        return null;
+    };
+
+    if (calculatedTabsLength > 1 && activeTabRealId) {
+        const j = findJobNode(activeTabRealId);
+        if (j) return (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+    }
+    if (selectedLeadId && pricingData?.jobs) {
+        const j = pricingData.jobs.find((x) => String(x.id || x.ItemID) === String(selectedLeadId));
+        if (j) return (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+    }
+    if (activeTabRealId) {
+        const j = findJobNode(activeTabRealId);
+        if (j) return (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+    }
+    return (activeTabObj?.label || activeTabObj?.name || '').toUpperCase();
+};
+
 const isDescendant = (childId, ancestorId, pool) => {
     if (!childId || !ancestorId || !pool) return false;
     const child = pool.find(j => String(j.id || j.ItemID || j.ID) === String(childId));
@@ -155,6 +380,25 @@ const isDescendant = (childId, ancestorId, pool) => {
         safety++;
     }
     return false;
+};
+
+/** Direct child job ids under parentId (pricing jobs + enquiry hierarchy merged — same as tab builder). */
+const collectDirectChildJobIdsFromPools = (parentId, pricingPool, hierarchyPool) => {
+    const pid = String(parentId);
+    const out = [];
+    const seen = new Set();
+    for (const pool of [pricingPool, hierarchyPool].filter(Boolean)) {
+        for (const j of pool) {
+            const id = String(j.id || j.ItemID || j.ID || '');
+            if (!id || seen.has(id)) continue;
+            const pp = String(j.parentId ?? j.ParentID ?? '').trim();
+            if (pp === pid && pp !== '0' && pp !== '') {
+                seen.add(id);
+                out.push(id);
+            }
+        }
+    }
+    return out;
 };
 
 const tableStyles = `
@@ -220,7 +464,15 @@ const QuoteForm = () => {
     const [quoteId, setQuoteId] = useState(null);
     const [loading, setLoading] = useState(false);
     const [existingQuotes, setExistingQuotes] = useState([]);
+    /** Rows from GET /by-enquiry scoped by LeadJob + RequestNo + OwnJob + ToName (previous-quote panel). */
+    const [quoteScopedForPanel, setQuoteScopedForPanel] = useState([]);
     const [selectedLeadId, setSelectedLeadId] = useState(null);
+    /** Last lead <select> fingerprint — avoids clearing customer when the same lead is re-applied after re-render. */
+    const leadChoiceFingerprintRef = useRef('');
+    /** One-shot gate: after a real lead change, auto-select first available customer option. */
+    const autoSelectCustomerAfterLeadChangeRef = useRef(false);
+    /** When lead changes, keep quote id/number if auto-select picks the same customer again (avoids Quote Ref → Draft). */
+    const preserveQuoteOnLeadChangeRef = useRef(null);
     const [saving, setSaving] = useState(false);
 
     // Quote Context Scope (For viewing/revising previous quotes with specific scope)
@@ -242,6 +494,7 @@ const QuoteForm = () => {
 
     // Selected Jobs for Pricing
     const [selectedJobs, setSelectedJobs] = useState([]);
+    const pricingSelectionTouchedRef = useRef({});
     const [expandedGroups, setExpandedGroups] = useState({}); // Track expanded revisions
 
     const toggleExpanded = (quoteNo) => {
@@ -331,14 +584,18 @@ const QuoteForm = () => {
     const [toEmail, setToEmail] = useState('');
     const [toFax, setToFax] = useState('');
     const [toAttention, setToAttention] = useState(''); // ReceivedFrom contact for selected customer
+    /** When enquiry-data map misses a label (e.g. pricing-only customer), filled from /attention-by-department. */
+    const [deptAttentionNames, setDeptAttentionNames] = useState([]);
 
+    /** Mirrors enquiry module: multi-select enquiry types → persisted as EnquiryQuotes.QuoteType (comma-separated). */
+    const [quoteEnquiryTypeSelect, setQuoteEnquiryTypeSelect] = useState('');
+    const [quoteTypeList, setQuoteTypeList] = useState([]);
+    const [enquiryTypesMaster, setEnquiryTypesMaster] = useState([]);
 
     // Prepared By
     const [preparedBy, setPreparedBy] = useState('');
     const [preparedByOptions, setPreparedByOptions] = useState([]);
     const [signatoryOptions, setSignatoryOptions] = useState([]);
-    const [enquiryCustomerOptions, setEnquiryCustomerOptions] = useState([]);
-
     // Pricing Data
     const [pricingData, setPricingData] = useState(null);
 
@@ -358,6 +615,7 @@ const QuoteForm = () => {
             departmentCode: d.departmentCode || d.DepartmentCode
         }));
     }, [pricingData, enquiryData]);
+
     const [pricingSummary, setPricingSummary] = useState([]);
     const [grandTotal, setGrandTotal] = useState(0);
     const [hasPricedOptional, setHasPricedOptional] = useState(false);
@@ -382,7 +640,7 @@ const QuoteForm = () => {
         setQuoteNumber('');
         setQuoteDate(new Date().toISOString().split('T')[0]);
         setValidityDays(30);
-        setPreparedBy(currentUser?.FullName || currentUser?.name || '');
+        setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
         setSignatory('');
         setSignatoryDesignation('');
         setSubject('');
@@ -393,6 +651,8 @@ const QuoteForm = () => {
         setToEmail('');
         setToFax('');
         setToAttention('');
+        setQuoteEnquiryTypeSelect('');
+        setQuoteTypeList([]);
         setClauses({
             showScopeOfWork: true, showBasisOfOffer: true, showExclusions: true,
             showPricingTerms: true, showSchedule: true, showWarranty: true,
@@ -439,8 +699,9 @@ const QuoteForm = () => {
             subject, quoteDate, validityDays, customerReference,
             signatory, signatoryDesignation, preparedBy,
             toName, toAddress, toPhone, toEmail, toAttention,
+            quoteTypeList, quoteEnquiryTypeSelect,
             clauseContent, clauses, customClauses, orderedClauses,
-            selectedJobs, quoteId, quoteNumber
+            quoteId, quoteNumber
         };
 
         // 2. Load or Reset New Tab State
@@ -460,18 +721,21 @@ const QuoteForm = () => {
             setSignatoryDesignation(saved.signatoryDesignation);
             setPreparedBy(saved.preparedBy);
 
-            // Use saved customer if it exists, otherwise carry over from current tab
-            setToName(saved.toName || currentCustomer.toName);
-            setToAddress(saved.toAddress || currentCustomer.toAddress);
-            setToPhone(saved.toPhone || currentCustomer.toPhone);
-            setToEmail(saved.toEmail || currentCustomer.toEmail);
-            setToAttention(saved.toAttention || currentCustomer.toAttention);
+            // Recipient (customer dropdown + To fields) is one global choice for this session, not per job tab.
+            // Restoring saved.toName here made HVAC/BMS tab switches snap the dropdown to the other tab's old value.
+            setToName(currentCustomer.toName);
+            setToAddress(currentCustomer.toAddress);
+            setToPhone(currentCustomer.toPhone);
+            setToEmail(currentCustomer.toEmail);
+            setToAttention(currentCustomer.toAttention);
+            setQuoteTypeList(Array.isArray(saved.quoteTypeList) ? [...saved.quoteTypeList] : []);
+            setQuoteEnquiryTypeSelect(saved.quoteEnquiryTypeSelect || '');
 
             setClauseContent(saved.clauseContent);
             setClauses(saved.clauses);
             setCustomClauses(saved.customClauses);
             setOrderedClauses(saved.orderedClauses);
-            setSelectedJobs(saved.selectedJobs);
+            // selectedJobs: global defaults from pricing summary effect (paired tabs), not per-tab snapshot
             setQuoteId(saved.quoteId);
             setQuoteNumber(saved.quoteNumber);
         } else {
@@ -495,12 +759,6 @@ const QuoteForm = () => {
         if (currentUser && enquiryData?.availableProfiles) {
             const userDept = (currentUser.Department || '').trim().toLowerCase();
             const userEmail = (currentUser.EmailId || currentUser.email || '').trim().toLowerCase();
-            const userName = (currentUser.FullName || currentUser.name || '').trim();
-
-            if (!preparedBy && userName) {
-                setPreparedBy(userName);
-            }
-
             // Priority 1: Backend Flag
             let personalProfile = enquiryData.availableProfiles.find(p => p.isPersonalProfile);
 
@@ -617,7 +875,8 @@ const QuoteForm = () => {
                 });
             };
 
-            const resolvedLeadJobId = findLeadJobByPrefix(leadLCode, localJobsList)?.id;
+            const _leadHit = findLeadJobByPrefix(leadLCode, localJobsList);
+            const resolvedLeadJobId = _leadHit ? (_leadHit.id || _leadHit.ItemID) : undefined;
 
             // --- Resolved Lead Code for Quote Number Comparison ---
             const currentLeadCode = (() => {
@@ -704,86 +963,247 @@ const QuoteForm = () => {
             // Determine if the effective root is a Lead Job or a Sub-job (Own Job Type)
             const isLeadJobContext = String(effectiveRootId) === String(resolvedLeadJobId);
 
-            if (!isLeadJobContext) {
-                // --- SUB-JOB LOGIC: Only parent job as customer name ---
-                const currentJob = localJobsList.find(j => String(j.id || j.ItemID || j.ID) === String(effectiveRootId));
-                if (currentJob) {
-                    const pid = currentJob.parentId || currentJob.ParentID;
-                    const parentJob = localJobsList.find(j => String(j.id || j.ItemID || j.ID) === String(pid));
-                    if (parentJob) {
-                        const pName = parentJob.itemName || parentJob.DivisionName;
-                        let quoteNo = null;
+            const selectedForTabs = (toName || '').trim();
 
-                        // Resolve latest quote for this internal parent customer
-                        if (existingQuotes.length > 0) {
-                            const tabQuotes = existingQuotes.filter(q => {
-                                if (normalize(q.ToName || '') !== normalize(pName || '')) return false;
-                                return matchDivisionCode(q.QuoteNumber?.split('/')[1]?.toUpperCase(), currentJob.itemName || currentJob.DivisionName, currentJob.divisionCode);
-                            });
-                            if (tabQuotes.length > 0) {
-                                tabQuotes.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
-                                quoteNo = tabQuotes[0].QuoteNumber;
-                            }
+            const isInternalJobName = (name) => {
+                if (!name) return false;
+                const key = collapseSpacesLower(stripQuoteJobPrefix(name));
+                return localJobsList.some((j) => {
+                    const jn = collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || ''));
+                    return jn === key && jn.length > 0;
+                });
+            };
+
+            const resolveLatestQuoteNoForJob = (jobNode) => {
+                if (!jobNode || !existingQuotes.length) return null;
+                const jn = (jobNode.itemName || jobNode.DivisionName || '').trim();
+                if (!jn) return null;
+                const tabLike = { label: jn, name: jn, divisionCode: jobNode.divisionCode };
+                const matches = existingQuotes.filter((q) => {
+                    if (selectedForTabs) {
+                        const qTo = normalize(q.ToName || '');
+                        const curTo = normalize(selectedForTabs);
+                        if (qTo && curTo && qTo !== curTo) return false;
+                    }
+                    return quoteNumberDivisionMatchesTab(q, tabLike, true);
+                });
+                if (matches.length === 0) return null;
+                matches.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
+                return matches[0].QuoteNumber;
+            };
+
+            /** Merge hierarchy + pricing so parent/child links are not lost when one source omits rows. */
+            const mergedJobsForHierarchy = (() => {
+                const byId = new Map();
+                const add = (row) => {
+                    const id = String(row?.id ?? row?.ItemID ?? row?.ID ?? '');
+                    if (!id) return;
+                    const prev = byId.get(id);
+                    const merged = prev
+                        ? {
+                            ...prev,
+                            ...row,
+                            parentId: row.parentId ?? row.ParentID ?? prev.parentId ?? prev.ParentID,
+                            ParentID: row.ParentID ?? row.parentId ?? prev.ParentID ?? prev.parentId,
+                            itemName: row.itemName || row.ItemName || prev.itemName,
+                            DivisionName: row.DivisionName || prev.DivisionName
                         }
+                        : {
+                            ...row,
+                            id: row.id || row.ItemID || row.ID,
+                            parentId: row.parentId ?? row.ParentID,
+                            ParentID: row.ParentID ?? row.parentId,
+                            itemName: row.itemName || row.ItemName || row.DivisionName,
+                            DivisionName: row.DivisionName || row.itemName
+                        };
+                    byId.set(id, merged);
+                };
+                (enquiryData?.divisionsHierarchy || []).forEach(add);
+                (localJobsList || []).forEach(add);
+                (pricingData?.jobs || []).forEach(add);
+                return [...byId.values()];
+            })();
 
-                        finalTabs = [{
+            const collectDirectSubJobs = (parentId) => {
+                if (!parentId) return [];
+                const pid = String(parentId);
+                const seen = new Set();
+                const out = [];
+                for (const j of mergedJobsForHierarchy) {
+                    const jid = String(j.id || j.ItemID || j.ID || '');
+                    if (!jid || seen.has(jid)) continue;
+                    const pp = String(j.parentId ?? j.ParentID ?? '').trim();
+                    if (pp === pid && pp !== '0' && pp !== '') {
+                        seen.add(jid);
+                        out.push(j);
+                    }
+                }
+                return out.sort((a, b) =>
+                    String(a.itemName || a.DivisionName || '').localeCompare(String(b.itemName || b.DivisionName || ''))
+                );
+            };
+
+            /**
+             * Own job for the logged-in user — same signals as quote customer options (email on division, then editableJobs, then department).
+             * Scoped to the current lead branch when resolvedLeadJobId is set.
+             */
+            const findOwnJobNodeForLoggedInUser = () => {
+                const userEmailNorm = (currentUser?.EmailId || currentUser?.email || '')
+                    .toLowerCase()
+                    .replace(/@almcg\.com/g, '@almoayyedcg.com')
+                    .trim();
+                const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase();
+                const editableNames = (pricingData?.access?.editableJobs || []).map((n) =>
+                    String(n).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+                );
+
+                const mailMatchesNode = (node) => {
+                    if (!userEmailNorm) return false;
+                    const raw = [node.commonMailIds, node.ccMailIds, node.CommonMailIds, node.CCMailIds]
+                        .filter(Boolean)
+                        .join(',');
+                    const parts = raw
+                        .split(/[,;]/)
+                        .map((m) =>
+                            m
+                                .trim()
+                                .toLowerCase()
+                                .replace(/@almcg\.com/g, '@almoayyedcg.com')
+                        )
+                        .filter(Boolean);
+                    return parts.some((p) => p === userEmailNorm);
+                };
+
+                const inLeadBranch = (j) => {
+                    if (!resolvedLeadJobId) return true;
+                    return isDescendantOrSelf(j.id || j.ItemID, resolvedLeadJobId);
+                };
+
+                const candidates = mergedJobsForHierarchy.filter(inLeadBranch);
+
+                for (const n of candidates) {
+                    if (mailMatchesNode(n)) return n;
+                }
+                for (const n of candidates) {
+                    const nodeNameNorm = (n.itemName || n.DivisionName || '')
+                        .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                        .trim()
+                        .toLowerCase();
+                    if (editableNames.includes(nodeNameNorm)) return n;
+                }
+                for (const n of candidates) {
+                    const nodeNameNorm = (n.itemName || n.DivisionName || '')
+                        .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                        .trim()
+                        .toLowerCase();
+                    if (userDeptNorm) {
+                        if (nodeNameNorm === userDeptNorm) return n;
+                        if (nodeNameNorm.includes(userDeptNorm) && userDeptNorm.length > 2) return n;
+                        if (
+                            userDeptNorm.includes(nodeNameNorm.replace(' project', '').trim()) &&
+                            nodeNameNorm.length > 2
+                        )
+                            return n;
+                    }
+                }
+                return null;
+            };
+
+            /**
+             * Tab 1 = user's own job (from email/editable/dept).
+             * Further tabs = **every** direct child subjob under that own job (same parent id), sorted by name.
+             */
+            const buildTwoTabsUserOwnJobAndDirectSubjob = (ownJobNode) => {
+                const ownId = ownJobNode.id || ownJobNode.ItemID;
+                const ownIdStr = String(ownId);
+                const kids = collectDirectSubJobs(ownId);
+                const ownLabel = (ownJobNode.itemName || ownJobNode.DivisionName || '').trim();
+                const tabs = [
+                    {
+                        id: `ownjob-${ownIdStr}`,
+                        name: ownLabel,
+                        label: ownLabel,
+                        isSelf: true,
+                        isOwnJobTab: true,
+                        realId: ownId,
+                        divisionCode: ownJobNode.divisionCode,
+                        quoteNo: resolveLatestQuoteNoForJob(ownJobNode)
+                    }
+                ];
+                for (const kid of kids) {
+                    tabs.push({
+                        id: `subjob-${kid.id || kid.ItemID}`,
+                        name: kid.itemName || kid.DivisionName,
+                        label: kid.itemName || kid.DivisionName,
+                        isSelf: false,
+                        isSubJobTab: true,
+                        realId: kid.id || kid.ItemID,
+                        divisionCode: kid.divisionCode,
+                        quoteNo: resolveLatestQuoteNoForJob(kid)
+                    });
+                }
+                return tabs;
+            };
+
+            /** External / fallback: tab 1 = resolved lead (L-branch root), tab 2 = first direct subjob under that root. */
+            const buildInternalLeadSubjobTabs = (markExternalRecipient = false) => {
+                if (!resolvedLeadJobId) return [];
+                const leadJobNode =
+                    mergedJobsForHierarchy.find((j) => String(j.id || j.ItemID) === String(resolvedLeadJobId)) ||
+                    localJobsList.find((j) => String(j.id || j.ItemID) === String(resolvedLeadJobId));
+                const leadLabel = (leadJobNode?.itemName || leadJobNode?.DivisionName || selectedForTabs || enquiryData?.leadJobPrefix || 'Lead').trim();
+                const subJobsAll = collectDirectSubJobs(resolvedLeadJobId);
+                const subJobs = subJobsAll;
+                const ext = markExternalRecipient ? { isExternal: true } : {};
+
+                return [
+                    {
+                        ...ext,
+                        id: `lead-${resolvedLeadJobId}`,
+                        name: leadLabel,
+                        label: leadLabel,
+                        isSelf: true,
+                        isLeadInternalTab: true,
+                        realId: resolvedLeadJobId,
+                        divisionCode: leadJobNode?.divisionCode,
+                        quoteNo: resolveLatestQuoteNoForJob(leadJobNode)
+                    },
+                    ...subJobs.map((sj) => ({
+                        ...ext,
+                        id: `subjob-${sj.id || sj.ItemID}`,
+                        name: sj.itemName || sj.DivisionName,
+                        label: sj.itemName || sj.DivisionName,
+                        isSelf: false,
+                        isSubJobTab: true,
+                        realId: sj.id || sj.ItemID,
+                        divisionCode: sj.divisionCode,
+                        quoteNo: resolveLatestQuoteNoForJob(sj)
+                    }))
+                ];
+            };
+
+            const userOwnJobFromLogin = findOwnJobNodeForLoggedInUser();
+            if (userOwnJobFromLogin) {
+                finalTabs = buildTwoTabsUserOwnJobAndDirectSubjob(userOwnJobFromLogin);
+            } else if (!isLeadJobContext) {
+                const currentJob = localJobsList.find((j) => String(j.id || j.ItemID || j.ID) === String(effectiveRootId));
+                if (currentJob) {
+                    finalTabs = [
+                        {
                             id: 'self',
-                            name: pName,
-                            label: pName,
+                            name: currentJob.itemName || currentJob.DivisionName,
+                            label: currentJob.itemName || currentJob.DivisionName,
                             isSelf: true,
-                            realId: currentJob.id || currentJob.ItemID || currentJob.ID, // Pricing context is this sub-job
+                            realId: currentJob.id || currentJob.ItemID || currentJob.ID,
                             companyLogo: currentJob.companyLogo,
                             companyName: currentJob.companyName,
                             departmentName: currentJob.departmentName,
-                            quoteNo: quoteNo
-                        }];
-                    }
+                            quoteNo: resolveLatestQuoteNoForJob(currentJob)
+                        }
+                    ];
                 }
             } else {
-                // --- LEAD-JOB LOGIC: Only external customer names ---
-                // 1. Identify unique external customers from existing quotes
-                const externalNames = [...new Set(existingQuotes
-                    .map(q => (q.ToName || '').trim())
-                    .filter(name => {
-                        if (!name) return false;
-                        // Avoid internal project components
-                        const isInternal = localJobsList.some(j =>
-                            normalize(j.itemName || j.DivisionName) === normalize(name) ||
-                            normalize(j.ItemName) === normalize(name) ||
-                            normalize(j.itemName || '').includes(normalize(name))
-                        );
-                        return !isInternal;
-                    })
-                )];
-
-                // 2. Include current selection if external and not in the quote list yet
-                if (toName && !localJobsList.some(j => normalize(j.itemName || j.DivisionName) === normalize(toName))) {
-                    if (!externalNames.some(n => normalize(n) === normalize(toName))) {
-                        externalNames.push(toName.trim());
-                    }
-                }
-
-                // 3. Map to tabs
-                finalTabs = externalNames.map(name => {
-                    let latestQuoteNo = null;
-                    const custQuotes = existingQuotes.filter(q => normalize(q.ToName) === normalize(name));
-                    if (custQuotes.length > 0) {
-                        custQuotes.sort((a, b) => (b.RevisionNo || 0) - (a.RevisionNo || 0));
-                        latestQuoteNo = custQuotes[0].QuoteNumber;
-                    }
-
-                    return {
-                        id: name,
-                        name: name,
-                        label: name,
-                        isExternal: true,
-                        isSelf: true, // Lead user "owns" all external quoting contexts
-                        realId: effectiveRootId, // Essential for pricing lookup
-                        quoteNo: latestQuoteNo
-                    };
-                });
-
-                // NO 'Own Job' tab for Lead Users as per request ("ONLY external customer name")
+                finalTabs = buildInternalLeadSubjobTabs(!!(selectedForTabs && !isInternalJobName(selectedForTabs)));
             }
 
 
@@ -801,19 +1221,429 @@ const QuoteForm = () => {
             console.error('[calculatedTabs] Error:', err);
             return [];
         }
-    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser]);
+    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser, pricingSummary]);
+
+    /** Aligns with UI fallback when calculatedTabs is empty (e.g. lead job + internal customer only). */
+    const effectiveQuoteTabs = React.useMemo(() => {
+        if (calculatedTabs && calculatedTabs.length > 0) return calculatedTabs;
+        return [{
+            id: 'default',
+            name: 'Own Job',
+            label: 'Own Job',
+            isSelf: true,
+            isEmptyCalculatedTabsFallback: true
+        }];
+    }, [calculatedTabs]);
+
+    const pricingSelectionContextKey = React.useMemo(
+        () => `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`,
+        [enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]
+    );
+
+    /** Own-job + subjob tabs: all pricing summary rows start checked; tab switch reapplies defaults (user can still uncheck). */
+    const prevQuoteTabForDefaultsRef = React.useRef(null);
+    React.useEffect(() => {
+        if (!pricingSummary?.length || !calculatedTabs?.length) return;
+
+        const tabs = calculatedTabs;
+        const pairedOwnSub =
+            tabs.length >= 2 &&
+            tabs[0]?.realId &&
+            tabs[0].isOwnJobTab &&
+            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        const pairedLeadSubExternal =
+            tabs.length >= 2 &&
+            tabs[0]?.realId &&
+            tabs[0].isLeadInternalTab &&
+            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        const paired = pairedOwnSub || pairedLeadSubExternal;
+        if (!paired) return;
+
+        const activeTabObj = tabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (!activeTabObj?.realId) return;
+
+        const pairedIds = new Set(tabs.map((t) => String(t.realId)).filter(Boolean));
+        const activeTabForPair = tabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (activeTabForPair?.realId) {
+            collectDirectChildJobIdsFromPools(
+                activeTabForPair.realId,
+                jobsPool,
+                enquiryData?.divisionsHierarchy || []
+            ).forEach((id) => pairedIds.add(id));
+        }
+
+        const names = pricingSummary
+            .filter((grp) => {
+                const grpNameNorm = collapseSpacesLower(stripQuoteJobPrefix(grp.name || ''));
+                const matchingJobs = jobsPool.filter((j) =>
+                    collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')) === grpNameNorm
+                );
+                if (matchingJobs.length === 0) return false;
+                // Do not require same "root id" as active tab — parent (own job) vs child (subjob) have different roots.
+                return matchingJobs.some((job) => pairedIds.has(String(job.id || job.ItemID || job.ID)));
+            })
+            .map((g) => g.name);
+
+        if (!names.length) return;
+
+        setSelectedJobs((prev) => {
+            const tabChanged =
+                prevQuoteTabForDefaultsRef.current !== null &&
+                prevQuoteTabForDefaultsRef.current !== activeQuoteTab;
+            prevQuoteTabForDefaultsRef.current = activeQuoteTab;
+
+            // If user manually toggled for this tab+customer, keep their selection.
+            if (pricingSelectionTouchedRef.current[pricingSelectionContextKey]) return prev;
+
+            if (tabChanged) return names;
+            if (prev.length === 0) return names;
+            // Pricing fetch often sets "all jobs" first; replace with own+subjob pair so both rows start checked.
+            if (paired && prev.length > names.length) return names;
+            return prev;
+        });
+    }, [activeQuoteTab, pricingSummary, calculatedTabs, jobsPool, pricingSelectionContextKey, enquiryData?.divisionsHierarchy]);
+
+    // Global default: for any context, start with all pricing groups checked until user manually deselects.
+    React.useEffect(() => {
+        if (!pricingSummary?.length) return;
+        if (!pricingSelectionContextKey) return;
+        if (pricingSelectionTouchedRef.current[pricingSelectionContextKey]) return;
+        const allNames = pricingSummary.map((g) => g?.name).filter(Boolean);
+        if (!allNames.length) return;
+        setSelectedJobs((prev) => {
+            const sameSize = prev.length === allNames.length;
+            const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
+            return sameMembers ? prev : allNames;
+        });
+    }, [pricingSummary, pricingSelectionContextKey]);
+
+    /**
+     * Quote customer dropdown (Steps 1–2):
+     * 1) Own job = Master_ConcernedSE.Department for the logged-in user (merged into currentUser).
+     * 2) If selected lead job ≠ own job → parent of own job in EnquiryFor for this RequestNo + LeadJobName (from API pool).
+     *    If selected lead = own job → names from EnquiryCustomer only (enquiryData.customerOptions).
+     */
+    const quoteCustomerDropdownOptions = React.useMemo(() => {
+        if (!enquiryData) return [];
+
+        const cleanJobLabel = (s) =>
+            String(s || '')
+                .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                .trim();
+
+        const poolForEf = enquiryData.divisionsHierarchy?.length ? enquiryData.divisionsHierarchy : (jobsPool.length > 0 ? jobsPool : []);
+        const allJobNamesNormSet = new Set(poolForEf.map((n) => normalize(n.itemName || n.DivisionName || '')));
+
+        // Step 1: current user’s email ID to be taken from login page stored
+        // ownjob to be derived from the current user’s email ID’s department from Master_ConcernedSE table
+        // (currentUser.Department is authoritative from DB match in AuthContext)
+        const ownjob = (currentUser?.Department || '').trim();
+        const ownjobLower = ownjob.toLowerCase();
+
+        const pricingJobs = pricingData?.jobs || [];
+        
+        // Resolve Selected Lead Job
+        let selectedLeadJob = null;
+        if (selectedLeadId) {
+            selectedLeadJob =
+                poolForEf.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId)) ||
+                pricingJobs.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
+        }
+
+        if (!selectedLeadJob && enquiryData.leadJobPrefix && poolForEf.length) {
+            const pref = String(enquiryData.leadJobPrefix).trim();
+            const prefClean = cleanJobLabel(pref).toLowerCase();
+            const roots = poolForEf.filter((j) => !j.parentId || j.parentId === '0' || j.parentId === 0);
+            selectedLeadJob = roots.find((r) => {
+                const nm = String(r.itemName || r.DivisionName || r.ItemName || '').trim();
+                return normalize(nm) === normalize(pref) || cleanJobLabel(nm).toLowerCase() === prefClean;
+            });
+        }
+
+        const selectedLeadLeadJobName = (selectedLeadJob?.leadJobName ?? selectedLeadJob?.LeadJobName ?? '').trim();
+        const selectedLeadJobNameClean = cleanJobLabel(selectedLeadJob?.itemName ?? selectedLeadJob?.ItemName ?? '').toLowerCase();
+
+        // Find own job node in the selected branch/hierarchy
+        const ownJobNodeInBranch = poolForEf.find((j) => {
+            if (!ownjob) return false;
+            // Strict match for job name vs department
+            const itemClean = cleanJobLabel(j.itemName || j.ItemName || '').toLowerCase();
+            const matchesName = itemClean === ownjobLower || itemClean.includes(ownjobLower) || ownjobLower.includes(itemClean);
+            if (!matchesName) return false;
+            
+            // Must belong to the same lead job branch if selected
+            if (selectedLeadLeadJobName) {
+                return (j.leadJobName ?? j.LeadJobName) === selectedLeadLeadJobName;
+            }
+            return true;
+        });
+
+        const enquiryCustomerOpts = (enquiryData.customerOptions || [])
+            .map((c) => String(c).trim())
+            .filter(Boolean)
+            .map((c) => ({ value: c, label: c, type: 'Linked' }));
+
+        const mergePricingExtrasForAdmin = () => {
+            const out = [...enquiryCustomerOpts];
+            const seen = new Set(out.map((o) => normalize(o.value)));
+            if (pricingData?.customers) {
+                pricingData.customers.forEach((c) => {
+                    const k = normalize(c);
+                    if (k && !seen.has(k)) {
+                        seen.add(k);
+                        out.push({ value: c, label: c, type: 'Internal Division' });
+                    }
+                });
+            }
+            return out.filter((opt) => !allJobNamesNormSet.has(normalize(opt.value)));
+        };
+
+        // Step 2 logic:
+        let filteredOptions = [];
+
+        // Check if selected lead name is same as ownjob
+        const leadIsOwnJob = selectedLeadJobNameClean === ownjobLower || 
+                           (ownjobLower.length > 2 && (selectedLeadJobNameClean.includes(ownjobLower) || ownjobLower.includes(selectedLeadJobNameClean)));
+
+        if (leadIsOwnJob) {
+            // if same as ownjob -> find external customer name from EnquiryCustomer
+            filteredOptions = isAdmin || pricingData?.access?.hasLeadAccess ? mergePricingExtrasForAdmin() : [...enquiryCustomerOpts];
+        } else {
+            // if not same as ownjob -> find the parent job of ownjob for selected enquiry and leadjobname from Enquiryfor
+            let parentJobName = '';
+            if (ownJobNodeInBranch) {
+                const pid = ownJobNodeInBranch.parentId ?? ownJobNodeInBranch.ParentID;
+                if (pid && pid !== '0' && pid !== 0) {
+                    const par = poolForEf.find((p) => String(p.id || p.ItemID || p.ID) === String(pid));
+                    if (par) {
+                        parentJobName = cleanJobLabel(par.itemName || par.DivisionName || par.ItemName || '').trim();
+                    }
+                }
+            }
+
+            if (parentJobName) {
+                filteredOptions = [
+                    { value: parentJobName, label: parentJobName, type: 'Internal Division' }
+                ];
+            } else {
+                // Fallback for Admins or if ownjob is itself a root relative to the selection
+                if (isAdmin || pricingData?.access?.hasLeadAccess) {
+                    filteredOptions = mergePricingExtrasForAdmin();
+                } else {
+                    filteredOptions = [];
+                }
+            }
+        }
+
+        // Preserve current toName if it matches an option or is an external append allowed by role
+        const t = (toName || '').trim();
+        if (t) {
+            const tn = normalize(t);
+            const tk = normalizeCustomerKey(t);
+            const has = filteredOptions.some(
+                (o) => normalize(o.value) === tn || normalizeCustomerKey(o.value) === tk
+            );
+            const isInternalName = allJobNamesNormSet.has(tn);
+            const allowExternalAppend = leadIsOwnJob || isAdmin || !!pricingData?.access?.hasLeadAccess;
+            if (allowExternalAppend && !isInternalName && !has) {
+                filteredOptions = [...filteredOptions, { value: t, label: t, type: 'Linked' }];
+            }
+        }
+
+        return filteredOptions;
+    }, [enquiryData, pricingData, jobsPool, selectedLeadId, currentUser, toName, isAdmin]);
+
+    const customerSelectValue = React.useMemo(() => {
+        if (!(toName || '').trim()) return null;
+        const t = toName.trim();
+        const tn = normalize(t);
+        const tk = normalizeCustomerKey(t);
+        const hit = quoteCustomerDropdownOptions.find(
+            (o) => normalize(o.value) === tn || normalizeCustomerKey(o.value) === tk
+        );
+        return { label: hit?.label ?? t, value: hit?.value ?? t };
+    }, [toName, quoteCustomerDropdownOptions]);
+
+    const quoteCustomerCreatableStyles = React.useMemo(
+        () => ({
+            control: (base, state) => ({
+                ...base,
+                minHeight: '38px',
+                fontSize: '13px',
+                borderColor: '#e2e8f0',
+                backgroundColor: state.isDisabled ? '#f1f5f9' : 'white',
+            }),
+            menu: (base) => ({ ...base, zIndex: 9999 }),
+        }),
+        []
+    );
+    const getCustomerOptionValue = React.useCallback((o) => o?.value ?? '', []);
+    const getCustomerOptionLabel = React.useCallback((o) => o?.label ?? '', []);
+
+    /**
+     * Params for GET /api/quotes/by-enquiry/:requestNo — matches EnquiryQuotes columns:
+     * - RequestNo = enquiry number (path param).
+     * - LeadJob = lead job dropdown selection (selectedLeadId → job display name).
+     * - First tab selected: OwnJob = first tab job name; ToName = customer dropdown (external recipient).
+     * - Direct subjob tab (not first): OwnJob = selected tab’s job name (same label as the tab in “Previous Quotes”);
+     *   ToName = first tab’s job label (internal branch routing, not the customer dropdown).
+     */
+    const scopedEnquiryQuotesParams = React.useMemo(() => {
+        const tabs =
+            calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs || [];
+        if (!tabs.length) return null;
+
+        const mergedJobPool =
+            (pricingData?.jobs && pricingData.jobs.length > 0 ? pricingData.jobs : null) || jobsPool || [];
+
+        const first = tabs[0];
+        const firstId = String(first?.id ?? '');
+        const firstLabelRaw = (first?.label || first?.name || '').trim();
+
+        const active = tabs.find(t => String(t.id) === String(activeQuoteTab));
+        const activeLabelRaw = (active?.label || active?.name || '').trim();
+
+        const isFirstTab = String(activeQuoteTab) === firstId;
+        const placeholderFirst =
+            first?.isEmptyCalculatedTabsFallback === true ||
+            /^own\s*job$/i.test(firstLabelRaw);
+
+        let ownJobName = '';
+        let toNameParam = '';
+        let useDepartmentForOwnJob = false;
+
+        /** Same OwnJob / ToName strings as stored in EnquiryQuotes (full job name from hierarchy when possible). */
+        const ownJobNameFromJobNode = (tab) => {
+            if (!tab?.realId) return '';
+            const node = mergedJobPool.find((j) => String(j.id || j.ItemID || j.ID) === String(tab.realId));
+            return (node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
+        };
+
+        const firstTabJobNameForDb = () => (ownJobNameFromJobNode(first) || firstLabelRaw).trim();
+
+        if (tabs.length === 1 || isFirstTab) {
+            if (placeholderFirst) {
+                // No real first tab — server resolves OwnJob from logged-in user email → Master_ConcernedSE.Department
+                useDepartmentForOwnJob = true;
+            } else {
+                ownJobName = firstTabJobNameForDb();
+            }
+            toNameParam = (toName || '').trim();
+        } else {
+            // Subjob tab (not first): OwnJob = selected tab; ToName = first tab label (internal “parent” job for the tuple)
+            ownJobName = (ownJobNameFromJobNode(active) || activeLabelRaw).trim();
+            toNameParam = firstTabJobNameForDb();
+        }
+
+        const leadJobName = (() => {
+            if (selectedLeadId) {
+                const node = mergedJobPool.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
+                const nm = (node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
+                if (nm) return nm;
+            }
+            const prefix = (enquiryData?.leadJobPrefix || '').trim();
+            if (prefix && mergedJobPool.length) {
+                const norm = (s) => String(s || '').replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
+                const target = norm(prefix);
+                const root = mergedJobPool.find((j) => {
+                    const isRoot = !j.parentId || j.parentId === '0' || j.parentId === 0;
+                    if (!isRoot) return false;
+                    const nm = j.itemName || j.ItemName || j.DivisionName || '';
+                    return norm(nm) === target || String(nm).trim().toLowerCase() === prefix.toLowerCase();
+                });
+                if (root) return (root.itemName || root.ItemName || root.DivisionName || '').trim();
+            }
+            return '';
+        })();
+
+        if (!leadJobName || !toNameParam) return null;
+        if (!useDepartmentForOwnJob && !ownJobName) return null;
+
+        return {
+            leadJobName,
+            toName: toNameParam,
+            ownJobName: useDepartmentForOwnJob ? null : ownJobName,
+            useDepartmentForOwnJob
+        };
+    }, [calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, selectedLeadId, pricingData, enquiryData?.leadJobPrefix, jobsPool, enquiryData?.divisionsHierarchy]);
+
+    /**
+     * Primitives-only key so the scoped-quote fetch does not re-run when `pricingData` / `jobsPool`
+     * object references change but LeadJob / OwnJob / ToName are unchanged (main cause of flicker).
+     */
+    const scopedQuotePanelFetchKey = React.useMemo(() => {
+        const p = scopedEnquiryQuotesParams;
+        if (!p) return null;
+        const em = (currentUser?.email || currentUser?.EmailId || '').trim().toLowerCase();
+        return [
+            p.leadJobName,
+            p.toName,
+            p.ownJobName ?? '',
+            p.useDepartmentForOwnJob ? '1' : '0',
+            em,
+        ].join('\x1e');
+    }, [
+        scopedEnquiryQuotesParams?.leadJobName,
+        scopedEnquiryQuotesParams?.toName,
+        scopedEnquiryQuotesParams?.ownJobName,
+        scopedEnquiryQuotesParams?.useDepartmentForOwnJob,
+        currentUser?.email,
+        currentUser?.EmailId,
+    ]);
+
+    useEffect(() => {
+        const rn = enquiryData?.enquiry?.RequestNo;
+        if (!rn) {
+            setQuoteScopedForPanel([]);
+            return;
+        }
+        if (!scopedQuotePanelFetchKey || !scopedEnquiryQuotesParams) {
+            setQuoteScopedForPanel([]);
+            return;
+        }
+        const p = scopedEnquiryQuotesParams;
+
+        let cancelled = false;
+        (async () => {
+            try {
+                // Do not clear the panel before fetch — that flashes empty. Replace when the response arrives.
+                const em = (currentUser?.email || currentUser?.EmailId || '').toString();
+                const qs = new URLSearchParams();
+                if (em) qs.set('userEmail', em);
+                qs.set('leadJobName', p.leadJobName);
+                qs.set('toName', p.toName);
+                if (p.ownJobName) qs.set('ownJobName', p.ownJobName);
+
+                const url = `${API_BASE}/api/quotes/by-enquiry/${encodeURIComponent(rn)}?${qs.toString()}`;
+                const res = await fetch(url);
+                if (cancelled) return;
+                if (res.ok) {
+                    const rows = await res.json();
+                    setQuoteScopedForPanel(Array.isArray(rows) ? rows : []);
+                } else {
+                    setQuoteScopedForPanel([]);
+                }
+            } catch (e) {
+                if (!cancelled) setQuoteScopedForPanel([]);
+            }
+        })();
+
+        return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch keyed by scopedQuotePanelFetchKey; scopedEnquiryQuotesParams identity churns with pricingData
+    }, [enquiryData?.enquiry?.RequestNo, scopedQuotePanelFetchKey]);
 
     // Auto-resolve active tabs based on calculated permissions
     useEffect(() => {
-        if (calculatedTabs && calculatedTabs.length > 0) {
-            // Fix Quote Tab
-            const currentQuoteTabValid = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
-            if (!currentQuoteTabValid) {
-                console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
-                setActiveQuoteTab(calculatedTabs[0].id);
+        if (!calculatedTabs || calculatedTabs.length === 0) {
+            if (String(activeQuoteTab) !== 'default') {
+                setActiveQuoteTab('default');
             }
-
-
+            return;
+        }
+        const currentQuoteTabValid = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
+        if (!currentQuoteTabValid) {
+            console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
+            setActiveQuoteTab(calculatedTabs[0].id);
         }
     }, [calculatedTabs, activeQuoteTab]);
 
@@ -920,54 +1750,84 @@ const QuoteForm = () => {
     // NEW: Sync Attention Of (toAttention) whenever toName or enquiryData changes
     // NOTE: toAttention is intentionally NOT in the dep array — adding it blocks manual editing by
     // re-running on every keystroke. We use a ref to track which customer we last resolved for.
-    const lastAttentionResolvedForRef = useRef('');
+    const lastAttentionResolvedForRef = useRef({ req: '', to: '', pricingSig: '' });
     useEffect(() => {
         if (!toName || !enquiryData) return;
 
-        // Only run once per customer change (prevents re-firing on every keystroke)
-        if (lastAttentionResolvedForRef.current === toName) return;
-        lastAttentionResolvedForRef.current = toName;
+        const req = String(enquiryData?.enquiry?.RequestNo || '');
+        const pricingSig = JSON.stringify(
+            (pricingData?.jobs || [])
+                .filter(j => j.visible !== false)
+                .map(j => stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '').toLowerCase())
+                .filter(Boolean)
+                .sort()
+        );
+        const prev = lastAttentionResolvedForRef.current;
+        if (prev.req === req && prev.to === toName && prev.pricingSig === pricingSig) return;
+        lastAttentionResolvedForRef.current = { req, to: toName, pricingSig };
 
-        // --- INTERNAL CUSTOMER DETECTION: Clear fields for internal divisions ---
-        const allJobNamesNormSetEffect = new Set(
+        // --- INTERNAL CUSTOMER: same detection as attentionSelectOptions ---
+        const hierarchyCleanEff = new Set(
             (enquiryData?.divisionsHierarchy || []).map(n =>
-                (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+                collapseSpacesLower(stripQuoteJobPrefix(n.itemName || n.DivisionName || ''))
             )
         );
-        const toNameClean = toName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-        if (allJobNamesNormSetEffect.has(toNameClean)) {
-            // Internal customer — clear attention
-            setToAttention('');
+        const profileCleanEff = new Set(
+            (enquiryData?.availableProfiles || []).map(p =>
+                collapseSpacesLower(stripQuoteJobPrefix(p.itemName || ''))
+            )
+        );
+        const pricingCleanEff = new Set(
+            (pricingData?.jobs || [])
+                .filter(j => j.visible !== false)
+                .map(j => collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')))
+                .filter(Boolean)
+        );
+        const toNameCleanEff = collapseSpacesLower(stripQuoteJobPrefix(toName));
+        const toKeyEff = normalizeCustomerKey(toName);
+        const isInternalCustomerEffect =
+            hierarchyCleanEff.has(toNameCleanEff) ||
+            profileCleanEff.has(toNameCleanEff) ||
+            [...pricingCleanEff].some(pc =>
+                pc === toNameCleanEff ||
+                (toKeyEff &&
+                    (normalizeCustomerKey(pc) === toKeyEff ||
+                        pc.includes(toNameCleanEff) ||
+                        toNameCleanEff.includes(pc)))
+            );
+        if (isInternalCustomerEffect) {
+            const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+            if (intAtt?.defaultAttention) setToAttention(intAtt.defaultAttention);
+            else if (intAtt?.options?.length) setToAttention(intAtt.options[0]);
+            else setToAttention('');
             return;
         }
 
-        // For external customers: resolve attention from contacts (only auto-fills on customer change)
+        // External: prefer discrete ReceivedFrom contacts (matches dropdown)
         const target = normalize(toName);
-
-        // 1. Try Exact Match
-        if (enquiryData.customerContacts && enquiryData.customerContacts[toName.trim()]) {
+        const extMap = enquiryData.externalAttentionOptionsByCustomer || {};
+        let extList = extMap[toName] || extMap[toName.trim()];
+        if (!extList) {
+            const fk = Object.keys(extMap).find(k => normalize(k) === target);
+            if (fk) extList = extMap[fk];
+        }
+        if (Array.isArray(extList) && extList.length > 0) {
+            setToAttention(extList[0]);
+        } else if (enquiryData.customerContacts && enquiryData.customerContacts[toName.trim()]) {
             setToAttention(enquiryData.customerContacts[toName.trim()]);
-        }
-        else if (enquiryData.customerContacts) {
+        } else if (enquiryData.customerContacts) {
             const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === target);
-            if (match) {
-                setToAttention(enquiryData.customerContacts[match]);
-            }
-            // 3. Fallback to global enquiry ReceivedFrom
-            else if (enquiryData.enquiry?.ReceivedFrom) {
-                setToAttention(enquiryData.enquiry.ReceivedFrom);
-            } else {
-                setToAttention('');
-            }
-        }
-        else if (enquiryData.enquiry?.ReceivedFrom) {
+            if (match) setToAttention(enquiryData.customerContacts[match]);
+            else if (enquiryData.enquiry?.ReceivedFrom) setToAttention(enquiryData.enquiry.ReceivedFrom);
+            else setToAttention('');
+        } else if (enquiryData.enquiry?.ReceivedFrom) {
             setToAttention(enquiryData.enquiry.ReceivedFrom);
         } else {
             setToAttention('');
         }
 
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [toName, enquiryData]); // toAttention intentionally excluded — see note above
+    }, [toName, enquiryData, pricingData?.jobs]); // toAttention intentionally excluded — see note above
 
 
 
@@ -1023,19 +1883,39 @@ const QuoteForm = () => {
         // 2. Determine generalized Lead Access (Matches calculatedTabs logic)
         const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
         const hasLeadAccess = !!pricingData?.access?.hasLeadAccess || ['civil', 'admin', 'bms admin'].includes(userDept);
+        const hasPricingScope = Array.isArray(pricingData?.access?.editableJobs) && pricingData.access.editableJobs.length > 0;
 
-        // 3. Strict Scope Validation (Based on Active Tab)
-        const activeTabObj = (calculatedTabs || []).find(t => String(t.id) === String(activeQuoteTab));
+        /** User has visible pricing rows for the customer currently quoted (fixes Save greyed out when editableJobs omits the job name). */
+        const pricingMatchesCustomer = (() => {
+            if (!enquiryData?.enquiry?.RequestNo || !toName?.trim()) return false;
+            const jobs = pricingData?.jobs;
+            if (!Array.isArray(jobs) || jobs.length === 0) return false;
+            const tKey = normalizeCustomerKey(toName);
+            if (!tKey) return false;
+            return jobs.some(j => {
+                if (j.visible === false) return false;
+                const jKey = normalizeCustomerKey(j.itemName || j.DivisionName || j.ItemName || '');
+                return jKey && (jKey === tKey || jKey.includes(tKey) || tKey.includes(jKey));
+            });
+        })();
+
+        // 3. Strict Scope Validation (Based on Active Tab — use effective tabs so empty calculatedTabs matches UI fallback)
+        const activeTabObj = (effectiveQuoteTabs || []).find(t => String(t.id) === String(activeQuoteTab));
 
         // If we are on the default tab or tab is not found, allow for Lead Users
         if (!activeTabObj) {
-            return hasLeadAccess;
+            return hasLeadAccess || hasPricingScope || pricingMatchesCustomer;
+        }
+
+        if (activeTabObj.isEmptyCalculatedTabsFallback) {
+            return hasLeadAccess || hasPricingScope || pricingMatchesCustomer;
         }
 
         // If the tab is marked as 'Self' or 'Owned', it's editable by the user
         if (activeTabObj.isSelf) {
             // Further validation for sub-users: they cannot edit tabs they don't have explicit access to
             if (!hasLeadAccess) {
+                if (pricingMatchesCustomer) return true;
                 const targetJob = normalize(activeTabObj.label || activeTabObj.name);
                 const allowedJobs = (pricingData?.access?.editableJobs || []).map(j => normalize(j));
                 const isAllowed = allowedJobs.some(allowed =>
@@ -1086,9 +1966,18 @@ const QuoteForm = () => {
                     const data = await res.json();
                     setUsersList(data.users || []);
                     setCustomersList(data.customers || []);
+                    const apiTypes = Array.isArray(data.enquiryTypes)
+                        ? data.enquiryTypes.map((t) => String(t).trim()).filter(Boolean)
+                        : [];
+                    const merged = [...new Set([...apiTypes, ...defaultEnquiryTypeOptions])];
+                    merged.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+                    setEnquiryTypesMaster(merged);
+                } else {
+                    setEnquiryTypesMaster([...defaultEnquiryTypeOptions]);
                 }
             } catch (err) {
                 console.error('Error fetching metadata lists:', err);
+                setEnquiryTypesMaster([...defaultEnquiryTypeOptions]);
             }
         };
         const fetchTemplates = async () => {
@@ -1106,151 +1995,6 @@ const QuoteForm = () => {
         fetchLists();
         fetchTemplates();
     }, []);
-
-    // Dynamic Customer Options based on Lead Job Hierarchy
-    useEffect(() => {
-        if (!enquiryData) return;
-
-        console.log('--- [Customer Options Calculation] START ---');
-        console.log(`[Customer Filter] Lead Job Prefix: ${enquiryData.leadJobPrefix}`);
-
-        // Robust Detection: Match user to a node in the hierarchy
-        const userEmailNorm = (currentUser?.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-        const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase();
-        const editableNames = (pricingData?.access?.editableJobs || []).map(n => String(n).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase());
-
-        const myNode = (enquiryData.divisionsHierarchy || []).find(n => {
-            const mails = [n.commonMailIds, n.ccMailIds].filter(Boolean).join(',').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-            const nodeNameNorm = (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-
-            if (userEmailNorm && mails.includes(userEmailNorm)) return true;
-            if (editableNames.includes(nodeNameNorm)) return true;
-
-            if (userDeptNorm) {
-                if (nodeNameNorm === userDeptNorm) return true;
-                if (nodeNameNorm.includes(userDeptNorm) && userDeptNorm.length > 2) return true;
-                if (userDeptNorm.includes(nodeNameNorm.replace(' project', '').trim()) && nodeNameNorm.length > 2) return true;
-            }
-            return false;
-        });
-
-        // Determine if we are in Subjob Mode
-        const hasParent = myNode && myNode.parentId && myNode.parentId != '0' && myNode.parentId != 0;
-        const isSubjobUser = enquiryData.userIsSubjobUser === true || hasParent;
-
-        console.log(`[Customer Filter] Detection: BackendFlag=${enquiryData.userIsSubjobUser}, HasParent=${hasParent}, Final=${isSubjobUser}`);
-        if (myNode) console.log(`[Customer Filter] User Matched to Node: ${myNode.itemName}`);
-
-        // 1. Base Options from API
-        const rawBase = enquiryData.customerOptions || [];
-        const baseOpts = rawBase.map(c => ({ value: c, label: c, type: 'Linked' }));
-
-        // 2. All job names from hierarchy (normalized for strict exclusion/inclusion)
-        const pool = jobsPool.length > 0 ? jobsPool : (enquiryData.divisionsHierarchy || []);
-        const allJobNamesNormSet = new Set(
-            pool.map(n => normalize(n.itemName || n.DivisionName || ''))
-        );
-
-        // 3. Pricing Context Customers
-        let pricingOpts = [];
-        if (pricingData?.customers) {
-            pricingOpts = [...pricingOpts, ...pricingData.customers.map(c => ({ value: c, label: c, type: 'Internal Division' }))];
-        }
-        if (pricingData?.extraCustomers) {
-            pricingOpts = [...pricingOpts, ...pricingData.extraCustomers.map(c => ({ value: c, label: c, type: 'Linked' }))];
-        }
-
-        // 4. Merge & Deduplicate
-        const allOpts = [...baseOpts, ...pricingOpts];
-        const uniqueMap = new Map();
-        allOpts.forEach(item => {
-            if (!item.value) return;
-            const key = normalize(item.value);
-            if (!uniqueMap.has(key)) uniqueMap.set(key, item);
-        });
-
-        // 5. EXTENDED FILTER LOGIC (Dynamic Context based on Tab):
-        const activeTabObj = calculatedTabs?.find(t => String(t.id) === String(activeQuoteTab));
-        const activeTabRealId = activeTabObj?.realId;
-        const currentNode = pool.find(n => String(n.id || n.ItemID) === String(activeTabRealId));
-
-        // MODE DETECTION: Is the currently active tab a Lead Job (root) or a Sub-job?
-        const isLeadJob = !currentNode || !currentNode.parentId || currentNode.parentId == '0' || currentNode.parentId == 0;
-
-        console.log('[Customer Filter] All Job Names (Norm):', Array.from(allJobNamesNormSet));
-        console.log('[Customer Filter] Current Tab:', activeQuoteTab, 'isLead?', isLeadJob);
-
-        // --- ENHANCEMENT: Strictly ensure parent job exists for sub-jobs ---
-        if (!isLeadJob && currentNode) {
-            const pid = currentNode.parentId || currentNode.ParentID;
-            const parent = pool.find(p => String(p.id || p.ItemID) === String(pid));
-            if (parent) {
-                const pName = parent.itemName || parent.DivisionName || '';
-                const pKey = normalize(pName);
-                if (pName && !uniqueMap.has(pKey)) {
-                    console.log('[Customer Filter] Injecting missing parent job:', pName);
-                    uniqueMap.set(pKey, { value: pName, label: pName, type: 'Internal Division' });
-                }
-            }
-        }
-
-        const uniqueOptions = Array.from(uniqueMap.values());
-
-        const filteredOptions = uniqueOptions.filter(opt => {
-            const valNorm = normalize(opt.value);
-            const isInternalJob = allJobNamesNormSet.has(valNorm);
-
-            if (isLeadJob) {
-                // 1. Lead Job Context: Show ONLY external customers (Strictly reject any internal job names)
-                return !isInternalJob;
-            } else {
-                // 2. Sub-job Context: Show ONLY the immediate parent job as customer
-                if (!isInternalJob || !currentNode) return false;
-
-                const parentId = currentNode.parentId || currentNode.ParentID;
-                if (parentId && parentId != '0' && parentId != 0) {
-                    const parentNode = pool.find(p => String(p.id || p.ItemID) === String(parentId));
-                    if (parentNode) {
-                        const parentNameNorm = normalize(parentNode.itemName || parentNode.DivisionName || '');
-                        return valNorm === parentNameNorm;
-                    }
-                }
-                return false;
-            }
-        });
-
-        console.log('[Customer Filter] Final Filtered Count:', filteredOptions.length, filteredOptions.map(o => o.value));
-        setEnquiryCustomerOptions(filteredOptions);
-        console.log('--- [Customer Options Calculation] END ---');
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enquiryData?.divisionsHierarchy, enquiryData?.customerOptions, currentUser, pricingData, activeQuoteTab, calculatedTabs, jobsPool]);
-
-    // Clear Customer Name ONLY when switching between Internal and External context
-    // This ensures that if we switch from BMS (Internal) to Civil (External), 
-    // we don't keep an internal job as the recipient for an external quote.
-    useEffect(() => {
-        if (!enquiryData || !toName || !enquiryCustomerOptions || enquiryCustomerOptions.length === 0) return;
-
-        // --- PROACTIVE FIX: Check for validity against current strictly filtered options ---
-        const isValid = enquiryCustomerOptions.some(opt => normalize(opt.value) === normalize(toName));
-
-        if (!isValid) {
-            const valuesEmpty =
-                !pricingData ||
-                pricingData.values == null ||
-                (typeof pricingData.values === 'object' &&
-                    !Array.isArray(pricingData.values) &&
-                    Object.keys(pricingData.values).length === 0);
-            if (valuesEmpty) {
-                console.log('[Customer Context Safety] Skipping clear — pricing values empty (avoid dropdown reset during load/merge).');
-                return;
-            }
-            console.log(`[Customer Context Safety] 🚨 Conflict! Selection "${toName}" is not valid for context ${activeQuoteTab}. Clearing.`);
-            handleCustomerChange(null);
-        }
-    }, [enquiryCustomerOptions, toName, activeQuoteTab, enquiryData, pricingData]);
-
-
 
     // Handle Metadata Selections
     const handleSelectSignatory = (e) => {
@@ -1284,6 +2028,18 @@ const QuoteForm = () => {
         }
     };
 
+    /** Clears customer fields for a lead-only switch without wiping loaded quote metadata (see preserveQuoteOnLeadChangeRef). */
+    const clearCustomerForLeadSwitch = () => {
+        setToName('');
+        setToAddress('');
+        setToPhone('');
+        setToEmail('');
+        setToAttention('');
+        if (enquiryData) {
+            loadPricingData(enquiryData.enquiry.RequestNo, '');
+        }
+    };
+
     // New handler for CreatableSelect
     const handleCustomerChange = (selectedOption) => {
         const selectedName = selectedOption ? selectedOption.value : '';
@@ -1295,12 +2051,35 @@ const QuoteForm = () => {
             return;
         }
 
-        setToName(selectedName);
-        setQuoteId(null); // Reset ID so auto-load can kick in for new customer
-        setQuoteDate(''); // Reset date to blank for new customer selection
+        const preserve = preserveQuoteOnLeadChangeRef.current;
+        const restoringSameCustomerAfterLead =
+            preserve &&
+            selectedName &&
+            normalize(selectedName) === normalize(preserve.toName);
+        if (preserve && selectedName && !restoringSameCustomerAfterLead) {
+            preserveQuoteOnLeadChangeRef.current = null;
+        }
 
+        setToName(selectedName);
+        if (!restoringSameCustomerAfterLead) {
+            setQuoteId(null); // Reset ID so auto-load can kick in for new customer
+            setQuoteDate(''); // Reset date to blank for new customer selection
+            setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+            setSignatory('');
+            setSignatoryDesignation('');
+        } else {
+            preserveQuoteOnLeadChangeRef.current = null;
+            autoSelectCustomerAfterLeadChangeRef.current = false;
+            setQuoteId(preserve.quoteId);
+            setQuoteNumber(preserve.quoteNumber || '');
+        }
+
+        // Do NOT set activeQuoteTab to the external customer string. Previous-quotes tabs use lead-*/subjob-*
+        // ids (or a single external tab id from calculatedTabs). Forcing activeQuoteTab = toName here fought
+        // the auto-resolve effect and caused the customer dropdown to oscillate between internal/external.
 
         if (!selectedName) {
+            preserveQuoteOnLeadChangeRef.current = null;
             setToAddress('');
             setToPhone('');
             setToEmail('');
@@ -1311,50 +2090,78 @@ const QuoteForm = () => {
             return;
         }
 
-        // --- INTERNAL CUSTOMER DETECTION ---
-        // An internal customer is a job/division name (e.g. "Electrical", "BMS") rather than an external company.
-        // For internal customers: keep address/phone/email/attention blank.
+        // --- INTERNAL CUSTOMER DETECTION (match attentionSelectOptions) ---
         const isInternalOption = selectedOption?.type === 'Internal Division';
-        const allJobNamesNormSet = new Set(
+        const hierarchyCleanSel = new Set(
             (enquiryData?.divisionsHierarchy || []).map(n =>
-                (n.itemName || n.DivisionName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
+                collapseSpacesLower(stripQuoteJobPrefix(n.itemName || n.DivisionName || ''))
             )
         );
-        const selectedNameClean = selectedName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
-        const isInternalByName = allJobNamesNormSet.has(selectedNameClean);
-        const isInternal = isInternalOption || isInternalByName;
+        const profileCleanSel = new Set(
+            (enquiryData?.availableProfiles || []).map(p =>
+                collapseSpacesLower(stripQuoteJobPrefix(p.itemName || ''))
+            )
+        );
+        const selectedNameClean = collapseSpacesLower(stripQuoteJobPrefix(selectedName));
+        const toKeySel = normalizeCustomerKey(selectedName);
+        const pricingCleanSel = new Set(
+            (pricingData?.jobs || [])
+                .filter(j => j.visible !== false)
+                .map(j => collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')))
+                .filter(Boolean)
+        );
+        const isInternalByPricing = [...pricingCleanSel].some(pc =>
+            pc === selectedNameClean ||
+            (toKeySel &&
+                (normalizeCustomerKey(pc) === toKeySel ||
+                    pc.includes(selectedNameClean) ||
+                    selectedNameClean.includes(pc)))
+        );
+        const isInternalByName = hierarchyCleanSel.has(selectedNameClean) || profileCleanSel.has(selectedNameClean);
+        const isInternal = isInternalOption || isInternalByName || isInternalByPricing;
 
         // Note: Legacy clearing block removed. We now attempt to find details 
         // for internal customers from availableProfiles/jobsPool below.
 
         // --- EXTERNAL CUSTOMER: Look up contact details ---
-        // Set Attention of (ReceivedFrom) for the selected customer
+        // Set Attention of from ReceivedFrom options / customerContacts for the selected customer
         console.log('[handleCustomerChange] Looking up customer:', selectedName);
         console.log('[handleCustomerChange] customerContacts available:', enquiryData?.customerContacts);
 
         const targetNorm = normalize(selectedName);
 
-        if (enquiryData?.customerContacts) {
-            // 1. Try exact match
-            if (enquiryData.customerContacts[selectedName]) {
-                setToAttention(enquiryData.customerContacts[selectedName]);
-                console.log('[handleCustomerChange] ✓ Found via exact match:', enquiryData.customerContacts[selectedName]);
+        if (!isInternal) {
+            const extMap = enquiryData?.externalAttentionOptionsByCustomer || {};
+            let extList = extMap[selectedName] || extMap[selectedName.trim()];
+            if (!extList) {
+                const fk = Object.keys(extMap).find(k => normalize(k) === targetNorm);
+                if (fk) extList = extMap[fk];
             }
-            // 2. Try normalized match
-            else {
-                const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === targetNorm);
-                if (match) {
-                    setToAttention(enquiryData.customerContacts[match]);
-                    console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
+            if (Array.isArray(extList) && extList.length > 0) {
+                setToAttention(extList[0]);
+            } else if (enquiryData?.customerContacts) {
+                if (enquiryData.customerContacts[selectedName]) {
+                    setToAttention(enquiryData.customerContacts[selectedName]);
+                    console.log('[handleCustomerChange] ✓ Found via exact match:', enquiryData.customerContacts[selectedName]);
                 } else {
-                    // 3. Fallback to main enquiry ReceivedFrom if no specific contact
-                    const fallback = enquiryData?.enquiry?.ReceivedFrom || '';
-                    setToAttention(fallback);
-                    console.log('[handleCustomerChange] ✗ Not found, using fallback:', fallback);
+                    const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === targetNorm);
+                    if (match) {
+                        setToAttention(enquiryData.customerContacts[match]);
+                        console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
+                    } else {
+                        const fallback = enquiryData?.enquiry?.ReceivedFrom || '';
+                        setToAttention(fallback);
+                        console.log('[handleCustomerChange] ✗ Not found, using fallback:', fallback);
+                    }
                 }
+            } else {
+                setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
             }
         } else {
-            setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+            const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, selectedName);
+            if (intAtt?.defaultAttention) setToAttention(intAtt.defaultAttention);
+            else if (intAtt?.options?.length) setToAttention(intAtt.options[0]);
+            else setToAttention('');
         }
 
 
@@ -1436,12 +2243,29 @@ const QuoteForm = () => {
             }
         }
 
-        // Reload pricing for selected customer
-        if (enquiryData) {
-            console.log('Customer changed to:', selectedName, 'Reloading pricing...');
-            loadPricingData(enquiryData.enquiry.RequestNo, selectedName);
-        }
+        // Pricing reload is handled by the useEffect([enquiryData, toName]) below — avoids double
+        // loadPricingData (handler + effect) and duplicate customer-filter runs / dropdown flicker.
     };
+
+    // Requirement: after changing lead job, auto-pick first customer from the newly filtered list.
+    useEffect(() => {
+        if (!autoSelectCustomerAfterLeadChangeRef.current) return;
+        if (!enquiryData) return;
+
+        const current = (toName || '').trim();
+        if (current) {
+            // User/manual selection already exists; do not override.
+            autoSelectCustomerAfterLeadChangeRef.current = false;
+            return;
+        }
+
+        const first = quoteCustomerDropdownOptions[0];
+        if (!first?.value) return; // Wait until options arrive/recompute.
+
+        autoSelectCustomerAfterLeadChangeRef.current = false;
+        handleCustomerChange(first);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [quoteCustomerDropdownOptions, toName, enquiryData]);
 
 
     const handleProfileChange = (e) => {
@@ -1464,9 +2288,9 @@ const QuoteForm = () => {
     };
 
     // Helper to load pricing data (Component Level)
-    const loadPricingData = async (reqNo, cxName) => {
+    const loadPricingData = async (reqNo, cxName, options = {}) => {
         console.log('--- loadPricingData START ---');
-        console.log('Req:', reqNo, 'Cx:', cxName);
+        console.log('Req:', reqNo, 'Cx:', cxName, 'Opts:', options);
         try {
             const url = `${API_BASE}/api/pricing/${encodeURIComponent(reqNo)}?userEmail=${encodeURIComponent(currentUser?.email || currentUser?.EmailId || '')}&customerName=${encodeURIComponent(cxName || '')}`;
             console.log('Fetching URL:', url);
@@ -1482,6 +2306,7 @@ const QuoteForm = () => {
                 // Process Raw Array into Nested Map: [CustomerKey][LeadJobKey][OptionID_JobID] = Value
                 const groupedValues = {};
                 if (Array.isArray(pData.values)) {
+                    pData.pricingValueRows = [...pData.values];
                     pData.values.forEach(v => {
                         const custKey = normalize(v.CustomerName || pData.activeCustomer || 'Main');
                         const leadKey = normalize(v.LeadJobName || 'Legacy');
@@ -1502,6 +2327,8 @@ const QuoteForm = () => {
                             }
                         }
                     });
+                } else {
+                    pData.pricingValueRows = [];
                 }
                 pData.allValues = groupedValues;
 
@@ -1637,7 +2464,12 @@ const QuoteForm = () => {
                 // Calculate Summary
                 const summary = [];
                 // INITIAL SELECTION: Filter jobs by current branch prefix (Step 2293)
-                const branchPrefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+                // Use override when caller just updated lead in UI (React state not committed yet).
+                const branchPrefix = (
+                    options.leadJobPrefixOverride != null && String(options.leadJobPrefixOverride).trim() !== ''
+                        ? String(options.leadJobPrefixOverride).trim()
+                        : enquiryData?.leadJobPrefix || ''
+                ).toUpperCase();
                 const jobsPool = pData.jobs || [];
 
                 const activeRoot = branchPrefix ? jobsPool.find(j => {
@@ -1701,6 +2533,7 @@ const QuoteForm = () => {
     };
 
     const handleJobToggle = (jobName) => {
+        pricingSelectionTouchedRef.current[pricingSelectionContextKey] = true;
         const newSelected = selectedJobs.includes(jobName)
             ? selectedJobs.filter(j => j !== jobName)
             : [...selectedJobs, jobName];
@@ -2198,6 +3031,36 @@ const QuoteForm = () => {
                     let val = effectiveValuesLookup[key] || effectiveValuesLookup[nameKey];
                     let price = val ? parsePrice(val.Price || 0) : 0;
 
+                    const reqNoEpv = enquiryData?.enquiry?.RequestNo ?? enquiryData?.RequestNo;
+                    if (Array.isArray(data.pricingValueRows) && data.pricingValueRows.length > 0 && reqNoEpv != null && String(reqNoEpv).trim() !== '') {
+                        const optName = String(opt.name || opt.OptionName || '').trim();
+                        const alternateOptionIds = [
+                            ...new Set(
+                                (data.options || [])
+                                    .filter((o) => String(o.name || '').trim() === optName)
+                                    .map((o) => String(o.id || o.ID || '').trim())
+                                    .filter(Boolean)
+                            ),
+                        ];
+                        const epv = resolveQuoteSummaryPriceFromRows(data.pricingValueRows, {
+                            requestNo: reqNoEpv,
+                            optionId: opt.id || opt.ID,
+                            branchPrefix: enquiryData?.leadJobPrefix || data?.leadJob || '',
+                            jobsPool,
+                            job,
+                            customerDropdown: activeCustomer,
+                            calculatedTabs,
+                            activeQuoteTab,
+                            hasLeadAccess: !!data.access?.hasLeadAccess,
+                            editableJobNames: data.access?.editableJobs || [],
+                            userDepartment: (currentUser?.Department || currentUser?.Division || '').trim(),
+                            alternateOptionIds: alternateOptionIds.length ? alternateOptionIds : undefined,
+                        });
+                        if (epv.found) {
+                            price = epv.price;
+                        }
+                    }
+
                     // Only enforce scoping if price is 0 (to prevent double counting)
                     if (price <= 0) {
                         const normalizeTokens = (s) => (s || '').toLowerCase()
@@ -2555,6 +3418,18 @@ const QuoteForm = () => {
         console.log('[calculateSummary] COMPLETE - Grand Total:', calculatedGrandTotal);
     };
 
+    const calculateSummaryRef = React.useRef(calculateSummary);
+    React.useLayoutEffect(() => {
+        calculateSummaryRef.current = calculateSummary;
+    });
+
+    // Branch isolation in calculateSummary uses activeQuoteTab; AutoLoad often skips loadQuote when quoteId is unchanged.
+    // Re-run when tab/selection/scope change so the pricing summary (own job + subjob) stays in sync without an extra click.
+    React.useEffect(() => {
+        if (!pricingData?.options) return;
+        calculateSummaryRef.current(pricingData, selectedJobs, toName, quoteContextScope);
+    }, [activeQuoteTab, selectedJobs, quoteContextScope, pricingData, toName]);
+
     // Search suggestions
     const handleSearchInput = (value) => {
         setSearchTerm(value);
@@ -2663,11 +3538,17 @@ const QuoteForm = () => {
     };
 
 
-    const loadQuote = (quote) => {
+    /** @param opts.preserveRecipient If true (tab-driven auto-load), do not overwrite To name/address — keeps customer dropdown stable.
+     *  @param opts.skipPreparedSignatory If true (AutoLoad / programmatic sync), do not copy Signatory / Designation from DB; set Prepared By to the logged-in user (new-quote UX). Explicit sidebar click loads full quote row including DB Prepared By.
+     */
+    const loadQuote = (quote, opts = {}) => {
         if (!currentUser) {
             alert("Please login to access quotes.");
             return;
         }
+
+        const preserveRecipient = opts.preserveRecipient === true;
+        const skipPreparedSignatory = opts.skipPreparedSignatory === true;
 
         const userEmail = (currentUser.email || currentUser.EmailId || '').toLowerCase().trim();
         const preparedByEmail = (quote.PreparedByEmail || '').toLowerCase().trim();
@@ -2698,45 +3579,80 @@ const QuoteForm = () => {
         setQuoteNumber(quote.QuoteNumber);
         setQuoteDate(quote.QuoteDate ? quote.QuoteDate.split('T')[0] : new Date().toISOString().split('T')[0]);
         setValidityDays(quote.ValidityDays || 30);
-        setCustomerReference(quote.CustomerReference || '');
+        setCustomerReference(quote.CustomerReference || quote.YourRef || '');
         setSubject(quote.Subject || '');
-        setPreparedBy(quote.PreparedBy || '');
-        setSignatory(quote.Signatory || '');
-        setSignatoryDesignation(quote.SignatoryDesignation || '');
-        setToName(quote.ToName || '');
-        setToAddress(quote.ToAddress || '');
-        setToPhone(quote.ToPhone || '');
-        setToEmail(quote.ToEmail || '');
-        setToFax(quote.ToFax || '');
-
-        // Auto-fill missing details for internal customers if they are blank in the saved quote
-        if (!quote.ToAddress && enquiryData?.availableProfiles) {
-            const profile = enquiryData.availableProfiles.find(p =>
-                p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === (quote.ToName || '').trim() ||
-                (p.name && p.name.trim() === (quote.ToName || '').trim())
-            );
-            if (profile) {
-                console.log('[loadQuote] Healing missing address from internal profile:', profile.itemName);
-                if (!quote.ToAddress) setToAddress(profile.address || '');
-                if (!quote.ToPhone) setToPhone(profile.phone || '');
-                if (!quote.ToFax) setToFax(profile.fax || '');
-                if (!quote.ToEmail) setToEmail(profile.email || '');
-            }
+        {
+            const fromQuote = String(quote.QuoteType || '')
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean);
+            const fromEnq = Array.isArray(enquiryData?.enquiry?.SelectedEnquiryTypes)
+                ? enquiryData.enquiry.SelectedEnquiryTypes.filter(Boolean)
+                : [];
+            setQuoteTypeList(fromQuote.length > 0 ? fromQuote : fromEnq);
+            setQuoteEnquiryTypeSelect('');
+        }
+        if (!skipPreparedSignatory) {
+            setPreparedBy(quote.PreparedBy || '');
+            setSignatory(quote.Signatory || '');
+            setSignatoryDesignation(quote.SignatoryDesignation || '');
+        } else {
+            setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+            setSignatory('');
+            setSignatoryDesignation('');
         }
 
-        // Set Attention Of (Prioritize saved value, fallback to Enquiry logic)
-        if (quote.ToAttention) {
-            setToAttention(quote.ToAttention);
-        } else if (quote.ToName && enquiryData?.customerContacts) {
-            const contact = enquiryData.customerContacts[quote.ToName.trim()];
-            if (contact) {
-                setToAttention(contact);
+        if (!preserveRecipient) {
+            setToName(quote.ToName || '');
+            setToAddress(quote.ToAddress || '');
+            setToPhone(quote.ToPhone || '');
+            setToEmail(quote.ToEmail || '');
+            setToFax(quote.ToFax || '');
+
+            // Auto-fill missing details for internal customers if they are blank in the saved quote
+            if (!quote.ToAddress && enquiryData?.availableProfiles) {
+                const profile = enquiryData.availableProfiles.find(p =>
+                    p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === (quote.ToName || '').trim() ||
+                    (p.name && p.name.trim() === (quote.ToName || '').trim())
+                );
+                if (profile) {
+                    console.log('[loadQuote] Healing missing address from internal profile:', profile.itemName);
+                    if (!quote.ToAddress) setToAddress(profile.address || '');
+                    if (!quote.ToPhone) setToPhone(profile.phone || '');
+                    if (!quote.ToFax) setToFax(profile.fax || '');
+                    if (!quote.ToEmail) setToEmail(profile.email || '');
+                }
+            }
+
+            // Set Attention Of — internal quotes: only names allowed by Master_ConcernedSE / enquiry-data map
+            const qToName = quote.ToName || '';
+            if (isQuoteInternalCustomer(enquiryData, pricingData?.jobs, qToName)) {
+                const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, qToName);
+                const allowed = Array.isArray(intAtt?.options) ? intAtt.options.filter(Boolean) : [];
+                const savedAtt = String(quote.ToAttention || '').trim();
+                if (savedAtt && allowed.some((o) => normLooseAttention(o) === normLooseAttention(savedAtt))) {
+                    setToAttention(savedAtt);
+                } else if (intAtt?.defaultAttention) {
+                    setToAttention(intAtt.defaultAttention);
+                } else if (allowed.length) {
+                    setToAttention(allowed[0]);
+                } else {
+                    setToAttention('');
+                }
+            } else if (quote.ToAttention) {
+                setToAttention(quote.ToAttention);
+            } else if (quote.ToName && enquiryData?.customerContacts) {
+                const contact = enquiryData.customerContacts[quote.ToName.trim()];
+                if (contact) {
+                    setToAttention(contact);
+                } else {
+                    setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+                }
             } else {
                 setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
             }
-        } else {
-            setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
         }
+
 
         // Always use Company Details for Footer, never the Customer (recipient) details
         // PROACTIVE FIX (Step 4488): Use the resolved profile if available in enquiryData (User-specific)
@@ -2852,7 +3768,8 @@ const QuoteForm = () => {
         // Trigger Summary Recalculation to update the Preview HTML with corrected scope
         // This fixes "Corrupted" quotes that were saved with full pricing
         if (pricingData) {
-            calculateSummary(pricingData, undefined, quote.ToName, newScope);
+            const summaryToName = preserveRecipient ? (toName || quote.ToName) : quote.ToName;
+            calculateSummary(pricingData, undefined, summaryToName, newScope);
             // Note: If pricingData is not for the correct customer, this might be slightly off provided values,
             // but structure will be correct. Usually Previous Quote Context implies same active enquiry.
         }
@@ -2872,6 +3789,28 @@ const QuoteForm = () => {
         // Use global jobsPool memo (Step 1240)
 
         console.log('[AutoLoad] Checking quotes for tab:', activeTabObj.label, 'ID:', activeTabRealId);
+
+        // Scoped API rows already encode the exact EnquiryQuotes tuple (RequestNo + LeadJob + OwnJob + ToName).
+        // Do not mix with existingQuotes here; mixing can re-introduce wrong quote refs from other contexts.
+        const sourceQuotes = quoteScopedForPanel.length > 0 ? quoteScopedForPanel : existingQuotes;
+
+        // Fast path: tab already resolved a quote number (sidebar / calculatedTabs)
+        if (activeTabObj.quoteNo && sourceQuotes.length > 0) {
+            const want = String(activeTabObj.quoteNo).trim();
+            const baseWant = want.split('-R')[0];
+            const byNo = sourceQuotes.find(q => {
+                const qn = String(q.QuoteNumber || '').trim();
+                if (!qn) return false;
+                return qn === want || qn.split('-R')[0] === baseWant;
+            });
+            if (byNo) {
+                if (quoteId !== byNo.ID) {
+                    console.log('[AutoLoad] Loading from tab.quoteNo:', want);
+                    loadQuote(byNo, { preserveRecipient: true, skipPreparedSignatory: true });
+                }
+                return;
+            }
+        }
 
         // Filter quotes for this tab (Replicating render logic)
         // Robust resolution of lead code for filtering (Walking up to root L-code)
@@ -2929,13 +3868,16 @@ const QuoteForm = () => {
             return prefix;
         })();
 
-        const tabQuotes = existingQuotes.filter(q => {
+        const tabQuotes = sourceQuotes.filter(q => {
+            // Scoped API can return quotes for multiple OwnJobs; always narrow by the active tab's job.
             // Priority 1: OwnJob Match (The specific branch/tab this quote belongs to)
-            const quoteOwnJob = (q.OwnJob || '').trim().toLowerCase();
-            const tabJobName = (activeTabObj.label || '').trim().toLowerCase();
+            const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+            const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
 
-            const isTabMatch = quoteOwnJob === tabJobName ||
-                (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId));
+            const isTabMatch =
+                quoteOwnJob === tabJobName ||
+                (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId)) ||
+                quoteNumberDivisionMatchesTab(q, activeTabObj, calculatedTabs.length > 1);
 
             if (!isTabMatch) return false;
 
@@ -2944,8 +3886,13 @@ const QuoteForm = () => {
             const normalizedCurrentTo = normalize(toName || '');
 
             const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
-            const qJobObjByOwnJob = jobsPool.find(j => (j.itemName === q.OwnJob) || (j.ItemName === q.OwnJob));
-            const isSelfMatch = normalize(qJobObjByOwnJob?.itemName || '') === normalizedCurrentTo;
+            const qJobObjByOwnJob = jobsPool.find((j) =>
+                collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')) ===
+                collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''))
+            );
+            const isSelfMatch =
+                collapseSpacesLower(stripQuoteJobPrefix(qJobObjByOwnJob?.itemName || qJobObjByOwnJob?.DivisionName || '')) ===
+                collapseSpacesLower(stripQuoteJobPrefix(toName || ''));
 
             // Ancestor match for internal quoting
             const isAncestorMatch = (() => {
@@ -2973,14 +3920,32 @@ const QuoteForm = () => {
                 return false;
             }
 
-            // Priority 3: Division Code verification
+            // Priority 3: Division Code verification (use job / lead context — not tab label alone)
             const parts = q.QuoteNumber?.split('/') || [];
             const qDivCode = parts[1]?.toUpperCase();
-            const tabName = (activeTabObj.label || '').toUpperCase();
-            const isTypeMatch = matchDivisionCode(qDivCode, tabName, activeTabObj.divisionCode);
+            const divisionMatchContextName = divisionMatchContextForQuoteTab(
+                selectedLeadId,
+                pricingData,
+                activeTabRealId,
+                activeTabObj,
+                calculatedTabs.length,
+                jobsPool
+            );
+            const ownJobMatchesTab =
+                collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || '')) ===
+                collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+            const isTypeMatch =
+                ownJobMatchesTab ||
+                matchDivisionCode(qDivCode, divisionMatchContextName, activeTabObj.divisionCode);
 
             if (!isTypeMatch) {
-                console.log(`[AutoLoad] REJECTED: Type mismatch. qDiv:${qDivCode} vs tabName:${tabName}`);
+                console.log(`[AutoLoad] REJECTED: Type mismatch. qDiv:${qDivCode} vs context:${divisionMatchContextName}`);
+                return false;
+            }
+
+            // Authoritative: QuoteNumber division segment (e.g. BMP vs HVP) must match the active tab.
+            if (calculatedTabs.length > 1 && !quoteNumberDivisionMatchesTab(q, activeTabObj, true)) {
+                console.log(`[AutoLoad] REJECTED: Quote ref division does not match active tab: ${q.QuoteNumber}`);
                 return false;
             }
 
@@ -2995,13 +3960,70 @@ const QuoteForm = () => {
             // Only load if different (using closure's quoteId)
             if (quoteId !== latest.ID) {
                 console.log('[AutoLoad] Loading latest quote:', latest.QuoteNumber, 'for branch:', currentLeadCode);
-                loadQuote(latest);
+                loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
             }
         } else {
             console.log('[AutoLoad] No quotes found for tab. Branch:', currentLeadCode);
+            // During lead/customer scope transitions, scoped list can be briefly empty while fetching.
+            // Avoid clearing current quote in that transient window.
+            if (scopedEnquiryQuotesParams && quoteScopedForPanel.length === 0) {
+                console.log('[AutoLoad] Scoped params active but scoped rows empty; skip reset until fetch settles.');
+                return;
+            }
+            if (!(toName || '').trim()) {
+                console.log('[AutoLoad] toName empty; skip reset until customer is set again.');
+                return;
+            }
+            // Relaxed fallback for lead-switch roundtrip:
+            // if strict OwnJob/tab filtering fails, still restore latest quote that matches current customer
+            // and lead branch (when L-code is available), instead of blanking Quote Ref.
+            const relaxedByCustomerAndLead = sourceQuotes.filter((q) => {
+                const sameCustomer =
+                    normalize(q.ToName || '') === normalize(toName || '') ||
+                    normalizeCustomerKey(q.ToName || '') === normalizeCustomerKey(toName || '');
+                if (!sameCustomer) return false;
+
+                const qParts = String(q.QuoteNumber || '').split('/');
+                const qLeadPart = (qParts[2] || '').toUpperCase();
+                const qLeadCode = qLeadPart.match(/L\d+/)?.[0] || '';
+                const curLeadCode = String(currentLeadCode || '').toUpperCase().match(/L\d+/)?.[0] || '';
+
+                // If either side has no L-code, do not reject on branch here (legacy formats).
+                if (qLeadCode && curLeadCode && qLeadCode !== curLeadCode) return false;
+
+                // With multiple job tabs (e.g. HVAC + BMS), never pick another tab's quote (was loading HVP on BMS tab).
+                if (calculatedTabs.length > 1) {
+                    const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                    const tabJobName = collapseSpacesLower(
+                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                    );
+                    const tabOwnJobMatches =
+                        quoteOwnJob === tabJobName ||
+                        (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId));
+                    const divMatchesTab = quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                    if (!tabOwnJobMatches && !divMatchesTab) return false;
+                }
+
+                return true;
+            });
+            if (relaxedByCustomerAndLead.length > 0) {
+                const latestRelaxed = [...relaxedByCustomerAndLead].sort((a, b) => {
+                    const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+                    if (r !== 0) return r;
+                    const ta = Date.parse(a.QuoteDate || 0) || 0;
+                    const tb = Date.parse(b.QuoteDate || 0) || 0;
+                    return tb - ta;
+                })[0];
+                if (latestRelaxed && quoteId !== latestRelaxed.ID) {
+                    console.log('[AutoLoad] Relaxed fallback loading quote:', latestRelaxed.QuoteNumber);
+                    loadQuote(latestRelaxed, { preserveRecipient: true, skipPreparedSignatory: true });
+                    return;
+                }
+            }
+
             // SAFEGUARD: Don't clear if we just saved/revised or if it's already null
             // Check if the current quoteId is actually a valid quote that just hasn't been synced to existingQuotes properly
-            const isJustSaved = existingQuotes.some(q => q.ID === quoteId && q.QuoteNumber === quoteNumber);
+            const isJustSaved = sourceQuotes.some(q => q.ID === quoteId && q.QuoteNumber === quoteNumber);
 
             if (quoteId !== null && !isJustSaved) {
                 console.log('[AutoLoad] Resetting to blank form as no saved quotes match current tab/customer.');
@@ -3019,16 +4041,66 @@ const QuoteForm = () => {
                 setCustomerReference(enquiryData?.enquiry?.CustomerRefNo || enquiryData?.enquiry?.RequestNo || '');
             }
 
-            // ALWAYS recalculate summary when switching tabs to ensure the sidebar summary matches the active branch,
-            // even if no previous quote was found to load.
-            if (pricingData) {
-                console.log('[AutoLoad] Recalculating summary for branch-specific view on tab:', activeQuoteTab);
-                calculateSummary(pricingData, selectedJobs, toName);
-            }
+            // Summary refresh on tab change is handled by the calculateSummary effect (paired tabs + same quoteId).
         }
-    }, [activeQuoteTab, calculatedTabs, existingQuotes, toName, selectedLeadId, pricingData, enquiryData]);
+    }, [activeQuoteTab, calculatedTabs, existingQuotes, quoteScopedForPanel, scopedEnquiryQuotesParams, toName, selectedLeadId, pricingData, enquiryData, quoteId, jobsPool]);
+
+    // Hard fallback: when server-scoped rows are available for current lead/customer,
+    // ensure one of them is loaded so Quote Ref never stays blank after lead switches.
+    useEffect(() => {
+        if (!quoteScopedForPanel || quoteScopedForPanel.length === 0) return;
+        if (!(toName || '').trim()) return;
+
+        const activeTabObj = calculatedTabs?.find((t) => String(t.id) === String(activeQuoteTab));
+        let panel = quoteScopedForPanel;
+        const scopeP = scopedEnquiryQuotesParams;
+        // When OwnJob is resolved from the user’s department (placeholder first tab), DB OwnJob may not match tab labels;
+        // keep QuoteNumber division heuristics. Otherwise GET /by-enquiry already filtered by LeadJob + OwnJob + ToName.
+        if (scopeP?.useDepartmentForOwnJob && activeTabObj && (activeTabObj.label || activeTabObj.name)) {
+            const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+            const filtered = quoteScopedForPanel.filter((q) => {
+                const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                return (
+                    quoteOwnJob === tabJobName ||
+                    (activeTabObj.realId && String(q.DepartmentID) === String(activeTabObj.realId)) ||
+                    quoteNumberDivisionMatchesTab(q, activeTabObj, (calculatedTabs?.length || 0) > 1)
+                );
+            });
+            if (filtered.length) panel = filtered;
+        }
+
+        const currentInScope = quoteId
+            ? panel.some((q) => String(q.ID) === String(quoteId))
+            : false;
+        if (currentInScope) return;
+
+        const latest = [...panel].sort((a, b) => {
+            const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+            if (r !== 0) return r;
+            const ta = Date.parse(a.QuoteDate || 0) || 0;
+            const tb = Date.parse(b.QuoteDate || 0) || 0;
+            return tb - ta;
+        })[0];
+
+        if (!latest) return;
+        loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [quoteScopedForPanel, quoteId, toName, activeQuoteTab, calculatedTabs, scopedEnquiryQuotesParams]);
 
 
+
+    const handleAddQuoteType = useCallback(() => {
+        const v = (quoteEnquiryTypeSelect || '').trim();
+        if (v && !quoteTypeList.includes(v)) {
+            setQuoteTypeList((prev) => [...prev, v]);
+            setQuoteEnquiryTypeSelect('');
+        }
+    }, [quoteEnquiryTypeSelect, quoteTypeList]);
+
+    const handleRemoveQuoteTypeAt = useCallback((idx) => {
+        if (idx == null || idx < 0) return;
+        setQuoteTypeList((prev) => prev.filter((_, i) => i !== idx));
+    }, []);
 
     // Generic Mandatory Field Validation
     const validateMandatoryFields = useCallback(() => {
@@ -3040,6 +4112,7 @@ const QuoteForm = () => {
         if (!preparedBy || !preparedBy.trim()) missingFields.push('Prepared By');
         if (!signatory || !signatory.trim()) missingFields.push('Signatory');
         if (!customerReference || !customerReference.trim()) missingFields.push('Customer Reference');
+        if (!quoteTypeList || quoteTypeList.length === 0) missingFields.push('Enquiry Type');
 
         // Check for future date
         if (quoteDate) {
@@ -3055,7 +4128,7 @@ const QuoteForm = () => {
             return false;
         }
         return true;
-    }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory, customerReference]);
+    }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory, customerReference, quoteTypeList]);
 
     const handleRevise = async () => {
         console.log('[handleRevise] Starting revision process. QuoteId:', quoteId);
@@ -3158,7 +4231,9 @@ const QuoteForm = () => {
     const fetchExistingQuotes = useCallback(async (requestNo) => {
         try {
             console.log('[fetchExistingQuotes] START fetching for:', requestNo);
-            const url = `${API_BASE}/api/quotes/by-enquiry/${encodeURIComponent(requestNo)}`;
+            const em = (currentUser?.email || currentUser?.EmailId || '').toString();
+            const qs = em ? `?${new URLSearchParams({ userEmail: em }).toString()}` : '';
+            const url = `${API_BASE}/api/quotes/by-enquiry/${encodeURIComponent(requestNo)}${qs}`;
             console.log('[fetchExistingQuotes] URL:', url);
 
             const res = await fetch(url);
@@ -3176,7 +4251,7 @@ const QuoteForm = () => {
         } catch (err) {
             console.error('[fetchExistingQuotes] Error:', err);
         }
-    }, []);
+    }, [currentUser]);
 
     // NEW: Auto-load latest revision for selected customer and lead job
 
@@ -3188,25 +4263,34 @@ const QuoteForm = () => {
         setLoading(true);
         setPricingData(null); // Reset pricing data to clear stale access rights
         setExistingQuotes([]);
+        setQuoteScopedForPanel([]);
         setPendingFiles([]); // Clear queue
+        leadChoiceFingerprintRef.current = '';
+        autoSelectCustomerAfterLeadChangeRef.current = false;
+        preserveQuoteOnLeadChangeRef.current = null;
         setToName('');
         setToAddress('');
         setToPhone('');
         setToEmail('');
         setToAttention('');
-        setPreparedBy('');
+        setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
         setSignatory('');
         setSignatoryDesignation('');
         setQuoteId(null);
         setQuoteNumber('');
         setSelectedLeadId(null);
+        setQuoteEnquiryTypeSelect('');
+        setQuoteTypeList([]);
 
         // --- LOCKED LOGIC: Clear Tab State Registry on New Enquiry ---
         tabStateRegistry.current = {};
 
         try {
             const userEmail = currentUser?.EmailId || '';
-            const res = await fetch(`${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}`);
+            const res = await fetch(
+                `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}`,
+                { cache: 'no-store' }
+            );
             if (res.ok) {
                 const data = await res.json();
                 setEnquiryData(data);
@@ -3399,12 +4483,17 @@ const QuoteForm = () => {
                 // Initialize Metadata
                 setQuoteDate(new Date().toISOString().split('T')[0]);
                 setValidityDays(30);
-                setPreparedBy(currentUser?.FullName || currentUser?.name || '');
+                setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
                 setSignatory('');
                 setSignatoryDesignation('');
 
-                setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No
+                setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No → YourRef on save
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
+                {
+                    const t = data.enquiry?.SelectedEnquiryTypes;
+                    setQuoteTypeList(Array.isArray(t) && t.length > 0 ? [...t] : []);
+                    setQuoteEnquiryTypeSelect('');
+                }
 
                 // Reset Customer Selection to ensure a clean slate (User must select manually)
                 const defaultCustomer = '';
@@ -3577,6 +4666,7 @@ const QuoteForm = () => {
         // --- LOCKED LOGIC: Clear Tab State Registry on Reset ---
         tabStateRegistry.current = {};
         setExistingQuotes([]);
+        setQuoteScopedForPanel([]);
         setPendingFiles([]); // Clear queue
         setExpandedGroups({});
         setSearchTerm('');
@@ -3722,10 +4812,27 @@ const QuoteForm = () => {
             clauseOrder: orderedClauses,
             quoteDate,
             customerReference,
+            quoteType: quoteTypeList.filter(Boolean).join(', '),
             subject,
             signatory,
             signatoryDesignation,
-            toName,
+            toName: (() => {
+                const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
+                if (!tabs || tabs.length < 2) return toName;
+                const tn = (toName || '').trim();
+                const key = collapseSpacesLower(stripQuoteJobPrefix(tn));
+                const pool = jobsPool.length > 0 ? jobsPool : enquiryData?.divisionsHierarchy || [];
+                const recipientIsInternalJobName = pool.some((j) => {
+                    const jn = collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || ''));
+                    return jn === key && jn.length > 0;
+                });
+                // External recipient: ToName always stays the company name; internal job-as-customer may use lead label on subjob tabs.
+                if (!recipientIsInternalJobName) return toName;
+                const firstId = String(tabs[0]?.id);
+                if (String(activeQuoteTab) === firstId) return toName;
+                const parentLabel = stripQuoteJobPrefix(tabs[0]?.label || tabs[0]?.name || '').trim();
+                return parentLabel || toName;
+            })(),
             toAddress,
             toPhone,
             toEmail,
@@ -3739,15 +4846,16 @@ const QuoteForm = () => {
                 return enquiryData.leadJobPrefix || '';
             })(),
             ownJob: (() => {
-                if (activeQuoteTab && calculatedTabs) {
-                    const tab = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
+                const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
+                if (activeQuoteTab && tabs) {
+                    const tab = tabs.find(t => String(t.id) === String(activeQuoteTab));
                     if (tab) return tab.name || tab.label || '';
                 }
                 return '';
             })(),
             status: 'Saved'
         };
-    }, [enquiryData, selectedJobs, pricingSummary, currentUser, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, selectedLeadId]);
+    }, [enquiryData, selectedJobs, pricingSummary, currentUser, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool]);
 
 
 
@@ -3787,7 +4895,7 @@ const QuoteForm = () => {
             if (!quoteId && existingQuotes.length > 0) {
                 // Check if any existing quote has the same customer AND same lead job branch AND same division
                 const sameCustomerQuote = existingQuotes.find(q => {
-                    const matchCustomer = normalize(q.ToName) === normalize(toName);
+                    const matchCustomer = normalize(q.ToName) === normalize(basePayload.toName);
 
                     // Branch Isolation: Match the prefix exactly
                     // q.QuoteNumber part 2 (Ref) is usually 'RequestNo-LCode' or just 'RequestNo'
@@ -4222,12 +5330,12 @@ const QuoteForm = () => {
             if (self) finalOutput = [self, ...results];
         }
 
-        return finalOutput.map(u => ({ value: u.FullName, label: u.FullName, type: 'OwnJob' }))
+        return finalOutput.map(u => ({ value: u.FullName, label: u.FullName, type: 'OwnJob', designation: u.Designation || '' }))
             .filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
     }, [usersList, currentUser, enquiryData, activeQuoteTab, calculatedTabs, pricingData]);
 
     const computedSignatoryOptions = React.useMemo(() => {
-        if (!usersList || usersList.length === 0 || !enquiryData || !enquiryData.divisionEmails) return [];
+        if (!usersList || usersList.length === 0 || !enquiryData) return [];
 
         // 1. Resolve Active Division Context
         let activeFull = '';
@@ -4256,8 +5364,12 @@ const QuoteForm = () => {
         console.log('[Signatory Debug] Filtering for division:', activeClean);
 
         // 2. Extract CC Mails for this division branch
+        const divisionEmails = Array.isArray(enquiryData.divisionEmails) ? enquiryData.divisionEmails : [];
+        if (divisionEmails.length === 0) {
+            return computedPreparedByOptions;
+        }
         let ccMailsList = [];
-        enquiryData.divisionEmails.forEach(div => {
+        divisionEmails.forEach(div => {
             const divDept = (div.departmentName || '').trim().toLowerCase();
             const divItem = (div.itemName || '').toLowerCase();
 
@@ -4292,6 +5404,9 @@ const QuoteForm = () => {
 
         const uniqueCCMails = [...new Set(ccMailsList)];
         console.log('[Signatory Debug] Unique CC Mails mapped:', uniqueCCMails);
+        if (uniqueCCMails.length === 0) {
+            return computedPreparedByOptions;
+        }
 
         const matchedItems = usersList.filter(u => {
             const uMail = (u.EmailId || '').toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
@@ -4314,11 +5429,130 @@ const QuoteForm = () => {
         });
 
         console.log('[Signatory Debug] Final Sorted Signatories found:', sortedItems.length);
-        return sortedItems;
-    }, [enquiryData, usersList, currentUser, activeQuoteTab, calculatedTabs, pricingData]);
+        return sortedItems.length > 0 ? sortedItems : computedPreparedByOptions;
+    }, [enquiryData, usersList, currentUser, activeQuoteTab, calculatedTabs, pricingData, computedPreparedByOptions]);
+
+    const attentionSelectOptions = React.useMemo(() => {
+        if (!toName || !enquiryData) return [];
+        const toNameClean = collapseSpacesLower(stripQuoteJobPrefix(toName));
+        const toKey = normalizeCustomerKey(toName);
+        const intAttEarly = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+        const hierarchyClean = new Set(
+            (enquiryData.divisionsHierarchy || []).map(n =>
+                collapseSpacesLower(stripQuoteJobPrefix(n.itemName || n.DivisionName || ''))
+            )
+        );
+        const profileClean = new Set(
+            (enquiryData.availableProfiles || []).map(p =>
+                collapseSpacesLower(stripQuoteJobPrefix(p.itemName || ''))
+            )
+        );
+        const pricingClean = new Set(
+            (pricingData?.jobs || [])
+                .filter(j => j.visible !== false)
+                .map(j => collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')))
+                .filter(Boolean)
+        );
+        const isInternalCustomer =
+            intAttEarly != null ||
+            hierarchyClean.has(toNameClean) ||
+            profileClean.has(toNameClean) ||
+            [...pricingClean].some(
+                pc =>
+                    pc === toNameClean ||
+                    (toKey &&
+                        (normalizeCustomerKey(pc) === toKey ||
+                            pc.includes(toNameClean) ||
+                            toNameClean.includes(pc)))
+            );
+
+        if (isInternalCustomer) {
+            const intAtt = intAttEarly || resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+            let list = Array.isArray(intAtt?.options) ? intAtt.options.filter(Boolean) : [];
+            if (list.length === 0 && deptAttentionNames.length) {
+                list = [...deptAttentionNames];
+            }
+            return list;
+        }
+        const extMap = enquiryData.externalAttentionOptionsByCustomer || {};
+        let extList = extMap[toName] || extMap[toName.trim()];
+        if (!extList) {
+            const tn = normalize(toName);
+            const fk = Object.keys(extMap).find(k => normalize(k) === tn);
+            if (fk) extList = extMap[fk];
+        }
+        if (Array.isArray(extList) && extList.length > 0) return extList;
+        const ccMap = enquiryData.customerContacts || {};
+        const ccKey = ccMap[toName] ? toName : Object.keys(ccMap).find(k => normalize(k) === normalize(toName));
+        const cc = ccKey ? ccMap[ccKey] : null;
+        if (cc) return String(cc).split(',').map(s => s.trim()).filter(Boolean);
+        const rf = enquiryData.enquiry?.ReceivedFrom;
+        if (rf) return String(rf).split(',').map(s => s.trim()).filter(Boolean);
+        return [];
+    }, [enquiryData, toName, pricingData?.jobs, deptAttentionNames]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            if (!toName.trim() || !enquiryData) {
+                setDeptAttentionNames([]);
+                return;
+            }
+            if (!isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) {
+                setDeptAttentionNames([]);
+                return;
+            }
+            const flex = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+            if (flex?.options?.length) {
+                setDeptAttentionNames([]);
+                return;
+            }
+            try {
+                const res = await fetch(
+                    `${API_BASE}/api/quotes/attention-by-department?dept=${encodeURIComponent(toName)}`
+                );
+                const arr = res.ok ? await res.json() : [];
+                if (!cancelled && Array.isArray(arr)) {
+                    setDeptAttentionNames(arr.map((x) => String(x || '').trim()).filter(Boolean));
+                }
+            } catch {
+                if (!cancelled) setDeptAttentionNames([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [toName, enquiryData, pricingData?.jobs]);
+
+    const showAttentionAsSelect = React.useMemo(
+        () =>
+            isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName) ||
+            attentionSelectOptions.length > 0,
+        [enquiryData, pricingData?.jobs, toName, attentionSelectOptions]
+    );
+
+    const attentionSelectMerged = React.useMemo(() => {
+        if (isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) {
+            return attentionSelectOptions;
+        }
+        return [...new Set([...attentionSelectOptions, toAttention].filter(Boolean))];
+    }, [enquiryData, pricingData?.jobs, toName, attentionSelectOptions, toAttention]);
+
+    // Drop stale Attention values that are not in the dropdown list (internal customers only)
+    useEffect(() => {
+        if (!toName || !enquiryData) return;
+        if (!isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) return;
+        const allowed = attentionSelectOptions;
+        if (allowed.length === 0) return;
+        const cur = String(toAttention || '').trim();
+        if (!cur) return;
+        if (allowed.some((o) => normLooseAttention(o) === normLooseAttention(cur))) return;
+        const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+        setToAttention(intAtt?.defaultAttention || allowed[0] || '');
+    }, [toName, enquiryData, pricingData?.jobs, toAttention, attentionSelectOptions]);
 
     // --- READ-ONLY TAB LOGIC ---
-    const activeGlobalTabObj = (calculatedTabs || []).find(t => String(t.id) === String(activeQuoteTab));
+    const activeGlobalTabObj = (effectiveQuoteTabs || []).find(t => String(t.id) === String(activeQuoteTab));
     const isEditingRestricted = activeGlobalTabObj && !activeGlobalTabObj.isSelf;
     const activeGlobalTabName = activeGlobalTabObj ? (activeGlobalTabObj.name || activeGlobalTabObj.label) : 'Project';
 
@@ -4371,15 +5605,20 @@ const QuoteForm = () => {
                                 )}
                             </div>
 
-                            {/* Lead Job Dropdown */}
-                            <div style={{ flex: 1 }}>
-                                <div style={{ position: 'relative' }}>
-                                    {(() => {
-                                        if (!enquiryData) return (
-                                            <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
-                                                <option>Select Lead Job</option>
-                                            </select>
-                                        );
+                            {/* Lead Job Dropdown + code pill (match Pricing module) */}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                {(() => {
+                                        if (!enquiryData) {
+                                            return (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                                                    <div style={{ flex: 1, position: 'relative' }}>
+                                                        <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
+                                                            <option>Select Lead Job</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                            );
+                                        }
 
                                         // 1. Get all potential lead jobs (roots)
                                         let allLeadJobs = enquiryData.divisions || [];
@@ -4441,23 +5680,13 @@ const QuoteForm = () => {
                                             });
                                         }
 
-                                        // 3. Determine Selected Value
-                                        let selectedValue = '';
-                                        if (selectedLeadId && pricingData?.jobs) {
-                                            const found = pricingData.jobs.find(j => String(j.id || j.ItemID) === String(selectedLeadId));
-                                            if (found) {
-                                                selectedValue = found.itemName || found.ItemName || found.DivisionName;
-                                            }
-                                        }
-
-                                        if (!selectedValue && enquiryData.leadJobPrefix) {
-                                            const prefix = String(enquiryData.leadJobPrefix).toLowerCase();
-                                            const found = (visibleLeadJobs || []).find(v => {
-                                                const vStr = String(v || '').toLowerCase();
-                                                return vStr === prefix || vStr.startsWith(prefix);
-                                            });
-                                            if (found) selectedValue = found;
-                                        }
+                                        // 3. Selected value MUST match an <option value> (full division string), never a bare clean name.
+                                        const selectedValue = resolveLeadJobSelectValue(
+                                            visibleLeadJobs,
+                                            selectedLeadId,
+                                            pricingData?.jobs,
+                                            enquiryData.leadJobPrefix
+                                        );
 
                                         console.log('[Quote Lead Job Render] State:', {
                                             prefix: enquiryData.leadJobPrefix,
@@ -4465,46 +5694,175 @@ const QuoteForm = () => {
                                             selected: selectedValue
                                         });
 
-                                        return (
-                                            <select
+                                        const leadClean = (s) =>
+                                            String(s || '')
+                                                .replace(/^L\d+\s*-\s*/i, '')
+                                                .trim()
+                                                .toLowerCase();
+
+                                        let selectedLeadCodeDisplay = '';
+                                        if (selectedLeadId && pricingData?.jobs) {
+                                            const root = pricingData.jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+                                            selectedLeadCodeDisplay = String(root?.leadJobCode || root?.LeadJobCode || '').trim();
+                                            if (!selectedLeadCodeDisplay && root) {
+                                                const nm = String(root.itemName || root.DivisionName || root.ItemName || '');
+                                                const m = nm.match(/^(L\d+)/i);
+                                                if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
+                                            }
+                                        }
+                                        if (!selectedLeadCodeDisplay && selectedValue) {
+                                            const m = String(selectedValue).trim().match(/^(L\d+)/i);
+                                            if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
+                                        }
+
+                                        const labelForCode =
+                                            selectedValue && String(selectedValue).trim()
+                                                ? selectedValue
+                                                : enquiryData.leadJobPrefix && String(enquiryData.leadJobPrefix).trim()
+                                                  ? enquiryData.leadJobPrefix
+                                                  : '';
+                                        const bareLOnly = labelForCode && /^L\d+$/i.test(String(labelForCode).trim());
+
+                                        // Enquiry divisions are often clean names ("Civil Project"); L-code lives on hierarchy / pricing job.
+                                        if (!selectedLeadCodeDisplay && !bareLOnly && enquiryData.divisionsHierarchy?.length && labelForCode) {
+                                            const sv = leadClean(labelForCode);
+                                            const node = enquiryData.divisionsHierarchy.find((d) => {
+                                                const raw = String(d.itemName || d.DivisionName || '').trim();
+                                                return (
+                                                    leadClean(raw) === sv ||
+                                                    raw.toLowerCase() === String(labelForCode).trim().toLowerCase()
+                                                );
+                                            });
+                                            selectedLeadCodeDisplay = String(node?.leadJobCode || node?.LeadJobCode || '').trim();
+                                            if (!selectedLeadCodeDisplay && node) {
+                                                const fromName = String(node.itemName || node.DivisionName || '').match(/^(L\d+)/i);
+                                                if (fromName) selectedLeadCodeDisplay = fromName[1].toUpperCase();
+                                            }
+                                        }
+                                        if (!selectedLeadCodeDisplay && !bareLOnly && pricingData?.jobs?.length && labelForCode) {
+                                            const sv = leadClean(labelForCode);
+                                            const root = pricingData.jobs.find((j) => {
+                                                const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
+                                                if (!isRoot) return false;
+                                                return leadClean(j.itemName || j.DivisionName || j.ItemName) === sv;
+                                            });
+                                            if (root) {
+                                                selectedLeadCodeDisplay = String(root.leadJobCode || root.LeadJobCode || '').trim();
+                                                if (!selectedLeadCodeDisplay) {
+                                                    const nm = String(root.itemName || root.DivisionName || '');
+                                                    const m = nm.match(/^(L\d+)/i);
+                                                    if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
+                                                }
+                                            }
+                                        }
+                                        if (!selectedLeadCodeDisplay && enquiryData.leadJobPrefix) {
+                                            const rawP = String(enquiryData.leadJobPrefix).trim();
+                                            let m = rawP.match(/^(L\d+)/i);
+                                            if (!m) m = rawP.match(/(L\d+)/i);
+                                            if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
+                                        }
+
+                                        const leadCodePill = selectedLeadCodeDisplay ? (
+                                            <span
                                                 style={{
-                                                    width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
-                                                    background: 'white', color: '#334155', fontWeight: '500',
-                                                    fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
-                                                }}
-                                                value={selectedValue}
-                                                onChange={(e) => {
-                                                    const val = e.target.value;
-                                                    setQuoteId(null);
-                                                    handleCustomerChange(null); // Clear customer selection on Lead Job change
-
-                                                    // Find the corresponding Hub ID for strict isolation
-                                                    const jobObj = (pricingData?.jobs || []).find(j => {
-                                                        const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
-                                                        return isRoot && (j.itemName === val || j.DivisionName === val);
-                                                    });
-                                                    if (jobObj) setSelectedLeadId(jobObj.id || jobObj.ItemID);
-
-                                                    if (val.match(/^L\d+/)) {
-                                                        const prefix = val.split('-')[0].trim();
-                                                        setEnquiryData(prev => ({ ...prev, leadJobPrefix: prefix }));
-                                                    } else {
-                                                        setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
-                                                    }
+                                                    padding: '4px 8px',
+                                                    borderRadius: '999px',
+                                                    border: '1px solid #cbd5e1',
+                                                    background: '#ffffff',
+                                                    color: '#334155',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    flexShrink: 0,
+                                                    lineHeight: 1.2
                                                 }}
                                             >
-                                                <option value="" disabled>Select Lead Job</option>
-                                                {visibleLeadJobs.map(div => {
-                                                    const cleanName = div.replace(/^L\d+\s*-\s*/, '').trim();
-                                                    return <option key={div} value={div}>{cleanName}</option>;
-                                                })}
-                                            </select>
+                                                {selectedLeadCodeDisplay}
+                                            </span>
+                                        ) : null;
+
+                                        return (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                                                <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+                                                    <select
+                                                        style={{
+                                                            width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
+                                                            background: 'white', color: '#334155', fontWeight: '500',
+                                                            fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
+                                                        }}
+                                                        value={selectedValue}
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            if (!val || !String(val).trim()) return;
+                                                            const nextFp = leadJobChoiceFingerprint(val);
+                                                            const prevFp = leadChoiceFingerprintRef.current;
+                                                            const didLeadChange = !!nextFp && nextFp !== prevFp;
+                                                            if (didLeadChange) {
+                                                                autoSelectCustomerAfterLeadChangeRef.current = true;
+                                                                const tn = (toName || '').trim();
+                                                                preserveQuoteOnLeadChangeRef.current =
+                                                                    quoteId && tn
+                                                                        ? {
+                                                                              quoteId,
+                                                                              quoteNumber: quoteNumber || '',
+                                                                              toName: tn
+                                                                          }
+                                                                        : null;
+                                                                clearCustomerForLeadSwitch();
+                                                            }
+                                                            leadChoiceFingerprintRef.current = nextFp || prevFp;
+
+                                                            // Find the corresponding Hub ID for strict isolation (val is full <option> string)
+                                                            const valClean = String(val || '')
+                                                                .replace(/^L\d+\s*-\s*/i, '')
+                                                                .trim()
+                                                                .toLowerCase();
+                                                            const jobObj = (pricingData?.jobs || []).find((j) => {
+                                                                const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
+                                                                if (!isRoot) return false;
+                                                                const nm = String(j.itemName || j.DivisionName || j.ItemName || '').trim();
+                                                                const nmLow = nm.toLowerCase();
+                                                                return (
+                                                                    nm === val ||
+                                                                    nmLow === String(val || '').trim().toLowerCase() ||
+                                                                    nmLow.replace(/^l\d+\s*-\s*/i, '').trim() === valClean
+                                                                );
+                                                            });
+                                                            if (jobObj) setSelectedLeadId(jobObj.id || jobObj.ItemID);
+
+                                                            const nextPrefixForPricing = val.match(/^L\d+/)
+                                                                ? val.split('-')[0].trim()
+                                                                : val;
+                                                            if (val.match(/^L\d+/)) {
+                                                                setEnquiryData(prev => ({ ...prev, leadJobPrefix: nextPrefixForPricing }));
+                                                            } else {
+                                                                setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
+                                                            }
+
+                                                            const reqNo = enquiryData?.enquiry?.RequestNo;
+                                                            const cx = (toNameRef.current || '').trim();
+                                                            if (reqNo && cx) {
+                                                                queueMicrotask(() =>
+                                                                    loadPricingData(reqNo, cx, {
+                                                                        leadJobPrefixOverride: nextPrefixForPricing
+                                                                    })
+                                                                );
+                                                            }
+                                                        }}
+                                                    >
+                                                        <option value="" disabled>Select Lead Job</option>
+                                                        {visibleLeadJobs.map(div => {
+                                                            const cleanName = div.replace(/^L\d+\s*-\s*/, '').trim();
+                                                            return <option key={div} value={div}>{cleanName}</option>;
+                                                        })}
+                                                    </select>
+                                                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
+                                                        <ChevronDown size={14} />
+                                                    </div>
+                                                </div>
+                                                {leadCodePill}
+                                            </div>
                                         );
                                     })()}
-                                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
-                                        <ChevronDown size={14} />
-                                    </div>
-                                </div>
                             </div>
                         </div>
 
@@ -4523,8 +5881,11 @@ const QuoteForm = () => {
                                         menu: (base) => ({ ...base, zIndex: 9999 })
                                     }}
                                     isDisabled={!enquiryData}
-                                    options={enquiryCustomerOptions}
-                                    value={toName ? { label: toName, value: toName } : null}
+                                    options={quoteCustomerDropdownOptions}
+                                    value={customerSelectValue}
+                                    getOptionValue={getCustomerOptionValue}
+                                    getOptionLabel={getCustomerOptionLabel}
+                                    styles={quoteCustomerCreatableStyles}
                                     onChange={(selected) => handleCustomerChange(selected)}
                                     placeholder="Select Customer..."
                                     formatCreateLabel={(inputValue) => `Use "${inputValue}"`}
@@ -4532,8 +5893,9 @@ const QuoteForm = () => {
                                 />
                             </div>
 
-                            {/* Search Button */}
+                            {/* Search + Clear (same row as customer select) */}
                             <button
+                                type="button"
                                 onClick={() => searchTerm.trim() && handleSearchInput(searchTerm)}
                                 style={{
                                     padding: '8px 16px',
@@ -4544,26 +5906,41 @@ const QuoteForm = () => {
                                     cursor: 'pointer',
                                     fontWeight: '500',
                                     fontSize: '13px',
-                                    whiteSpace: 'nowrap'
+                                    whiteSpace: 'nowrap',
+                                    flexShrink: 0
                                 }}
                             >
                                 Search
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleClear}
+                                style={{
+                                    padding: '8px 14px',
+                                    background: '#e2e8f0',
+                                    border: '1px solid #cbd5e1',
+                                    borderRadius: '6px',
+                                    cursor: 'pointer',
+                                    fontSize: '13px',
+                                    color: '#475569',
+                                    fontWeight: '600',
+                                    whiteSpace: 'nowrap',
+                                    flexShrink: 0
+                                }}
+                            >
+                                Clear
                             </button>
                         </div>
                     </div>
                 </div>
 
-                {/* Action Buttons & Clear Selection */}
+                {/* Action Buttons (Clear lives next to Search above) */}
                 {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected */}
                 {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
                     <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
 
-                        {/* Left Actions: Clear, Save, Revision */}
+                        {/* Left Actions: Save, Revision */}
                         <div style={{ display: 'flex', gap: '6px' }}>
-                            <button onClick={handleClear} style={{ padding: '6px 8px', background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', color: '#475569', fontWeight: '600' }}>
-                                Clear
-                            </button>
-
                             {/* Save Button - Disabled if already saved (Revision only allowed) */}
                             <button
                                 onClick={() => saveQuote()}
@@ -4582,7 +5959,13 @@ const QuoteForm = () => {
                                     fontSize: '12px',
                                     opacity: saving ? 0.7 : 1
                                 }}
-                                title={isEditingRestricted ? "Editing is restricted for this tab" : !canEdit() ? "No permission to modify" : (quoteId ? "Quote is saved and cannot be edited. Create a revision instead." : "")}
+                                title={
+                                    saving ? 'Saving…' :
+                                    isEditingRestricted ? 'Editing is restricted for this tab' :
+                                    !canEdit() ? 'No permission to save (admin/lead access, pricing scope, or tab ownership required)' :
+                                    quoteId ? 'Quote is saved and cannot be edited. Create a revision instead.' :
+                                    ''
+                                }
                             >
                                 <Save size={14} /> {saving ? 'Saving...' : 'Save'}
                             </button>
@@ -4675,6 +6058,36 @@ const QuoteForm = () => {
 
                                                 const activeTabRealId = activeTabObj.realId;
 
+                                                /** Lead + all direct subjobs (or own job + all direct subjobs): show every branch tab's pricing rows in the summary. */
+                                                const leadPlusSubs =
+                                                    tabs.length >= 2 &&
+                                                    tabs[0]?.isLeadInternalTab &&
+                                                    tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+                                                const ownPlusSubs =
+                                                    tabs.length >= 2 &&
+                                                    tabs[0]?.isOwnJobTab &&
+                                                    tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+                                                const pairedPricingRealIds =
+                                                    (leadPlusSubs || ownPlusSubs) && tabs[0]?.realId
+                                                        ? new Set(tabs.map((t) => String(t.realId)).filter(Boolean))
+                                                        : null;
+
+                                                // Include direct children of the active tab (e.g. HVAC → nested subjobs) so they are not excluded by the tab-only id set.
+                                                const pairedPricingSummaryIds =
+                                                    pairedPricingRealIds &&
+                                                    pairedPricingRealIds.size >= 2 &&
+                                                    activeTabRealId
+                                                        ? (() => {
+                                                              const s = new Set(pairedPricingRealIds);
+                                                              collectDirectChildJobIdsFromPools(
+                                                                  activeTabRealId,
+                                                                  jobsPool,
+                                                                  enquiryData?.divisionsHierarchy || []
+                                                              ).forEach((id) => s.add(id));
+                                                              return s;
+                                                          })()
+                                                        : pairedPricingRealIds;
+
                                                 // Hierarchy filter removed (using global isDescendant)
 
                                                 // Resolve current lead code for robust branch isolation
@@ -4714,53 +6127,81 @@ const QuoteForm = () => {
                                                     return prefix;
                                                 })();
 
-                                                // Filter and Render Previous Quotes
-                                                const filteredQuotes = existingQuotes.filter(q => {
+                                                // Filter and Render Previous Quotes (API-scoped list when available).
+                                                // Scoped rows are the source of truth for the requested EnquiryQuotes tuple.
+                                                const useScopedPanel = quoteScopedForPanel.length > 0;
+                                                const quoteSourceList = useScopedPanel ? quoteScopedForPanel : existingQuotes;
+
+                                                let filteredQuotes = quoteSourceList.filter(q => {
                                                     const normalizedQuoteTo = normalize(q.ToName || '');
                                                     const normalizedCurrentTo = normalize(toName || '');
 
-                                                    const activeTabAncestors = [];
-                                                    let currAnc = activeTabRealId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
-                                                    let ancSafety = 0;
-                                                    let ancVisited = new Set();
-                                                    while (currAnc && (currAnc.parentId || currAnc.ParentID) && (currAnc.parentId || currAnc.ParentID) !== '0' && (currAnc.parentId || currAnc.ParentID) !== 0 && ancSafety < 20) {
-                                                        const pId = String(currAnc.parentId || currAnc.ParentID);
-                                                        if (ancVisited.has(pId)) break;
-                                                        ancVisited.add(pId);
-                                                        const parent = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === pId);
-                                                        if (parent) {
-                                                            activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
-                                                            currAnc = parent;
-                                                            ancSafety++;
-                                                        } else {
-                                                            break;
+                                                    if (!useScopedPanel) {
+                                                        const activeTabAncestors = [];
+                                                        let currAnc = activeTabRealId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
+                                                        let ancSafety = 0;
+                                                        let ancVisited = new Set();
+                                                        while (currAnc && (currAnc.parentId || currAnc.ParentID) && (currAnc.parentId || currAnc.ParentID) !== '0' && (currAnc.parentId || currAnc.ParentID) !== 0 && ancSafety < 20) {
+                                                            const pId = String(currAnc.parentId || currAnc.ParentID);
+                                                            if (ancVisited.has(pId)) break;
+                                                            ancVisited.add(pId);
+                                                            const parent = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === pId);
+                                                            if (parent) {
+                                                                activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
+                                                                currAnc = parent;
+                                                                ancSafety++;
+                                                            } else {
+                                                                break;
+                                                            }
                                                         }
+
+                                                        const isExactMatch = normalizedCurrentTo && (normalizedQuoteTo === normalizedCurrentTo);
+                                                        const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
+
+                                                        if (!normalizedCurrentTo) return false;
+
+                                                        if (!isExactMatch && !isAncestorMatch) return false;
                                                     }
 
-                                                    // CUSTOMER FILTER: Match selection OR any ancestor (Internal Quoting)
-                                                    const isExactMatch = normalizedCurrentTo && (normalizedQuoteTo === normalizedCurrentTo);
-                                                    const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
-
-                                                    // STRICT REQUIREMENT: If No Customer is selected, do not show quotes in the list.
-                                                    if (!normalizedCurrentTo) return false;
-
-                                                    if (!isExactMatch && !isAncestorMatch) return false;
+                                                    // Scoped rows: server already matched EnquiryQuotes (LeadJob + RequestNo +
+                                                    // OwnJob + ToName). Do not re-filter by QuoteNumber division — that can
+                                                    // hide the correct tuple when the DB row is right.
+                                                    if (useScopedPanel) {
+                                                        if (scopedEnquiryQuotesParams?.useDepartmentForOwnJob && tabs.length > 1) {
+                                                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                                                        }
+                                                        return true;
+                                                    }
 
                                                     const parts = q.QuoteNumber?.split('/') || [];
                                                     const qDivCode = parts[1]?.toUpperCase();
                                                     // Robust L-tag extraction: Handles AAC/BMS/17-L1/36 or AAC/BMS/L1-17/36
                                                     const qLeadPart = parts[2] ? parts[2].toUpperCase() : '';
-                                                    const qLeadCodeOnly = qLeadPart.match(/L\d+/) ? qLeadPart.match(/L\d+/)[0] : qLeadPart;
+                                                    const qLeadCodeOnly = qLeadPart.match(/L\d+/) ? qLeadPart.match(/L\d+/)[0] : '';
 
-                                                    // STRICT PROJECT TYPE FILTER: Match quote's division code to this tab's project
-                                                    const tabName = (activeTabObj.label || '').toUpperCase();
-                                                    const isTypeMatch = matchDivisionCode(qDivCode, tabName, activeTabObj.divisionCode);
+                                                    // Division match must use the active tab's job when multiple tabs (not parent lead only).
+                                                    const divisionMatchContextName = divisionMatchContextForQuoteTab(
+                                                        selectedLeadId,
+                                                        pricingData,
+                                                        activeTabRealId,
+                                                        activeTabObj,
+                                                        tabs.length,
+                                                        jobsPool
+                                                    );
+
+                                                    const ownJobMatchesTab =
+                                                        collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || '')) ===
+                                                        collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+                                                    const isTypeMatch =
+                                                        ownJobMatchesTab ||
+                                                        matchDivisionCode(qDivCode, divisionMatchContextName, activeTabObj.divisionCode);
 
                                                     if (!isTypeMatch) return false;
 
-                                                    // Branch Isolation: Ensure quote belongs to precisely this Lead/Subjob branch
-                                                    const currentLeadCodeClean = currentLeadCode.match(/L\d+/) ? currentLeadCode.match(/L\d+/)[0] : currentLeadCode;
+                                                    if (tabs.length > 1 && !quoteNumberDivisionMatchesTab(q, activeTabObj, true)) return false;
 
+                                                    // Branch Isolation: Ensure quote belongs to precisely this Lead/Subjob branch
+                                                    const currentLeadCodeClean = currentLeadCode.match(/L\d+/) ? currentLeadCode.match(/L\d+/)[0] : '';
                                                     if (qLeadCodeOnly && currentLeadCodeClean && qLeadCodeOnly !== currentLeadCodeClean) return false;
 
                                                     // STRICT ISOLATION: Sub-users CANNOT see parent division quotes (Step 1922)
@@ -4776,6 +6217,8 @@ const QuoteForm = () => {
 
                                                     return true;
                                                 });
+
+                                                // Do not inject out-of-scope loaded quotes into the list; panel must reflect scoped tuple only.
 
                                                 // Group revisions
                                                 const quoteGroups = filteredQuotes.reduce((acc, q) => {
@@ -4797,7 +6240,7 @@ const QuoteForm = () => {
                                                         return (
                                                             <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                                                 <div
-                                                                    onClick={() => loadQuote(latest)}
+                                                                    onClick={() => loadQuote(latest, { preserveRecipient: true })}
                                                                     style={{
                                                                         padding: '8px',
                                                                         background: quoteId === latest.ID ? '#f0f9ff' : 'white',
@@ -4838,9 +6281,9 @@ const QuoteForm = () => {
 
                                                                 {/* Render History if Expanded */}
                                                                 {isExpanded && sorted.slice(1).map(rev => (
-                                                                    <div
-                                                                        key={rev.ID}
-                                                                        onClick={() => loadQuote(rev)}
+                                                                        <div
+                                                                            key={rev.ID}
+                                                                            onClick={() => loadQuote(rev, { preserveRecipient: true })}
                                                                         style={{
                                                                             padding: '6px 8px',
                                                                             background: quoteId === rev.ID ? '#eff6ff' : '#f8fafc',
@@ -4866,11 +6309,20 @@ const QuoteForm = () => {
                                                     });
 
                                                 // Filter Pricing Summary
-                                                const filteredPricing = pricingSummary.filter(grp => {
-                                                    const grpNameNorm = normalize(grp.name);
+                                                const filteredPricing = pricingSummary.filter((grp) => {
+                                                    const grpNameNorm = collapseSpacesLower(stripQuoteJobPrefix(grp.name || ''));
                                                     // Robustness (Step 4488): Check ALL jobs matching this name for hierarchy relevance
-                                                    const matchingJobs = jobsPool.filter(j => normalize(j.itemName || j.DivisionName) === grpNameNorm);
+                                                    const matchingJobs = jobsPool.filter((j) =>
+                                                        collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')) === grpNameNorm
+                                                    );
                                                     if (matchingJobs.length === 0) return activeTabObj.isSelf || tabs.length === 1;
+
+                                                    // Paired lead/own + subjob tabs: show sibling tab rows + direct nested subjobs under the active tab.
+                                                    if (pairedPricingSummaryIds && pairedPricingSummaryIds.size >= 2) {
+                                                        return matchingJobs.some((job) =>
+                                                            pairedPricingSummaryIds.has(String(job.id || job.ItemID || job.ID))
+                                                        );
+                                                    }
 
                                                     // Check if active tab is the Lead Job, who must see all pricing for compilation
                                                     const prefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
@@ -5021,13 +6473,26 @@ const QuoteForm = () => {
 
                                     <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <input
-                                            type="text"
-                                            value={toAttention}
-                                            onChange={(e) => setToAttention(e.target.value)}
-                                            placeholder="Contact Person..."
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                        />
+                                        {showAttentionAsSelect ? (
+                                                <select
+                                                    value={attentionSelectMerged.includes(toAttention) ? toAttention : ''}
+                                                    onChange={(e) => setToAttention(e.target.value)}
+                                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px', background: '#fff' }}
+                                                >
+                                                    <option value="">— Select —</option>
+                                                    {attentionSelectMerged.map((opt) => (
+                                                        <option key={opt} value={opt}>{opt}</option>
+                                                    ))}
+                                                </select>
+                                        ) : (
+                                            <input
+                                                type="text"
+                                                value={toAttention}
+                                                onChange={(e) => setToAttention(e.target.value)}
+                                                placeholder="Contact Person..."
+                                                style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                            />
+                                        )}
                                     </div>
 
                                     <div style={{ marginBottom: '10px' }}>
@@ -5035,6 +6500,24 @@ const QuoteForm = () => {
                                         <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical' }} />
                                     </div>
 
+                                    <div style={{ marginBottom: '10px' }}>
+                                        <ListBoxControl
+                                            label={
+                                                <span style={{ fontSize: '12px', color: '#64748b' }}>
+                                                    Enquiry Type<span style={{ color: '#ef4444' }}>*</span>
+                                                </span>
+                                            }
+                                            options={enquiryTypesMaster}
+                                            selectedOption={quoteEnquiryTypeSelect}
+                                            onOptionChange={(val) => setQuoteEnquiryTypeSelect(val || '')}
+                                            listBoxItems={quoteTypeList}
+                                            onAdd={handleAddQuoteType}
+                                            onRemove={handleRemoveQuoteTypeAt}
+                                            minSearchLength={0}
+                                            disabled={false}
+                                            canRemove
+                                        />
+                                    </div>
 
                                     <div style={{ marginBottom: '10px' }}>
                                         <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
@@ -5059,11 +6542,16 @@ const QuoteForm = () => {
                                             onChange={(newValue) => {
                                                 setSignatory(newValue ? newValue.value : '');
                                                 // Update designation if selected from list
-                                                if (newValue && newValue.designation) {
-                                                    setSignatoryDesignation(newValue.designation);
+                                                if (newValue) {
+                                                    if (newValue.designation) {
+                                                        setSignatoryDesignation(newValue.designation);
+                                                    } else {
+                                                        const matched = usersList.find(u => u.FullName === newValue.value);
+                                                        setSignatoryDesignation(matched?.Designation || '');
+                                                    }
                                                 }
                                             }}
-                                            options={computedSignatoryOptions}
+                                            options={computedSignatoryOptions.length > 0 ? computedSignatoryOptions : computedPreparedByOptions}
                                             value={signatory ? { label: signatory, value: signatory } : null}
                                             placeholder="Select or Type Signatory..."
                                             styles={{
@@ -5895,7 +7383,7 @@ const QuoteForm = () => {
                                                         </tr>
                                                         <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Date:</td><td style={{ padding: '4px 16px' }}>{formatDate(quoteDate)}</td></tr>
                                                         <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Prepared By:</td><td style={{ padding: '4px 16px' }}>{preparedBy || 'N/A'}</td></tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Type:</td><td style={{ padding: '4px 16px' }}>{enquiryData.enquiry.EnquiryType || 'Tender'}</td></tr>
+                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Type:</td><td style={{ padding: '4px 16px' }}>{(quoteTypeList.length ? quoteTypeList.join(', ') : null) || enquiryData.enquiry.EnquiryType || 'Tender'}</td></tr>
                                                         <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Your Ref:</td><td style={{ padding: '4px 16px' }}>{customerReference}</td></tr>
                                                         <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Validity:</td><td style={{ padding: '4px 16px' }}>{getValidityDate()}</td></tr>
                                                     </tbody>

@@ -30,6 +30,22 @@ const SearchableSelectControl = ({
     // Find selected object
     const selectedValue = selectOptions.find(opt => opt.value === selectedOption) || null;
 
+    /** Below minSearchLength, react-select needs the current value in `options` or the selection disappears. */
+    const optionsForSelect = useMemo(() => {
+        if (minSearchLength <= 0) return selectOptions;
+        const q = (inputValue || '').trim().toLowerCase();
+        if (q.length >= minSearchLength) {
+            if (!q) return selectOptions;
+            return selectOptions.filter(
+                (o) =>
+                    String(o.value).toLowerCase().includes(q) ||
+                    String(o.label).toLowerCase().includes(q)
+            );
+        }
+        if (selectedValue) return [selectedValue];
+        return [];
+    }, [inputValue, minSearchLength, selectOptions, selectedValue]);
+
     const customStyles = {
         control: (provided) => ({
             ...provided,
@@ -61,8 +77,11 @@ const SearchableSelectControl = ({
                     value={selectedValue}
                     onChange={(opt) => onOptionChange(opt ? opt.value : '')}
                     onInputChange={(val) => setInputValue(val)}
-                    options={inputValue.length >= minSearchLength ? selectOptions : []}
-                    noOptionsMessage={() => inputValue.length < minSearchLength ? `Type ${minSearchLength}+ characters to search...` : "No results found"}
+                    options={optionsForSelect}
+                    noOptionsMessage={() =>
+                        minSearchLength > 0 && (inputValue || '').trim().length < minSearchLength
+                            ? `Type ${minSearchLength}+ characters to search...`
+                            : 'No results found'}
                     styles={customStyles}
                     isDisabled={disabled}
                     isClearable={true}

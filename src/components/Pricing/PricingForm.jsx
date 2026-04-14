@@ -2498,8 +2498,6 @@ const PricingForm = () => {
                                                 // Provision (Step 1857): Even if user has hasLeadAccess, if they are NOT the lead for this specific selection,
                                                 // we restrict them to their assigned scope.
                                                 const myJobs = pricingData.access.editableJobs || [];
-                                                const selectedJobObj = pricingData.jobs?.find(j => j.id == selectedLeadId);
-                                                const isLeadForThisSelection = selectedJobObj && myJobs.includes(selectedJobObj.itemName);
 
                                                 // Always include descendants of editable jobs for "Subjob View"
                                                 const getMyTotalScope = (names) => {
@@ -2524,14 +2522,24 @@ const PricingForm = () => {
                                                     return ids;
                                                 };
 
-                                                // Provision (Step 1922 Fix): Sub-job users (BMS/Electrical) should NEVER see parent prices (Civil).
-                                                // We treat them as limited even if they have hasLeadAccess, unless they are the Lead of the ROOT job.
-                                                const rootJobs = pricingData.jobs.filter(j => isRootJob(j));
-                                                const isTrulyRootLead = (pricingData.access.hasLeadAccess || isLeadForThisSelection) && rootJobs.some(rj => rj.id == selectedLeadId);
+                                                // Must match the header badge ("Lead Job Access" vs "Subjob Access"):
+                                                // only the user whose editable job *is* the selected lead root gets full branch scope.
+                                                // Using hasLeadAccess here wrongly cleared myScopeIds for subjob users who matched another
+                                                // root on the enquiry — they then saw the parent lead pricing row (read-only), violating 1c/2c.
+                                                const selectedJobForScope = pricingData.jobs?.find((j) => String(j.id) === String(selectedLeadId));
+                                                const editableObjsForScope = (pricingData.jobs || []).filter((j) =>
+                                                    myJobs.includes(j.itemName)
+                                                );
+                                                const ownJobIsSelectedLeadRoot =
+                                                    !!selectedJobForScope &&
+                                                    editableObjsForScope.some((ej) => String(ej.id) === String(selectedJobForScope.id)) &&
+                                                    (!selectedJobForScope.parentId ||
+                                                        selectedJobForScope.parentId === 0 ||
+                                                        selectedJobForScope.parentId === '0');
 
-                                                const myScopeIds = (pricingData.access.canEditAll || isTrulyRootLead)
-                                                    ? null // Admins or True Lead Jobs have global scope
-                                                    : getMyTotalScope(myJobs);
+                                                const myScopeIds = (pricingData.access.canEditAll || ownJobIsSelectedLeadRoot)
+                                                    ? null // Admins, or own job is this lead root: full branch under selected lead (2a–2b; 2c N/A for root-as-own)
+                                                    : getMyTotalScope(myJobs); // Subjob under this lead: own job + descendants only; parent lead row hidden (1c)
 
                                                 // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
                                                 let contextFilteredJobs = targetJobs.filter(j => {

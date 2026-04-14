@@ -64,6 +64,59 @@ function inferAssignedSEsForEnquiryForItem(item, seList, users) {
     return seList.map((n) => String(n || '').trim()).filter(Boolean);
 }
 
+/** Alphanumeric fold for company / contractor name comparison (OCR & master data variants). */
+function normalizeCompanyKey(str) {
+    return str ? String(str).toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+}
+
+function companyNameTokens(str) {
+    return String(str || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length > 1);
+}
+
+/**
+ * True if a contact's CompanyName belongs to the selected customer / contractor string.
+ * Handles "CO" vs "Company", spacing, and minor wording differences vs Master_Customer.
+ */
+function contactCompanyMatchesCustomer(contactCompany, selectedCustomerName, customers = []) {
+    if (!contactCompany || !selectedCustomerName) return false;
+    const a = selectedCustomerName.trim();
+    const b = contactCompany.trim();
+    if (a.toLowerCase() === b.toLowerCase()) return true;
+
+    const na = normalizeCompanyKey(a);
+    const nb = normalizeCompanyKey(b);
+    if (na && na === nb) return true;
+    if (na.length >= 16 && nb.length >= 16 && (na.includes(nb) || nb.includes(na))) return true;
+
+    const custRow = customers.find(
+        (c) =>
+            c.CompanyName &&
+            (c.CompanyName.trim().toLowerCase() === a.toLowerCase() ||
+                normalizeCompanyKey(c.CompanyName) === na ||
+                (na.length >= 14 &&
+                    nb.length >= 14 &&
+                    (normalizeCompanyKey(c.CompanyName).includes(na) || na.includes(normalizeCompanyKey(c.CompanyName)))))
+    );
+    if (custRow) {
+        const nk = normalizeCompanyKey(custRow.CompanyName);
+        return nb === nk || (nk.length >= 14 && nb.length >= 14 && (nk.includes(nb) || nb.includes(nk)));
+    }
+
+    const ta = companyNameTokens(a);
+    const tbSet = new Set(companyNameTokens(b));
+    if (ta.length >= 3 && tbSet.size >= 3) {
+        let inter = 0;
+        for (const t of ta) if (tbSet.has(t)) inter += 1;
+        const denom = Math.min(ta.length, tbSet.size);
+        if (denom >= 4 && inter / denom >= 0.45) return true;
+    }
+
+    return false;
+}
+
 const EnquiryForm = ({ requestNoToOpen }) => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
 
@@ -211,6 +264,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     // Ref for error section to scroll to it when validation fails
     const errorSectionRef = useRef(null);
+    /** Prevents double-submit while add/update is in flight (state updates are async). */
+    const submitInFlightRef = useRef(false);
     /** After initial SE hydration for a loaded enquiry, do not re-infer (would undo removing the last assignee). */
     const enquiryForHydratedRef = useRef(null);
 
@@ -264,12 +319,19 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
     const receivedFromOptions = useMemo(() => {
         if (!formData.CustomerName || !masters.contacts) return [];
-        const normalize = (str) => str ? str.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-        const target = normalize(formData.CustomerName);
-        return masters.contacts
-            .filter(c => normalize(c.CompanyName) === target)
-            .map(c => `${c.ContactName}|${c.CompanyName}`);
-    }, [formData.CustomerName, masters.contacts]);
+        const customers = masters.customers || [];
+        const seen = new Set();
+        const out = [];
+        for (const c of masters.contacts) {
+            if (!c.ContactName || !c.CompanyName) continue;
+            if (!contactCompanyMatchesCustomer(c.CompanyName, formData.CustomerName, customers)) continue;
+            const key = `${c.ContactName}|${c.CompanyName}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(key);
+        }
+        return out;
+    }, [formData.CustomerName, masters.contacts, masters.customers]);
 
     const filteredSEOptions = useMemo(() => {
         if (!enqForList || enqForList.length === 0) return masters.concernedSEs;
@@ -663,11 +725,17 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             // Update specific list based on category
             if (data.Category === 'Contractor') {
                 handleInputChange('CustomerName', data.CompanyName);
+                handleInputChange('ReceivedFrom', '');
                 updateMasters(prev => ({
                     ...prev,
-                    existingCustomers: [...prev.existingCustomers, data.CompanyName],
+                    existingCustomers: prev.existingCustomers.includes(data.CompanyName)
+                        ? prev.existingCustomers
+                        : [...prev.existingCustomers, data.CompanyName],
                     customers: [...prev.customers, newItem]
                 }));
+                setCustomerList((prev) =>
+                    prev.includes(data.CompanyName) ? prev : [...prev, data.CompanyName]
+                );
             } else if (data.Category === 'Client') {
                 handleInputChange('ClientName', data.CompanyName);
                 updateMasters(prev => ({
@@ -743,6 +811,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             handleInputChange('CustomerName', data.CompanyName);
             const val = `${data.ContactName}|${data.CompanyName}`;
             handleInputChange('ReceivedFrom', val);
+            setReceivedFromList((prev) => (prev.includes(val) ? prev : [...prev, val]));
+            if (!customerList.includes(data.CompanyName)) {
+                setCustomerList((prev) => [...prev, data.CompanyName]);
+            }
         } else {
             if (data.ID) {
                 const success = await updateMaster('contact', data.ID, data);
@@ -891,8 +963,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
-        if (isSubmitting) return;
-
         const newErrors = {};
 
         // Validate Required Fields (strict):
@@ -961,8 +1031,18 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
-        setErrors({});
+        if (isModifyMode && formData.Status === 'Reports') {
+            const confirmed = window.confirm(
+                'This enquiry has already been closed (Status: Reports).\n\n' +
+                'Are you sure you want to modify it?'
+            );
+            if (!confirmed) return;
+        }
+
+        if (submitInFlightRef.current) return;
+        submitInFlightRef.current = true;
         setIsSubmitting(true);
+        setErrors({});
 
         // Payload should reflect explicit chips only.
         const derivedConcerned = [...new Set(
@@ -990,16 +1070,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         try {
             if (isModifyMode) {
-                // Check if enquiry is closed (Status = Reports)
-                if (formData.Status === 'Reports') {
-                    const confirmed = window.confirm(
-                        'This enquiry has already been closed (Status: Reports).\n\n' +
-                        'Are you sure you want to modify it?'
-                    );
-                    if (!confirmed) {
-                        return; // User cancelled
-                    }
-                }
                 await updateEnquiry(formData.RequestNo, payload);
 
                 // Upload pending files if any
@@ -1036,6 +1106,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             console.error('Submit failed:', err);
             alert('An unexpected error occurred during submission.');
         } finally {
+            submitInFlightRef.current = false;
             setIsSubmitting(false);
         }
     };
@@ -1709,7 +1780,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                         {(activeTab === 'New' || (activeTab === 'Modify' && isModifyMode)) && (
                             <div className="row justify-content-center">
                                 <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
-                                    <form onSubmit={handleSubmit}>
+                                    <form onSubmit={handleSubmit} aria-busy={isSubmitting}>
                                         {/* Enquiry Status Tracker */}
                                         <div className="card mb-2 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
                                             <div className="card-body p-2">

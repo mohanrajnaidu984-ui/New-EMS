@@ -56,18 +56,22 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                 const extracted = await res.json();
                 console.log('OCR Result:', extracted);
 
-                // Merge extracted data, prioritizing non-empty scanned values
-                setFormData(prev => ({
-                    ...prev,
-                    ContactName: extracted.ContactName || prev.ContactName,
-                    CompanyName: extracted.CompanyName || prev.CompanyName,
-                    Mobile1: extracted.Mobile1 || prev.Mobile1,
-                    EmailId: extracted.EmailId || prev.EmailId,
-                    Designation: extracted.Designation || prev.Designation,
-                    Address1: extracted.Address1 || prev.Address1,
-                    Phone: extracted.Phone || prev.Phone,
-                    FaxNo: extracted.FaxNo || prev.FaxNo,
-                }));
+                // Merge OCR fields; keep Company Name when already set (enquiry context).
+                setFormData(prev => {
+                    const hadCompany = Boolean(prev.CompanyName && prev.CompanyName.trim());
+                    return {
+                        ...prev,
+                        ContactName: extracted.ContactName || prev.ContactName,
+                        CompanyName: hadCompany ? prev.CompanyName : (extracted.CompanyName || prev.CompanyName),
+                        Mobile1: extracted.Mobile1 || prev.Mobile1,
+                        EmailId: extracted.EmailId || prev.EmailId,
+                        Designation: extracted.Designation || prev.Designation,
+                        Address1: extracted.Address1 || prev.Address1,
+                        Address2: extracted.Address2 || prev.Address2,
+                        Phone: extracted.Phone || prev.Phone,
+                        FaxNo: extracted.FaxNo || prev.FaxNo,
+                    };
+                });
                 alert('Scanned successfully! Please review the auto-filled details.');
             } else {
                 alert('Failed to scan image.');

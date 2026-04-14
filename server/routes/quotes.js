@@ -109,6 +109,36 @@ router.get('/lists/metadata', async (req, res) => {
     }
 });
 
+/** FullName list where Master_ConcernedSE.Department matches dept (trim / collapse spaces / L-prefix strip). */
+router.get('/attention-by-department', async (req, res) => {
+    try {
+        const dept = String(req.query.dept || '').trim();
+        if (!dept) return res.json([]);
+        const masterSeRes = await sql.query`
+            SELECT FullName, Department FROM Master_ConcernedSE
+            WHERE FullName IS NOT NULL AND LTRIM(RTRIM(FullName)) <> N''
+              AND (Status = N'Active' OR Status IS NULL OR LTRIM(RTRIM(ISNULL(Status, N''))) = N'')
+        `;
+        const normDeptLabel = (s) =>
+            String(s || '')
+                .replace(/\u00a0/g, ' ')
+                .toLowerCase()
+                .replace(/\s+/g, ' ')
+                .trim();
+        const stripJobPrefix = (name) => String(name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+        const target = normDeptLabel(stripJobPrefix(dept));
+        if (!target) return res.json([]);
+        const names = (masterSeRes.recordset || [])
+            .filter((r) => normDeptLabel(r.Department) === target)
+            .map((r) => String(r.FullName || '').trim())
+            .filter(Boolean);
+        res.json([...new Set(names)].sort((a, b) => a.localeCompare(b)));
+    } catch (e) {
+        console.error('[quotes] attention-by-department:', e);
+        res.status(500).json([]);
+    }
+});
+
 router.get('/list/pending', async (req, res) => {
     try {
         let { userEmail } = req.query;
@@ -905,13 +935,18 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
             }
         }
 
-        // HARD RULE:
-        // - Own-tab: resolve OwnJob from logged-in user's email.
+        // Scoped request: client sent at least one dimension to filter by.
+        // Unfiltered list (?userEmail only): must NOT apply OwnJob from user department or every enquiry
+        // would only show rows matching Master_ConcernedSE.Department — hiding Civil quotes for HVAC users, etc.
+        const hasScopedFilters = Boolean(toName || leadJobName || ownJobNameFromTab);
+
+        // HARD RULE (scoped only):
+        // - Own-tab without ownJobName query: resolve OwnJob from logged-in user's email.
         // - Subjob-tab: use explicit ownJobName from selected tab label.
         let ownJobName = '';
         if (ownJobNameFromTab) {
             ownJobName = ownJobNameFromTab;
-        } else if (userEmail) {
+        } else if (userEmail && hasScopedFilters) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
             const userRes = await sql.query`
                 SELECT TOP 1 Department
@@ -956,9 +991,9 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                    CustomClauses, ClauseOrder
             FROM EnquiryQuotes
             WHERE LTRIM(RTRIM(ISNULL(CAST(RequestNo AS NVARCHAR(50)), ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
-              AND (@toName IS NULL OR LTRIM(RTRIM(ISNULL(ToName, ''))) = LTRIM(RTRIM(@toName)))
-              AND (@leadJobName IS NULL OR LTRIM(RTRIM(ISNULL(LeadJob, ''))) = LTRIM(RTRIM(@leadJobName)))
-              AND (@ownJobName IS NULL OR LTRIM(RTRIM(ISNULL(OwnJob, ''))) = LTRIM(RTRIM(@ownJobName)))
+              AND (@toName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N'')))))
+              AND (@leadJobName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))))
+              AND (@ownJobName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N'')))))
             ORDER BY QuoteNo, RevisionNo DESC
         `);
 
@@ -1334,6 +1369,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     id: r.ID,
                     parentId: r.ParentID,
                     itemName: r.ItemName,
+                    leadJobName: r.LeadJobName || '',
                     commonMailIds: r.CommonMailIds,
                     ccMailIds: r.CCMailIds,
                     leadJobCode: assignedCode, // Child inherits root's L-code
@@ -1500,6 +1536,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
         // Get Customer Options with ReceivedFrom contacts
         let customerOptions = [];
         let customerContacts = {}; // Map customer names to their ReceivedFrom contacts
+        let externalAttentionOptionsByCustomer = {}; // Quote "Attention of" — external: ReceivedFrom contacts per company
+        let internalAttentionByCleanItemName = {}; // Internal division → { options, defaultAttention, ... }
         let parentCustomerName = null; // Internal parent job name when own job is a subjob
         try {
             // Get customers from EnquiryCustomer table
@@ -1624,6 +1662,287 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
             customerOptions = stripRedundantCommaJoined(uniqueOptions);
 
+            // --- Quote "Attention of" metadata (dropdowns on client) ---
+            try {
+                const masterSeRes = await sql.query`
+                    SELECT FullName, Department, EmailId FROM Master_ConcernedSE
+                    WHERE FullName IS NOT NULL AND LTRIM(RTRIM(FullName)) <> N''
+                      AND (Status = N'Active' OR Status IS NULL OR LTRIM(RTRIM(ISNULL(Status, N''))) = N'')
+                `;
+                const masterRows = masterSeRes.recordset || [];
+                const concernedOrderedRes = await sql.query`
+                    SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo} ORDER BY SEName
+                `;
+                const normLooseSe = (x) => String(x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const allSeForEnquiry = [];
+                const seenSeOrder = new Set();
+                for (const row of concernedOrderedRes.recordset || []) {
+                    const n = String(row.SEName || '').trim();
+                    if (!n) continue;
+                    const k = normLooseSe(n);
+                    if (seenSeOrder.has(k)) continue;
+                    seenSeOrder.add(k);
+                    allSeForEnquiry.push(n);
+                }
+                const normKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const cleanItemName = (name) => String(name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                /** Labels that must not match every "* Project" / generic job name via substring alone */
+                const WEAK_DEPT_LABELS = new Set([
+                    'project', 'projects', 'general', 'gen', 'sales', 'all', 'na', 'n/a', 'tbd',
+                    'department', 'dept', 'division', 'group', 'company', 'contracting', 'contract',
+                    'office', 'branch', 'region', 'hq', 'unit', 'section', 'team', 'main', 'staff'
+                ]);
+                /**
+                 * Master_ConcernedSE.Department vs internal customer context (item name, enquiry dept name, codes).
+                 */
+                const departmentMatchesSelectedCustomer = (masterDept, customerLabel) => {
+                    const a = String(masterDept || '').toLowerCase().trim();
+                    const c = String(customerLabel || '').toLowerCase().trim();
+                    if (!a || !c) return false;
+                    if (a === c) return true;
+                    const nkA = normKey(a);
+                    const nkC = normKey(c);
+                    if (nkA.length >= 3 && nkC.length >= 3) {
+                        if (nkA === nkC || nkA.includes(nkC) || nkC.includes(nkA)) return true;
+                    }
+                    if (a.includes(c) || c.includes(a)) {
+                        if (a !== c) {
+                            const shorter = a.length <= c.length ? a : c;
+                            const longer = a.length <= c.length ? c : a;
+                            if (WEAK_DEPT_LABELS.has(shorter) && longer.includes(shorter)) return false;
+                        }
+                        return true;
+                    }
+                    const custTok = c.split(/[^a-z0-9]+/).filter(p => p.length > 2 && !WEAK_DEPT_LABELS.has(p));
+                    const deptTok = a.split(/[^a-z0-9]+/).filter(p => p.length > 2 && !WEAK_DEPT_LABELS.has(p));
+                    if (custTok.length && custTok.some(t => a.includes(t))) return true;
+                    if (deptTok.length && deptTok.some(t => c.includes(t))) return true;
+                    return false;
+                };
+                const departmentMatchesAnyLabel = (masterDept, labels) => {
+                    const uniq = [...new Set((labels || []).map((s) => String(s || '').trim()).filter(Boolean))];
+                    return uniq.some((lab) => departmentMatchesSelectedCustomer(masterDept, lab));
+                };
+                /**
+                 * Same as SSMS: LTRIM(RTRIM(Department)) = clean name; collapse all whitespace / NBSP so UI matches DB.
+                 */
+                const normDeptLabel = (s) =>
+                    String(s || '')
+                        .replace(/\u00a0/g, ' ')
+                        .toLowerCase()
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                const deptEqualsCleanCustomer = (masterDept, cleanCustomerName) =>
+                    normDeptLabel(masterDept) === normDeptLabel(cleanCustomerName);
+                const byCompany = {};
+                receivedFromResult.recordset.forEach(row => {
+                    if (!row.CompanyName || !row.ContactName) return;
+                    const company = String(row.CompanyName).replace(/,+$/, '').trim();
+                    const contact = String(row.ContactName).trim();
+                    if (!byCompany[company]) byCompany[company] = new Set();
+                    byCompany[company].add(contact);
+                });
+                const findCompanyRfKey = (cust) => {
+                    const keys = Object.keys(byCompany);
+                    const hit = keys.find(k => k.toLowerCase() === String(cust).toLowerCase().trim());
+                    if (hit) return hit;
+                    const t = normKey(cust);
+                    return keys.find(k => normKey(k) === t) || null;
+                };
+                customerOptions.forEach(cust => {
+                    const set = new Set();
+                    const ck = findCompanyRfKey(cust);
+                    if (ck) byCompany[ck].forEach(x => set.add(x));
+                    const cc = customerContacts[cust];
+                    if (cc) {
+                        String(cc).split(',').forEach(p => {
+                            const t = p.trim();
+                            if (t) set.add(t);
+                        });
+                    }
+                    if (set.size === 0 && enquiry.ReceivedFrom) {
+                        String(enquiry.ReceivedFrom).split(',').forEach(p => {
+                            const t = p.trim();
+                            if (t) set.add(t);
+                        });
+                    }
+                    externalAttentionOptionsByCustomer[cust] = [...set].sort((a, b) => a.localeCompare(b));
+                });
+
+                const normLoose = (x) => String(x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const normalizeMail = (e) => String(e || '').toLowerCase().trim()
+                    .replace(/@almcg\.com$/i, '@almoayyedcg.com');
+                const divisionMailSet = (row) => {
+                    const s = new Set();
+                    const add = (raw) => {
+                        String(raw || '').split(',').forEach((part) => {
+                            const t = normalizeMail(part);
+                            if (t) s.add(t);
+                        });
+                    };
+                    add(row.commonMailIds);
+                    add(row.ccMailIds);
+                    return s;
+                };
+                const masterByLooseName = new Map();
+                masterRows.forEach(m => {
+                    const fn = String(m.FullName || '').trim();
+                    if (fn) masterByLooseName.set(normLoose(fn), m);
+                });
+                const findMasterForSeName = (seName) => {
+                    const k = normLoose(seName);
+                    if (!k) return null;
+                    if (masterByLooseName.has(k)) return masterByLooseName.get(k);
+                    for (const m of masterRows) {
+                        const fn = String(m.FullName || '').trim();
+                        if (!fn) continue;
+                        const fk = normLoose(fn);
+                        if (fk === k) return m;
+                        if (k.length >= 5 && fk.includes(k)) return m;
+                        if (fk.length >= 5 && k.includes(fk)) return m;
+                    }
+                    return null;
+                };
+
+                const ancestorCleanItemNames = (startParentId) => {
+                    const labels = [];
+                    let pid = startParentId;
+                    let steps = 0;
+                    while (pid != null && pid !== '' && String(pid) !== '0' && steps++ < 40) {
+                        const p = (rawItems || []).find((i) => String(i.ID) === String(pid));
+                        if (!p) break;
+                        const anc = cleanItemName(String(p.ItemName || ''));
+                        if (anc) labels.push(anc);
+                        pid = p.ParentID;
+                    }
+                    return labels;
+                };
+
+                for (const h of divisionsHierarchy || []) {
+                    const fullItem = String(h.itemName || '').trim();
+                    const cl = cleanItemName(fullItem);
+                    if (!cl) continue;
+                    const jobDept = String(h.departmentName || '').trim() || cl;
+                    const divisionMails = divisionMailSet(h);
+                    const attentionLabels = [
+                        cl,
+                        jobDept,
+                        h.divisionCode && String(h.divisionCode).trim(),
+                        h.departmentCode && String(h.departmentCode).trim(),
+                        ...ancestorCleanItemNames(h.parentId)
+                    ];
+                    /** Primary: Master_ConcernedSE.Department = clean internal customer (e.g. 'HVAC Project'). */
+                    let namesFromDept = masterRows
+                        .filter(m => deptEqualsCleanCustomer(m.Department, cl))
+                        .map(m => String(m.FullName || '').trim())
+                        .filter(Boolean);
+                    if (namesFromDept.length === 0) {
+                        namesFromDept = masterRows
+                            .filter(m => departmentMatchesAnyLabel(m.Department, attentionLabels))
+                            .map(m => String(m.FullName || '').trim())
+                            .filter(Boolean);
+                    }
+                    let options = [...new Set(namesFromDept)].sort((a, b) => a.localeCompare(b));
+                    /** When Department text does not match labels, use SEs rostered on this row's division mails. */
+                    if (options.length === 0 && divisionMails.size > 0) {
+                        const fromMails = masterRows
+                            .filter((m) => {
+                                const em = normalizeMail(m.EmailId);
+                                return em && divisionMails.has(em);
+                            })
+                            .map((m) => String(m.FullName || '').trim())
+                            .filter(Boolean);
+                        options = [...new Set(fromMails)].sort((a, b) => a.localeCompare(b));
+                    }
+                    /** Concerned SE on enquiry whose email is on this division row. */
+                    if (options.length === 0 && divisionMails.size > 0) {
+                        const fromConcerned = [];
+                        for (const seName of allSeForEnquiry) {
+                            const m = findMasterForSeName(seName);
+                            if (!m) continue;
+                            const em = normalizeMail(m.EmailId);
+                            if (em && divisionMails.has(em)) {
+                                const fn = String(m.FullName || '').trim();
+                                fromConcerned.push(fn || seName);
+                            }
+                        }
+                        options = [...new Set(fromConcerned)].sort((a, b) => a.localeCompare(b));
+                    }
+                    const assignedDeptMatch = [];
+                    for (const seName of allSeForEnquiry) {
+                        const m = findMasterForSeName(seName);
+                        if (!m) continue;
+                        if (deptEqualsCleanCustomer(m.Department, cl) || departmentMatchesAnyLabel(m.Department, attentionLabels)) {
+                            assignedDeptMatch.push(seName);
+                        }
+                    }
+                    const assignedByRowMail = [];
+                    const assignedByDeptOnly = [];
+                    for (const seName of assignedDeptMatch) {
+                        const m = findMasterForSeName(seName);
+                        if (!m) continue;
+                        const em = normalizeMail(m.EmailId);
+                        const onRow = em && divisionMails.size > 0 && divisionMails.has(em);
+                        if (onRow) assignedByRowMail.push(seName);
+                        else assignedByDeptOnly.push(seName);
+                    }
+                    const assignedForThisDivision = [...assignedByRowMail, ...assignedByDeptOnly];
+                    const firstAssigned = assignedForThisDivision[0];
+                    const firstAssignedFull = firstAssigned
+                        ? String(findMasterForSeName(firstAssigned)?.FullName || '').trim() || firstAssigned
+                        : '';
+                    /** Default only if that person is already in the Master_ConcernedSE–matched list */
+                    let defaultAttention = '';
+                    if (firstAssignedFull && options.some(o => normLoose(o) === normLoose(firstAssignedFull))) {
+                        defaultAttention = firstAssignedFull;
+                    } else {
+                        defaultAttention = options[0] || '';
+                    }
+                    const entry = { options, defaultAttention, itemName: fullItem, departmentName: jobDept };
+                    internalAttentionByCleanItemName[cl.toLowerCase()] = entry;
+                    const nk = normKey(cl);
+                    if (nk) internalAttentionByCleanItemName[`__norm_${nk}`] = entry;
+                    const fullKeySpaced = String(fullItem).toLowerCase().replace(/\s+/g, ' ').trim();
+                    if (fullKeySpaced && fullKeySpaced !== cl.toLowerCase()) {
+                        internalAttentionByCleanItemName[fullKeySpaced] = entry;
+                    }
+                }
+
+                /**
+                 * If any EnquiryFor row still has no non-empty options (label mismatch vs SSMS), fill from exact
+                 * Master_ConcernedSE.Department = clean ItemName using normDeptLabel (matches user SQL).
+                 */
+                for (const row of rawItems || []) {
+                    const fullItem = String(row.ItemName || '').trim();
+                    const cl = cleanItemName(fullItem);
+                    if (!cl) continue;
+                    const k = cl.toLowerCase();
+                    const cur = internalAttentionByCleanItemName[k];
+                    if (cur && Array.isArray(cur.options) && cur.options.length > 0) continue;
+                    const namesExact = masterRows
+                        .filter((m) => deptEqualsCleanCustomer(m.Department, cl))
+                        .map((m) => String(m.FullName || '').trim())
+                        .filter(Boolean);
+                    if (namesExact.length === 0) continue;
+                    const opts = [...new Set(namesExact)].sort((a, b) => a.localeCompare(b));
+                    const entry = {
+                        options: opts,
+                        defaultAttention: opts[0] || '',
+                        itemName: fullItem,
+                        departmentName: cl
+                    };
+                    internalAttentionByCleanItemName[k] = entry;
+                    const nk = normKey(cl);
+                    if (nk) internalAttentionByCleanItemName[`__norm_${nk}`] = entry;
+                    const fullKeySpaced = String(fullItem).toLowerCase().replace(/\s+/g, ' ').trim();
+                    if (fullKeySpaced && fullKeySpaced !== k) {
+                        internalAttentionByCleanItemName[fullKeySpaced] = entry;
+                    }
+                }
+            } catch (attErr) {
+                console.error('[Quote API] attention dropdown meta:', attErr);
+            }
+
             console.log('[Quote API] Final customerOptions:', customerOptions);
 
         } catch (err) {
@@ -1650,6 +1969,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             preparedByOptions,
             customerOptions,
             customerContacts,
+            externalAttentionOptionsByCustomer,
+            internalAttentionByCleanItemName,
             parentCustomerName,
             leadJobPrefix,
             divisionEmails: resolvedItems.map(item => ({

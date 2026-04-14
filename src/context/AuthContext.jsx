@@ -39,15 +39,23 @@ function applyRgiAdmin(u) {
     return u;
 }
 
-/** Merge Master_ConcernedSE profile (by EmailId) into client user shape. Department is authoritative. */
+/** Merge Master_ConcernedSE profile (by EmailId) into client user shape. Department is authoritative from DB. */
 function applyProfileMerge(base, profile) {
     if (!profile) return base;
+    /** Login page persists the exact address in `currentUserEmail` — never replace it with DB EmailId (typos / drift). */
+    const storedLogin = getStoredLoginEmail();
+    const emailIdentity =
+        storedLogin ||
+        profile.EmailId ||
+        base.email ||
+        base.EmailId ||
+        '';
     return {
         ...base,
         id: profile.ID ?? base.id,
         name: profile.FullName ?? base.name,
-        email: profile.EmailId || base.email,
-        EmailId: profile.EmailId || base.EmailId,
+        email: emailIdentity,
+        EmailId: emailIdentity,
         role: profile.Roles ?? base.role,
         Roles: profile.Roles ?? base.Roles,
         Department: profile.Department,
@@ -88,7 +96,11 @@ export const AuthProvider = ({ children }) => {
         }
 
         if (userData) {
-            setCurrentUser(applyRgiAdmin(userData));
+            const stored = getStoredLoginEmail();
+            const patched = stored
+                ? { ...userData, EmailId: stored, email: stored }
+                : userData;
+            setCurrentUser(applyRgiAdmin(patched));
         }
 
         // Older sessions: `currentUser` JSON had email but `currentUserEmail` was never set — backfill for pricing API.

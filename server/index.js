@@ -10,6 +10,7 @@ const multer = require('multer');
 const nodemailer = require('nodemailer');
 const Tesseract = require('tesseract.js');
 const multerMemory = multer({ storage: multer.memoryStorage() });
+const { parseContactCardFromOcrText } = require('./parseContactOcr');
 
 // Configure Nodemailer Transporter
 console.log('--- Email Config ---');
@@ -411,125 +412,9 @@ app.post('/api/extract-contact-ocr', multerMemory.single('image'), async (req, r
         const { data: { text } } = await Tesseract.recognize(req.file.buffer, 'eng');
         console.log('OCR Output:', text);
 
-        // --- Regex Extraction Logic ---
-        // Pre-process: Replace pipes with newlines to handle multi-part lines like "Email: ... | Tel: ..."
-        const processedText = text.replace(/\|/g, '\n');
-        const lines = processedText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-        // 1. Email
-        const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/i;
-        const emailMatch = text.match(emailRegex);
-        const email = emailMatch ? emailMatch[0] : '';
-
-        // 2. Phone / Mobile / Fax Parsing
-        let mobile = '';
-        let phone = '';
-        let fax = '';
-
-        // Strategy: Iterate lines to find prefixed numbers first
-        for (const line of lines) {
-            const lower = line.toLowerCase();
-            // Clean non-digit chars partially to check for numbers
-            const hasNumber = /\d{6,}/.test(line);
-
-            if (hasNumber) {
-                // Check for Mobile indicators
-                if (lower.includes('mob') || lower.includes('cell') || lower.startsWith('+')) {
-                    const match = line.match(/[+]?[\d\s-]{8,}/);
-                    if (match && !mobile) mobile = match[0].trim();
-                }
-                // Check for Fax indicators
-                else if (lower.includes('fax')) {
-                    const match = line.match(/[+]?[\d\s-]{8,}/);
-                    if (match && !fax) fax = match[0].trim();
-                }
-                // Check for Tel/Phone indicators
-                else if (lower.includes('tel') || lower.includes('ph') || lower.includes('dir')) {
-                    const match = line.match(/[+]?[\d\s-]{8,}/);
-                    if (match && !phone) phone = match[0].trim();
-                }
-            }
-        }
-
-        // Fallback: if no prefixed mobile found, regex scan the whole text for generic international format
-        if (!mobile) {
-            // Matches +973 12345678 or 00973...
-            const genericMatch = text.match(/(?:\+|00)\d{1,3}[-\s.]?\d{3,}[-\s.]?\d{4,}/);
-            if (genericMatch) mobile = genericMatch[0];
-        }
-
-        // 3. Address (Heuristic)
-        let address = '';
-        // Use regex for short words to ensure boundaries, simple text for phrases
-        const addressRegex = /\b(p\.o\.? box|box|block|road|avenue|ave|st|street|building|flat|manama|bahrain|kingdom of)\b/i;
-
-        for (const line of lines) {
-            // If line matches address pattern
-            if (addressRegex.test(line)) {
-                if (line.length > 10) { // filter out short noise
-                    // Heuristic: If it looks like a title (General Manager), skip it
-                    if (line.toLowerCase().includes('manager') || line.toLowerCase().includes('engineer')) continue;
-
-                    address = line; // Take the first strong match
-                    break;
-                }
-            }
-        }
-
-        // 4. Company Name (Heuristic)
-        let company = '';
-        const companyKeywords = ['ltd', 'limited', 'w.l.l', 'llc', 'inc', 'group', 'contracting', 'trading', 'services', 'air conditioning', 'solutions', 'technologies', 'engineering'];
-        for (const line of lines) {
-            const lower = line.toLowerCase();
-            // Exclude lines that are likely addresses or emails or names
-            if (lower.includes('@') || lower.includes('p.o. box')) continue;
-
-            if (companyKeywords.some(kw => lower.includes(kw))) {
-                company = line;
-                break;
-            }
-        }
-
-        // 5. Name (Heuristic: usually first or second line, few words, no numbers)
-        let name = '';
-        // Skip common header words if any
-        const skipWords = ['regards', 'best regards', 'sincerely', 'thanks'];
-        for (const line of lines) {
-            const lower = line.toLowerCase();
-            if (skipWords.some(sw => lower.includes(sw))) continue;
-            if (lower.includes(email)) continue; // Don't pick email line as name
-
-            // Name criteria: 2-4 words, mostly letters, not a company name
-            if (/^[a-zA-Z\s.]+$/.test(line) && line.split(/\s+/).length >= 2 && line.split(/\s+/).length <= 5) {
-                if (!companyKeywords.some(kw => lower.includes(kw))) {
-                    name = line;
-                    break;
-                }
-            }
-        }
-
-        // 6. Designation
-        let designation = '';
-        const desigKeywords = ['manager', 'engineer', 'director', 'consultant', 'executive', 'officer', 'head', 'lead', 'specialist', 'technician'];
-        for (const line of lines) {
-            if (line === name) continue;
-            if (line === company) continue;
-
-            if (desigKeywords.some(kw => line.toLowerCase().includes(kw))) {
-                designation = line;
-                break;
-            }
-        }
-
+        const parsed = parseContactCardFromOcrText(text);
         res.json({
-            ContactName: name,
-            CompanyName: company,
-            Mobile1: mobile,       // Mapped to Mobile1
-            Phone: phone,          // Mapped to Phone
-            FaxNo: fax,
-            EmailId: email,
-            Designation: designation,
-            Address1: address,
+            ...parsed,
             RawText: text
         });
 

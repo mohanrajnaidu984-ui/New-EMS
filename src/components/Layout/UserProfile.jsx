@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth, getStoredLoginEmail } from '../../context/AuthContext';
 import ProfileImageModal from '../Modals/ProfileImageModal';
 import ChangePasswordModal from '../Modals/ChangePasswordModal';
 import UserManagementModal from '../Modals/UserManagementModal';
@@ -56,6 +56,9 @@ const UserProfile = () => {
     }, [dropdownOpen]);
 
     if (!currentUser) return null;
+
+    const displayEmail =
+        getStoredLoginEmail() || currentUser.email || currentUser.EmailId || '';
 
     // Check Admin Role
     const roleString = currentUser.role || currentUser.Roles || '';
@@ -113,7 +116,7 @@ const UserProfile = () => {
 
                 <div className="d-flex align-items-center profile-text-group">
                     <span className={`fw-medium ${(dropdownOpen) ? 'text-primary' : 'text-secondary'}`} style={{ fontSize: '12px', transition: 'color 0.2s ease' }}>
-                        {currentUser.email || currentUser.EmailId || currentUser.name}
+                        {displayEmail || currentUser.name}
                     </span>
                     <i className="bi bi-chevron-down ms-1 text-secondary" style={{ fontSize: '0.85rem', transition: 'transform 0.2s ease' }}></i>
                 </div>
@@ -136,7 +139,7 @@ const UserProfile = () => {
                 >
                     <div className="px-3 py-2 border-bottom mb-1">
                         <div className="fw-bold text-dark" style={{ fontSize: '0.85rem' }}>{currentUser.name}</div>
-                        <div className="text-muted" style={{ fontSize: '0.75rem' }}>{currentUser.email || currentUser.EmailId}</div>
+                        <div className="text-muted" style={{ fontSize: '0.75rem' }}>{displayEmail}</div>
                     </div>
 
                     <button
