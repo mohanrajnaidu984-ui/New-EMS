@@ -11,6 +11,10 @@ const {
     userHasQuotePricingEnquiryAccess,
     normalizePricingJobName,
 } = require('../lib/quotePricingAccess');
+const mapQuoteListingRows = require('../lib/mapQuoteListingRows');
+const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
+const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
+const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
 
 // Configure Multer Storage for Quote Attachments
 const uploadDir = path.join(__dirname, '..', 'uploads', 'quotes');
@@ -34,7 +38,7 @@ const upload = multer({ storage: storage });
 // GET /api/quotes/lists/metadata - Fetch lists for dropdowns
 router.get('/lists/metadata', async (req, res) => {
     try {
-        const usersResult = await sql.query`SELECT FullName, Designation, EmailId, Department FROM Master_ConcernedSE WHERE Status = 'Active' ORDER BY FullName`;
+        const usersResult = await sql.query`SELECT FullName, Designation, EmailId, Department, MobileNumber FROM Master_ConcernedSE WHERE Status = 'Active' ORDER BY FullName`;
         const customersMasterRes = await sql.query`
             SELECT *
             FROM Master_CustomerName
@@ -142,738 +146,55 @@ router.get('/attention-by-department', async (req, res) => {
 router.get('/list/pending', async (req, res) => {
     try {
         let { userEmail } = req.query;
-        if (userEmail) {
-            userEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
-        }
         console.log(`[API] Check Pending Quotes for ${userEmail || 'All'}...`);
-
-        const accessCtx = userEmail ? await resolvePricingAccessContext(userEmail) : null;
-        if (userEmail && (!accessCtx || !accessCtx.user)) {
-            return res.json([]);
-        }
-
-        const isAdmin = !!(accessCtx && accessCtx.isAdmin);
-        const userDepartment = accessCtx ? accessCtx.userDepartment : '';
-        const isCcUser = !!(accessCtx && accessCtx.isCcUser);
-
-        const uEsc = (userEmail || '').replace(/'/g, "''");
-        const trimmedDept = (userDepartment || '').trim();
-        const deptEsc = trimmedDept.replace(/'/g, "''");
-        // Match getPricingAnchorJobs: strip "L1 - " / "Sub Job - " from Department so SQL scope aligns with pricing UI.
-        const deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
-        const hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
-        const mefAccessPredicate = isCcUser
-            ? `REPLACE(ISNULL(MEF.CCMailIds, ''), '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'`
-            : hasDeptScope
-                ? `(
-                    LOWER(LTRIM(RTRIM(MEF.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
-                    OR LOWER(LTRIM(RTRIM(EF.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
-                    OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
-                    OR LOWER(LTRIM(RTRIM(EF.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
-                )`
-                : `1 = 1`;
-
-        const scopedJobIdsSubquery = isCcUser
-            ? `REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'`
-            : hasDeptScope
-                ? `(
-                    LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
-                    OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
-                    OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
-                    OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
-                )`
-                : `1 = 1`;
-
-        // Spec: pending = EnquiryPricingValues has price for (RequestNo + EnquiryForItem + LeadJobName + customer)
-        // and no EnquiryQuotes row (latest revision) with TotalAmount > 0 for same RequestNo + OwnJob + LeadJob + ToName.
-        const pvMatchesEfJobSql = `
-            (
-                (PV.EnquiryForID IS NOT NULL AND PV.EnquiryForID <> 0 AND PV.EnquiryForID = EF.ID)
-                OR (
-                    (PV.EnquiryForID IS NULL OR PV.EnquiryForID = 0)
-                    AND LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))) = LTRIM(RTRIM(ISNULL(EF.ItemName, N'')))
-                )
-            )`;
-        const latestPvTupleOnlySql = `
-            NOT EXISTS (
-                SELECT 1
-                FROM EnquiryPricingValues PVN
-                WHERE PVN.RequestNo = PV.RequestNo
-                  AND LTRIM(RTRIM(ISNULL(PVN.EnquiryForItem, N''))) = LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N'')))
-                  AND LTRIM(RTRIM(ISNULL(PVN.LeadJobName, N''))) = LTRIM(RTRIM(ISNULL(PV.LeadJobName, N'')))
-                  AND LTRIM(RTRIM(ISNULL(PVN.CustomerName, N''))) = LTRIM(RTRIM(ISNULL(PV.CustomerName, N'')))
-                  AND (
-                        ISNULL(PVN.UpdatedAt, '19000101') > ISNULL(PV.UpdatedAt, '19000101')
-                        OR (
-                            ISNULL(PVN.UpdatedAt, '19000101') = ISNULL(PV.UpdatedAt, '19000101')
-                            AND ISNULL(PVN.ID, 0) > ISNULL(PV.ID, 0)
-                        )
-                  )
-            )`;
-        // Pending rule:
-        // Keep enquiry in pending when ANY priced tuple is still missing a quote.
-        // Tuple = RequestNo + OwnJob + LeadJob + Customer.
-        const noCompletedQuoteForSameTupleSql = `
-            NOT EXISTS (
-                SELECT 1
-                FROM EnquiryQuotes EQ
-                WHERE EQ.RequestNo = E.RequestNo
-                AND LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.ToName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.CustomerName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                AND (
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.OwnJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                    OR (
-                        LEN(LTRIM(ISNULL(EQ.OwnJob, N''))) >= 2
-                        AND LOWER(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(EQ.OwnJob, N'')))) + N'%'
-                    )
-                )
-                AND (
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.LeadJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                    OR (
-                        LEN(LTRIM(ISNULL(EQ.LeadJob, N''))) >= 2
-                        AND LOWER(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(EQ.LeadJob, N'')))) + N'%'
-                    )
-                )
-                AND EQ.RevisionNo = (SELECT MAX(EQ2.RevisionNo) FROM EnquiryQuotes EQ2 WHERE EQ2.QuoteNo = EQ.QuoteNo)
-                AND ISNULL(EQ.TotalAmount, 0) > 0
-            )`;
-
-        let query;
-        if (userEmail && !isAdmin) {
-            const enforceAssignedOnly = !isCcUser;
-            // Match ConcernedSE by login email via Master_ConcernedSE (FullName-only match fails when FullName is NULL or mismatched).
-            const assignedOnlyClause = enforceAssignedOnly
-                ? `
-                AND EXISTS (
-                    SELECT 1
-                    FROM ConcernedSE cs
-                    INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
-                    WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, N'')))
-                      AND LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(N'${uEsc}'))
-                )
-                `
-                : '';
-            // Refined logic for specific user's division
-            query = `
-                SELECT DISTINCT 
-                    E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.EnquiryDate, E.DueDate, E.Status,
-                    (
-                        SELECT STUFF((
-                            SELECT DISTINCT ';;' + qt.ToName + '|' + FORMAT(ISNULL(qt.TotalAmount, 0), 'N2')
-                            FROM EnquiryQuotes qt
-                            WHERE qt.RequestNo = E.RequestNo
-                            AND ISNULL(qt.TotalAmount, 0) > 0
-                            AND qt.RevisionNo = (
-                                SELECT MAX(rx.RevisionNo) 
-                                FROM EnquiryQuotes rx 
-                                WHERE rx.QuoteNo = qt.QuoteNo
-                            )
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
-                    ) as QuotedCustomers,
-                    (
-                        SELECT STUFF((
-                            SELECT ', ' + ItemName 
-                            FROM EnquiryFor 
-                            WHERE RequestNo = E.RequestNo 
-                            FOR XML PATH('')
-                        ), 1, 2, '')
-                    ) as Divisions,
-                    (
-                        SELECT STUFF((
-                            SELECT ';;' + CustomerName + '|' + CAST(SUM(LatestPrice) AS VARCHAR)
-                            FROM (
-                                SELECT 
-                                    po2.CustomerName,
-                                    pv2.Price as LatestPrice,
-                                    ROW_NUMBER() OVER (
-                                        PARTITION BY po2.CustomerName, ISNULL(CAST(pv2.EnquiryForID AS VARCHAR), pv2.EnquiryForItem) 
-                                        ORDER BY pv2.UpdatedAt DESC
-                                    ) as rn
-                                FROM EnquiryPricingOptions po2
-                                JOIN EnquiryPricingValues pv2 ON po2.ID = pv2.OptionID
-                                WHERE po2.RequestNo = E.RequestNo
-                            ) t
-                            WHERE rn = 1
-                            GROUP BY CustomerName
-                            HAVING SUM(LatestPrice) > 0
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
-                    ) as PricingCustomerDetails,
-                    (
-                        SELECT STUFF((
-                            SELECT DISTINCT ',' + CAST(EF2.ID AS VARCHAR)
-                            FROM EnquiryFor EF2
-                            JOIN Master_EnquiryFor MEF2 ON (
-                                EF2.ItemName = MEF2.ItemName OR 
-                                EF2.ItemName LIKE '%- ' + MEF2.ItemName OR 
-                                EF2.ItemName LIKE '%- ' + MEF2.DivisionCode OR
-                                MEF2.ItemName LIKE '%' + EF2.ItemName + '%'
-                            )
-                            WHERE EF2.RequestNo = E.RequestNo
-                            AND (${scopedJobIdsSubquery})
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 1, '')
-                    ) as ScopedJobIDs
-                FROM EnquiryMaster E
-                JOIN EnquiryPricingOptions PO ON E.RequestNo = PO.RequestNo
-                JOIN EnquiryPricingValues PV ON PO.ID = PV.OptionID
-                JOIN EnquiryFor EF ON E.RequestNo = EF.RequestNo 
-                JOIN Master_EnquiryFor MEF ON (
-                    EF.ItemName = MEF.ItemName OR 
-                    EF.ItemName LIKE '%- ' + MEF.ItemName OR
-                    EF.ItemName LIKE '%- ' + MEF.DivisionCode OR
-                    MEF.ItemName LIKE '%' + EF.ItemName + '%'
-                )
-                WHERE PV.Price > 0
-                AND LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))) <> N''
-                AND LTRIM(RTRIM(ISNULL(PV.LeadJobName, N''))) <> N''
-                AND LTRIM(RTRIM(ISNULL(PV.CustomerName, N''))) <> N''
-                AND (${mefAccessPredicate})
-                ${assignedOnlyClause}
-                AND (
-                    EF.ItemName = PO.ItemName OR 
-                    EF.ItemName LIKE PO.ItemName + '%' OR 
-                    PO.ItemName LIKE EF.ItemName + '%'
-                )
-                AND ${pvMatchesEfJobSql}
-                AND ${latestPvTupleOnlySql}
-                AND ${noCompletedQuoteForSameTupleSql}
-                ORDER BY E.DueDate DESC, E.RequestNo DESC
-            `;
-        } else {
-            // Admin or Fallback (Show all with prices but no quotes)
-            query = `
-                SELECT DISTINCT 
-                    E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.EnquiryDate, E.DueDate, E.Status,
-                    (
-                        SELECT STUFF((
-                            SELECT DISTINCT ';;' + qt.ToName + '|' + FORMAT(ISNULL(qt.TotalAmount, 0), 'N2')
-                            FROM EnquiryQuotes qt
-                            WHERE qt.RequestNo = E.RequestNo
-                            AND ISNULL(qt.TotalAmount, 0) > 0
-                            AND qt.RevisionNo = (
-                                SELECT MAX(rx.RevisionNo) 
-                                FROM EnquiryQuotes rx 
-                                WHERE rx.QuoteNo = qt.QuoteNo
-                            )
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
-                    ) as QuotedCustomers,
-                    (
-                        SELECT STUFF((
-                            SELECT ', ' + ItemName 
-                            FROM EnquiryFor 
-                            WHERE RequestNo = E.RequestNo 
-                            FOR XML PATH('')
-                        ), 1, 2, '')
-                    ) as Divisions,
-                    (
-                        SELECT STUFF((
-                            SELECT ';;' + CustomerName + '|' + CAST(SUM(LatestPrice) AS VARCHAR)
-                            FROM (
-                                SELECT 
-                                    po2.CustomerName,
-                                    pv2.Price as LatestPrice,
-                                    ROW_NUMBER() OVER (
-                                        PARTITION BY po2.CustomerName, ISNULL(CAST(pv2.EnquiryForID AS VARCHAR), pv2.EnquiryForItem) 
-                                        ORDER BY pv2.UpdatedAt DESC
-                                    ) as rn
-                                FROM EnquiryPricingOptions po2
-                                JOIN EnquiryPricingValues pv2 ON po2.ID = pv2.OptionID
-                                WHERE po2.RequestNo = E.RequestNo
-                            ) t
-                            WHERE rn = 1
-                            GROUP BY CustomerName
-                            HAVING SUM(LatestPrice) > 0
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
-                    ) as PricingCustomerDetails,
-                    (
-                        SELECT STUFF((
-                            SELECT DISTINCT ',' + CAST(ID AS VARCHAR)
-                            FROM EnquiryFor
-                            WHERE RequestNo = E.RequestNo AND (ParentID IS NULL OR ParentID = '0' OR ParentID = 0)
-                            FOR XML PATH(''), TYPE
-                        ).value('.', 'NVARCHAR(MAX)'), 1, 1, '')
-                    ) as ScopedJobIDs
-                FROM EnquiryMaster E
-                JOIN EnquiryPricingOptions PO ON E.RequestNo = PO.RequestNo
-                JOIN EnquiryPricingValues PV ON PO.ID = PV.OptionID
-                JOIN EnquiryFor EF ON E.RequestNo = EF.RequestNo
-                JOIN Master_EnquiryFor MEF ON (
-                    EF.ItemName = MEF.ItemName OR 
-                    EF.ItemName LIKE '%- ' + MEF.ItemName OR
-                    MEF.ItemName LIKE '%' + EF.ItemName + '%'
-                )
-                WHERE PV.Price > 0
-                AND LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))) <> N''
-                AND LTRIM(RTRIM(ISNULL(PV.LeadJobName, N''))) <> N''
-                AND LTRIM(RTRIM(ISNULL(PV.CustomerName, N''))) <> N''
-                AND (
-                    EF.ItemName = PO.ItemName OR 
-                    EF.ItemName LIKE PO.ItemName + '%' OR 
-                    PO.ItemName LIKE EF.ItemName + '%'
-                )
-                AND ${pvMatchesEfJobSql}
-                AND ${latestPvTupleOnlySql}
-                AND ${noCompletedQuoteForSameTupleSql}
-                ORDER BY E.DueDate DESC, E.RequestNo DESC
-            `;
-        }
-
-        const result = await sql.query(query);
-        const enquiries = result.recordset;
-
+        const { enquiries, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, '');
         if (enquiries.length > 0) {
-            const requestNos = enquiries.map(e => `'${e.RequestNo}'`).join(',');
-
-            // Fetch Jobs (CCMailIds required for anchor scope — same as pricing)
-            const jobsRes = await sql.query(`
-                SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, MEF.CCMailIds AS CCMailIds
-                FROM EnquiryFor EF
-                LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
-                WHERE EF.RequestNo IN (${requestNos})
-            `);
-            const allJobsRaw = jobsRes.recordset || [];
-            const seenJobKeys = new Set();
-            const allJobs = [];
-            for (const j of allJobsRaw) {
-                const jid = j.ID ?? j.id;
-                if (jid == null) continue;
-                const k = `${j.RequestNo}:${jid}`;
-                if (seenJobKeys.has(k)) continue;
-                seenJobKeys.add(k);
-                allJobs.push(j);
-            }
-
-            // Fetch Prices using the same matching rule as the validated SSMS query:
-            // match current EnquiryFor row by (EnquiryForID) OR (trimmed EnquiryForItem = trimmed ItemName).
-            const pricesRes = await sql.query(`
-                SELECT
-                    v.RequestNo,
-                    v.OptionID,
-                    v.EnquiryForID,
-                    v.EnquiryForItem,
-                    v.Price,
-                    v.UpdatedAt,
-                    v.CustomerName,
-                    v.LeadJobName,
-                    v.PriceOption,
-                    m.MatchedEnquiryForId,
-                    m.MatchedItemName,
-                    m.MatchedParentId
-                FROM EnquiryPricingValues v
-                OUTER APPLY (
-                    SELECT TOP 1
-                        ef.ID AS MatchedEnquiryForId,
-                        ef.ItemName AS MatchedItemName,
-                        ef.ParentID AS MatchedParentId
-                    FROM EnquiryFor ef
-                    WHERE ef.RequestNo = v.RequestNo
-                      AND (
-                            (v.EnquiryForID IS NOT NULL AND v.EnquiryForID <> 0 AND v.EnquiryForID = ef.ID)
-                         OR (
-                                LTRIM(RTRIM(ISNULL(v.EnquiryForItem, N''))) <> N''
-                            AND LTRIM(RTRIM(v.EnquiryForItem)) = LTRIM(RTRIM(ef.ItemName))
-                            )
-                        )
-                    ORDER BY
-                        CASE WHEN v.EnquiryForID IS NOT NULL AND v.EnquiryForID <> 0 AND v.EnquiryForID = ef.ID THEN 0 ELSE 1 END,
-                        ef.ID
-                ) m
-                WHERE v.RequestNo IN (${requestNos})
-            `);
-            const allPrices = pricesRes.recordset;
-
-            // Fetch external customers from transactional table (authoritative source)
-            const enquiryCustomersRes = await sql.query(`
-                SELECT RequestNo, CustomerName
-                FROM EnquiryCustomer
-                WHERE RequestNo IN (${requestNos})
-            `);
-            const allEnquiryCustomers = enquiryCustomersRes.recordset;
-
-            console.log(`[API] Found ${allJobs.length} jobs and ${allPrices.length} prices for ${enquiries.length} enquiries.`);
-
-            // Map subjob prices for each enquiry
-            const mappedEnquiries = enquiries.map(enq => {
-                const enqRequestNo = enq.RequestNo?.toString().trim();
-                if (!enqRequestNo) return null;
-
-                const enqJobs = allJobs.filter(j => j.RequestNo?.toString().trim() == enqRequestNo);
-                const enqPrices = allPrices.filter(p => p.RequestNo?.toString().trim() == enqRequestNo);
-
-                // Build hierarchy
-                const childrenMap = {};
-                enqJobs.forEach(j => {
-                    if (j.ParentID && j.ParentID != '0') {
-                        if (!childrenMap[j.ParentID]) childrenMap[j.ParentID] = [];
-                        childrenMap[j.ParentID].push(j);
-                    }
-                });
-
-                const roots = enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
-                roots.sort((a, b) => a.ID - b.ID);
-                
-                // Map each root to an L-code (L1, L2...)
-                const rootLabelMap = {};
-                roots.forEach((r, idx) => {
-                    const existing = (r.LeadJobCode || '').trim().toUpperCase();
-                    if (existing && existing.match(/^L\d+$/)) {
-                        rootLabelMap[r.ID] = existing;
-                    } else {
-                        rootLabelMap[r.ID] = `L${idx + 1}`;
-                    }
-                });
-
-                const flatList = [];
-                const traverse = (job, level) => {
-                    flatList.push({ ...job, level });
-                    const children = childrenMap[job.ID] || [];
-                    children.sort((a, b) => a.ID - b.ID);
-                    children.forEach(child => traverse(child, level + 1));
-                };
-                roots.forEach(root => traverse(root, 0));
-
-                // Filter flatList by ScopedJobIDs — prefer JS anchors (aligned with pricing) when user is non-admin
-                let scopedJobIDsStr = (enq.ScopedJobIDs || '').toString().split(',').map(id => id.trim()).filter(Boolean);
-                if (userEmail && accessCtx && accessCtx.user && !accessCtx.isAdmin) {
-                    const anchors = getPricingAnchorJobs(enqJobs, accessCtx, userEmail);
-                    if (anchors.length > 0) {
-                        const visibleIds = expandVisibleJobIdsFromAnchors(anchors, enqJobs);
-                        scopedJobIDsStr = Array.from(visibleIds);
-                    }
-                    // If no JS anchors, keep SQL ScopedJobIDs — pending query already enforced ConcernedSE + division access
-                }
-                if (scopedJobIDsStr.length === 0 && roots.length > 0) {
-                    scopedJobIDsStr = roots.map((r) => String(r.ID));
-                }
-                const scopedJobIDsSet = new Set(scopedJobIDsStr);
-                const scopedJobs = flatList.filter(j => scopedJobIDsSet.has(j.ID.toString()));
-
-                // Fix childrenMap keys to be strings for consistent lookup
-                const stringChildrenMap = {};
-                Object.entries(childrenMap).forEach(([k, v]) => {
-                    stringChildrenMap[k.toString()] = v;
-                });
-
-                // Identify all IDs that are descendants of scoped IDs
-                const validIDs = new Set();
-                const collectDescendants = (id) => {
-                    const idStr = id.toString();
-                    if (validIDs.has(idStr)) return;
-                    validIDs.add(idStr);
-                    const children = stringChildrenMap[idStr] || [];
-                    children.forEach(c => collectDescendants(c.ID));
-                };
-                scopedJobIDsStr.forEach(id => collectDescendants(id));
-
-                const filteredFlatList = flatList.filter(job => validIDs.has(job.ID.toString()));
-
-                // Indentation adjustment: use the minimum level among visible jobs (to make first job L1)
-                let minLevel = 0;
-                if (filteredFlatList.length > 0) {
-                    minLevel = Math.min(...filteredFlatList.map(j => j.level || 0));
-                }
-
-                const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-                // Identify Root and Job Names for Aggregation
-                const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
-                const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
-                const internalCustomerNorm = normalize(internalCustomer);
-                const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
-
-                // External customers from EnquiryCustomer table (authoritative)
-                let externalCustomers = allEnquiryCustomers
-                    .filter(c => c.RequestNo?.toString().trim() == enqRequestNo)
-                    .map(c => (c.CustomerName || '').trim())
-                    .filter(Boolean);
-                externalCustomers = [...new Set(externalCustomers.map(c => c.replace(/,\s*$/, '').trim()))];
-
-                // Pre-calculate Individual (Self) Prices (Latest Only) - STRICTLY Internal
-                const selfPrices = {};
-                const updateDates = {};
-                flatList.forEach(job => {
-                    const normOpt = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                    const isBasePrice = (p) => {
-                        const po = p.PriceOption ?? p.priceOption ?? p.priceoption;
-                        return normOpt(po) === 'base price';
-                    };
-
-                    const idMatches = enqPrices.filter(p => {
-                        if (!isBasePrice(p)) return false;
-                        const matchedId = p.MatchedEnquiryForId ?? p.matchedEnquiryForId ?? p.matchedenquiryforid;
-                        if (matchedId != null && matchedId !== '' && String(matchedId) !== '0') {
-                            return String(matchedId) === String(job.ID);
-                        }
-                        return p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0' && String(p.EnquiryForID) === String(job.ID);
-                    });
-
-                    // Fallback to ItemName only for legacy rows that have no usable IDs.
-                    // If a row has MatchedEnquiryForId/EnquiryForID, keep strict ID matching
-                    // to avoid same-name collisions across branches.
-                    let finalMatches = idMatches;
-                    if (finalMatches.length === 0) {
-                        finalMatches = enqPrices.filter(p =>
-                            isBasePrice(p) &&
-                            !(p.MatchedEnquiryForId ?? p.matchedEnquiryForId ?? p.matchedenquiryforid) &&
-                            !(p.EnquiryForID && p.EnquiryForID != 0 && p.EnquiryForID != '0') &&
-                            p.EnquiryForItem &&
-                            p.EnquiryForItem.toString().trim().toLowerCase() === job.ItemName.toString().trim().toLowerCase()
-                        );
-                    }
-
-                    const sortedMatches = [...finalMatches].sort((a, b) => new Date(b.UpdatedAt || 0) - new Date(a.UpdatedAt || 0));
-
-                    // For Subjob Prices tree, strictly use the internal customer view or divisions
-                    let priceRow = sortedMatches.find(p => p.Price > 0 && p.CustomerName && (
-                        normalize(p.CustomerName) === internalCustomerNorm ||
-                        jobNameSetNorm.has(normalize(p.CustomerName))
-                    ));
-
-                    if (!priceRow) priceRow = sortedMatches.find(p => p.Price > 0);
-                    if (!priceRow && sortedMatches.length > 0) priceRow = sortedMatches[0];
-
-                    selfPrices[job.ID] = priceRow ? parseFloat(priceRow.Price || 0) : 0;
-                    updateDates[job.ID] = priceRow ? priceRow.UpdatedAt : null;
-                });
-
-                const subJobPrices = filteredFlatList.map(job => {
-                    const displayLevel = Math.max(0, (job.level || 0) - minLevel);
-
-                    const displayName = (() => {
-                        // Inherit LeadJobCode from root ancestor
-                        let root = job;
-                        let visited = new Set();
-                        while (root.ParentID && root.ParentID != 0 && root.ParentID != '0' && !visited.has(root.ID)) {
-                            const p = enqJobs.find(j => j.ID == root.ParentID);
-                            if (!p) break;
-                            visited.add(root.ID);
-                            root = p;
-                        }
-
-                        const displayCode = rootLabelMap[root.ID] || 'L1';
-
-                        // STRICT label rule for pending summary:
-                        // always display the current job itself (never parent/lead alias).
-                        // This ensures subjob users see only ownjob + its descendants,
-                        // without parent/lead job labels appearing in the list.
-                        const labelBaseName = job.ItemName;
-                        return `${labelBaseName} (${displayCode})`;
-                    })();
-
-                    // Each row shows this department's own Base Price only (net), never a roll-up of descendants.
-                    const totalVal = selfPrices[job.ID] || 0;
-
-                    const updatedAtTs =
-                        (updateDates[job.ID] ? new Date(updateDates[job.ID]).getTime() : 0) || 0;
-
-                    return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAtTs ? new Date(updatedAtTs).toISOString() : ''}|${displayLevel}`;
-                }).join(';;');
-
-                // Aggregate PricingCustomerDetails (Hide Subjobs, Aggregate to Root)
-                let aggregatedPricing = {};
-                if (enq.PricingCustomerDetails) {
-                    enq.PricingCustomerDetails.split(';;').forEach(p => {
-                        const parts = p.split('|');
-                        const name = parts[0]?.trim();
-                        const val = parseFloat(parts[1]) || 0;
-                        if (!name) return;
-
-                        const nameNorm = normalize(name);
-                        if (jobNameSetNorm.has(nameNorm)) {
-                            // It's a job name (Internal) -> keep as original name (Parent Job)
-                            aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
-                        } else {
-                            // It's an external customer
-                            aggregatedPricing[name] = (aggregatedPricing[name] || 0) + val;
-                        }
-                    });
-                }
-
-                const finalPricingStr = Object.entries(aggregatedPricing)
-                    .map(([name, val]) => `${name}|${val.toFixed(2)}`)
-                    .join(';;');
-
-                // Customer column:
-                // - If ownjob is subjob in a lead branch => include that branch parent job name.
-                // - If ownjob is lead/root in a lead branch => include external customers.
-                // - If both exist across branches => include both sets (deduped).
-                const stripLeadPrefix = (s) => String(s || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
-                const finalCustomerSet = new Set();
-                const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
-                const withLeadCode = (name, code) => {
-                    const base = (name || '').replace(/,\s*$/, '').trim();
-                    const c = String(code || '').trim().toUpperCase();
-                    if (!base) return '';
-                    if (!c || !/^L\d+$/.test(c)) return base;
-                    return `${base} (${c})`;
-                };
-                const anchorJobs = userEmail && accessCtx && accessCtx.user
-                    ? getPricingAnchorJobs(enqJobs, accessCtx, userEmail)
-                    : enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
-                const ownDeptClean = stripLeadPrefix(userDepartment || '');
-                const ownDeptNorm = normalize(ownDeptClean);
-                let hasOwnAsLeadInAnyBranch = false;
-                let hasOwnAsSubjobInAnyBranch = false;
-                const ownLeadCodes = new Set();     // lead codes where ownjob is root
-                const ownSubjobLeadCodes = new Set(); // lead codes where ownjob is subjob
-
-                const childrenByParent = {};
-                enqJobs.forEach((j) => {
-                    const pid = j.ParentID;
-                    if (pid == null || pid === '' || pid === '0' || pid === 0) return;
-                    const key = String(pid);
-                    if (!childrenByParent[key]) childrenByParent[key] = [];
-                    childrenByParent[key].push(j);
-                });
-
-                const rootsForBranchCheck = enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
-                const collectBranchJobs = (root) => {
-                    const out = [];
-                    const stack = [root];
-                    const seen = new Set();
-                    while (stack.length > 0) {
-                        const cur = stack.pop();
-                        const cid = String(cur.ID);
-                        if (seen.has(cid)) continue;
-                        seen.add(cid);
-                        out.push(cur);
-                        const kids = childrenByParent[cid] || [];
-                        kids.forEach(k => stack.push(k));
-                    }
-                    return out;
-                };
-
-                rootsForBranchCheck.forEach((root) => {
-                    const branchJobs = collectBranchJobs(root);
-                    const ownNodes = branchJobs.filter((j) => normalize(stripLeadPrefix(j.ItemName || '')) === ownDeptNorm);
-                    if (ownNodes.length === 0) return;
-                    ownNodes.forEach((ownNode) => {
-                        const pid = ownNode.ParentID;
-                        const rootLeadCode = String(root.LeadJobCode || '').trim().toUpperCase();
-                        const isLead = (pid == null || pid === '' || pid === '0' || pid === 0);
-                        if (isLead) {
-                            hasOwnAsLeadInAnyBranch = true;
-                            if (/^L\d+$/.test(rootLeadCode)) ownLeadCodes.add(rootLeadCode);
-                            return;
-                        }
-                        hasOwnAsSubjobInAnyBranch = true;
-                        if (/^L\d+$/.test(rootLeadCode)) ownSubjobLeadCodes.add(rootLeadCode);
-                        const parent = enqJobs.find(pj => String(pj.ID) === String(pid));
-                        if (!parent || !parent.ItemName) return;
-                        const label = stripLeadPrefix(parent.ItemName) || String(parent.ItemName).trim();
-                        const leadCode = (() => {
-                            const raw = (root.LeadJobCode || ownNode.LeadJobCode || parent.LeadJobCode || '').toString().trim().toUpperCase();
-                            return /^L\d+$/.test(raw) ? raw : '';
-                        })();
-                        const displayLabel = withLeadCode(label, leadCode);
-                        if (displayLabel && (!userDivisionKey || !normalize(displayLabel).includes(userDivisionKey))) {
-                            finalCustomerSet.add(displayLabel);
-                        }
-                    });
-                });
-
-                if (hasOwnAsLeadInAnyBranch || (!hasOwnAsSubjobInAnyBranch && finalCustomerSet.size === 0)) {
-                    const leadCodes = Array.from(ownLeadCodes);
-                    externalCustomers.forEach((c) => {
-                        if (!c) return;
-                        if (leadCodes.length === 0) {
-                            if (!userDivisionKey || !normalize(c).includes(userDivisionKey)) finalCustomerSet.add(c);
-                            return;
-                        }
-                        leadCodes.forEach((lc) => {
-                            const disp = withLeadCode(c, lc);
-                            if (disp && (!userDivisionKey || !normalize(disp).includes(userDivisionKey))) {
-                                finalCustomerSet.add(disp);
-                            }
-                        });
-                    });
-                }
-
-                // Fail-safe: always include parent names of visible subjob anchors (same rule as quote customer dropdown).
-                // This avoids missing parent customers when department text does not exactly match EnquiryFor item labels.
-                anchorJobs.forEach((job) => {
-                    if (!job.ParentID || job.ParentID == '0' || job.ParentID == 0) return;
-                    const parent = enqJobs.find((pj) => String(pj.ID) === String(job.ParentID));
-                    if (!parent || !parent.ItemName) return;
-                    const label = stripLeadPrefix(parent.ItemName) || String(parent.ItemName).trim();
-                    const leadCode = (() => {
-                        const code = String(job.LeadJobCode || parent.LeadJobCode || '').trim().toUpperCase();
-                        if (ownSubjobLeadCodes.size === 0) return code;
-                        return ownSubjobLeadCodes.has(code) ? code : '';
-                    })();
-                    const displayLabel = withLeadCode(label, leadCode);
-                    if (displayLabel && (!userDivisionKey || !normalize(displayLabel).includes(userDivisionKey))) {
-                        finalCustomerSet.add(displayLabel);
-                    }
-                });
-
-                const finalCustomersRaw = Array.from(finalCustomerSet);
-                const finalCustomers = [];
-                const seenBase = new Set();
-                finalCustomersRaw.forEach((name) => {
-                    const base = String(name || '').replace(/\s*\(L\d+\)\s*$/i, '').trim().toLowerCase();
-                    if (!base || seenBase.has(base)) return;
-                    seenBase.add(base);
-                    finalCustomers.push(name);
-                });
-
-                const fullCustomerName = finalCustomers.join(', ');
-
-                if (enq.RequestNo == '51') {
-                    console.log(`[DEBUG 51] Root: ${internalCustomer}, External:`, externalCustomers);
-                    console.log(`[DEBUG 51] JobSet:`, Array.from(jobNameSetNorm));
-                    console.log(`[DEBUG 51] Final Customer Set:`, Array.from(finalCustomerSet));
-                    console.log(`[DEBUG 51] Final Customers Array:`, finalCustomers);
-                    console.log(`[DEBUG 51] Final Pricing Str:`, finalPricingStr);
-                }
-
-                return {
-                    RequestNo: enq.RequestNo,
-                    ProjectName: enq.ProjectName,
-                    CustomerName: fullCustomerName,
-                    PricingCustomerDetails: finalPricingStr,
-                    ClientName: enq.ClientName || enq.clientname || '-',
-                    ConsultantName: enq.ConsultantName || enq.consultantname || '-',
-                    EnquiryDate: enq.EnquiryDate,
-                    DueDate: enq.DueDate,
-                    Status: enq.Status,
-                    Divisions: enq.Divisions,
-                    QuotedCustomers: enq.QuotedCustomers,
-                    SubJobPrices: subJobPrices
-                };
-            }).filter(Boolean);
-
-            let finalMapped = mappedEnquiries;
-            if (userEmail && accessCtx && !accessCtx.isAdmin) {
-                finalMapped = mappedEnquiries.map(enq => {
-                    const accessRule = accessCtx.isCcUser ? 'cc_coordinator' : 'concerned_se';
-                    return { ...enq, AccessRule: accessRule };
-                });
-            }
-
+            const finalMapped = await mapQuoteListingRows(sql, enquiries, ue, accessCtx);
             if (finalMapped.length > 0) {
                 console.log(`[API] FINAL DATA Enq 0:`, {
                     ReqNo: finalMapped[0].RequestNo,
                     Client: finalMapped[0].ClientName,
                     Consultant: finalMapped[0].ConsultantName,
-                    SubJobPricesLen: finalMapped[0].SubJobPrices?.length
+                    SubJobPricesLen: finalMapped[0].SubJobPrices?.length,
                 });
             }
-
             console.log(`[API] Pending Quotes found: ${finalMapped.length}`);
-            res.json(finalMapped);
-        } else {
-            res.json([]);
+            return res.json(finalMapped);
         }
+        return res.json([]);
     } catch (err) {
         console.error('Error fetching pending quotes:', err);
         res.status(500).json({ error: 'Failed to fetch pending quotes', details: err.message });
+    }
+});
+
+router.get('/list/search', async (req, res) => {
+    try {
+        let { userEmail, q, dateFrom, dateTo } = req.query;
+        const extra = buildQuoteListSearchExtraWhere(q || '', dateFrom || '', dateTo || '');
+        if (!extra.ok) {
+            return res.json([]);
+        }
+        const { enquiries: pendingRaw, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, extra.sql);
+        const { enquiries: quotedRaw } = await runQuotedQuoteListQuery(sql, userEmail, extra.sql);
+        const pendingMapped = await mapQuoteListingRows(sql, pendingRaw || [], ue, accessCtx);
+        const quotedMapped = await mapQuoteListingRows(sql, quotedRaw || [], ue, accessCtx);
+        const byNo = new Map();
+        for (const row of quotedMapped) {
+            byNo.set(String(row.RequestNo), { ...row, QuoteListKind: 'quoted' });
+        }
+        for (const row of pendingMapped) {
+            byNo.set(String(row.RequestNo), { ...row, QuoteListKind: 'pending' });
+        }
+        const merged = Array.from(byNo.values()).sort((a, b) => {
+            const ta = a.DueDate ? new Date(a.DueDate).getTime() : 0;
+            const tb = b.DueDate ? new Date(b.DueDate).getTime() : 0;
+            return tb - ta;
+        });
+        return res.json(merged);
+    } catch (err) {
+        console.error('Error searching quote lists:', err);
+        res.status(500).json({ error: 'Failed to search quote lists', details: err.message });
     }
 });
 
@@ -1247,6 +568,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
         let resolvedItems = [];
         let rawItems = [];
+        let enquiryForBrandingRows = [];
         try {
             // 1. Fetch raw items with Hierarchy (Join Master to get Default Assignments)
             // Use REPLACE/STUFF or logic to match both "L1 - Civil Project" and "Civil Project"
@@ -1516,18 +838,53 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             console.error('[Quote API] Error fetching EnquiryFor:', err);
         }
 
-        // Get Prepared By Options
+        enquiryForBrandingRows = (resolvedItems || [])
+            .map((r) => ({
+                itemName: r.ItemName || '',
+                departmentName: r.DepartmentName || '',
+                companyName: r.CompanyName || '',
+                companyLogo: r.CompanyLogo ? String(r.CompanyLogo).replace(/\\/g, '/') : null,
+                address: r.Address || [r.Address1, r.Address2].filter(Boolean).join('\n') || '',
+                phone: r.Phone || [r.Phone1, r.Phone2].filter(Boolean).join(' / ') || '',
+                faxNo: r.FaxNo || '',
+                email: r.CommonMailIds ? String(r.CommonMailIds).split(',')[0].trim() : '',
+            }))
+            .filter((row) => String(row.itemName || '').trim() || String(row.departmentName || '').trim());
+
+        // Get Prepared By Options (MobileNumber from Master_ConcernedSE via FullName = SEName)
         let preparedByOptions = [];
         try {
-            const seResult = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
+            const seResult = await sql.query`
+                SELECT cs.SEName, m.MobileNumber
+                FROM ConcernedSE cs
+                LEFT JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+                WHERE cs.RequestNo = ${requestNo}
+            `;
             seResult.recordset.forEach(row => {
-                if (row.SEName) preparedByOptions.push({ value: row.SEName, label: row.SEName, type: 'SE' });
+                if (row.SEName) {
+                    const mobileNumber = row.MobileNumber != null ? String(row.MobileNumber).trim() : '';
+                    preparedByOptions.push({ value: row.SEName, label: row.SEName, type: 'SE', mobileNumber });
+                }
             });
 
             if (enquiry.CreatedBy) {
-                preparedByOptions.push({ value: enquiry.CreatedBy, label: enquiry.CreatedBy, type: 'Creator' });
+                const createdName = String(enquiry.CreatedBy).trim();
+                let creatorMobile = '';
+                if (createdName) {
+                    const mobRes = await sql.query`
+                        SELECT TOP 1 MobileNumber FROM Master_ConcernedSE
+                        WHERE UPPER(LTRIM(RTRIM(ISNULL(FullName, N'')))) = UPPER(LTRIM(RTRIM(${createdName})))
+                    `;
+                    const raw = mobRes.recordset?.[0]?.MobileNumber;
+                    creatorMobile = raw != null ? String(raw).trim() : '';
+                }
+                preparedByOptions.push({
+                    value: enquiry.CreatedBy,
+                    label: enquiry.CreatedBy,
+                    type: 'Creator',
+                    mobileNumber: creatorMobile,
+                });
             }
-            // Add emails from default list if needed, or rely on frontend
             preparedByOptions = preparedByOptions.filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
         } catch (err) {
             console.error('[Quote API] Error fetching Prepared By options:', err);
@@ -1979,6 +1336,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 commonMailIds: item.CommonMailIds || '',
                 departmentName: item.DepartmentName || ''
             })),
+            enquiryForBrandingRows,
             quoteNumber: 'Draft',
             userIsSubjobUser,   // True if user's jobs are all subjobs (not lead job)
             divisionsHierarchy  // Return full hierarchy

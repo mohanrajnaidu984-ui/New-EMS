@@ -41,6 +41,7 @@ function normalizePricingValueRow(r) {
         EnquiryForItem: firstDefined(r, ['EnquiryForItem', 'enquiryForItem', 'enquiryforitem']),
         Price: firstDefined(r, ['Price', 'price']),
         UpdatedAt: firstDefined(r, ['UpdatedAt', 'updatedAt', 'updatedat']),
+        UpdatedBy: firstDefined(r, ['UpdatedBy', 'updatedBy', 'updatedby']),
         PriceOption: firstDefined(r, ['PriceOption', 'priceOption', 'priceoption']),
         CustomerName: firstDefined(r, ['CustomerName', 'customerName', 'customername']),
         LeadJobName: firstDefined(r, ['LeadJobName', 'leadJobName', 'leadjobname']),
@@ -60,8 +61,19 @@ const {
 } = require('../lib/quotePricingAccess');
 const { filterJobsByDepartment } = require('../services/hierarchyService');
 
+/** `yyyy-MM-dd` only — used for EnquiryDate bounds on non-pending list searches */
+function parsePricingListYmd(s) {
+    if (!s || typeof s !== 'string') return null;
+    const t = s.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return null;
+    const [y, mo, d] = t.split('-').map(Number);
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return t;
+}
+
 // Helper to get Enquiry List with Pricing Tree
-async function getEnquiryPricingList(userEmail, search = null, pendingOnly = true) {
+async function getEnquiryPricingList(userEmail, search = null, pendingOnly = true, opts = {}) {
     if (!userEmail) return [];
 
     const ctx = await resolvePricingAccessContext(userEmail);
@@ -109,9 +121,38 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         baseQuery += ` AND (E.Status IN ('Open', 'Enquiry', 'Priced', 'Estimated', 'Quote', 'Pricing', 'Pending', 'Quoted', 'Submitted') OR E.Status IS NULL OR E.Status = '') `;
     }
 
-    if (search) {
-        baseQuery += ` AND (CAST(E.RequestNo AS NVARCHAR(32)) LIKE @search OR E.ProjectName LIKE @search OR E.CustomerName LIKE @search OR E.ClientName LIKE @search OR E.ConsultantName LIKE @search) `;
-        request.input('search', sql.NVarChar, `%${search}%`);
+    // Enquiry date range (Search Pricing list only — matches Quote list / EnquiryDate semantics)
+    if (!pendingOnly) {
+        const df = parsePricingListYmd((opts && opts.dateFrom) || '');
+        const dt = parsePricingListYmd((opts && opts.dateTo) || '');
+        if (df && dt) {
+            request.input('pricingListDateFrom', sql.Date, df);
+            request.input('pricingListDateTo', sql.Date, dt);
+            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) BETWEEN @pricingListDateFrom AND @pricingListDateTo `;
+        } else if (df) {
+            request.input('pricingListDateFrom', sql.Date, df);
+            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) >= @pricingListDateFrom `;
+        } else if (dt) {
+            request.input('pricingListDateTo', sql.Date, dt);
+            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) <= @pricingListDateTo `;
+        }
+    }
+
+    const searchTrim = search && String(search).trim();
+    if (searchTrim) {
+        baseQuery += ` AND (
+            CAST(E.RequestNo AS NVARCHAR(32)) LIKE @search
+            OR E.ProjectName LIKE @search
+            OR E.CustomerName LIKE @search
+            OR E.ClientName LIKE @search
+            OR E.ConsultantName LIKE @search
+            OR EXISTS (
+                SELECT 1 FROM dbo.EnquiryPricingValues vSrch
+                WHERE vSrch.RequestNo = E.RequestNo
+                  AND LTRIM(RTRIM(ISNULL(vSrch.UpdatedBy, N''))) LIKE @search
+            )
+        ) `;
+        request.input('search', sql.NVarChar, `%${searchTrim}%`);
     }
 
     baseQuery += ` ORDER BY E.DueDate DESC, E.RequestNo DESC `;
@@ -163,6 +204,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             v.EnquiryForItem,
             v.Price,
             v.UpdatedAt,
+            v.UpdatedBy,
             v.PriceOption,
             v.CustomerName,
             v.LeadJobName,
@@ -612,10 +654,30 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             return null;
         }
 
+        /** Most recent non-empty UpdatedBy on EnquiryPricingValues for this enquiry (fallback: latest row) */
+        const pricedRows = enqPrices
+            .map((pr) => ({
+                at: pr.UpdatedAt ?? pr.updatedAt,
+                by: String(pr.UpdatedBy ?? pr.updatedBy ?? '').trim(),
+            }))
+            .filter((r) => r.at)
+            .sort((a, b) => new Date(b.at) - new Date(a.at));
+        let pricedBy = '';
+        for (const r of pricedRows) {
+            if (r.by) {
+                pricedBy = r.by;
+                break;
+            }
+        }
+        if (!pricedBy && pricedRows.length) {
+            pricedBy = pricedRows[0].by;
+        }
+
         return {
             ...enq,
             CustomerName: fullCustomerName,
-            SubJobPrices: displayItems.join(';;')
+            SubJobPrices: displayItems.join(';;'),
+            PricedBy: pricedBy || null,
         };
     }).filter(Boolean);
 }
@@ -636,10 +698,10 @@ router.get('/list/pending', async (req, res) => {
 // GET /api/pricing/list - New Generic List with Search
 router.get('/list', async (req, res) => {
     try {
-        const { userEmail, search, pendingOnly } = req.query;
-        console.log('Pricing List Search:', { search, userEmail });
+        const { userEmail, search, pendingOnly, dateFrom, dateTo } = req.query;
+        console.log('Pricing List Search:', { search, userEmail, dateFrom, dateTo });
         const isPendingOnly = pendingOnly === 'true';
-        const result = await getEnquiryPricingList(userEmail, search, isPendingOnly);
+        const result = await getEnquiryPricingList(userEmail, search || null, isPendingOnly, { dateFrom, dateTo });
         res.json(result);
     } catch (err) {
         console.error('Error searching pricing list:', err);

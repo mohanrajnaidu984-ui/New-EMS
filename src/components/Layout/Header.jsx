@@ -137,7 +137,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
               <div className="d-flex align-items-center gap-2">
                 <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
                 <div style={{ transform: 'scale(0.9)', transformOrigin: 'right bottom' }}>
-                  <UserProfile />
+                  <UserProfile activeTab={activeTab} />
                 </div>
               </div>
             </div>

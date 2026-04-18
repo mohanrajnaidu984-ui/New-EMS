@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download } from 'lucide-react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenLine } from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
 import { format } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
@@ -8,11 +8,31 @@ import ClauseEditor from './ClauseEditor';
 import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
 import ListBoxControl from '../Enquiry/ListBoxControl';
 import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
+import { buildQuotePrintDocumentHtml } from './quotePrintDocumentHtml';
+import {
+    SignatureVaultModal,
+    QuoteSignatureStamp,
+    makeVerificationCode,
+    loadStampsForEnquiry,
+    saveStampsForEnquiry,
+    EMS_QUOTE_PLACE_STAMP_EVENT,
+} from './QuoteDigitalSignature';
 
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
 console.log("QUOTE FILE LOADED");
 
 const API_BASE = '';
+
+/** Right-panel quote filter row (category drives which fields are enabled). */
+const QUOTE_LIST_CATEGORY = {
+    PENDING: 'pending_quote',
+    SEARCH: 'search_quote',
+};
+
+/** Stable reference when there are zero quote tabs (avoids new [] every memo pass). */
+const EMPTY_CALCULATED_TABS = [];
+/** Stable empty list for department attention fetch clears. */
+const EMPTY_DEPT_ATTENTION_NAMES = [];
 
 // Default clause templates
 const defaultClauses = {
@@ -122,6 +142,60 @@ const collapseSpacesLower = (s) =>
         .toLowerCase()
         .replace(/\s+/g, ' ')
         .trim();
+
+/** Encode each path segment so spaces / `#` / `?` in filenames (e.g. `AAC Logo.png`) load correctly via `/uploads`. */
+function encodeAppStaticPath(pathFromRoot) {
+    if (!pathFromRoot) return pathFromRoot;
+    const norm = String(pathFromRoot).replace(/\/+/g, '/');
+    const parts = norm.split('/').filter(Boolean);
+    if (parts.length === 0) return '/';
+    return (
+        '/' +
+        parts
+            .map((seg) => {
+                try {
+                    return encodeURIComponent(decodeURIComponent(seg));
+                } catch {
+                    return encodeURIComponent(seg);
+                }
+            })
+            .join('/')
+    );
+}
+
+/**
+ * DB may store relative paths (`uploads/...`), full disk paths, or absolute URLs.
+ * Vite serves the app on :5173 and proxies `/uploads` to the API — never prefix `http(s):` or `data:` with `/`.
+ */
+function resolveQuoteLogoSrc(logo) {
+    if (logo == null) return null;
+    const raw = String(logo).trim();
+    if (!raw) return null;
+    if (/^data:/i.test(raw)) return raw;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (raw.startsWith('//')) return raw;
+
+    let s = raw.replace(/\\/g, '/');
+    const lower = s.toLowerCase();
+    const uploadsMarker = '/uploads/';
+    const absUploads = lower.indexOf(uploadsMarker);
+    if (absUploads >= 0) {
+        const tail = s.slice(absUploads);
+        return encodeAppStaticPath(tail);
+    }
+    const relUploads = lower.indexOf('uploads/');
+    if (relUploads === 0 || (relUploads === 1 && s[0] === '/')) {
+        const i = lower.indexOf('uploads/');
+        const tail = s[i] === '/' ? s.slice(i) : `/${s.slice(i)}`;
+        return encodeAppStaticPath(tail);
+    }
+    // Filename only under server/uploads/logos (multer default)
+    if (!lower.includes('uploads') && /^[^/\\]+\.(png|jpe?g|gif|webp|svg)$/i.test(s)) {
+        return encodeAppStaticPath(`/uploads/logos/${s}`);
+    }
+    if (s.startsWith('/')) return encodeAppStaticPath(s);
+    return encodeAppStaticPath(`/${s}`);
+}
 
 /** Server-built map: internal division → Master_ConcernedSE names + default assigned SE for this enquiry. */
 const resolveQuoteInternalAttention = (enquiryData, toName) => {
@@ -308,6 +382,49 @@ const matchDivisionCode = (qDivCode, jName, jDivCode = null) => {
         (q === 'GEN'); // Global fallback for general quotes
 };
 
+/** True when enquiry payload implies multiple branch quote tabs (Civil / Electrical / …) — do not force login profile onto header. */
+const enquiryPayloadSuggestsMultiBranchTabs = (data) => {
+    if (!data || typeof data !== 'object') return false;
+    const divs = data.divisions || [];
+    if (Array.isArray(divs) && divs.filter(Boolean).length >= 2) return true;
+    const h = data.divisionsHierarchy || [];
+    if (h.length >= 3) return true;
+    const nonPersonal = (data.availableProfiles || []).filter((p) => !p?.isPersonalProfile);
+    return nonPersonal.length >= 2;
+};
+
+/**
+ * Match the active Previous-Quotes job tab to enquiry-data rows built from Master_EnquiryFor
+ * (DepartmentName first, then EnquiryFor ItemName).
+ */
+const matchMasterEnquiryForBrandingRow = (activeTab, rows) => {
+    if (!activeTab || !Array.isArray(rows) || rows.length === 0) return null;
+    const tabN = collapseSpacesLower(stripQuoteJobPrefix(activeTab.label || activeTab.name || ''));
+    if (!tabN) return null;
+    const scoreDept = (dn) => {
+        const d = collapseSpacesLower(String(dn || ''));
+        if (!d) return 0;
+        if (d === tabN) return 100;
+        if (tabN.includes(d) || d.includes(tabN)) return 80;
+        return 0;
+    };
+    const scoreItem = (itemName) => {
+        const i = collapseSpacesLower(stripQuoteJobPrefix(String(itemName || '')));
+        if (!i) return 0;
+        if (i === tabN) return 100;
+        if (tabN.includes(i) || i.includes(tabN)) return 80;
+        return 0;
+    };
+    const scored = rows
+        .map((r) => ({ r, sd: scoreDept(r.departmentName), si: scoreItem(r.itemName) }))
+        .filter((x) => x.sd > 0 || x.si > 0)
+        .sort((a, b) => {
+            if (b.sd !== a.sd) return b.sd - a.sd;
+            return b.si - a.si;
+        });
+    return scored[0]?.r ?? null;
+};
+
 /**
  * Saved EnquiryQuotes.OwnJob is often the creator's department (server overwrites on insert/update),
  * not the priced branch — so multi-tab views must align rows using QuoteNumber's division segment vs the active tab.
@@ -319,6 +436,14 @@ const quoteNumberDivisionMatchesTab = (q, activeTabObj, multiTab) => {
     if (!qDiv || qDiv === 'GEN') return false;
     const tabLabel = (activeTabObj.label || activeTabObj.name || '').toUpperCase();
     return matchDivisionCode(qDiv, tabLabel, activeTabObj.divisionCode);
+};
+
+/** Primary key on EnquiryQuotes rows from API (driver / JSON may use ID, id, or Id). */
+const quoteRowId = (q) => {
+    if (!q || typeof q !== 'object') return undefined;
+    const id = q.ID ?? q.id ?? q.Id;
+    if (id === null || id === undefined || id === '') return undefined;
+    return id;
 };
 
 /**
@@ -448,6 +573,105 @@ const tableStyles = `
     }
 `;
 
+/** mm → px at 96dpi (CSS px). */
+const quoteMmToPx = (mm) => (mm * 96) / 25.4;
+
+/** Standard clause keys — module scope for preview/pagination and clause list UI. */
+const QUOTE_CLAUSE_DEFINITIONS = [
+    { key: 'showScopeOfWork', contentKey: 'scopeOfWork', title: 'Scope of Work' },
+    { key: 'showBasisOfOffer', contentKey: 'basisOfOffer', title: 'Basis of the Offer' },
+    { key: 'showExclusions', contentKey: 'exclusions', title: 'Exclusions and Qualifications' },
+    { key: 'showPricingTerms', contentKey: 'pricingTerms', title: 'Pricing & Payment Terms' },
+    { key: 'showSchedule', contentKey: 'schedule', title: 'High-Level Schedule' },
+    { key: 'showWarranty', contentKey: 'warranty', title: 'Warranty & Defects Liability Period' },
+    { key: 'showResponsibilityMatrix', contentKey: 'responsibilityMatrix', title: 'Responsibility Matrix' },
+    { key: 'showTermsConditions', contentKey: 'termsConditions', title: 'Terms & Conditions' },
+    { key: 'showBillOfQuantity', contentKey: 'billOfQuantity', title: 'Bill of Quantity' },
+    { key: 'showAcceptance', contentKey: 'acceptance', title: 'Acceptance & Confirmation' },
+];
+
+/** Pack clause indices (0..n-1) into pages by measured block height. */
+const packClauseIndicesByHeights = (heights, usablePx) => {
+    if (!heights?.length) return [];
+    const usable = Math.max(usablePx, 240);
+    const pages = [];
+    let cur = [];
+    let sum = 0;
+    for (let i = 0; i < heights.length; i++) {
+        const h = Math.max(heights[i] || 0, 1);
+        if (cur.length > 0 && sum + h > usable) {
+            pages.push(cur);
+            cur = [];
+            sum = 0;
+        }
+        cur.push(i);
+        sum += h;
+    }
+    if (cur.length) pages.push(cur);
+    return pages;
+};
+
+/** Pack a subset of global clause indices using measured heights for those indices only. */
+const packGlobalClauseSubset = (globalIndices, heights, usablePx) => {
+    if (!globalIndices?.length) return [];
+    const subH = globalIndices.map((gi) => Math.max(heights[gi] || 0, 1));
+    const localPacked = packClauseIndicesByHeights(subH, usablePx);
+    return localPacked.map((localGroup) => localGroup.map((li) => globalIndices[li]));
+};
+
+/**
+ * Pull leading clauses from page i onto page i-1 when they still fit (fixes
+ * leftover vertical room from rounding / conservative chrome vs greedy pack).
+ */
+const rebalanceClausePageGroups = (groups, heights, usablePx) => {
+    if (!groups || groups.length < 2) return groups;
+    const slackPx = 36;
+    const cap = Math.max(usablePx + slackPx, 280);
+    const hAt = (idx) => Math.max(heights[idx] || 0, 1);
+    const out = groups.map((g) => [...g]);
+    for (let pi = 1; pi < out.length; pi++) {
+        let safety = 0;
+        while (out[pi].length && safety < heights.length + 4) {
+            safety += 1;
+            const moveIdx = out[pi][0];
+            const prev = out[pi - 1];
+            const sumPrev = prev.reduce((s, j) => s + hAt(j), 0);
+            if (sumPrev + hAt(moveIdx) <= cap) {
+                prev.push(out[pi].shift());
+            } else {
+                break;
+            }
+        }
+    }
+    return out.filter((g) => g.length > 0);
+};
+
+const clausePageGroupsEqual = (a, b) => {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        const ra = a[i];
+        const rb = b[i];
+        if (ra.length !== rb.length) return false;
+        for (let j = 0; j < ra.length; j++) {
+            if (ra[j] !== rb[j]) return false;
+        }
+    }
+    return true;
+};
+
+const indicesEqual = (a, b) => {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+};
+
+const clausePaginateEqual = (a, b) =>
+    indicesEqual(a?.pageOne, b?.pageOne) && clausePageGroupsEqual(a?.continuation, b?.continuation);
+
 const QuoteForm = () => {
     const { currentUser } = useAuth();
     const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
@@ -461,11 +685,17 @@ const QuoteForm = () => {
 
     // Enquiry and quote data
     const [enquiryData, setEnquiryData] = useState(null);
+    const enquiryDataRef = useRef(null);
+    useLayoutEffect(() => {
+        enquiryDataRef.current = enquiryData;
+    }, [enquiryData]);
     const [quoteId, setQuoteId] = useState(null);
     const [loading, setLoading] = useState(false);
     const [existingQuotes, setExistingQuotes] = useState([]);
     /** Rows from GET /by-enquiry scoped by LeadJob + RequestNo + OwnJob + ToName (previous-quote panel). */
     const [quoteScopedForPanel, setQuoteScopedForPanel] = useState([]);
+    /** When equal to scopedQuotePanelFetchKey, the scoped GET has finished for that key (panel may be []). */
+    const [scopedQuotesFetchSettledKey, setScopedQuotesFetchSettledKey] = useState(null);
     const [selectedLeadId, setSelectedLeadId] = useState(null);
     /** Last lead <select> fingerprint — avoids clearing customer when the same lead is re-applied after re-render. */
     const leadChoiceFingerprintRef = useRef('');
@@ -494,6 +724,20 @@ const QuoteForm = () => {
 
     // Selected Jobs for Pricing
     const [selectedJobs, setSelectedJobs] = useState([]);
+    /** Same logical selection often gets a new array reference from effects — avoid re-firing calculateSummary. */
+    /** Sorted so checkbox order / array reference churn does not re-fire calculateSummary (quickDigest already sorts). */
+    const selectedJobsSig = React.useMemo(() => {
+        const arr = Array.isArray(selectedJobs) ? selectedJobs : [];
+        try {
+            return [...arr].map(String).sort((a, b) => a.localeCompare(b)).join('\x1e');
+        } catch {
+            return arr.map(String).join('\x1e');
+        }
+    }, [selectedJobs]);
+    /** Skip redundant setState when calculateSummary output is unchanged (stops flicker / render storms). */
+    const lastPricingCalcSigRef = useRef('');
+    /** When inputs match last committed run, skip the whole calculateSummary body (stops console/render storms). */
+    const lastQuickCalcInputRef = useRef('');
     const pricingSelectionTouchedRef = useRef({});
     const [expandedGroups, setExpandedGroups] = useState({}); // Track expanded revisions
 
@@ -533,6 +777,10 @@ const QuoteForm = () => {
     // Print Settings
     const [printWithHeader, setPrintWithHeader] = useState(true);
 
+    /** Per-enquiry draggable digital signatures on quote sheets (persisted in localStorage). */
+    const [signatureVaultOpen, setSignatureVaultOpen] = useState(false);
+    const [quoteDigitalStamps, setQuoteDigitalStamps] = useState([]);
+
     // Pending Files State
     const [pendingFiles, setPendingFiles] = useState([]);
 
@@ -559,9 +807,14 @@ const QuoteForm = () => {
 
     // Company Header Info
     const [quoteLogo, setQuoteLogo] = useState(null);
+    const quoteLogoDisplaySrc = React.useMemo(() => resolveQuoteLogoSrc(quoteLogo), [quoteLogo]);
     const [quoteCompanyName, setQuoteCompanyName] = useState('Almoayyed Air Conditioning');
     const [quoteAttachments, setQuoteAttachments] = useState([]);
     const [isUploading, setIsUploading] = useState(false);
+    const [quoteListCategory, setQuoteListCategory] = useState(QUOTE_LIST_CATEGORY.PENDING);
+    const [quoteListSearchCriteria, setQuoteListSearchCriteria] = useState('');
+    const [quoteListDateFrom, setQuoteListDateFrom] = useState('');
+    const [quoteListDateTo, setQuoteListDateTo] = useState('');
     const fileInputRef = useRef(null);
     const [footerDetails, setFooterDetails] = useState(null);
     const [companyProfiles, setCompanyProfiles] = useState([]);
@@ -616,6 +869,30 @@ const QuoteForm = () => {
         }));
     }, [pricingData, enquiryData]);
 
+    /** Content signature for pricing — avoids effect storms when `pricingData` is replaced with an equivalent object. */
+    const pricingStableSig = React.useMemo(() => {
+        const pd = pricingData;
+        if (!pd?.options || !pd.values || typeof pd.values !== 'object') return '';
+        const vals = pd.values;
+        const keys = Object.keys(vals).sort();
+        let acc = 0;
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const row = vals[k];
+            const pr = row != null ? row.Price ?? row.price : '';
+            const n = parseFloat(pr);
+            const bucket = Number.isFinite(n) ? Math.round(n * 1000) : 0;
+            acc = (((acc << 5) - acc + k.length * 131 + bucket) | 0) >>> 0;
+        }
+        return [
+            pd.options.length,
+            keys.length,
+            String(pd.leadJob || ''),
+            pd.access?.hasLeadAccess ? '1' : '0',
+            acc,
+        ].join('\x1e');
+    }, [pricingData]);
+
     const [pricingSummary, setPricingSummary] = useState([]);
     const [grandTotal, setGrandTotal] = useState(0);
     const [hasPricedOptional, setHasPricedOptional] = useState(false);
@@ -625,7 +902,59 @@ const QuoteForm = () => {
     const [usersList, setUsersList] = useState([]);
     const [customersList, setCustomersList] = useState([]);
     const [pendingQuotes, setPendingQuotes] = useState([]); // Pending List State
+    const [quoteSearchResults, setQuoteSearchResults] = useState([]);
+    const [quoteSearchLoading, setQuoteSearchLoading] = useState(false);
     const [pendingQuotesSortConfig, setPendingQuotesSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
+
+    const quoteListDisplayRows = React.useMemo(
+        () => (quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? quoteSearchResults : pendingQuotes),
+        [quoteListCategory, quoteSearchResults, pendingQuotes],
+    );
+
+    const refetchPendingQuotes = useCallback(() => {
+        const userEmail = currentUser?.EmailId || currentUser?.email || '';
+        fetch(`${API_BASE}/api/quotes/list/pending?userEmail=${encodeURIComponent(userEmail)}`)
+            .then(res => res.json())
+            .then(data => setPendingQuotes(data || []))
+            .catch(err => console.error('Error fetching pending quotes:', err));
+    }, [currentUser]);
+
+    const handleQuoteListSearch = useCallback(async () => {
+        if (quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH) return;
+        const userEmail = currentUser?.EmailId || currentUser?.email || '';
+        const q = quoteListSearchCriteria.trim();
+        const df = (quoteListDateFrom || '').trim();
+        const dt = (quoteListDateTo || '').trim();
+        if (!q && !(df && dt)) {
+            setQuoteSearchResults([]);
+            return;
+        }
+        setQuoteSearchLoading(true);
+        try {
+            const params = new URLSearchParams();
+            params.set('userEmail', userEmail);
+            params.set('q', quoteListSearchCriteria);
+            if (df) params.set('dateFrom', df);
+            if (dt) params.set('dateTo', dt);
+            const res = await fetch(`${API_BASE}/api/quotes/list/search?${params.toString()}`);
+            const data = res.ok ? await res.json() : [];
+            setQuoteSearchResults(Array.isArray(data) ? data : []);
+        } catch (e) {
+            console.error('[QuoteForm] list/search', e);
+            setQuoteSearchResults([]);
+        } finally {
+            setQuoteSearchLoading(false);
+        }
+    }, [quoteListCategory, quoteListSearchCriteria, quoteListDateFrom, quoteListDateTo, currentUser]);
+
+    const handleQuoteListClear = useCallback(() => {
+        setQuoteListSearchCriteria('');
+        setQuoteListDateFrom('');
+        setQuoteListDateTo('');
+        setQuoteSearchResults([]);
+        setQuoteListCategory(QUOTE_LIST_CATEGORY.PENDING);
+        refetchPendingQuotes();
+    }, [refetchPendingQuotes]);
 
     // Tab State for unified Quote and Pricing Sections
     const [activeQuoteTab, setActiveQuoteTab] = useState('self');
@@ -633,6 +962,7 @@ const QuoteForm = () => {
     // --- LOCKED LOGIC: Independent Tab State Management (Step 1722 fix) ---
     // Registry to store form state per tab to prevent data sharing/leakage.
     const tabStateRegistry = useRef({});
+    const attentionOptionsCacheRef = React.useRef({ sig: '', arr: EMPTY_DEPT_ATTENTION_NAMES });
 
     // --- LOCKED LOGIC: Reusable Form Reset ---
     const resetFormState = useCallback(() => {
@@ -679,6 +1009,9 @@ const QuoteForm = () => {
         setQuoteContextScope(null);
         setPricingSummary([]);
         setHasUserPricing(false);
+        lastPricingCalcSigRef.current = '';
+        lastQuickCalcInputRef.current = '';
+        attentionOptionsCacheRef.current = { sig: '', arr: EMPTY_DEPT_ATTENTION_NAMES };
 
         // --- ENFORCE USER IDENTITY (Step 4488) ---
         if (enquiryData?.companyDetails) {
@@ -753,47 +1086,6 @@ const QuoteForm = () => {
         setActiveQuoteTab(newTabId);
     };
 
-    // --- PROACTIVE IDENTITY SYNC (Step 4488) ---
-    // ABSOLUTE LOCK: Ensure logo and footer are ALWAYS based on current user's personal profile
-    useEffect(() => {
-        if (currentUser && enquiryData?.availableProfiles) {
-            const userDept = (currentUser.Department || '').trim().toLowerCase();
-            const userEmail = (currentUser.EmailId || currentUser.email || '').trim().toLowerCase();
-            // Priority 1: Backend Flag
-            let personalProfile = enquiryData.availableProfiles.find(p => p.isPersonalProfile);
-
-            // Priority 2: Robust match (Email or Dept)
-            if (!personalProfile) {
-                personalProfile = enquiryData.availableProfiles.find(p => {
-                    const pEmail = (p.email || '').trim().toLowerCase();
-                    const pItem = (p.itemName || '').trim().toLowerCase();
-                    const pName = (p.name || '').trim().toLowerCase();
-                    return (userEmail && pEmail && (userEmail.includes(pEmail) || pEmail.includes(userEmail.split('@')[0]))) ||
-                        (pItem === userDept || pName === userDept || (userDept.includes('bms') && pItem.includes('bms')));
-                });
-            }
-
-            if (personalProfile) {
-                if (quoteCompanyName !== personalProfile.name) {
-                    console.log('[IdentitySync] Absolute branding lock applied for:', personalProfile.name);
-                    setQuoteCompanyName(personalProfile.name);
-                    setQuoteLogo(personalProfile.logo);
-                    setFooterDetails(personalProfile);
-                }
-
-                // Inject/Lock in enquiryData for persistence
-                if (enquiryData.companyDetails?.name !== personalProfile.name) {
-                    setEnquiryData(prev => ({
-                        ...prev,
-                        companyDetails: { ...personalProfile, isPersonalProfile: true },
-                        enquiryLogo: personalProfile.logo,
-                        enquiryCompanyName: personalProfile.name
-                    }));
-                }
-            }
-        }
-    }, [currentUser, enquiryData?.availableProfiles]);
-
     const isDescendant = useCallback((childId, ancestorId, pool = null) => {
         if (!childId || !ancestorId) return false;
         const targetAncId = String(ancestorId);
@@ -827,14 +1119,167 @@ const QuoteForm = () => {
         'showBillOfQuantity', 'showSchedule', 'showWarranty', 'showResponsibilityMatrix', 'showTermsConditions', 'showAcceptance'
     ]);
 
+    const quotePreviewLayoutRef = useRef(null);
+    const clauseMeasureHostRef = useRef(null);
+    const lastClausePackSigRef = useRef('');
+    /** pageOne reserved for letterhead→signatory only (no clauses); continuation = clause groups on sheet 2+. */
+    const [clausePaginate, setClausePaginate] = useState({ pageOne: [], continuation: [] });
+
+    /** Checked clauses in UI order (preview + measurement source). */
+    const activeClausesList = React.useMemo(() => {
+        return orderedClauses
+            .map((id) => {
+                const isCustom = String(id).startsWith('custom_');
+                const customClause = isCustom ? customClauses.find((c) => c.id === id) : null;
+                const standardClause = !isCustom ? QUOTE_CLAUSE_DEFINITIONS.find((c) => c.key === id) : null;
+                if (!customClause && !standardClause) return null;
+                return isCustom
+                    ? { ...customClause, type: 'custom', listKey: id }
+                    : {
+                        ...standardClause,
+                        type: 'standard',
+                        isChecked: clauses[id],
+                        content: clauseContent[standardClause.contentKey],
+                        listKey: id,
+                    };
+            })
+            .filter((c) => c && c.isChecked);
+    }, [orderedClauses, clauses, customClauses, clauseContent]);
+
+    /**
+     * Stable key for clause packing — must NOT include pricingTerms body length: calculateSummary
+     * rewrites that HTML every run and would churn this key → layout effect → setClausePaginate → infinite updates.
+     */
+    const clausePaginationLayoutKey = React.useMemo(() => {
+        const ordered = orderedClauses.join(',');
+        const std = QUOTE_CLAUSE_DEFINITIONS.map((d) => {
+            const on = clauses[d.key] ? 1 : 0;
+            if (d.contentKey === 'pricingTerms') return `${d.key}:${on}:_`;
+            return `${d.key}:${on}:${String(clauseContent[d.contentKey] || '').length}`;
+        }).join(';');
+        const cust = (customClauses || [])
+            .map((c) => `${String(c.id)}:${String(c.content || '').length}`)
+            .join(';');
+        return `${ordered}|${std}|${cust}`;
+    }, [orderedClauses, clauses, clauseContent, customClauses]);
+
+    const isQuotePreviewVisible = Boolean(
+        enquiryData && enquiryData.leadJobPrefix && String(toName || '').trim()
+    );
+
+    /* clausePaginationLayoutKey replaces activeClausesList in deps — list identity churned and retriggered packing → max update depth. */
+    useLayoutEffect(() => {
+        if (!isQuotePreviewVisible) return;
+        const preview = quotePreviewLayoutRef.current;
+        const host = clauseMeasureHostRef.current;
+        if (!preview || !host) return;
+
+        lastClausePackSigRef.current = '';
+
+        if (activeClausesList.length === 0) {
+            setClausePaginate((prev) =>
+                prev.pageOne.length || prev.continuation.length ? { pageOne: [], continuation: [] } : prev
+            );
+            return;
+        }
+
+        const cs = getComputedStyle(preview);
+        const padL = parseFloat(cs.paddingLeft) || 0;
+        const padR = parseFloat(cs.paddingRight) || 0;
+        const innerW = Math.max(320, preview.clientWidth - padL - padR);
+        host.style.width = `${innerW}px`;
+
+        const measureHeights = () =>
+            activeClausesList.map((_, i) => {
+                const n = host.querySelector(`[data-clause-measure-index="${i}"]`);
+                return n ? Math.round(n.getBoundingClientRect().height) : 0;
+            });
+
+        const applyPack = () => {
+            const heights = measureHeights();
+            const fallback = { pageOne: [], continuation: [activeClausesList.map((_, i) => i)] };
+            if (heights.some((h) => !h)) {
+                const sigFb = JSON.stringify(fallback);
+                if (lastClausePackSigRef.current === sigFb) return;
+                lastClausePackSigRef.current = sigFb;
+                setClausePaginate((prev) => (clausePaginateEqual(prev, fallback) ? prev : fallback));
+                return;
+            }
+            const sheetInnerMm = 297 - 15 * 2;
+            /** Sheet 2+ chrome (continuation header); all clauses start after page 1 (letterhead through signatory). */
+            const continuationChromeMm = 62;
+            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 110));
+
+            const pageOne = [];
+            const remaining = activeClausesList.map((_, i) => i);
+            const contPacked = packGlobalClauseSubset(remaining, heights, contUsablePx);
+            const continuation = rebalanceClausePageGroups(contPacked, heights, contUsablePx);
+            const next = { pageOne, continuation };
+            const sig = JSON.stringify(next);
+            if (lastClausePackSigRef.current === sig) return;
+            lastClausePackSigRef.current = sig;
+            setClausePaginate((prev) => (clausePaginateEqual(prev, next) ? prev : next));
+        };
+
+        /* One deferred pass: sync applyPack + immediate remeasure fought calculateSummary’s pricingTerms updates. */
+        const id = requestAnimationFrame(() => {
+            applyPack();
+        });
+        return () => cancelAnimationFrame(id);
+    }, [clausePaginationLayoutKey, isQuotePreviewVisible, sidebarWidth]);
+
+    const sanitizedPageOneClauseIndices = React.useMemo(() => {
+        if (!activeClausesList.length) return [];
+        return (clausePaginate.pageOne || []).filter(
+            (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
+        );
+    }, [clausePaginate.pageOne, activeClausesList]);
+
+    /** Continuation-only groups; drop empty / invalid; if none left but clauses exist, show all on one sheet. */
+    const sanitizedClausePageGroups = React.useMemo(() => {
+        if (!activeClausesList.length) return [];
+        const p1f = (clausePaginate.pageOne || []).filter(
+            (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
+        );
+        const filtered = (clausePaginate.continuation || [])
+            .map((group) =>
+                group.filter(
+                    (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
+                )
+            )
+            .filter((g) => g.length > 0);
+        if (filtered.length) return filtered;
+        if (p1f.length) return [];
+        return [activeClausesList.map((_, i) => i)];
+    }, [clausePaginate.continuation, clausePaginate.pageOne, activeClausesList]);
+
+    const quotePreviewTotalPages =
+        activeClausesList.length === 0 ? 1 : 1 + sanitizedClausePageGroups.length;
+
+    /** So profile “Manage signatures” modal can build the Page list while Quote is open. */
+    useLayoutEffect(() => {
+        if (typeof window !== 'undefined') {
+            window.__EMS_QUOTE_PREVIEW_TOTAL_PAGES = quotePreviewTotalPages;
+        }
+    }, [quotePreviewTotalPages]);
+
+    /** Same tab *structure* → same array reference, even when `enquiryData`/`pricingData` get new object identities. */
+    const calculatedTabsCacheRef = React.useRef({ sig: '', tabs: EMPTY_CALCULATED_TABS });
+
     // Memoized Tabs Calculation
     const calculatedTabs = React.useMemo(() => {
         try {
             // Guard: At least enquiryData must exist
-            if (!enquiryData) return [];
+            if (!enquiryData) {
+                calculatedTabsCacheRef.current = { sig: '[]', tabs: EMPTY_CALCULATED_TABS };
+                return EMPTY_CALCULATED_TABS;
+            }
 
             const hierarchy = enquiryData.divisionsHierarchy || [];
-            if (hierarchy.length === 0 && jobsPool.length === 0) return [];
+            if (hierarchy.length === 0 && jobsPool.length === 0) {
+                calculatedTabsCacheRef.current = { sig: '[]', tabs: EMPTY_CALCULATED_TABS };
+                return EMPTY_CALCULATED_TABS;
+            }
 
             // 1. Source of Truth: Use consolidated jobsPool
             const localJobsList = jobsPool.length > 0 ? jobsPool : hierarchy.map(d => ({
@@ -1109,6 +1554,17 @@ const QuoteForm = () => {
                 return null;
             };
 
+            const attachJobBranding = (tab, node) => {
+                if (!node) return tab;
+                return {
+                    ...tab,
+                    companyLogo: tab.companyLogo || node.companyLogo || node.CompanyLogo,
+                    companyName: tab.companyName || node.companyName || node.CompanyName,
+                    departmentName: tab.departmentName || node.departmentName || node.DepartmentName,
+                    divisionCode: tab.divisionCode || node.divisionCode || node.DivisionCode,
+                };
+            };
+
             /**
              * Tab 1 = user's own job (from email/editable/dept).
              * Further tabs = **every** direct child subjob under that own job (same parent id), sorted by name.
@@ -1119,28 +1575,36 @@ const QuoteForm = () => {
                 const kids = collectDirectSubJobs(ownId);
                 const ownLabel = (ownJobNode.itemName || ownJobNode.DivisionName || '').trim();
                 const tabs = [
-                    {
-                        id: `ownjob-${ownIdStr}`,
-                        name: ownLabel,
-                        label: ownLabel,
-                        isSelf: true,
-                        isOwnJobTab: true,
-                        realId: ownId,
-                        divisionCode: ownJobNode.divisionCode,
-                        quoteNo: resolveLatestQuoteNoForJob(ownJobNode)
-                    }
+                    attachJobBranding(
+                        {
+                            id: `ownjob-${ownIdStr}`,
+                            name: ownLabel,
+                            label: ownLabel,
+                            isSelf: true,
+                            isOwnJobTab: true,
+                            realId: ownId,
+                            divisionCode: ownJobNode.divisionCode,
+                            quoteNo: resolveLatestQuoteNoForJob(ownJobNode),
+                        },
+                        ownJobNode
+                    ),
                 ];
                 for (const kid of kids) {
-                    tabs.push({
-                        id: `subjob-${kid.id || kid.ItemID}`,
-                        name: kid.itemName || kid.DivisionName,
-                        label: kid.itemName || kid.DivisionName,
-                        isSelf: false,
-                        isSubJobTab: true,
-                        realId: kid.id || kid.ItemID,
-                        divisionCode: kid.divisionCode,
-                        quoteNo: resolveLatestQuoteNoForJob(kid)
-                    });
+                    tabs.push(
+                        attachJobBranding(
+                            {
+                                id: `subjob-${kid.id || kid.ItemID}`,
+                                name: kid.itemName || kid.DivisionName,
+                                label: kid.itemName || kid.DivisionName,
+                                isSelf: false,
+                                isSubJobTab: true,
+                                realId: kid.id || kid.ItemID,
+                                divisionCode: kid.divisionCode,
+                                quoteNo: resolveLatestQuoteNoForJob(kid),
+                            },
+                            kid
+                        )
+                    );
                 }
                 return tabs;
             };
@@ -1157,28 +1621,36 @@ const QuoteForm = () => {
                 const ext = markExternalRecipient ? { isExternal: true } : {};
 
                 return [
-                    {
-                        ...ext,
-                        id: `lead-${resolvedLeadJobId}`,
-                        name: leadLabel,
-                        label: leadLabel,
-                        isSelf: true,
-                        isLeadInternalTab: true,
-                        realId: resolvedLeadJobId,
-                        divisionCode: leadJobNode?.divisionCode,
-                        quoteNo: resolveLatestQuoteNoForJob(leadJobNode)
-                    },
-                    ...subJobs.map((sj) => ({
-                        ...ext,
-                        id: `subjob-${sj.id || sj.ItemID}`,
-                        name: sj.itemName || sj.DivisionName,
-                        label: sj.itemName || sj.DivisionName,
-                        isSelf: false,
-                        isSubJobTab: true,
-                        realId: sj.id || sj.ItemID,
-                        divisionCode: sj.divisionCode,
-                        quoteNo: resolveLatestQuoteNoForJob(sj)
-                    }))
+                    attachJobBranding(
+                        {
+                            ...ext,
+                            id: `lead-${resolvedLeadJobId}`,
+                            name: leadLabel,
+                            label: leadLabel,
+                            isSelf: true,
+                            isLeadInternalTab: true,
+                            realId: resolvedLeadJobId,
+                            divisionCode: leadJobNode?.divisionCode,
+                            quoteNo: resolveLatestQuoteNoForJob(leadJobNode),
+                        },
+                        leadJobNode
+                    ),
+                    ...subJobs.map((sj) =>
+                        attachJobBranding(
+                            {
+                                ...ext,
+                                id: `subjob-${sj.id || sj.ItemID}`,
+                                name: sj.itemName || sj.DivisionName,
+                                label: sj.itemName || sj.DivisionName,
+                                isSelf: false,
+                                isSubJobTab: true,
+                                realId: sj.id || sj.ItemID,
+                                divisionCode: sj.divisionCode,
+                                quoteNo: resolveLatestQuoteNoForJob(sj),
+                            },
+                            sj
+                        )
+                    ),
                 ];
             };
 
@@ -1216,12 +1688,144 @@ const QuoteForm = () => {
                 finalTabs[0].id = 'self';
             }
 
+            if (finalTabs.length === 0) {
+                calculatedTabsCacheRef.current = { sig: '[]', tabs: EMPTY_CALCULATED_TABS };
+                return EMPTY_CALCULATED_TABS;
+            }
+
+            const reqNoForTabs = String(enquiryData?.enquiry?.RequestNo || enquiryData?.RequestNo || '');
+            let structSig = '';
+            try {
+                structSig = JSON.stringify({
+                    req: reqNoForTabs,
+                    tabs: finalTabs.map((t) => ({
+                        i: String(t.id),
+                        r: String(t.realId ?? ''),
+                        l: String(t.label || t.name || '').trim(),
+                        q: String(t.quoteNo || '').trim(),
+                        ow: !!t.isOwnJobTab,
+                        su: !!t.isSubJobTab,
+                        le: !!t.isLeadInternalTab,
+                        d: String(t.divisionCode || ''),
+                        cn: String(t.companyName || ''),
+                        dp: String(t.departmentName || ''),
+                        lg: String(t.companyLogo || ''),
+                        sf: !!t.isSelf,
+                        x: !!t.isExternal,
+                    })),
+                });
+            } catch {
+                structSig = `n:${finalTabs.length}:${reqNoForTabs}`;
+            }
+            const c = calculatedTabsCacheRef.current;
+            if (structSig === c.sig && Array.isArray(c.tabs) && c.tabs.length === finalTabs.length) {
+                return c.tabs;
+            }
+            calculatedTabsCacheRef.current = { sig: structSig, tabs: finalTabs };
             return finalTabs;
         } catch (err) {
             console.error('[calculatedTabs] Error:', err);
-            return [];
+            calculatedTabsCacheRef.current = { sig: 'err', tabs: EMPTY_CALCULATED_TABS };
+            return EMPTY_CALCULATED_TABS;
         }
-    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser, pricingSummary]);
+        // Intentionally omit pricingSummary: it updates on every calculateSummary() but tabs come from
+        // jobs / hierarchy / existingQuotes only. Including it re-created this array every render and
+        // re-fired AutoLoad + hard-fallback (Maximum update depth, Quote Ref stuck on Draft).
+    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser]);
+
+    // --- PROACTIVE IDENTITY SYNC (Step 4488) ---
+    // ABSOLUTE LOCK: Ensure logo and footer are ALWAYS based on current user's personal profile.
+    // Placed after `calculatedTabs` — must not reference it in deps before initialization (TDZ crash).
+    useEffect(() => {
+        if (currentUser && enquiryData?.availableProfiles) {
+            // Multiple branch tabs: header/footer follow active tab + division profile (do not force personal profile).
+            if ((calculatedTabs || []).length > 1) return;
+
+            const userDept = (currentUser.Department || '').trim().toLowerCase();
+            const userEmail = (currentUser.EmailId || currentUser.email || '').trim().toLowerCase();
+            // Priority 1: Backend Flag
+            let personalProfile = enquiryData.availableProfiles.find(p => p.isPersonalProfile);
+
+            // Priority 2: Robust match (Email or Dept)
+            if (!personalProfile) {
+                personalProfile = enquiryData.availableProfiles.find(p => {
+                    const pEmail = (p.email || '').trim().toLowerCase();
+                    const pItem = (p.itemName || '').trim().toLowerCase();
+                    const pName = (p.name || '').trim().toLowerCase();
+                    return (userEmail && pEmail && (userEmail.includes(pEmail) || pEmail.includes(userEmail.split('@')[0]))) ||
+                        (pItem === userDept || pName === userDept || (userDept.includes('bms') && pItem.includes('bms')));
+                });
+            }
+
+            if (personalProfile) {
+                if (import.meta.env.DEV && quoteCompanyName !== personalProfile.name) {
+                    console.log('[IdentitySync] Absolute branding lock applied for:', personalProfile.name);
+                }
+                setQuoteCompanyName((prev) => (prev === personalProfile.name ? prev : personalProfile.name));
+                setQuoteLogo((prev) => (prev === personalProfile.logo ? prev : personalProfile.logo));
+                setFooterDetails((prev) => {
+                    if (prev === personalProfile) return prev;
+                    if (
+                        prev &&
+                        personalProfile &&
+                        prev.name === personalProfile.name &&
+                        prev.address === personalProfile.address &&
+                        prev.phone === personalProfile.phone &&
+                        (prev.email || '') === (personalProfile.email || '')
+                    ) {
+                        return prev;
+                    }
+                    return personalProfile;
+                });
+
+                // Inject/Lock in enquiryData for persistence (functional update + bail avoids enquiryData churn → calculatedTabs churn → loops).
+                setEnquiryData((prev) => {
+                    if (!prev) return prev;
+                    const locked =
+                        prev.companyDetails?.name === personalProfile.name &&
+                        prev.enquiryCompanyName === personalProfile.name &&
+                        prev.enquiryLogo === personalProfile.logo;
+                    if (locked) return prev;
+                    return {
+                        ...prev,
+                        companyDetails: { ...personalProfile, isPersonalProfile: true },
+                        enquiryLogo: personalProfile.logo,
+                        enquiryCompanyName: personalProfile.name,
+                    };
+                });
+            }
+        }
+    }, [currentUser, enquiryData?.availableProfiles, calculatedTabs?.length]);
+
+    /** Stable string so memo/effects do not re-fire when calculatedTabs is a new array with the same tabs. */
+    const quoteTabsFingerprint = React.useMemo(
+        () =>
+            (calculatedTabs || [])
+                .map(
+                    (t) =>
+                        `${String(t.id)}:${String(t.realId ?? '')}:${String(t.label || t.name || '').trim()}:${String(t.quoteNo || '').trim()}`
+                )
+                .join('|'),
+        [calculatedTabs]
+    );
+
+    /** Tab branding without `calculatedTabs` reference in effect deps (prevents logo/footer setState every render). */
+    const quoteTabBrandingFingerprint = React.useMemo(
+        () =>
+            (calculatedTabs || [])
+                .map(
+                    (t) =>
+                        `${String(t.id)}:${String(t.companyLogo || '')}:${String(t.companyName || '')}:${String(t.departmentName || '').trim()}`
+                )
+                .join('|'),
+        [calculatedTabs]
+    );
+
+    /** Group names only — pricingSummary array identity churns every calculateSummary; this string stays stable when names unchanged. */
+    const pricingSummaryNamesKey = React.useMemo(
+        () => (pricingSummary || []).map((g) => String(g?.name || '').trim()).join('\x1e'),
+        [pricingSummary]
+    );
 
     /** Aligns with UI fallback when calculatedTabs is empty (e.g. lead job + internal customer only). */
     const effectiveQuoteTabs = React.useMemo(() => {
@@ -1239,6 +1843,43 @@ const QuoteForm = () => {
         () => `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`,
         [enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]
     );
+
+    /** Avoid preview signature/footer falling back to a personal-locked enquiry row when multiple job tabs are shown. */
+    const quotePreviewEnquiryCompanyFallback = React.useMemo(() => {
+        const cd = enquiryData?.companyDetails;
+        if (!cd) return null;
+        if ((calculatedTabs || []).length > 1 && cd.isPersonalProfile) return null;
+        return cd;
+    }, [enquiryData?.companyDetails, calculatedTabs?.length]);
+
+    /** Document preview: under multi-job tabs, show active branch + same date tail as enquiry ProjectName when present. */
+    const quotePreviewProjectName = React.useMemo(() => {
+        const enq = enquiryData?.enquiry;
+        if (!enq) return '';
+        const tabs = calculatedTabs || [];
+        const fallback = String(enq.ProjectName || '').trim();
+        if (!tabs.length || tabs.length <= 1) return fallback;
+        const tab = tabs.find((t) => String(t.id) === String(activeQuoteTab));
+        const tl = String(tab?.label || tab?.name || '').trim();
+        if (!tl) return fallback;
+        const dateM = fallback.match(/\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b/);
+        const datePart = dateM ? dateM[1] : '';
+        const base = stripQuoteJobPrefix(tl).trim() || tl;
+        return datePart ? `${base} ${datePart}` : base || fallback;
+    }, [enquiryData?.enquiry?.ProjectName, calculatedTabs, activeQuoteTab]);
+
+    /** Preview-only subject line: keep custom text; normalize generic "Proposal for …" to active tab project label. */
+    const quotePreviewSubject = React.useMemo(() => {
+        const s = String(subject || '').trim();
+        const p = String(quotePreviewProjectName || '').trim();
+        if (!p) return s;
+        if (!s) return `Proposal for ${p}`;
+        const tabs = calculatedTabs || [];
+        if (tabs.length > 1 && /^proposal\s+for\s+/i.test(s)) {
+            return `Proposal for ${p}`;
+        }
+        return s;
+    }, [subject, quotePreviewProjectName, calculatedTabs]);
 
     /** Own-job + subjob tabs: all pricing summary rows start checked; tab switch reapplies defaults (user can still uncheck). */
     const prevQuoteTabForDefaultsRef = React.useRef(null);
@@ -1262,15 +1903,18 @@ const QuoteForm = () => {
         const activeTabObj = tabs.find((t) => String(t.id) === String(activeQuoteTab));
         if (!activeTabObj?.realId) return;
 
-        const pairedIds = new Set(tabs.map((t) => String(t.realId)).filter(Boolean));
-        const activeTabForPair = tabs.find((t) => String(t.id) === String(activeQuoteTab));
-        if (activeTabForPair?.realId) {
-            collectDirectChildJobIdsFromPools(
-                activeTabForPair.realId,
-                jobsPool,
-                enquiryData?.divisionsHierarchy || []
-            ).forEach((id) => pairedIds.add(id));
-        }
+        // Union roots + direct children for every paired tab so `names` does not depend on which tab is active
+        // (only adding the active tab's children dropped sibling groups from `names` after tab switch → wrong checkboxes).
+        const pairedIds = new Set();
+        tabs.forEach((t) => {
+            const rid = t?.realId != null ? String(t.realId) : '';
+            if (rid) pairedIds.add(rid);
+            if (t?.realId) {
+                collectDirectChildJobIdsFromPools(t.realId, jobsPool, enquiryData?.divisionsHierarchy || []).forEach((id) =>
+                    pairedIds.add(String(id))
+                );
+            }
+        });
 
         const names = pricingSummary
             .filter((grp) => {
@@ -1286,28 +1930,66 @@ const QuoteForm = () => {
 
         if (!names.length) return;
 
-        setSelectedJobs((prev) => {
-            const tabChanged =
-                prevQuoteTabForDefaultsRef.current !== null &&
-                prevQuoteTabForDefaultsRef.current !== activeQuoteTab;
-            prevQuoteTabForDefaultsRef.current = activeQuoteTab;
+        const prevTab = prevQuoteTabForDefaultsRef.current;
+        const tabChanged = prevTab !== null && prevTab !== activeQuoteTab;
 
+        const sameSetAsNames = (prev) =>
+            prev.length === names.length && names.every((n) => prev.includes(n)) && prev.every((n) => names.includes(n));
+
+        setSelectedJobs((prev) => {
             // If user manually toggled for this tab+customer, keep their selection.
             if (pricingSelectionTouchedRef.current[pricingSelectionContextKey]) return prev;
+
+            // Same multiset → keep prev reference (avoids Maximum update depth when `names` is a fresh [] each run).
+            if (sameSetAsNames(prev)) return prev;
 
             if (tabChanged) return names;
             if (prev.length === 0) return names;
             // Pricing fetch often sets "all jobs" first; replace with own+subjob pair so both rows start checked.
             if (paired && prev.length > names.length) return names;
+            // New quote: pricing summary uses grp.name (e.g. "HVAC Project") but loadPricingData may set itemName
+            // strings that do not match — checkboxes stay off. Re-sync to summary names until user touches toggles.
+            if (
+                quoteId == null &&
+                paired &&
+                names.length > 0 &&
+                !names.every((n) => prev.includes(n))
+            ) {
+                return names;
+            }
             return prev;
         });
-    }, [activeQuoteTab, pricingSummary, calculatedTabs, jobsPool, pricingSelectionContextKey, enquiryData?.divisionsHierarchy]);
+
+        prevQuoteTabForDefaultsRef.current = activeQuoteTab;
+    }, [
+        activeQuoteTab,
+        pricingSummaryNamesKey,
+        quoteTabsFingerprint,
+        jobsPool,
+        pricingSelectionContextKey,
+        enquiryData?.divisionsHierarchy,
+        quoteId,
+    ]);
 
     // Global default: for any context, start with all pricing groups checked until user manually deselects.
     React.useEffect(() => {
         if (!pricingSummary?.length) return;
         if (!pricingSelectionContextKey) return;
         if (pricingSelectionTouchedRef.current[pricingSelectionContextKey]) return;
+
+        const tabs = calculatedTabs || [];
+        const pairedOwnSub =
+            tabs.length >= 2 &&
+            tabs[0]?.realId &&
+            tabs[0].isOwnJobTab &&
+            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        const pairedLeadSubExternal =
+            tabs.length >= 2 &&
+            tabs[0]?.realId &&
+            tabs[0].isLeadInternalTab &&
+            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        if (pairedOwnSub || pairedLeadSubExternal) return;
+
         const allNames = pricingSummary.map((g) => g?.name).filter(Boolean);
         if (!allNames.length) return;
         setSelectedJobs((prev) => {
@@ -1315,7 +1997,7 @@ const QuoteForm = () => {
             const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
             return sameMembers ? prev : allNames;
         });
-    }, [pricingSummary, pricingSelectionContextKey]);
+    }, [pricingSummaryNamesKey, pricingSelectionContextKey, quoteTabsFingerprint]);
 
     /**
      * Quote customer dropdown (Steps 1–2):
@@ -1430,7 +2112,9 @@ const QuoteForm = () => {
                 if (isAdmin || pricingData?.access?.hasLeadAccess) {
                     filteredOptions = mergePricingExtrasForAdmin();
                 } else {
-                    filteredOptions = [];
+                    // If we can't resolve an internal parent division for this user/lead selection,
+                    // don't leave the dropdown empty—fall back to external customers linked to the enquiry.
+                    filteredOptions = [...enquiryCustomerOpts];
                 }
             }
         }
@@ -1595,13 +2279,17 @@ const QuoteForm = () => {
         const rn = enquiryData?.enquiry?.RequestNo;
         if (!rn) {
             setQuoteScopedForPanel([]);
+            setScopedQuotesFetchSettledKey(null);
             return;
         }
         if (!scopedQuotePanelFetchKey || !scopedEnquiryQuotesParams) {
             setQuoteScopedForPanel([]);
+            setScopedQuotesFetchSettledKey(null);
             return;
         }
         const p = scopedEnquiryQuotesParams;
+        const fetchKey = scopedQuotePanelFetchKey;
+        setScopedQuotesFetchSettledKey(null);
 
         let cancelled = false;
         (async () => {
@@ -1623,14 +2311,88 @@ const QuoteForm = () => {
                 } else {
                     setQuoteScopedForPanel([]);
                 }
+                if (!cancelled) setScopedQuotesFetchSettledKey(fetchKey);
             } catch (e) {
-                if (!cancelled) setQuoteScopedForPanel([]);
+                if (!cancelled) {
+                    setQuoteScopedForPanel([]);
+                    setScopedQuotesFetchSettledKey(fetchKey);
+                }
             }
         })();
 
         return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch keyed by scopedQuotePanelFetchKey; scopedEnquiryQuotesParams identity churns with pricingData
     }, [enquiryData?.enquiry?.RequestNo, scopedQuotePanelFetchKey]);
+
+    const scopedQuoteTupleReady =
+        !scopedEnquiryQuotesParams ||
+        scopedQuotesFetchSettledKey === scopedQuotePanelFetchKey;
+
+    /** Preview must not show another tab's Quote Ref while scoped rows + active tab imply "no quote for this tab". */
+    const loadedQuoteOutOfActiveTabScope = React.useMemo(() => {
+        if (!scopedEnquiryQuotesParams) return false;
+        if (scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey) return false;
+        if (!quoteScopedForPanel?.length || !calculatedTabs?.length || !activeQuoteTab) return false;
+        const activeTabObj = calculatedTabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (!activeTabObj || !(activeTabObj.label || activeTabObj.name)) return false;
+        const multiTab = calculatedTabs.length > 1;
+        const narrowed = multiTab || !!scopedEnquiryQuotesParams.useDepartmentForOwnJob;
+        if (!narrowed) return false;
+        const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+        const panel = quoteScopedForPanel.filter((q) => {
+            const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+            return (
+                quoteOwnJob === tabJobName ||
+                (activeTabObj.realId && String(q.DepartmentID) === String(activeTabObj.realId)) ||
+                quoteNumberDivisionMatchesTab(q, activeTabObj, multiTab)
+            );
+        });
+        const hasLoadedRef =
+            (quoteId != null && String(quoteId).trim() !== '') ||
+            (quoteNumber != null && String(quoteNumber).trim() !== '');
+        if (!hasLoadedRef) return false;
+        const matchById = panel.some((q) => String(quoteRowId(q) ?? '') === String(quoteId ?? ''));
+        const qnTrim = quoteNumber != null ? String(quoteNumber).trim() : '';
+        const quoteNoMatchesRow = (q) => {
+            const qn = String(q.QuoteNumber || q.quoteNumber || '').trim();
+            return !!(qn && qnTrim && (qn === qnTrim || qn.split('-R')[0] === qnTrim.split('-R')[0]));
+        };
+        const matchByNumber = qnTrim
+            ? panel.some((q) => quoteNoMatchesRow(q)) ||
+              // OwnJob on server often ≠ priced branch; division segment of QuoteNumber still matches this tab.
+              (Array.isArray(quoteScopedForPanel) &&
+                  quoteScopedForPanel.some(
+                      (q) => quoteNoMatchesRow(q) && quoteNumberDivisionMatchesTab(q, activeTabObj, multiTab)
+                  ))
+            : false;
+        return !(matchById || matchByNumber);
+    }, [
+        scopedEnquiryQuotesParams,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+        quoteScopedForPanel,
+        calculatedTabs,
+        activeQuoteTab,
+        quoteId,
+        quoteNumber,
+    ]);
+
+    /** Save only when no DB quote for this enquiry+lead+ownjob+ToName tuple; Revision only when at least one exists (scoped API is source of truth when active). */
+    const hasPersistedQuoteForScope = React.useMemo(() => {
+        if (!enquiryData?.enquiry?.RequestNo) return false;
+        if (scopedEnquiryQuotesParams) {
+            if (scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey) return false;
+            return quoteScopedForPanel.length > 0;
+        }
+        return !!quoteId;
+    }, [
+        enquiryData?.enquiry?.RequestNo,
+        scopedEnquiryQuotesParams,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+        quoteScopedForPanel.length,
+        quoteId,
+    ]);
 
     // Auto-resolve active tabs based on calculated permissions
     useEffect(() => {
@@ -1648,42 +2410,278 @@ const QuoteForm = () => {
     }, [calculatedTabs, activeQuoteTab]);
 
     // Sync Company Logo and Details based on Active Pricing Tab
+    // Multi-tab: resolve division profile + jobsPool row (subjob tabs often had no company fields on the tab object).
     useEffect(() => {
-        if (calculatedTabs && activeQuoteTab) {
-            const activeTab = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
-            if (activeTab) {
-                console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
-                
-                // --- MANDATORY IDENTITY LOCK (Step 4488) ---
-                // Prioritize the locked identity in enquiryData if it's been synced
-                const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
-                
-                const finalLogo = personalProfile?.logo || activeTab.companyLogo || enquiryData?.enquiryLogo || null;
-                const finalCompanyName = personalProfile?.name || activeTab.companyName || activeTab.departmentName || enquiryData?.enquiryCompanyName || 'Almoayyed Air Conditioning';
-                
-                console.log('[QuoteForm]   - Locked Company:', finalCompanyName);
+        if (!calculatedTabs?.length || !activeQuoteTab) return;
+        const activeTab = calculatedTabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (!activeTab) return;
 
-                setQuoteLogo(finalLogo);
-                setQuoteCompanyName(finalCompanyName);
+        if (import.meta.env.DEV) {
+            console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
+        }
 
-                // Update Footer Details
-                const footerSource = personalProfile || activeTab || enquiryData?.companyDetails;
-                if (footerSource && (footerSource.address || footerSource.phone || footerSource.email)) {
-                    setFooterDetails({
-                        name: finalCompanyName,
-                        address: footerSource.address,
-                        phone: footerSource.phone,
-                        fax: footerSource.fax,
-                        email: footerSource.email || footerSource.CommonMailIds
-                    });
-                } else {
-                    // Final safety fallback
-                    if (personalProfile) setFooterDetails(personalProfile);
-                    else setFooterDetails(null);
-                }
+        const brandingRows = enquiryData?.enquiryForBrandingRows;
+        if (Array.isArray(brandingRows) && brandingRows.length > 0) {
+            const mefHit = matchMasterEnquiryForBrandingRow(activeTab, brandingRows);
+            if (
+                mefHit &&
+                (mefHit.companyLogo ||
+                    mefHit.address ||
+                    mefHit.phone ||
+                    (mefHit.companyName || '').trim() ||
+                    (mefHit.departmentName || '').trim())
+            ) {
+                const displayName =
+                    String(mefHit.companyName || '').trim() ||
+                    String(mefHit.departmentName || '').trim() ||
+                    String(activeTab.label || activeTab.name || '').trim();
+                const logo = mefHit.companyLogo || null;
+                setQuoteLogo((prev) => (prev === logo ? prev : logo));
+                setQuoteCompanyName((prev) => (prev === displayName ? prev : displayName));
+                const nextFooter = {
+                    name: displayName,
+                    address: mefHit.address || '',
+                    phone: mefHit.phone || '',
+                    fax: mefHit.faxNo || '',
+                    email: mefHit.email || '',
+                };
+                setFooterDetails((prev) => {
+                    if (
+                        prev &&
+                        prev.name === nextFooter.name &&
+                        prev.address === nextFooter.address &&
+                        prev.phone === nextFooter.phone &&
+                        prev.fax === nextFooter.fax &&
+                        (prev.email || '') === (nextFooter.email || '')
+                    ) {
+                        return prev;
+                    }
+                    return nextFooter;
+                });
+                return;
             }
         }
-    }, [activeQuoteTab, calculatedTabs, enquiryData?.availableProfiles]);
+
+        const personalProfile = enquiryData?.availableProfiles?.find((p) => p.isPersonalProfile);
+        const multiTab = (calculatedTabs || []).length > 1;
+        // Any multi-job quote screen must use division/tab + QuoteNumber segment — not the "single-tab" path that
+        // defaults to personalProfile + "Almoayyed Air Conditioning" (tabs like `id: self` may lack isOwnJobTab flags).
+        const tabContext = multiTab;
+
+        const jobNode =
+            activeTab?.realId != null
+                ? jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(activeTab.realId))
+                : null;
+
+        const profiles = enquiryData?.availableProfiles || [];
+
+        const refLike = String(activeTab.quoteNo || quoteNumber || '').trim();
+        const refDivU = (() => {
+            const parts = refLike.split('/').map((s) => s.trim());
+            const seg = parts.length > 1 ? parts[1] : '';
+            const u = seg ? seg.toUpperCase() : '';
+            if (!u) return '';
+            if (['AAC', 'ACC', 'GEN'].includes(u)) return '';
+            return u;
+        })();
+
+        const resolveDivisionProfile = () => {
+            if (!tabContext) return null;
+
+            if (refDivU) {
+                let hit = profiles.find(
+                    (p) => !p.isPersonalProfile && String(p.divisionCode || '').toUpperCase() === refDivU
+                );
+                if (hit) return hit;
+                hit = profiles.find(
+                    (p) =>
+                        !p.isPersonalProfile &&
+                        matchDivisionCode(
+                            refDivU,
+                            String(p.itemName || p.name || '').toUpperCase(),
+                            p.divisionCode
+                        )
+                );
+                if (hit) return hit;
+                hit = profiles.find(
+                    (p) =>
+                        !p.isPersonalProfile &&
+                        matchDivisionCode(
+                            refDivU,
+                            String(p.itemName || p.name || '').toUpperCase(),
+                            p.divisionCode
+                        )
+                );
+                if (hit) return hit;
+            }
+
+            const divCode = String(
+                activeTab.divisionCode || jobNode?.divisionCode || jobNode?.DivisionCode || ''
+            ).toUpperCase();
+            if (divCode) {
+                let hit = profiles.find(
+                    (p) => !p.isPersonalProfile && String(p.divisionCode || '').toUpperCase() === divCode
+                );
+                if (hit) return hit;
+                hit = profiles.find(
+                    (p) =>
+                        !p.isPersonalProfile &&
+                        divCode &&
+                        matchDivisionCode(
+                            divCode,
+                            String(p.itemName || p.name || '').toUpperCase(),
+                            p.divisionCode
+                        )
+                );
+                if (hit) return hit;
+                hit = profiles.find(
+                    (p) =>
+                        !p.isPersonalProfile &&
+                        divCode &&
+                        matchDivisionCode(
+                            divCode,
+                            String(p.itemName || p.name || '').toUpperCase(),
+                            p.divisionCode
+                        )
+                );
+                if (hit) return hit;
+            }
+            const tabLabel = collapseSpacesLower(stripQuoteJobPrefix(activeTab.label || activeTab.name || ''));
+            const tabTokens = tabLabel.split(/\s+/).filter((t) => t.length > 2);
+            return (
+                profiles.find((p) => {
+                    if (p.isPersonalProfile) return false;
+                    const pn = collapseSpacesLower(stripQuoteJobPrefix(p.itemName || p.name || ''));
+                    if (pn && (pn === tabLabel || tabLabel.includes(pn) || pn.includes(tabLabel))) return true;
+                    if (pn && tabTokens.some((tok) => pn.includes(tok) || tok.includes(pn))) return true;
+                    return false;
+                }) || null
+            );
+        };
+
+        let divisionProfile = resolveDivisionProfile();
+        if (tabContext && divisionProfile?.isPersonalProfile) {
+            divisionProfile = null;
+        }
+
+        const jobLogo = jobNode?.companyLogo || jobNode?.CompanyLogo || null;
+        const jobComp =
+            jobNode?.companyName ||
+            jobNode?.CompanyName ||
+            jobNode?.departmentName ||
+            jobNode?.DepartmentName ||
+            '';
+
+        let finalLogo;
+        let finalCompanyName;
+        let footerSource;
+
+        if (tabContext) {
+            const tabDisplay = String(activeTab.label || activeTab.name || '').trim();
+            const cd = enquiryData?.companyDetails;
+            const cdSafe =
+                cd && !cd.isPersonalProfile
+                    ? cd
+                    : null;
+            // Do not fall back to enquiryLogo / personalProfile here — they are often another division (e.g. HVAC AC while Civil/CIP tab is active).
+            finalLogo =
+                divisionProfile?.logo ||
+                activeTab.companyLogo ||
+                jobLogo ||
+                (cdSafe?.logo ?? null) ||
+                null;
+            finalCompanyName =
+                divisionProfile?.name ||
+                activeTab.companyName ||
+                activeTab.departmentName ||
+                jobComp ||
+                tabDisplay ||
+                (cdSafe?.name ?? null) ||
+                'Almoayyed Contracting';
+            if (divisionProfile?.address || divisionProfile?.phone || divisionProfile?.email) {
+                footerSource = divisionProfile;
+            } else if (jobNode?.address || jobNode?.phone || jobNode?.email) {
+                footerSource = jobNode;
+            } else if (cdSafe?.address || cdSafe?.phone || cdSafe?.email) {
+                footerSource = cdSafe;
+            } else {
+                const rawCd = enquiryData?.companyDetails;
+                footerSource =
+                    divisionProfile ||
+                    cdSafe ||
+                    (rawCd && !rawCd.isPersonalProfile ? rawCd : null);
+            }
+        } else {
+            const preferTabBranding = !!(
+                activeTab.companyLogo ||
+                activeTab.companyName ||
+                activeTab.departmentName
+            );
+            finalLogo = preferTabBranding
+                ? activeTab.companyLogo || enquiryData?.enquiryLogo || personalProfile?.logo || null
+                : personalProfile?.logo || activeTab.companyLogo || enquiryData?.enquiryLogo || null;
+            finalCompanyName = preferTabBranding
+                ? activeTab.companyName ||
+                  activeTab.departmentName ||
+                  personalProfile?.name ||
+                  enquiryData?.enquiryCompanyName ||
+                  'Almoayyed Air Conditioning'
+                : personalProfile?.name ||
+                  activeTab.companyName ||
+                  activeTab.departmentName ||
+                  enquiryData?.enquiryCompanyName ||
+                  'Almoayyed Air Conditioning';
+            footerSource = preferTabBranding
+                ? activeTab?.address || activeTab?.phone || activeTab?.email
+                    ? activeTab
+                    : enquiryData?.companyDetails || activeTab || personalProfile
+                : personalProfile || activeTab || enquiryData?.companyDetails;
+        }
+
+        if (import.meta.env.DEV) {
+            console.log('[QuoteForm]   - Locked Company:', finalCompanyName);
+        }
+
+        setQuoteLogo((prev) => (prev === finalLogo ? prev : finalLogo));
+        setQuoteCompanyName((prev) => (prev === finalCompanyName ? prev : finalCompanyName));
+
+        if (footerSource && (footerSource.address || footerSource.phone || footerSource.email)) {
+            const nextFooter = {
+                name: finalCompanyName,
+                address: footerSource.address,
+                phone: footerSource.phone,
+                fax: footerSource.fax,
+                email: footerSource.email || footerSource.CommonMailIds,
+            };
+            setFooterDetails((prev) => {
+                if (
+                    prev &&
+                    prev.name === nextFooter.name &&
+                    prev.address === nextFooter.address &&
+                    prev.phone === nextFooter.phone &&
+                    prev.fax === nextFooter.fax &&
+                    prev.email === nextFooter.email
+                ) {
+                    return prev;
+                }
+                return nextFooter;
+            });
+        } else if (personalProfile && !tabContext) {
+            setFooterDetails((prev) => (prev === personalProfile ? prev : personalProfile));
+        } else {
+            setFooterDetails((prev) => (prev == null ? prev : null));
+        }
+    }, [
+        activeQuoteTab,
+        quoteTabBrandingFingerprint,
+        quoteNumber,
+        enquiryData?.availableProfiles,
+        enquiryData?.enquiryForBrandingRows,
+        jobsPool,
+        enquiryData?.companyDetails,
+        enquiryData?.enquiryLogo,
+        enquiryData?.enquiryCompanyName,
+    ]);
 
 
     // Ref to track if we've already auto-selected for the current tab (prevents overwriting user manual selection)
@@ -1946,16 +2944,10 @@ const QuoteForm = () => {
         console.log('[QuoteForm] current user object:', currentUser);
         console.log(`[QuoteForm] Fetched pending quotes for: ${userEmail}`);
 
-        fetch(`${API_BASE}/api/quotes/list/pending?userEmail=${encodeURIComponent(userEmail)}`)
-            .then(res => res.json())
-            .then(data => {
-                console.log(`[QuoteForm] Fetched ${data?.length || 0} pending quotes for ${userEmail}`, data);
-                setPendingQuotes(data || []);
-            })
-            .catch(err => console.error('Error fetching pending quotes:', err));
+        refetchPendingQuotes();
 
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [currentUser]);
+    }, [currentUser, refetchPendingQuotes]);
 
     // Fetch Metadata Lists
     useEffect(() => {
@@ -2548,21 +3540,39 @@ const QuoteForm = () => {
         const activeJobs = Array.isArray(currentSelectedJobs) ? currentSelectedJobs : [];
         const normalizeCust = (s) => (s || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
-        console.log('[calculateSummary] START');
-        console.log('[calculateSummary] Data:', data);
-        console.log('[calculateSummary] Active Customer:', activeCustomer);
-        console.log('[calculateSummary] Selected Jobs:', currentSelectedJobs);
-        console.log('[calculateSummary] activeJobs list:', activeJobs);
-        console.log('[calculateSummary] Access:', data?.access);
-        console.log('[calculateSummary] Override Scope:', overrideScope);
-
         if (!data || !data.options || !data.values) {
-            console.log('[calculateSummary] Missing data, options, or values');
+            if (import.meta.env.DEV) console.log('[calculateSummary] Missing data, options, or values');
             return;
         }
 
-        console.log('[calculateSummary] Options count:', data.options.length);
-        console.log('[calculateSummary] Options:', data.options);
+        let quickDigest = '';
+        try {
+            quickDigest = JSON.stringify({
+                ps: pricingStableSig,
+                tab: String(activeQuoteTab || ''),
+                fp: quoteTabsFingerprint,
+                sc: overrideScope ?? null,
+                j: [...activeJobs].map(String).sort(),
+                c: String(activeCustomer || ''),
+            });
+        } catch (_) {
+            quickDigest = '';
+        }
+        if (quickDigest && quickDigest === lastQuickCalcInputRef.current) {
+            return;
+        }
+
+        if (import.meta.env.DEV) {
+            console.log('[calculateSummary] START');
+            console.log('[calculateSummary] Data:', data);
+            console.log('[calculateSummary] Active Customer:', activeCustomer);
+            console.log('[calculateSummary] Selected Jobs:', currentSelectedJobs);
+            console.log('[calculateSummary] activeJobs list:', activeJobs);
+            console.log('[calculateSummary] Access:', data?.access);
+            console.log('[calculateSummary] Override Scope:', overrideScope);
+            console.log('[calculateSummary] Options count:', data.options.length);
+            console.log('[calculateSummary] Options:', data.options);
+        }
 
         let includedOptionCount = 0;
         const skipReasons = [];
@@ -2624,29 +3634,36 @@ const QuoteForm = () => {
         const groups = {};
 
         // BRANCH ISOLATION (Step 2293)
-        // Identify IDs that belong to the current Lead Job Prefix to avoid branch cross-contamination
+        // Identify IDs that belong to the current Lead Job Prefix to avoid branch cross-contamination.
+        // Paired own+subjob / lead+subjob tabs: include every tab branch in branchIds so pricing summary
+        // does not drop the sibling row when switching quote tabs (was clearing checkboxes indirectly).
         const branchIds = new Set();
-        const activeTabObj = (calculatedTabs || []).find(t => String(t.id) === String(activeQuoteTab));
+        const tabsForBranch = calculatedTabs || [];
+        const activeTabObj = tabsForBranch.find((t) => String(t.id) === String(activeQuoteTab));
         const branchPrefixRaw = (activeTabObj?.label || activeTabObj?.name || enquiryData?.leadJobPrefix || '').toUpperCase();
         const branchPrefix = branchPrefixRaw.replace(/^(L\d+\s*-\s*)/, '').trim();
 
-        let rootJob = null;
-        if (activeTabObj?.realId) {
-            rootJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId));
-        } else if (branchPrefix && jobsPool.length > 0) {
-            rootJob = jobsPool.find(j => {
-                const name = (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
-                const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
-                return name === branchPrefix || clean === branchPrefix || name === branchPrefixRaw || clean === branchPrefixRaw || (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix);
-            });
-        }
+        const pairedOwnSubSummary =
+            tabsForBranch.length >= 2 &&
+            tabsForBranch[0]?.realId &&
+            tabsForBranch[0].isOwnJobTab &&
+            tabsForBranch.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        const pairedLeadSubSummary =
+            tabsForBranch.length >= 2 &&
+            tabsForBranch[0]?.realId &&
+            tabsForBranch[0].isLeadInternalTab &&
+            tabsForBranch.slice(1).every((t) => t?.realId && t.isSubJobTab);
+        const pairedMultiBranchSummary = pairedOwnSubSummary || pairedLeadSubSummary;
 
-        if (rootJob) {
-            branchIds.add(String(rootJob.id || rootJob.ItemID || rootJob.ID));
+        const expandBranchIdsFromSeeds = (seedIds) => {
+            seedIds.forEach((id) => {
+                const s = String(id || '').trim();
+                if (s) branchIds.add(s);
+            });
             let changed = true;
             while (changed) {
                 changed = false;
-                jobsPool.forEach(j => {
+                jobsPool.forEach((j) => {
                     const jId = String(j.id || j.ItemID || j.ID);
                     const pId = String(j.parentId || j.ParentID || j.ParentID);
                     if (jId && !branchIds.has(jId) && branchIds.has(pId)) {
@@ -2655,8 +3672,38 @@ const QuoteForm = () => {
                     }
                 });
             }
+        };
+
+        let rootJob = null;
+        if (pairedMultiBranchSummary) {
+            const seeds = tabsForBranch.map((t) => t?.realId).filter(Boolean);
+            expandBranchIdsFromSeeds(seeds);
+            if (tabsForBranch[0]?.realId) {
+                rootJob = jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(tabsForBranch[0].realId));
+            }
+        } else if (activeTabObj?.realId) {
+            rootJob = jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(activeTabObj.realId));
+        } else if (branchPrefix && jobsPool.length > 0) {
+            rootJob = jobsPool.find((j) => {
+                const name = (j.itemName || j.DivisionName || j.ItemName || '').toUpperCase();
+                const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                return (
+                    name === branchPrefix ||
+                    clean === branchPrefix ||
+                    name === branchPrefixRaw ||
+                    clean === branchPrefixRaw ||
+                    (j.leadJobCode && j.leadJobCode.toUpperCase() === branchPrefix)
+                );
+            });
         }
-        console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
+
+        if (!pairedMultiBranchSummary && rootJob) {
+            branchIds.clear();
+            expandBranchIdsFromSeeds([String(rootJob.id || rootJob.ItemID || rootJob.ID)]);
+        }
+        if (import.meta.env.DEV) {
+            console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
+        }
 
         // DEDUPLICATE OPTIONS (Step 1560 + Lead Job Fix)
         // Multiple options with the same name/itemName can exist for DIFFERENT lead jobs
@@ -2825,8 +3872,8 @@ const QuoteForm = () => {
                     if (!isAncestorOfRoot) {
                         if (import.meta.env.DEV) {
                             skipReasons.push({ name: opt.name, reason: 'branch_mismatch', leadJobName: opt.leadJobName });
+                            console.log(`[calculateSummary] Skipping unrelated branch option "${opt.name}" (leadJobName="${opt.leadJobName}")`);
                         }
-                        console.log(`[calculateSummary] Skipping unrelated branch option "${opt.name}" (leadJobName="${opt.leadJobName}")`);
                         return;
                     }
                 }
@@ -2868,10 +3915,12 @@ const QuoteForm = () => {
                         hadScopedValueKey: optionHasScopedValueKey(opt),
                     });
                 }
-                console.log(`[calculateSummary] Filtered out (customer mismatch):`, opt.name, 'opt:', opt.customerName, 'active:', activeCustomer);
+                if (import.meta.env.DEV) {
+                    console.log(`[calculateSummary] Filtered out (customer mismatch):`, opt.name, 'opt:', opt.customerName, 'active:', activeCustomer);
+                }
                 return;
             }
-            console.log(`[calculateSummary] Passed customer filter:`, opt.name);
+            if (import.meta.env.DEV) console.log(`[calculateSummary] Passed customer filter:`, opt.name);
 
             // 1. Visibility Filter
             let isVisible = false;
@@ -2887,7 +3936,9 @@ const QuoteForm = () => {
             // 4. Manual Editable/Visible Context Check (Sub-Job Users)
             if ((data.access?.hasLeadAccess && !hasLimitedAccess) || isLeadMatch || (hasLimitedAccess && optJobId && allowedQuoteIds.has(optJobId))) {
                 isVisible = true;
-                console.log(`[calculateSumary] Visible (authorized scope or branch match):`, opt.name);
+                if (import.meta.env.DEV) {
+                    console.log(`[calculateSummary] Visible (authorized scope or branch match):`, opt.name);
+                }
             } else if (opt.itemName) {
                 // Fallback for sub-job users or cases where ID matching is tricky - check names
                 const isEditable = data.access?.editableJobs?.some(scopeName => {
@@ -2921,20 +3972,24 @@ const QuoteForm = () => {
                     return false;
                 });
                 isVisible = isEditable || isVisibleJob;
-                console.log(`[calculateSumary] Visibility result for "${opt.name}": isEditable=${isEditable}, isVisibleJob=${isVisibleJob}, isVisible=${isVisible}`);
+                if (import.meta.env.DEV) {
+                    console.log(`[calculateSummary] Visibility result for "${opt.name}": isEditable=${isEditable}, isVisibleJob=${isVisibleJob}, isVisible=${isVisible}`);
+                }
             } else if (!opt.itemName && data.access?.editableJobs?.length > 0) {
                 isVisible = true;
-                console.log(`[calculateSumary] Visible (no itemName, has editable jobs):`, opt.name);
+                if (import.meta.env.DEV) {
+                    console.log(`[calculateSummary] Visible (no itemName, has editable jobs):`, opt.name);
+                }
             }
 
             if (!isVisible) {
                 if (import.meta.env.DEV) {
                     skipReasons.push({ name: opt.name, reason: 'not_visible' });
+                    console.log(`[calculateSummary] Filtered out (not visible):`, opt.name);
                 }
-                console.log(`[calculateSummary] Filtered out (not visible):`, opt.name);
                 return;
             }
-            console.log(`[calculateSummary] Passed visibility filter:`, opt.name);
+            if (import.meta.env.DEV) console.log(`[calculateSummary] Passed visibility filter:`, opt.name);
             includedOptionCount += 1;
 
             // Determine if this option's job is currently selected (for Total calculation)
@@ -3121,7 +4176,9 @@ const QuoteForm = () => {
                                     const iVal = vals[vKey] || vals[vNameKey];
                                     if (iVal && parsePrice(iVal.Price) > 0) {
                                         price = parsePrice(iVal.Price);
-                                        console.log(`[calculateSummary] FALLBACK MATCH for job ${job.itemName}: Found price ${price} using Option ${iOpt.id} from candidate ${candKey}`);
+                                        if (import.meta.env.DEV) {
+                                            console.log(`[calculateSummary] FALLBACK MATCH for job ${job.itemName}: Found price ${price} using Option ${iOpt.id} from candidate ${candKey}`);
+                                        }
                                         break;
                                     }
                                 }
@@ -3153,7 +4210,9 @@ const QuoteForm = () => {
                                     const iVal = vals[vKey] || vals[vNameKey];
                                     if (iVal && parsePrice(iVal.Price) > 0) {
                                         price = parsePrice(iVal.Price);
-                                        console.log(`[calculateSummary] GLOBAL FALLBACK for job ${job.itemName}: Found price ${price} in bucket ${bucketKey}`);
+                                        if (import.meta.env.DEV) {
+                                            console.log(`[calculateSummary] GLOBAL FALLBACK for job ${job.itemName}: Found price ${price} in bucket ${bucketKey}`);
+                                        }
                                         break;
                                     }
                                 }
@@ -3301,20 +4360,6 @@ const QuoteForm = () => {
             summary.sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        setHasUserPricing(userHasEnteredPrice);
-        setGrandTotal(calculatedGrandTotal);
-        setHasPricedOptional(foundPricedOptional);
-        // setPricingSummary(summary); // Moved to end of function to avoid duplicate updates
-
-        if (import.meta.env.DEV) {
-            console.log('[calculateSummary] effectiveValuesLookup keys:', Object.keys(effectiveValuesLookup).length, 'scoped data.values keys:', Object.keys(scopedValuesFlat).length);
-            console.log('[calculateSummary] included options (post filters):', includedOptionCount, 'unique option rows:', uniqueOptions.length, 'skipReasons (sample):', skipReasons.slice(0, 20));
-        }
-        console.log('[calculateSummary] COMPLETE');
-        console.log('[calculateSummary] Summary:', summary);
-        console.log('[calculateSummary] Grand Total:', calculatedGrandTotal);
-        console.log('[calculateSummary] Has User Pricing:', userHasEnteredPrice);
-
         // Generate Pricing Terms Content with Table
         let tableHtml = '<table contentEditable="false" style="width:100%; border-collapse:collapse; margin-bottom:16px;">';
         tableHtml += '<thead><tr style="background:#f8fafc; border:1px solid #cbd5e1;"><th style="padding:10px; border:1px solid #cbd5e1; text-align:left;">Description</th><th style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Amount (BHD)</th></tr></thead>';
@@ -3407,15 +4452,57 @@ const QuoteForm = () => {
             pricingText = pricingText.replace('[Amount in figures and words]', totalString);
         }
 
-        setClauseContent(prev => ({
-            ...prev,
-            pricingTerms: tableHtml + pricingText
-        }));
+        const pricingTermsFull = tableHtml + pricingText;
+        const round6 = (n) => Number((Number(n) || 0).toFixed(6));
+        let calcSig = '';
+        try {
+            calcSig = JSON.stringify({
+                tabs: quoteTabsFingerprint,
+                tab: String(activeQuoteTab || ''),
+                scope: overrideScope ?? null,
+                jobs: [...activeJobs].map(String).sort(),
+                cust: String(activeCustomer || ''),
+                sum: summary.map((g) => ({
+                    n: g.name,
+                    t: round6(g.total),
+                    it: (g.items || []).map((it) => ({ n: it.name, t: round6(it.total) })),
+                })),
+                grand: round6(calculatedGrandTotal),
+                htmlGrand: round6(htmlGrandTotal),
+                hu: !!userHasEnteredPrice,
+                fpo: !!foundPricedOptional,
+                html: pricingTermsFull,
+            });
+        } catch (_) {
+            calcSig = '';
+        }
+        if (calcSig && lastPricingCalcSigRef.current === calcSig) {
+            lastQuickCalcInputRef.current = quickDigest;
+            return;
+        }
+        lastPricingCalcSigRef.current = calcSig;
+        lastQuickCalcInputRef.current = quickDigest;
 
-        // Save the calculated summary to state
-        console.log('[calculateSummary] Saving summary to state:', summary.length, 'groups');
+        setHasUserPricing(userHasEnteredPrice);
+        setGrandTotal(calculatedGrandTotal);
+        setHasPricedOptional(foundPricedOptional);
+
+        if (import.meta.env.DEV) {
+            console.log('[calculateSummary] effectiveValuesLookup keys:', Object.keys(effectiveValuesLookup).length, 'scoped data.values keys:', Object.keys(scopedValuesFlat).length);
+            console.log('[calculateSummary] included options (post filters):', includedOptionCount, 'unique option rows:', uniqueOptions.length, 'skipReasons (sample):', skipReasons.slice(0, 20));
+            console.log('[calculateSummary] COMPLETE');
+            console.log('[calculateSummary] Summary:', summary);
+            console.log('[calculateSummary] Grand Total:', calculatedGrandTotal);
+            console.log('[calculateSummary] Has User Pricing:', userHasEnteredPrice);
+            console.log('[calculateSummary] Saving summary to state:', summary.length, 'groups');
+        }
+
+        setClauseContent((prev) => {
+            if (prev && prev.pricingTerms === pricingTermsFull) return prev;
+            return { ...prev, pricingTerms: pricingTermsFull };
+        });
+
         setPricingSummary(summary);
-        console.log('[calculateSummary] COMPLETE - Grand Total:', calculatedGrandTotal);
     };
 
     const calculateSummaryRef = React.useRef(calculateSummary);
@@ -3425,10 +4512,11 @@ const QuoteForm = () => {
 
     // Branch isolation in calculateSummary uses activeQuoteTab; AutoLoad often skips loadQuote when quoteId is unchanged.
     // Re-run when tab/selection/scope change so the pricing summary (own job + subjob) stays in sync without an extra click.
+    // Use selectedJobsSig so a new array reference with the same job names does not re-enter the effect.
     React.useEffect(() => {
         if (!pricingData?.options) return;
         calculateSummaryRef.current(pricingData, selectedJobs, toName, quoteContextScope);
-    }, [activeQuoteTab, selectedJobs, quoteContextScope, pricingData, toName]);
+    }, [activeQuoteTab, selectedJobsSig, quoteTabsFingerprint, quoteContextScope, pricingStableSig, toName]);
 
     // Search suggestions
     const handleSearchInput = (value) => {
@@ -3539,7 +4627,7 @@ const QuoteForm = () => {
 
 
     /** @param opts.preserveRecipient If true (tab-driven auto-load), do not overwrite To name/address — keeps customer dropdown stable.
-     *  @param opts.skipPreparedSignatory If true (AutoLoad / programmatic sync), do not copy Signatory / Designation from DB; set Prepared By to the logged-in user (new-quote UX). Explicit sidebar click loads full quote row including DB Prepared By.
+     *  @param opts.skipPreparedSignatory If true (AutoLoad / programmatic sync), do not copy Prepared By from DB — use the logged-in user instead. Signatory / designation are always taken from the quote row when present so saved quotes preview correctly.
      */
     const loadQuote = (quote, opts = {}) => {
         if (!currentUser) {
@@ -3575,8 +4663,9 @@ const QuoteForm = () => {
         // Removed restrictive view block to allow parent job users to view their subjob quotes
         // edit permissions are strictly handled by the canEdit() check on Save/Revise buttons.
 
-        setQuoteId(quote.ID);
-        setQuoteNumber(quote.QuoteNumber);
+        const qRowId = quoteRowId(quote);
+        setQuoteId(qRowId !== undefined ? qRowId : null);
+        setQuoteNumber(quote.QuoteNumber ?? quote.quoteNumber ?? '');
         setQuoteDate(quote.QuoteDate ? quote.QuoteDate.split('T')[0] : new Date().toISOString().split('T')[0]);
         setValidityDays(quote.ValidityDays || 30);
         setCustomerReference(quote.CustomerReference || quote.YourRef || '');
@@ -3594,13 +4683,11 @@ const QuoteForm = () => {
         }
         if (!skipPreparedSignatory) {
             setPreparedBy(quote.PreparedBy || '');
-            setSignatory(quote.Signatory || '');
-            setSignatoryDesignation(quote.SignatoryDesignation || '');
         } else {
             setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
-            setSignatory('');
-            setSignatoryDesignation('');
         }
+        setSignatory((quote.Signatory || '').trim());
+        setSignatoryDesignation((quote.SignatoryDesignation || '').trim());
 
         if (!preserveRecipient) {
             setToName(quote.ToName || '');
@@ -3654,26 +4741,28 @@ const QuoteForm = () => {
         }
 
 
-        // Always use Company Details for Footer, never the Customer (recipient) details
-        // PROACTIVE FIX (Step 4488): Use the resolved profile if available in enquiryData (User-specific)
-        const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
-        const resolvedProfile = personalProfile || enquiryData?.companyDetails;
+        // Header/footer: with multiple branch tabs, branding is driven by the active tab + quote ref (useEffect).
+        // Applying personalProfile here overwrote Civil/CIP with the logged-in user's AC identity after every loadQuote.
+        const multiTabBranch = (calculatedTabs || []).length > 1;
+        if (!multiTabBranch) {
+            const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
+            const resolvedProfile = personalProfile || enquiryData?.companyDetails;
 
-        if (resolvedProfile) {
-            setFooterDetails(resolvedProfile);
-            setQuoteCompanyName(resolvedProfile.name);
-            setQuoteLogo(resolvedProfile.logo);
-        } else {
-            // Fallback default
-            setFooterDetails({
-                name: 'Almoayyed Contracting',
-                address: 'P.O. Box 32232, Manama, Kingdom of Bahrain',
-                phone: '(+973) 17 400 407',
-                fax: '(+973) 17 400 396',
-                email: 'bms@almcg.com'
-            });
-            setQuoteCompanyName('Almoayyed Contracting');
-            setQuoteLogo(null);
+            if (resolvedProfile) {
+                setFooterDetails(resolvedProfile);
+                setQuoteCompanyName(resolvedProfile.name);
+                setQuoteLogo(resolvedProfile.logo);
+            } else {
+                setFooterDetails({
+                    name: 'Almoayyed Contracting',
+                    address: 'P.O. Box 32232, Manama, Kingdom of Bahrain',
+                    phone: '(+973) 17 400 407',
+                    fax: '(+973) 17 400 396',
+                    email: 'bms@almcg.com'
+                });
+                setQuoteCompanyName('Almoayyed Contracting');
+                setQuoteLogo(null);
+            }
         }
 
         // Clause Visibility Logic:
@@ -3790,26 +4879,16 @@ const QuoteForm = () => {
 
         console.log('[AutoLoad] Checking quotes for tab:', activeTabObj.label, 'ID:', activeTabRealId);
 
-        // Scoped API rows already encode the exact EnquiryQuotes tuple (RequestNo + LeadJob + OwnJob + ToName).
-        // Do not mix with existingQuotes here; mixing can re-introduce wrong quote refs from other contexts.
-        const sourceQuotes = quoteScopedForPanel.length > 0 ? quoteScopedForPanel : existingQuotes;
+        // When scoped params apply, only scoped GET rows define this tuple — never fall back to existingQuotes
+        // (empty scoped list + existingQuotes caused wrong auto-load and Save/Revision mismatch).
+        const scopedOnly = !!scopedEnquiryQuotesParams;
+        const sourceQuotes = scopedOnly
+            ? quoteScopedForPanel
+            : (quoteScopedForPanel.length > 0 ? quoteScopedForPanel : existingQuotes);
 
-        // Fast path: tab already resolved a quote number (sidebar / calculatedTabs)
-        if (activeTabObj.quoteNo && sourceQuotes.length > 0) {
-            const want = String(activeTabObj.quoteNo).trim();
-            const baseWant = want.split('-R')[0];
-            const byNo = sourceQuotes.find(q => {
-                const qn = String(q.QuoteNumber || '').trim();
-                if (!qn) return false;
-                return qn === want || qn.split('-R')[0] === baseWant;
-            });
-            if (byNo) {
-                if (quoteId !== byNo.ID) {
-                    console.log('[AutoLoad] Loading from tab.quoteNo:', want);
-                    loadQuote(byNo, { preserveRecipient: true, skipPreparedSignatory: true });
-                }
-                return;
-            }
+        if (scopedOnly && scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey) {
+            console.log('[AutoLoad] Scoped fetch not settled for key; skip.');
+            return;
         }
 
         // Filter quotes for this tab (Replicating render logic)
@@ -3886,6 +4965,9 @@ const QuoteForm = () => {
             const normalizedCurrentTo = normalize(toName || '');
 
             const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+            const curKey = normalizeCustomerKey(toName || '');
+            const qKey = normalizeCustomerKey(q.ToName || '');
+            const isCustomerKeyMatch = !!curKey && !!qKey && curKey === qKey;
             const qJobObjByOwnJob = jobsPool.find((j) =>
                 collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')) ===
                 collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''))
@@ -3915,7 +4997,15 @@ const QuoteForm = () => {
                 return false;
             })();
 
-            if (!isExactMatch && !isAncestorMatch && !isSelfMatch) {
+            // Scoped GET already narrowed the tuple (enquiry + lead + customer context). Persisted ToName is often
+            // the priced internal branch (e.g. "Civil Project") while the recipient dropdown shows the external customer ("BEMCO").
+            if (
+                !isExactMatch &&
+                !isCustomerKeyMatch &&
+                !isAncestorMatch &&
+                !isSelfMatch &&
+                !scopedOnly
+            ) {
                 console.log(`[AutoLoad] REJECTED: Customer mismatch. q:${normalizedQuoteTo} vs cur:${normalizedCurrentTo}`);
                 return false;
             }
@@ -3952,83 +5042,135 @@ const QuoteForm = () => {
             return true;
         });
 
+        // Fast path: tab.quoteNo must resolve within tab-scoped rows only (never load another tab's ref from sourceQuotes).
+        if (activeTabObj.quoteNo && tabQuotes.length > 0) {
+            const want = String(activeTabObj.quoteNo).trim();
+            const baseWant = want.split('-R')[0];
+            const byNo = tabQuotes.find((q) => {
+                const qn = String(q.QuoteNumber || '').trim();
+                if (!qn) return false;
+                return qn === want || qn.split('-R')[0] === baseWant;
+            });
+            if (byNo) {
+                if (String(quoteRowId(byNo) ?? '') !== String(quoteId ?? '')) {
+                    console.log('[AutoLoad] Loading from tab.quoteNo:', want);
+                    loadQuote(byNo, { preserveRecipient: true, skipPreparedSignatory: true });
+                }
+                return;
+            }
+        }
+
         if (tabQuotes.length > 0) {
             // Found quotes: Sort by Revision (Desc) and Load Latest
             const sorted = tabQuotes.sort((a, b) => b.RevisionNo - a.RevisionNo);
             const latest = sorted[0];
 
             // Only load if different (using closure's quoteId)
-            if (quoteId !== latest.ID) {
+            if (String(quoteRowId(latest) ?? '') !== String(quoteId ?? '')) {
                 console.log('[AutoLoad] Loading latest quote:', latest.QuoteNumber, 'for branch:', currentLeadCode);
                 loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
             }
         } else {
             console.log('[AutoLoad] No quotes found for tab. Branch:', currentLeadCode);
-            // During lead/customer scope transitions, scoped list can be briefly empty while fetching.
-            // Avoid clearing current quote in that transient window.
-            if (scopedEnquiryQuotesParams && quoteScopedForPanel.length === 0) {
-                console.log('[AutoLoad] Scoped params active but scoped rows empty; skip reset until fetch settles.');
-                return;
-            }
             if (!(toName || '').trim()) {
                 console.log('[AutoLoad] toName empty; skip reset until customer is set again.');
                 return;
             }
-            // Relaxed fallback for lead-switch roundtrip:
-            // if strict OwnJob/tab filtering fails, still restore latest quote that matches current customer
-            // and lead branch (when L-code is available), instead of blanking Quote Ref.
-            const relaxedByCustomerAndLead = sourceQuotes.filter((q) => {
-                const sameCustomer =
-                    normalize(q.ToName || '') === normalize(toName || '') ||
-                    normalizeCustomerKey(q.ToName || '') === normalizeCustomerKey(toName || '');
-                if (!sameCustomer) return false;
+            // Relaxed fallback: legacy only. When GET /by-enquiry is scoped (LeadJob + OwnJob + ToName), that list is
+            // authoritative — never pull another tab's quote here (was showing BMS ref on HVAC with "No quotes for this tab").
+            if (!scopedEnquiryQuotesParams) {
+                const relaxedByCustomerAndLead = sourceQuotes.filter((q) => {
+                    const sameCustomer =
+                        normalize(q.ToName || '') === normalize(toName || '') ||
+                        normalizeCustomerKey(q.ToName || '') === normalizeCustomerKey(toName || '');
+                    if (!sameCustomer) return false;
 
-                const qParts = String(q.QuoteNumber || '').split('/');
-                const qLeadPart = (qParts[2] || '').toUpperCase();
-                const qLeadCode = qLeadPart.match(/L\d+/)?.[0] || '';
-                const curLeadCode = String(currentLeadCode || '').toUpperCase().match(/L\d+/)?.[0] || '';
+                    const qParts = String(q.QuoteNumber || '').split('/');
+                    const qLeadPart = (qParts[2] || '').toUpperCase();
+                    const qLeadCode = qLeadPart.match(/L\d+/)?.[0] || '';
+                    const curLeadCode = String(currentLeadCode || '').toUpperCase().match(/L\d+/)?.[0] || '';
 
-                // If either side has no L-code, do not reject on branch here (legacy formats).
-                if (qLeadCode && curLeadCode && qLeadCode !== curLeadCode) return false;
+                    // If either side has no L-code, do not reject on branch here (legacy formats).
+                    if (qLeadCode && curLeadCode && qLeadCode !== curLeadCode) return false;
 
-                // With multiple job tabs (e.g. HVAC + BMS), never pick another tab's quote (was loading HVP on BMS tab).
-                if (calculatedTabs.length > 1) {
-                    const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
-                    const tabJobName = collapseSpacesLower(
-                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
-                    );
-                    const tabOwnJobMatches =
-                        quoteOwnJob === tabJobName ||
-                        (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId));
-                    const divMatchesTab = quoteNumberDivisionMatchesTab(q, activeTabObj, true);
-                    if (!tabOwnJobMatches && !divMatchesTab) return false;
-                }
+                    // With multiple job tabs (e.g. HVAC + BMS), never pick another tab's quote (was loading HVP on BMS tab).
+                    if (calculatedTabs.length > 1) {
+                        const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                        const tabJobName = collapseSpacesLower(
+                            stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                        );
+                        const tabOwnJobMatches =
+                            quoteOwnJob === tabJobName ||
+                            (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId));
+                        const divMatchesTab = quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                        if (!tabOwnJobMatches && !divMatchesTab) return false;
+                    }
 
-                return true;
-            });
-            if (relaxedByCustomerAndLead.length > 0) {
-                const latestRelaxed = [...relaxedByCustomerAndLead].sort((a, b) => {
-                    const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
-                    if (r !== 0) return r;
-                    const ta = Date.parse(a.QuoteDate || 0) || 0;
-                    const tb = Date.parse(b.QuoteDate || 0) || 0;
-                    return tb - ta;
-                })[0];
-                if (latestRelaxed && quoteId !== latestRelaxed.ID) {
-                    console.log('[AutoLoad] Relaxed fallback loading quote:', latestRelaxed.QuoteNumber);
-                    loadQuote(latestRelaxed, { preserveRecipient: true, skipPreparedSignatory: true });
-                    return;
+                    return true;
+                });
+                if (relaxedByCustomerAndLead.length > 0) {
+                    const latestRelaxed = [...relaxedByCustomerAndLead].sort((a, b) => {
+                        const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+                        if (r !== 0) return r;
+                        const ta = Date.parse(a.QuoteDate || 0) || 0;
+                        const tb = Date.parse(b.QuoteDate || 0) || 0;
+                        return tb - ta;
+                    })[0];
+                    if (latestRelaxed && String(quoteRowId(latestRelaxed) ?? '') !== String(quoteId ?? '')) {
+                        console.log('[AutoLoad] Relaxed fallback loading quote:', latestRelaxed.QuoteNumber);
+                        loadQuote(latestRelaxed, { preserveRecipient: true, skipPreparedSignatory: true });
+                        return;
+                    }
                 }
             }
 
-            // SAFEGUARD: Don't clear if we just saved/revised or if it's already null
-            // Check if the current quoteId is actually a valid quote that just hasn't been synced to existingQuotes properly
-            const isJustSaved = sourceQuotes.some(q => q.ID === quoteId && q.QuoteNumber === quoteNumber);
+            // SAFEGUARD: Don't clear if we just saved/revised for *this tab*. Never use full sourceQuotes here —
+            // a sibling-tab quote in the scoped panel would block reset and keep the wrong Quote Ref on screen.
+            const qnTrimGuard = (quoteNumber != null ? String(quoteNumber).trim() : '');
+            const savedRowForGuard =
+                quoteId != null && String(quoteId).trim() !== ''
+                    ? existingQuotes.find((q) => String(quoteRowId(q) ?? '') === String(quoteId ?? ''))
+                    : null;
+            const savedRowSameRef =
+                !!savedRowForGuard &&
+                !!qnTrimGuard &&
+                String(savedRowForGuard.QuoteNumber || savedRowForGuard.quoteNumber || '').trim() === qnTrimGuard;
+
+            let savedBelongsToActiveTab = false;
+            if (savedRowForGuard && activeTabObj && savedRowSameRef) {
+                const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(savedRowForGuard.OwnJob || ''));
+                const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+                const jobMatch =
+                    quoteOwnJob === tabJobName ||
+                    (activeTabRealId && String(savedRowForGuard.DepartmentID) === String(activeTabRealId)) ||
+                    quoteNumberDivisionMatchesTab(savedRowForGuard, activeTabObj, calculatedTabs.length > 1);
+                const custMatch =
+                    normalize(savedRowForGuard.ToName || '') === normalize(toName || '') ||
+                    (normalizeCustomerKey(savedRowForGuard.ToName || '') &&
+                        normalizeCustomerKey(savedRowForGuard.ToName || '') === normalizeCustomerKey(toName || '')) ||
+                    !!scopedOnly;
+                savedBelongsToActiveTab = !!(jobMatch && custMatch);
+            }
+
+            const isJustSaved =
+                tabQuotes.some((q) => {
+                    const qid = quoteRowId(q);
+                    return (
+                        String(qid ?? '') === String(quoteId ?? '') &&
+                        String(q.QuoteNumber || q.quoteNumber || '').trim() === qnTrimGuard
+                    );
+                }) ||
+                (scopedOnly && savedBelongsToActiveTab);
 
             if (quoteId !== null && !isJustSaved) {
                 console.log('[AutoLoad] Resetting to blank form as no saved quotes match current tab/customer.');
                 setQuoteId(null);
                 setQuoteNumber('');
+                const reg = tabStateRegistry.current[activeQuoteTab];
+                if (reg && typeof reg === 'object') {
+                    reg.quoteId = null;
+                    reg.quoteNumber = '';
+                }
                 setClauseContent(defaultClauses);
                 setClauses({
                     showScopeOfWork: true, showBasisOfOffer: true, showExclusions: true,
@@ -4043,34 +5185,56 @@ const QuoteForm = () => {
 
             // Summary refresh on tab change is handled by the calculateSummary effect (paired tabs + same quoteId).
         }
-    }, [activeQuoteTab, calculatedTabs, existingQuotes, quoteScopedForPanel, scopedEnquiryQuotesParams, toName, selectedLeadId, pricingData, enquiryData, quoteId, jobsPool]);
+    }, [
+        activeQuoteTab,
+        quoteTabsFingerprint,
+        existingQuotes,
+        quoteScopedForPanel,
+        scopedEnquiryQuotesParams,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+        toName,
+        selectedLeadId,
+        pricingData,
+        enquiryData,
+        quoteId,
+        jobsPool,
+    ]);
 
-    // Hard fallback: when server-scoped rows are available for current lead/customer,
-    // ensure one of them is loaded so Quote Ref never stays blank after lead switches.
+    // Hard fallback: when server-scoped rows exist, load the latest only if it belongs to the active tab.
+    // Never keep the full unfiltered panel when the tab filter is empty — that loaded another tab's Quote Ref (e.g. BMS on HVAC).
     useEffect(() => {
         if (!quoteScopedForPanel || quoteScopedForPanel.length === 0) return;
+        if (
+            scopedEnquiryQuotesParams &&
+            scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey
+        ) {
+            return;
+        }
         if (!(toName || '').trim()) return;
 
         const activeTabObj = calculatedTabs?.find((t) => String(t.id) === String(activeQuoteTab));
         let panel = quoteScopedForPanel;
         const scopeP = scopedEnquiryQuotesParams;
-        // When OwnJob is resolved from the user’s department (placeholder first tab), DB OwnJob may not match tab labels;
-        // keep QuoteNumber division heuristics. Otherwise GET /by-enquiry already filtered by LeadJob + OwnJob + ToName.
-        if (scopeP?.useDepartmentForOwnJob && activeTabObj && (activeTabObj.label || activeTabObj.name)) {
+        const multiTab = (calculatedTabs?.length || 0) > 1;
+        const narrowed =
+            !!(activeTabObj && (activeTabObj.label || activeTabObj.name)) &&
+            (multiTab || !!scopeP?.useDepartmentForOwnJob);
+
+        if (narrowed) {
             const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
-            const filtered = quoteScopedForPanel.filter((q) => {
+            panel = quoteScopedForPanel.filter((q) => {
                 const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
                 return (
                     quoteOwnJob === tabJobName ||
                     (activeTabObj.realId && String(q.DepartmentID) === String(activeTabObj.realId)) ||
-                    quoteNumberDivisionMatchesTab(q, activeTabObj, (calculatedTabs?.length || 0) > 1)
+                    quoteNumberDivisionMatchesTab(q, activeTabObj, multiTab)
                 );
             });
-            if (filtered.length) panel = filtered;
         }
 
         const currentInScope = quoteId
-            ? panel.some((q) => String(q.ID) === String(quoteId))
+            ? panel.some((q) => String(quoteRowId(q) ?? '') === String(quoteId ?? ''))
             : false;
         if (currentInScope) return;
 
@@ -4082,10 +5246,22 @@ const QuoteForm = () => {
             return tb - ta;
         })[0];
 
-        if (!latest) return;
+        if (!latest) {
+            if (narrowed && (quoteId !== null || (quoteNumber || '').trim() !== '')) {
+                console.log('[HardFallback] No scoped quote for active tab; clearing Quote Ref for draft preview.');
+                setQuoteId(null);
+                setQuoteNumber('');
+                const reg = tabStateRegistry.current[activeQuoteTab];
+                if (reg && typeof reg === 'object') {
+                    reg.quoteId = null;
+                    reg.quoteNumber = '';
+                }
+            }
+            return;
+        }
         loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [quoteScopedForPanel, quoteId, toName, activeQuoteTab, calculatedTabs, scopedEnquiryQuotesParams]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- calculatedTabs read from closure; quoteTabsFingerprint tracks meaningful tab/quoteNo changes
+    }, [quoteScopedForPanel, quoteId, quoteNumber, toName, activeQuoteTab, quoteTabsFingerprint, scopedEnquiryQuotesParams, scopedQuotesFetchSettledKey, scopedQuotePanelFetchKey]);
 
 
 
@@ -4163,18 +5339,20 @@ const QuoteForm = () => {
                 const data = await res.json();
                 console.log('[handleRevise] Success! New revision data:', data);
 
+                const newRevId = data.id ?? data.ID ?? data.Id;
+                const newRevQn = data.quoteNumber ?? data.QuoteNumber ?? '';
                 // Update quote ID and number first
-                setQuoteId(data.id);
-                setQuoteNumber(data.quoteNumber);
+                setQuoteId(newRevId);
+                setQuoteNumber(newRevQn);
 
                 // Update local quotes list immediately so AutoLoad doesn't reset to Draft (Step 4488 FIX)
                 setExistingQuotes(prev => [
                     ...prev,
                     {
-                        ID: data.id,
-                        QuoteNumber: data.quoteNumber,
+                        ID: newRevId,
+                        QuoteNumber: newRevQn,
                         ToName: toName,
-                        RevisionNo: data.revisionNo || 0,
+                        RevisionNo: data.revisionNo ?? data.RevisionNo ?? 0,
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
@@ -4183,6 +5361,28 @@ const QuoteForm = () => {
                         LeadJob: payload.leadJob  // CRITICAL for AutoLoad matching
                     }
                 ]);
+
+                if (scopedEnquiryQuotesParams) {
+                    const optimisticRevRow = {
+                        ID: newRevId,
+                        QuoteNumber: newRevQn,
+                        ToName: toName,
+                        RevisionNo: data.revisionNo ?? data.RevisionNo ?? 0,
+                        Status: 'Saved',
+                        QuoteDate: quoteDate,
+                        PreparedBy: preparedBy,
+                        TotalAmount: grandTotal,
+                        OwnJob: payload.ownJob,
+                        LeadJob: payload.leadJob,
+                    };
+                    setQuoteScopedForPanel((prev) => {
+                        const idStr = String(newRevId ?? '');
+                        if (!idStr || idStr === 'undefined') return prev;
+                        const withoutOldRev = prev.filter((q) => String(quoteRowId(q) ?? '') !== String(quoteId ?? ''));
+                        if (withoutOldRev.some((q) => String(quoteRowId(q) ?? '') === idStr)) return withoutOldRev;
+                        return [...withoutOldRev, optimisticRevRow];
+                    });
+                }
 
                 // Note: Metadata is NOT cleared anymore to allow immediate viewing/working with the new revision.
                 // Re-calculating existing quotes will pull the latest list.
@@ -4193,12 +5393,20 @@ const QuoteForm = () => {
                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 console.log('[handleRevise] Refreshing quotes list...');
-                await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+                const refreshed = await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+                const match = Array.isArray(refreshed)
+                    ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newRevId ?? ''))
+                    : null;
+                if (match) {
+                    queueMicrotask(() =>
+                        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true })
+                    );
+                }
 
                 // Upload any pending files now that we have a new Revision ID
-                if (pendingFiles.length > 0) {
+                if (pendingFiles.length > 0 && newRevId != null && newRevId !== '') {
                     console.log('[handleRevise] Uploading pending files to new revision...', pendingFiles.length);
-                    await uploadFiles(pendingFiles, data.id);
+                    await uploadFiles(pendingFiles, newRevId);
                     setPendingFiles([]); // Clear queue
                 }
 
@@ -4245,12 +5453,13 @@ const QuoteForm = () => {
                 console.log('[fetchExistingQuotes] Count:', quotes.length);
                 quotes.forEach(q => console.log('  -', q.QuoteNumber, '| To:', q.ToName, '| OwnJob:', q.OwnJob, '| IdentityCode:', q.IdentityCode));
                 setExistingQuotes(quotes);
-            } else {
-                console.error('[fetchExistingQuotes] Failed to fetch, status:', res.status);
+                return quotes;
             }
+            console.error('[fetchExistingQuotes] Failed to fetch, status:', res.status);
         } catch (err) {
             console.error('[fetchExistingQuotes] Error:', err);
         }
+        return null;
     }, [currentUser]);
 
     // NEW: Auto-load latest revision for selected customer and lead job
@@ -4264,6 +5473,7 @@ const QuoteForm = () => {
         setPricingData(null); // Reset pricing data to clear stale access rights
         setExistingQuotes([]);
         setQuoteScopedForPanel([]);
+        setScopedQuotesFetchSettledKey(null);
         setPendingFiles([]); // Clear queue
         leadChoiceFingerprintRef.current = '';
         autoSelectCustomerAfterLeadChangeRef.current = false;
@@ -4325,91 +5535,90 @@ const QuoteForm = () => {
                     'showBillOfQuantity', 'showSchedule', 'showWarranty', 'showResponsibilityMatrix', 'showTermsConditions', 'showAcceptance'
                 ]);
 
-                if (data.companyDetails) {
-                    setQuoteCompanyName(data.companyDetails.name || 'Almoayyed Air Conditioning');
-                    setQuoteLogo(data.companyDetails.logo);
-                    setFooterDetails(data.companyDetails);
-                }
-
                 setCompanyProfiles(data.availableProfiles || []);
 
-                // ---------------------------------------------------------
-                // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
-                // ---------------------------------------------------------
-                let selectedProfile = null;
-                const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
+                const useTabDrivenQuoteBranding = enquiryPayloadSuggestsMultiBranchTabs(data);
+                if (!useTabDrivenQuoteBranding) {
+                    if (data.companyDetails) {
+                        setQuoteCompanyName(data.companyDetails.name || 'Almoayyed Air Conditioning');
+                        setQuoteLogo(data.companyDetails.logo);
+                        setFooterDetails(data.companyDetails);
+                    }
 
-                if (userDept && data.availableProfiles?.length > 0) {
-                    console.log(`[Profile selection] User Dept: ${userDept}. Available profiles:`, data.availableProfiles.map(p => p.itemName));
+                    // ---------------------------------------------------------
+                    // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
+                    // ---------------------------------------------------------
+                    let selectedProfile = null;
+                    const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
 
-                    // 1. Try to find an EXACT match for User Dept (Trimmed and Case-Insensitive)
-                    const normalizedDept = userDept.trim().toLowerCase();
-                    selectedProfile = data.availableProfiles.find(p => {
-                        const pItemName = (p.itemName || '').trim().toLowerCase();
-                        const pName = (p.name || '').trim().toLowerCase();
-                        return pItemName === normalizedDept || pName === normalizedDept;
-                    });
+                    if (userDept && data.availableProfiles?.length > 0) {
+                        console.log(`[Profile selection] User Dept: ${userDept}. Available profiles:`, data.availableProfiles.map(p => p.itemName));
 
-                    // 2. Try Heuristic Matches if no exact match
-                    if (!selectedProfile) {
-                        if (userDept.toLowerCase().includes('civil')) {
-                            selectedProfile = data.availableProfiles.find(p =>
-                                p.itemName?.toLowerCase().includes('civil') ||
-                                p.code === 'ACC' ||
-                                p.divisionCode === 'CVLP'
-                            );
-                        } else if (userDept.toLowerCase().includes('bms')) {
-                            selectedProfile = data.availableProfiles.find(p =>
-                                (p.itemName && p.itemName.toLowerCase().includes('bms')) ||
-                                p.divisionCode === 'BMS' ||
-                                p.divisionCode === 'BMP' ||
-                                (p.name && p.name.toLowerCase().includes('bms'))
-                            );
-                        } else if (userDept.toLowerCase().includes('hv') || userDept.toLowerCase().includes('condition')) {
-                            selectedProfile = data.availableProfiles.find(p =>
-                                (p.itemName && (p.itemName.toLowerCase().includes('hv') || p.itemName.toLowerCase().includes('condition'))) ||
-                                p.divisionCode === 'HVP' || p.divisionCode === 'AMM'
-                            );
-                        } else if (userDept.toLowerCase().includes('mep')) {
-                            selectedProfile = data.availableProfiles.find(p =>
-                                p.divisionCode === 'AAC' || p.divisionCode === 'ELP' || p.divisionCode === 'PLP'
-                            );
+                        // 1. Try to find an EXACT match for User Dept (Trimmed and Case-Insensitive)
+                        const normalizedDept = userDept.trim().toLowerCase();
+                        selectedProfile = data.availableProfiles.find(p => {
+                            const pItemName = (p.itemName || '').trim().toLowerCase();
+                            const pName = (p.name || '').trim().toLowerCase();
+                            return pItemName === normalizedDept || pName === normalizedDept;
+                        });
+
+                        // 2. Try Heuristic Matches if no exact match
+                        if (!selectedProfile) {
+                            if (userDept.toLowerCase().includes('civil')) {
+                                selectedProfile = data.availableProfiles.find(p =>
+                                    p.itemName?.toLowerCase().includes('civil') ||
+                                    p.code === 'ACC' ||
+                                    p.divisionCode === 'CVLP'
+                                );
+                            } else if (userDept.toLowerCase().includes('bms')) {
+                                selectedProfile = data.availableProfiles.find(p =>
+                                    (p.itemName && p.itemName.toLowerCase().includes('bms')) ||
+                                    p.divisionCode === 'BMS' ||
+                                    p.divisionCode === 'BMP' ||
+                                    (p.name && p.name.toLowerCase().includes('bms'))
+                                );
+                            } else if (userDept.toLowerCase().includes('hv') || userDept.toLowerCase().includes('condition')) {
+                                selectedProfile = data.availableProfiles.find(p =>
+                                    (p.itemName && (p.itemName.toLowerCase().includes('hv') || p.itemName.toLowerCase().includes('condition'))) ||
+                                    p.divisionCode === 'HVP' || p.divisionCode === 'AMM'
+                                );
+                            } else if (userDept.toLowerCase().includes('mep')) {
+                                selectedProfile = data.availableProfiles.find(p =>
+                                    p.divisionCode === 'AAC' || p.divisionCode === 'ELP' || p.divisionCode === 'PLP'
+                                );
+                            }
+                        }
+
+                        // 3. Last Resort: Any personal profile if none matched above
+                        if (!selectedProfile) {
+                            selectedProfile = data.availableProfiles.find(p => p.isPersonalProfile);
                         }
                     }
 
-                    // 3. Last Resort: Any personal profile if none matched above
-                    if (!selectedProfile) {
-                        selectedProfile = data.availableProfiles.find(p => p.isPersonalProfile);
+                    // --- MANDATORY IDENTITY OVERRIDE (Step 4488) ---
+                    const personalProfile = data.availableProfiles.find(p => p.isPersonalProfile);
+                    if (personalProfile) {
+                        selectedProfile = personalProfile;
+                        console.log(`[Profile selection] ✓ ENFORCING personal identity: ${selectedProfile.name}`);
                     }
-                }
 
-                // --- MANDATORY IDENTITY OVERRIDE (Step 4488) ---
-                // "right side header company logo and footer comany address details should be based on current user's mail ID"
-                // ALWAYS PRIORITIZE PERSONAL PROFILE FOR ENFORCED BRANDING
-                const personalProfile = data.availableProfiles.find(p => p.isPersonalProfile);
-                if (personalProfile) {
-                    selectedProfile = personalProfile;
-                    console.log(`[Profile selection] ✓ ENFORCING personal identity: ${selectedProfile.name}`);
-                }
+                    if (selectedProfile) {
+                        console.log(`[Profile selection] ENFORCING user profile: "${userDept}" ->`, selectedProfile);
+                        setQuoteCompanyName(selectedProfile.name);
+                        setQuoteLogo(selectedProfile.logo);
+                        setFooterDetails(selectedProfile);
 
-                if (selectedProfile) {
-                    console.log(`[Profile selection] ENFORCING user profile: "${userDept}" ->`, selectedProfile);
-                    setQuoteCompanyName(selectedProfile.name);
-                    setQuoteLogo(selectedProfile.logo);
-                    setFooterDetails(selectedProfile);
+                        data.companyDetails = { ...selectedProfile, isPersonalProfile: true };
+                        data.enquiryLogo = selectedProfile.logo;
+                        data.enquiryCompanyName = selectedProfile.name;
 
-                    // Update the master enquiryData object to ensure payload generation uses these codes
-                    data.companyDetails = { ...selectedProfile, isPersonalProfile: true };
-                    // Explicitly set the logo/footer in the data object too as fallback
-                    data.enquiryLogo = selectedProfile.logo;
-                    data.enquiryCompanyName = selectedProfile.name;
-
-                    setEnquiryData({ ...data });
-                } else if (data.companyDetails) {
-                    setQuoteCompanyName(data.companyDetails.name);
-                    setQuoteLogo(data.companyDetails.logo);
-                    setFooterDetails(data.companyDetails);
-                    console.log(`[Profile selection] No specific user profile, using default identity: ${data.companyDetails.divisionCode}`);
+                        setEnquiryData({ ...data });
+                    } else if (data.companyDetails) {
+                        setQuoteCompanyName(data.companyDetails.name);
+                        setQuoteLogo(data.companyDetails.logo);
+                        setFooterDetails(data.companyDetails);
+                        console.log(`[Profile selection] No specific user profile, using default identity: ${data.companyDetails.divisionCode}`);
+                    }
                 }
 
                 // 3a. Auto-Select Lead Job
@@ -4581,7 +5790,14 @@ const QuoteForm = () => {
             const res = await fetch(`${API_BASE}/api/quotes/attachments/${qId}`);
             if (res.ok) {
                 const data = await res.json();
-                setQuoteAttachments(data);
+                setQuoteAttachments((prev) => {
+                    try {
+                        if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
+                    } catch (_) {
+                        /* ignore */
+                    }
+                    return data;
+                });
             }
         } catch (err) {
             console.error('Error fetching attachments:', err);
@@ -4657,16 +5873,18 @@ const QuoteForm = () => {
         if (quoteId) {
             fetchQuoteAttachments(quoteId);
         } else {
-            setQuoteAttachments([]);
+            setQuoteAttachments((prev) => (prev.length === 0 ? prev : []));
         }
-    }, [quoteId]);
+    }, [quoteId, fetchQuoteAttachments]);
 
     // Clear selection
     const handleClear = () => {
+        calculatedTabsCacheRef.current = { sig: '', tabs: EMPTY_CALCULATED_TABS };
         // --- LOCKED LOGIC: Clear Tab State Registry on Reset ---
         tabStateRegistry.current = {};
         setExistingQuotes([]);
         setQuoteScopedForPanel([]);
+        setScopedQuotesFetchSettledKey(null);
         setPendingFiles([]); // Clear queue
         setExpandedGroups({});
         setSearchTerm('');
@@ -4952,14 +6170,17 @@ const QuoteForm = () => {
 
             if (res.ok) {
                 const data = await res.json();
+                const newId = data.id ?? data.ID ?? data.Id;
+                const newQn = data.quoteNumber ?? data.QuoteNumber ?? '';
+
                 // CRITICAL FIX: Update existingQuotes locally FIRST to prevent useEffect race condition
                 setExistingQuotes(prev => [
                     ...prev,
                     {
-                        ID: data.id,
-                        QuoteNumber: data.quoteNumber,
+                        ID: newId,
+                        QuoteNumber: newQn,
                         ToName: toName,
-                        RevisionNo: 0,
+                        RevisionNo: data.revisionNo ?? data.RevisionNo ?? 0,
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
@@ -4969,20 +6190,42 @@ const QuoteForm = () => {
                     }
                 ]);
 
+                /* Scoped GET does not re-run after save; without this row AutoLoad sees empty tabQuotes and clears Quote Ref → Draft. */
+                if (scopedEnquiryQuotesParams) {
+                    const optimisticRow = {
+                        ID: newId,
+                        QuoteNumber: newQn,
+                        ToName: toName,
+                        RevisionNo: data.revisionNo ?? data.RevisionNo ?? 0,
+                        Status: 'Saved',
+                        QuoteDate: quoteDate,
+                        PreparedBy: preparedBy,
+                        TotalAmount: grandTotal,
+                        OwnJob: savePayload.ownJob,
+                        LeadJob: savePayload.leadJob,
+                    };
+                    setQuoteScopedForPanel((prev) => {
+                        const idStr = String(newId ?? '');
+                        if (!idStr || idStr === 'undefined') return prev;
+                        if (prev.some((q) => String(quoteRowId(q) ?? '') === idStr)) return prev;
+                        return [...prev, optimisticRow];
+                    });
+                }
+
                 console.log('[saveQuote] Success! Received data:', data);
-                if (data.id) {
-                    console.log('[saveQuote] Setting QuoteId:', data.id);
-                    setQuoteId(data.id);
+                if (newId != null && newId !== '') {
+                    console.log('[saveQuote] Setting QuoteId:', newId);
+                    setQuoteId(newId);
                     // Proactive Sync with Registry
                     if (activeQuoteTab) {
                         if (!tabStateRegistry.current[activeQuoteTab]) tabStateRegistry.current[activeQuoteTab] = {};
-                        tabStateRegistry.current[activeQuoteTab].quoteId = data.id;
-                        tabStateRegistry.current[activeQuoteTab].quoteNumber = data.quoteNumber;
+                        tabStateRegistry.current[activeQuoteTab].quoteId = newId;
+                        tabStateRegistry.current[activeQuoteTab].quoteNumber = newQn;
                     }
                 }
-                if (data.quoteNumber) {
-                    console.log('[saveQuote] Setting QuoteNumber:', data.quoteNumber);
-                    setQuoteNumber(data.quoteNumber);
+                if (newQn) {
+                    console.log('[saveQuote] Setting QuoteNumber:', newQn);
+                    setQuoteNumber(newQn);
                 }
 
                 if (!isAutoSave) {
@@ -4992,14 +6235,14 @@ const QuoteForm = () => {
                 // --- TAB STATE SYNC: Ensure the new ID is stored in the registry immediately ---
                 if (activeQuoteTab) {
                     if (!tabStateRegistry.current[activeQuoteTab]) tabStateRegistry.current[activeQuoteTab] = {};
-                    tabStateRegistry.current[activeQuoteTab].quoteId = data.id;
-                    tabStateRegistry.current[activeQuoteTab].quoteNumber = data.quoteNumber;
+                    tabStateRegistry.current[activeQuoteTab].quoteId = newId;
+                    tabStateRegistry.current[activeQuoteTab].quoteNumber = newQn;
                 }
 
                 // Upload any pending files now that we have a Quote ID
-                if (pendingFiles.length > 0) {
+                if (pendingFiles.length > 0 && newId != null && newId !== '') {
                     console.log('[saveQuote] Uploading pending files...', pendingFiles.length);
-                    await uploadFiles(pendingFiles, data.id);
+                    await uploadFiles(pendingFiles, newId);
                     setPendingFiles([]); // Clear queue
                 }
 
@@ -5007,8 +6250,20 @@ const QuoteForm = () => {
                 console.log('[saveQuote] Waiting 500ms for DB sync...');
                 await new Promise(resolve => setTimeout(resolve, 500));
 
-                if (enquiryData) fetchExistingQuotes(enquiryData.enquiry.RequestNo);
-                return data;
+                let refreshed = null;
+                if (enquiryData) {
+                    refreshed = await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+                }
+                const match = Array.isArray(refreshed)
+                    ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newId ?? ''))
+                    : null;
+                if (match) {
+                    queueMicrotask(() =>
+                        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true })
+                    );
+                }
+
+                return { ...data, id: newId, quoteNumber: newQn };
             } else {
                 const errorData = await res.json().catch(() => ({}));
                 console.error('[saveQuote] Server Error:', res.status, errorData);
@@ -5023,7 +6278,7 @@ const QuoteForm = () => {
         } finally {
             if (!isAutoSave) setSaving(false);
         }
-    }, [enquiryData, toName, quoteId, existingQuotes, getQuotePayload, calculatedTabs, pricingData, selectedJobs, fetchExistingQuotes, validateMandatoryFields, grandTotal]);
+    }, [enquiryData, toName, quoteId, existingQuotes, getQuotePayload, calculatedTabs, pricingData, selectedJobs, fetchExistingQuotes, validateMandatoryFields, grandTotal, scopedEnquiryQuotesParams]);
 
     // Paste Handle
     useEffect(() => {
@@ -5071,70 +6326,107 @@ const QuoteForm = () => {
         return () => window.removeEventListener('paste', handleGlobalPaste);
     }, [quoteId, uploadFiles, enquiryData, toName, saveQuote]);
 
+    /** Placed stamps are per enquiry + lead job context + customer (not per user only). */
+    const digitalStampScope = React.useMemo(() => {
+        const requestNo = enquiryData?.enquiry?.RequestNo;
+        if (!requestNo) return null;
+        const customer = (toName || '').trim();
+        const activeTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
+        const tabJobLabel = (activeTabObj?.label || activeTabObj?.name || '').trim();
+        const leadPrefix = (enquiryData?.leadJobPrefix || '').trim();
+        const leadKey = [leadPrefix, tabJobLabel].filter(Boolean).join(' | ') || tabJobLabel || leadPrefix;
+        return { requestNo, leadKey, customer };
+    }, [enquiryData?.enquiry?.RequestNo, enquiryData?.leadJobPrefix, toName, activeQuoteTab, quoteTabsFingerprint]);
+
+    const stampScopeRef = useRef(null);
+    useEffect(() => {
+        stampScopeRef.current = digitalStampScope;
+    }, [digitalStampScope]);
+
+    useEffect(() => {
+        if (!digitalStampScope) {
+            setQuoteDigitalStamps([]);
+            return;
+        }
+        const loaded = loadStampsForEnquiry(
+            digitalStampScope.requestNo,
+            digitalStampScope.leadKey,
+            digitalStampScope.customer
+        );
+        setQuoteDigitalStamps((prev) => (JSON.stringify(prev) === JSON.stringify(loaded) ? prev : loaded));
+    }, [digitalStampScope]);
+
+    const commitQuoteDigitalStamps = useCallback((updater) => {
+        setQuoteDigitalStamps((prev) => {
+            const next = typeof updater === 'function' ? updater(prev) : updater;
+            const ctx = stampScopeRef.current;
+            if (ctx?.requestNo) saveStampsForEnquiry(ctx.requestNo, next, ctx.leadKey, ctx.customer);
+            return next;
+        });
+    }, []);
+
+    const handlePlaceDigitalStamp = useCallback(
+        ({ imageDataUrl, sheetIndex, displayName, designation }) => {
+            const iso = new Date().toISOString();
+            const email = currentUser?.EmailId || currentUser?.email || '';
+            commitQuoteDigitalStamps((prev) => [
+                ...prev,
+                {
+                    id: globalThis.crypto?.randomUUID?.() || `st-${Date.now()}`,
+                    sheetIndex: Math.max(0, Number(sheetIndex) || 0),
+                    xPct: 82,
+                    yPct: 38,
+                    imageDataUrl,
+                    displayName: (displayName || '').trim(),
+                    designation: (designation || '').trim(),
+                    placedAtIso: iso,
+                    verificationCode: makeVerificationCode(email, iso),
+                },
+            ]);
+        },
+        [currentUser, commitQuoteDigitalStamps]
+    );
+
+    const handleMoveDigitalStamp = useCallback(
+        (id, xPct, yPct) => {
+            commitQuoteDigitalStamps((prev) => prev.map((s) => (s.id === id ? { ...s, xPct, yPct } : s)));
+        },
+        [commitQuoteDigitalStamps]
+    );
+
+    const handleRemoveDigitalStamp = useCallback(
+        (id) => {
+            commitQuoteDigitalStamps((prev) => prev.filter((s) => s.id !== id));
+        },
+        [commitQuoteDigitalStamps]
+    );
+
+    /** Profile menu → Manage signatures → Place on page (when Quote tab is active). */
+    useEffect(() => {
+        const onPlaceFromProfile = (ev) => {
+            const d = ev?.detail;
+            if (!d?.imageDataUrl) return;
+            handlePlaceDigitalStamp({
+                imageDataUrl: d.imageDataUrl,
+                sheetIndex: d.sheetIndex ?? 0,
+                displayName: (d.displayName || '').trim(),
+                designation: (d.designation || '').trim(),
+            });
+        };
+        window.addEventListener(EMS_QUOTE_PLACE_STAMP_EVENT, onPlaceFromProfile);
+        return () => window.removeEventListener(EMS_QUOTE_PLACE_STAMP_EVENT, onPlaceFromProfile);
+    }, [handlePlaceDigitalStamp]);
+
     // Print quote
     const printQuote = () => {
+        const printRoot = document.getElementById('quote-print-root');
         const printContent = document.getElementById('quote-preview');
-        if (printContent) {
+        const fragmentHtml = printRoot ? printRoot.innerHTML : printContent ? printContent.innerHTML : '';
+        if (fragmentHtml) {
             const printWindow = window.open('', '_blank');
-            printWindow.document.write(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>.</title>
-                    <style>
-                        /* CRITICAL: Top-level @page rule hiding headers */
-                        @page {
-                            size: A4 portrait;
-                            margin: 0; /* No units, no !important */
-                        }
-
-                        /* Global Reset */
-                        html, body {
-                            margin: 0 !important;
-                            padding: 0 !important;
-                            background: white;
-                            width: 100%;
-                            height: 100%;
-                            font-family: Arial, sans-serif;
-                            -webkit-print-color-adjust: exact;
-                        }
-
-                        /* Wrapper for Layout Margins */
-                        .print-wrapper {
-                            padding: 15mm;
-                            width: 100%;
-                            box-sizing: border-box;
-                        }
-
-                        /* Helper Styles from Component */
-                        ${tableStyles}
-
-                        /* Conditional Visibility */
-                        ${!printWithHeader ? `
-                            .print-logo-section, .footer-section { display: none !important; }
-                            .page-one { min-height: auto !important; }
-                        ` : ''}
-
-                        /* Print Media Specifics */
-                        @media print {
-                            @page { margin: 0; }
-                            body { margin: 0 !important; }
-                            .print-wrapper { padding: 15mm !important; }
-                            .page-break { page-break-before: always; }
-                        }
-                    </style>
-                </head>
-                <body>
-                    <div class="print-wrapper">
-                        ${printContent.innerHTML}
-                    </div>
-                    <script>
-                        // Clear title to remove app name
-                        document.title = ".";
-                    </script>
-                </body>
-                </html>
-            `);
+            printWindow.document.write(
+                buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, '')
+            );
             printWindow.document.close();
             printWindow.focus();
 
@@ -5146,37 +6438,54 @@ const QuoteForm = () => {
         }
     };
 
-    // Download PDF
-    const downloadPDF = () => {
-        const element = document.getElementById('quote-preview');
-        if (!element) return;
+    /** Vector PDF via server Puppeteer (selectable text — not canvas screenshots). */
+    const downloadPDF = async () => {
+        const printRoot = document.getElementById('quote-print-root');
+        const printContent = document.getElementById('quote-preview');
+        const fragmentHtml = printRoot ? printRoot.innerHTML : printContent ? printContent.innerHTML : '';
+        if (!fragmentHtml) return;
+
+        const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
+        const serverOrigin = envOrigin
+            ? String(envOrigin).replace(/\/$/, '')
+            : `${window.location.protocol}//${window.location.hostname}:5002`;
 
         setIsUploading(true);
-
-        const opt = {
-            margin: [10, 10, 10, 10],
-            filename: `Quote_${quoteNumber.replace(/\//g, '_')}.pdf`,
-            image: { type: 'jpeg', quality: 0.98 },
-            html2canvas: {
-                scale: 2,
-                useCORS: true,
-                logging: false,
-                letterRendering: true
-            },
-            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-            pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', 'h3', '.clause-content'] }
-        };
-
-        if (window.html2pdf) {
-            window.html2pdf().set(opt).from(element).save()
-                .then(() => setIsUploading(false))
-                .catch(err => {
-                    console.error('PDF generation error:', err);
-                    setIsUploading(false);
-                    alert('Failed to generate PDF. Please try again or use Print.');
-                });
-        } else {
-            alert('PDF library not loaded yet. Please wait a moment or use Print.');
+        try {
+            const html = buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, true);
+            const fname = `Quote_${quoteNumber.replace(/\//g, '_')}.pdf`;
+            const res = await fetch(`${API_BASE}/api/quote-pdf/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ html, filename: fname }),
+            });
+            if (!res.ok) {
+                let detail = res.statusText;
+                try {
+                    const j = await res.json();
+                    detail = j.message || j.error || detail;
+                } catch {
+                    /* ignore */
+                }
+                throw new Error(detail);
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fname;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('PDF generation error:', err);
+            alert(
+                `PDF download failed: ${err.message || err}\n\n` +
+                    'Ensure the API server is running and Puppeteer is installed (cd server && npm install). ' +
+                    'You can still use Print → Save as PDF for a vector file.'
+            );
+        } finally {
             setIsUploading(false);
         }
     };
@@ -5200,20 +6509,6 @@ const QuoteForm = () => {
         date.setDate(date.getDate() + parseInt(validityDays || 0));
         return formatDate(date);
     };
-
-    // Clause definitions for rendering
-    const clauseDefinitions = [
-        { key: 'showScopeOfWork', contentKey: 'scopeOfWork', title: 'Scope of Work' },
-        { key: 'showBasisOfOffer', contentKey: 'basisOfOffer', title: 'Basis of the Offer' },
-        { key: 'showExclusions', contentKey: 'exclusions', title: 'Exclusions and Qualifications' },
-        { key: 'showPricingTerms', contentKey: 'pricingTerms', title: 'Pricing & Payment Terms' },
-        { key: 'showSchedule', contentKey: 'schedule', title: 'High-Level Schedule' },
-        { key: 'showWarranty', contentKey: 'warranty', title: 'Warranty & Defects Liability Period' },
-        { key: 'showResponsibilityMatrix', contentKey: 'responsibilityMatrix', title: 'Responsibility Matrix' },
-        { key: 'showTermsConditions', contentKey: 'termsConditions', title: 'Terms & Conditions' },
-        { key: 'showBillOfQuantity', contentKey: 'billOfQuantity', title: 'Bill of Quantity' },
-        { key: 'showAcceptance', contentKey: 'acceptance', title: 'Acceptance & Confirmation' }
-    ];
 
     // Helper: Check if job is descendant of ancestor (Recursive) - Scoped to Component
     const isDescendantOf = (jobName, ancestorId) => {
@@ -5330,8 +6625,15 @@ const QuoteForm = () => {
             if (self) finalOutput = [self, ...results];
         }
 
-        return finalOutput.map(u => ({ value: u.FullName, label: u.FullName, type: 'OwnJob', designation: u.Designation || '' }))
-            .filter((v, i, a) => a.findIndex(t => (t.value === v.value)) === i);
+        return finalOutput
+            .map((u) => ({
+                value: u.FullName,
+                label: u.FullName,
+                type: 'OwnJob',
+                designation: u.Designation || '',
+                mobileNumber: (u.MobileNumber != null ? String(u.MobileNumber) : '').trim(),
+            }))
+            .filter((v, i, a) => a.findIndex((t) => t.value === v.value) === i);
     }, [usersList, currentUser, enquiryData, activeQuoteTab, calculatedTabs, pricingData]);
 
     const computedSignatoryOptions = React.useMemo(() => {
@@ -5432,8 +6734,53 @@ const QuoteForm = () => {
         return sortedItems.length > 0 ? sortedItems : computedPreparedByOptions;
     }, [enquiryData, usersList, currentUser, activeQuoteTab, calculatedTabs, pricingData, computedPreparedByOptions]);
 
+    /** Prepared-by line on quote preview: mobile from Master_ConcernedSE.MobileNumber (users list / enquiry options / logged-in profile). */
+    const preparedByContactFromMaster = React.useMemo(() => {
+        const name = (preparedBy || '').trim();
+        if (!name) return '';
+        const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const n = norm(name);
+        const fromUsers = usersList.find((x) => norm(x.FullName) === n);
+        const uMob = (fromUsers?.MobileNumber != null ? String(fromUsers.MobileNumber) : '').trim();
+        if (uMob) return uMob;
+        const po = preparedByOptions.find(
+            (o) => norm(String(o.value || '')) === n || norm(String(o.label || '')) === n
+        );
+        const pMob = (po?.mobileNumber != null ? String(po.mobileNumber) : '').trim();
+        if (pMob) return pMob;
+        const selfName = (currentUser?.FullName || currentUser?.name || '').trim();
+        if (norm(selfName) === n) {
+            const cMob = (currentUser?.MobileNumber != null ? String(currentUser.MobileNumber) : '').trim();
+            if (cMob) return cMob;
+        }
+        return '';
+    }, [preparedBy, usersList, preparedByOptions, currentUser]);
+
     const attentionSelectOptions = React.useMemo(() => {
-        if (!toName || !enquiryData) return [];
+        const finish = (rawList) => {
+            const norm = (Array.isArray(rawList) ? rawList : [])
+                .map((s) => String(s || '').trim())
+                .filter(Boolean);
+            let sig = '';
+            try {
+                sig = [...norm].sort().join('\x1e');
+            } catch {
+                sig = `n:${norm.length}`;
+            }
+            if (!norm.length) {
+                attentionOptionsCacheRef.current = { sig: '', arr: EMPTY_DEPT_ATTENTION_NAMES };
+                return EMPTY_DEPT_ATTENTION_NAMES;
+            }
+            const c = attentionOptionsCacheRef.current;
+            if (sig === c.sig && c.arr.length === norm.length) return c.arr;
+            attentionOptionsCacheRef.current = { sig, arr: norm };
+            return norm;
+        };
+
+        if (!toName || !enquiryData) {
+            attentionOptionsCacheRef.current = { sig: '', arr: EMPTY_DEPT_ATTENTION_NAMES };
+            return EMPTY_DEPT_ATTENTION_NAMES;
+        }
         const toNameClean = collapseSpacesLower(stripQuoteJobPrefix(toName));
         const toKey = normalizeCustomerKey(toName);
         const intAttEarly = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
@@ -5472,7 +6819,7 @@ const QuoteForm = () => {
             if (list.length === 0 && deptAttentionNames.length) {
                 list = [...deptAttentionNames];
             }
-            return list;
+            return finish(list);
         }
         const extMap = enquiryData.externalAttentionOptionsByCustomer || {};
         let extList = extMap[toName] || extMap[toName.trim()];
@@ -5481,30 +6828,47 @@ const QuoteForm = () => {
             const fk = Object.keys(extMap).find(k => normalize(k) === tn);
             if (fk) extList = extMap[fk];
         }
-        if (Array.isArray(extList) && extList.length > 0) return extList;
+        if (Array.isArray(extList) && extList.length > 0) return finish(extList);
         const ccMap = enquiryData.customerContacts || {};
         const ccKey = ccMap[toName] ? toName : Object.keys(ccMap).find(k => normalize(k) === normalize(toName));
         const cc = ccKey ? ccMap[ccKey] : null;
-        if (cc) return String(cc).split(',').map(s => s.trim()).filter(Boolean);
+        if (cc) return finish(String(cc).split(',').map(s => s.trim()).filter(Boolean));
         const rf = enquiryData.enquiry?.ReceivedFrom;
-        if (rf) return String(rf).split(',').map(s => s.trim()).filter(Boolean);
-        return [];
-    }, [enquiryData, toName, pricingData?.jobs, deptAttentionNames]);
+        if (rf) return finish(String(rf).split(',').map(s => s.trim()).filter(Boolean));
+        return finish([]);
+    }, [enquiryData, toName, pricingStableSig, deptAttentionNames]);
+
+    const enquiryLoadSig = React.useMemo(
+        () =>
+            [
+                String(enquiryData?.enquiry?.RequestNo || ''),
+                String((enquiryData?.divisionsHierarchy || []).length),
+                String((enquiryData?.availableProfiles || []).length),
+                String(enquiryData?.leadJobPrefix || ''),
+            ].join('\x1e'),
+        [
+            enquiryData?.enquiry?.RequestNo,
+            enquiryData?.divisionsHierarchy?.length,
+            enquiryData?.availableProfiles?.length,
+            enquiryData?.leadJobPrefix,
+        ]
+    );
 
     useEffect(() => {
         let cancelled = false;
         (async () => {
-            if (!toName.trim() || !enquiryData) {
-                setDeptAttentionNames([]);
+            const ed = enquiryDataRef.current;
+            if (!toName.trim() || !ed) {
+                setDeptAttentionNames((p) => (p.length === 0 ? p : EMPTY_DEPT_ATTENTION_NAMES));
                 return;
             }
-            if (!isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) {
-                setDeptAttentionNames([]);
+            if (!isQuoteInternalCustomer(ed, pricingData?.jobs, toName)) {
+                setDeptAttentionNames((p) => (p.length === 0 ? p : EMPTY_DEPT_ATTENTION_NAMES));
                 return;
             }
-            const flex = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
+            const flex = resolveQuoteInternalAttentionFlexible(ed, toName);
             if (flex?.options?.length) {
-                setDeptAttentionNames([]);
+                setDeptAttentionNames((p) => (p.length === 0 ? p : EMPTY_DEPT_ATTENTION_NAMES));
                 return;
             }
             try {
@@ -5513,16 +6877,22 @@ const QuoteForm = () => {
                 );
                 const arr = res.ok ? await res.json() : [];
                 if (!cancelled && Array.isArray(arr)) {
-                    setDeptAttentionNames(arr.map((x) => String(x || '').trim()).filter(Boolean));
+                    const next = arr.map((x) => String(x || '').trim()).filter(Boolean);
+                    setDeptAttentionNames((prev) => {
+                        if (prev.length === next.length && prev.every((v, i) => v === next[i])) return prev;
+                        return next;
+                    });
                 }
             } catch {
-                if (!cancelled) setDeptAttentionNames([]);
+                if (!cancelled) {
+                    setDeptAttentionNames((p) => (p.length === 0 ? p : EMPTY_DEPT_ATTENTION_NAMES));
+                }
             }
         })();
         return () => {
             cancelled = true;
         };
-    }, [toName, enquiryData, pricingData?.jobs]);
+    }, [toName, enquiryLoadSig, pricingStableSig]);
 
     const showAttentionAsSelect = React.useMemo(
         () =>
@@ -5538,18 +6908,34 @@ const QuoteForm = () => {
         return [...new Set([...attentionSelectOptions, toAttention].filter(Boolean))];
     }, [enquiryData, pricingData?.jobs, toName, attentionSelectOptions, toAttention]);
 
-    // Drop stale Attention values that are not in the dropdown list (internal customers only)
+    const attentionOptionsContentSig = React.useMemo(() => {
+        if (!attentionSelectOptions.length) return '';
+        try {
+            return attentionSelectOptions.map((s) => String(s || '').trim()).sort().join('\x1e');
+        } catch {
+            return `n:${attentionSelectOptions.length}`;
+        }
+    }, [attentionSelectOptions]);
+
+    // Drop stale Attention values that are not in the dropdown list (internal customers only).
+    // Do not depend on `enquiryData` / `attentionSelectOptions` identity — they churned and re-fired this every render.
     useEffect(() => {
-        if (!toName || !enquiryData) return;
-        if (!isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) return;
+        const ed = enquiryDataRef.current;
+        if (!toName?.trim() || !ed) return;
+        if (!isQuoteInternalCustomer(ed, pricingData?.jobs, toName)) return;
         const allowed = attentionSelectOptions;
         if (allowed.length === 0) return;
         const cur = String(toAttention || '').trim();
         if (!cur) return;
         if (allowed.some((o) => normLooseAttention(o) === normLooseAttention(cur))) return;
-        const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, toName);
-        setToAttention(intAtt?.defaultAttention || allowed[0] || '');
-    }, [toName, enquiryData, pricingData?.jobs, toAttention, attentionSelectOptions]);
+        const intAtt = resolveQuoteInternalAttentionFlexible(ed, toName);
+        const next = String(intAtt?.defaultAttention || allowed[0] || '').trim();
+        setToAttention((prev) => {
+            const p = String(prev || '').trim();
+            if (normLooseAttention(p) === normLooseAttention(next)) return prev;
+            return next;
+        });
+    }, [toName, toAttention, attentionOptionsContentSig, pricingStableSig]);
 
     // --- READ-ONLY TAB LOGIC ---
     const activeGlobalTabObj = (effectiveQuoteTabs || []).find(t => String(t.id) === String(activeQuoteTab));
@@ -5688,11 +7074,13 @@ const QuoteForm = () => {
                                             enquiryData.leadJobPrefix
                                         );
 
-                                        console.log('[Quote Lead Job Render] State:', {
-                                            prefix: enquiryData.leadJobPrefix,
-                                            options: visibleLeadJobs,
-                                            selected: selectedValue
-                                        });
+                                        if (import.meta.env.DEV) {
+                                            console.log('[Quote Lead Job Render] State:', {
+                                                prefix: enquiryData.leadJobPrefix,
+                                                options: visibleLeadJobs,
+                                                selected: selectedValue
+                                            });
+                                        }
 
                                         const leadClean = (s) =>
                                             String(s || '')
@@ -5870,16 +7258,6 @@ const QuoteForm = () => {
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                             <div style={{ flex: 1, position: 'relative' }}>
                                 <CreatableSelect
-                                    styles={{
-                                        control: (base, state) => ({
-                                            ...base,
-                                            minHeight: '38px',
-                                            fontSize: '13px',
-                                            borderColor: '#e2e8f0',
-                                            backgroundColor: state.isDisabled ? '#f1f5f9' : 'white'
-                                        }),
-                                        menu: (base) => ({ ...base, zIndex: 9999 })
-                                    }}
                                     isDisabled={!enquiryData}
                                     options={quoteCustomerDropdownOptions}
                                     value={customerSelectValue}
@@ -5941,20 +7319,20 @@ const QuoteForm = () => {
 
                         {/* Left Actions: Save, Revision */}
                         <div style={{ display: 'flex', gap: '6px' }}>
-                            {/* Save Button - Disabled if already saved (Revision only allowed) */}
+                            {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
                                 onClick={() => saveQuote()}
-                                disabled={saving || !canEdit() || !!quoteId || isEditingRestricted}
+                                disabled={saving || !canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted}
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
                                     padding: '6px 12px',
-                                    background: (!canEdit() || quoteId || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
-                                    color: (!canEdit() || quoteId || isEditingRestricted) ? '#94a3b8' : 'white',
+                                    background: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
+                                    color: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
                                     border: 'none',
                                     borderRadius: '44px',
-                                    cursor: (!canEdit() || quoteId || isEditingRestricted) ? 'not-allowed' : 'pointer',
+                                    cursor: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
                                     fontWeight: '600',
                                     fontSize: '12px',
                                     opacity: saving ? 0.7 : 1
@@ -5963,7 +7341,8 @@ const QuoteForm = () => {
                                     saving ? 'Saving…' :
                                     isEditingRestricted ? 'Editing is restricted for this tab' :
                                     !canEdit() ? 'No permission to save (admin/lead access, pricing scope, or tab ownership required)' :
-                                    quoteId ? 'Quote is saved and cannot be edited. Create a revision instead.' :
+                                    !scopedQuoteTupleReady ? 'Loading quote scope…' :
+                                    hasPersistedQuoteForScope ? 'A quote already exists for this enquiry and customer. Use Revision to change it.' :
                                     ''
                                 }
                             >
@@ -5971,8 +7350,8 @@ const QuoteForm = () => {
                             </button>
 
                             {/* Revision Button */}
-                            {quoteId && (
-                                <button onClick={handleRevise} disabled={saving || !canEdit() || isEditingRestricted} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: (!canEdit() || isEditingRestricted) ? '#94a3b8' : '#0284c7', color: 'white', border: 'none', borderRadius: '4px', cursor: (!canEdit() || isEditingRestricted) ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px' }} title={isEditingRestricted ? "Editing is restricted for this tab" : !canEdit() ? "No permission to revise" : ""}>
+                            {hasPersistedQuoteForScope && (
+                                <button onClick={handleRevise} disabled={saving || !canEdit() || isEditingRestricted || !quoteId} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: (!canEdit() || isEditingRestricted || !quoteId) ? '#94a3b8' : '#0284c7', color: 'white', border: 'none', borderRadius: '4px', cursor: (!canEdit() || isEditingRestricted || !quoteId) ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px' }} title={isEditingRestricted ? "Editing is restricted for this tab" : !canEdit() ? "No permission to revise" : !quoteId ? "Loading quote…" : ""}>
                                     <Plus size={14} /> Revision
                                 </button>
                             )}
@@ -5994,6 +7373,28 @@ const QuoteForm = () => {
                             {/* Print Preview - Icon Only */}
                             <button onClick={printQuote} disabled={!hasUserPricing} title="Print Preview" style={{ width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'white', color: '#1e293b', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', opacity: !hasUserPricing ? 0.5 : 1 }}>
                                 <Printer size={16} />
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setSignatureVaultOpen(true)}
+                                disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
+                                title="Signatures: open this, save to library, then use Place on page. On the quote preview, drag the stamp anywhere (except ×) to move it. Profile menu can manage defaults."
+                                style={{
+                                    width: '30px',
+                                    height: '30px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    background: 'white',
+                                    color: '#1e293b',
+                                    border: '1px solid #cbd5e1',
+                                    borderRadius: '4px',
+                                    cursor: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 'not-allowed' : 'pointer',
+                                    opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
+                                }}
+                            >
+                                <PenLine size={16} />
                             </button>
 
                             {/* Email - Icon Only */}
@@ -6058,37 +7459,26 @@ const QuoteForm = () => {
 
                                                 const activeTabRealId = activeTabObj.realId;
 
-                                                /** Lead + all direct subjobs (or own job + all direct subjobs): show every branch tab's pricing rows in the summary. */
-                                                const leadPlusSubs =
-                                                    tabs.length >= 2 &&
-                                                    tabs[0]?.isLeadInternalTab &&
-                                                    tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
-                                                const ownPlusSubs =
-                                                    tabs.length >= 2 &&
-                                                    tabs[0]?.isOwnJobTab &&
-                                                    tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
-                                                const pairedPricingRealIds =
-                                                    (leadPlusSubs || ownPlusSubs) && tabs[0]?.realId
-                                                        ? new Set(tabs.map((t) => String(t.realId)).filter(Boolean))
-                                                        : null;
-
-                                                // Include direct children of the active tab (e.g. HVAC → nested subjobs) so they are not excluded by the tab-only id set.
-                                                const pairedPricingSummaryIds =
-                                                    pairedPricingRealIds &&
-                                                    pairedPricingRealIds.size >= 2 &&
-                                                    activeTabRealId
-                                                        ? (() => {
-                                                              const s = new Set(pairedPricingRealIds);
-                                                              collectDirectChildJobIdsFromPools(
-                                                                  activeTabRealId,
-                                                                  jobsPool,
-                                                                  enquiryData?.divisionsHierarchy || []
-                                                              ).forEach((id) => s.add(id));
-                                                              return s;
-                                                          })()
-                                                        : pairedPricingRealIds;
-
-                                                // Hierarchy filter removed (using global isDescendant)
+                                                /** Active tab job + all descendants in pool — sidebar shows only this branch (not sibling Civil/HVAC when Electrical is selected). */
+                                                const tabScopeIdsForSidebar = (() => {
+                                                    const s = new Set();
+                                                    if (!activeTabRealId) return s;
+                                                    s.add(String(activeTabRealId));
+                                                    let changed = true;
+                                                    while (changed) {
+                                                        changed = false;
+                                                        jobsPool.forEach((j) => {
+                                                            const jId = String(j.id || j.ItemID || j.ID || '');
+                                                            const pId = String(j.parentId ?? j.ParentID ?? '').trim();
+                                                            if (!jId || s.has(jId)) return;
+                                                            if (pId && s.has(pId)) {
+                                                                s.add(jId);
+                                                                changed = true;
+                                                            }
+                                                        });
+                                                    }
+                                                    return s;
+                                                })();
 
                                                 // Resolve current lead code for robust branch isolation
                                                 const currentLeadCode = (() => {
@@ -6243,8 +7633,8 @@ const QuoteForm = () => {
                                                                     onClick={() => loadQuote(latest, { preserveRecipient: true })}
                                                                     style={{
                                                                         padding: '8px',
-                                                                        background: quoteId === latest.ID ? '#f0f9ff' : 'white',
-                                                                        border: `1px solid ${quoteId === latest.ID ? '#0ea5e9' : '#e2e8f0'}`,
+                                                                        background: String(quoteRowId(latest) ?? '') === String(quoteId ?? '') ? '#f0f9ff' : 'white',
+                                                                        border: `1px solid ${String(quoteRowId(latest) ?? '') === String(quoteId ?? '') ? '#0ea5e9' : '#e2e8f0'}`,
                                                                         borderRadius: '8px',
                                                                         cursor: 'pointer',
                                                                         position: 'relative'
@@ -6282,11 +7672,11 @@ const QuoteForm = () => {
                                                                 {/* Render History if Expanded */}
                                                                 {isExpanded && sorted.slice(1).map(rev => (
                                                                         <div
-                                                                            key={rev.ID}
+                                                                            key={String(quoteRowId(rev) ?? rev.QuoteNumber ?? rev.quoteNumber ?? 'rev')}
                                                                             onClick={() => loadQuote(rev, { preserveRecipient: true })}
                                                                         style={{
                                                                             padding: '6px 8px',
-                                                                            background: quoteId === rev.ID ? '#eff6ff' : '#f8fafc',
+                                                                            background: String(quoteRowId(rev) ?? '') === String(quoteId ?? '') ? '#eff6ff' : '#f8fafc',
                                                                             border: '1px solid #e2e8f0',
                                                                             borderRadius: '6px',
                                                                             marginLeft: '12px',
@@ -6308,40 +7698,25 @@ const QuoteForm = () => {
                                                         );
                                                     });
 
-                                                // Filter Pricing Summary
+                                                // Filter Pricing Summary — under each subjob tab, only that job subtree (not all L1 siblings).
                                                 const filteredPricing = pricingSummary.filter((grp) => {
                                                     const grpNameNorm = collapseSpacesLower(stripQuoteJobPrefix(grp.name || ''));
-                                                    // Robustness (Step 4488): Check ALL jobs matching this name for hierarchy relevance
                                                     const matchingJobs = jobsPool.filter((j) =>
                                                         collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')) === grpNameNorm
                                                     );
                                                     if (matchingJobs.length === 0) return activeTabObj.isSelf || tabs.length === 1;
 
-                                                    // Paired lead/own + subjob tabs: show sibling tab rows + direct nested subjobs under the active tab.
-                                                    if (pairedPricingSummaryIds && pairedPricingSummaryIds.size >= 2) {
+                                                    if (tabs.length > 1 && activeTabRealId && tabScopeIdsForSidebar.size > 0) {
                                                         return matchingJobs.some((job) =>
-                                                            pairedPricingSummaryIds.has(String(job.id || job.ItemID || job.ID))
+                                                            tabScopeIdsForSidebar.has(String(job.id || job.ItemID || job.ID))
                                                         );
                                                     }
 
-                                                    // Check if active tab is the Lead Job, who must see all pricing for compilation
-                                                    const prefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
-
-                                                    // Resolve real name if it's "Own Job" (default tab)
-                                                    const activeJobEntity = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId));
-                                                    const rawTabName = activeJobEntity ? (activeJobEntity.itemName || activeJobEntity.DivisionName || '') : (activeTabObj.name || activeTabObj.label || '');
-
-                                                    const activeTabName = rawTabName.toUpperCase();
-                                                    const cleanActiveTabName = activeTabName.replace(/^(L\d+\s*-\s*)/, '').trim();
-                                                    const isLeadJob = prefix && (activeTabName === prefix || cleanActiveTabName === prefix || activeTabName.includes(prefix));
-
                                                     const isRelevant = matchingJobs.some(job => {
                                                         const jId = job.id || job.ItemID || job.ID;
-                                                        // HIERARCHY MATCH: Only include if explicitly the active tab OR a descendant of it
                                                         const isMatch = String(jId) === String(activeTabRealId) || isDescendant(jId, activeTabRealId, jobsPool);
                                                         if (!isMatch) return false;
 
-                                                        // BRANCH ISOLATION: Must belong to the same Lead Job as the active tab
                                                         const getRootId = (id) => {
                                                             let curr = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(id));
                                                             let visited = new Set();
@@ -6363,7 +7738,6 @@ const QuoteForm = () => {
 
                                                     if (!isRelevant) return false;
 
-                                                    // STRICT VISIBILITY: Block ancestors if strictly limited
                                                     const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                                                     const isStrictlyLimited = userDept && !['civil', 'admin', 'bms admin'].includes(userDept) && !isAdmin;
 
@@ -6666,7 +8040,7 @@ const QuoteForm = () => {
 
                                         const isCustom = id.startsWith('custom_');
                                         const customClause = isCustom ? customClauses.find(c => c.id === id) : null;
-                                        const standardClause = !isCustom ? clauseDefinitions.find(c => c.key === id) : null;
+                                        const standardClause = !isCustom ? QUOTE_CLAUSE_DEFINITIONS.find(c => c.key === id) : null;
 
                                         if (!customClause && !standardClause) return null;
 
@@ -6842,14 +8216,209 @@ const QuoteForm = () => {
                             Loading enquiry data...
                         </div >
                     ) : !enquiryData ? (
-                        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                            {pendingQuotes.length > 0 ? (
+                        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            <div
+                                className="no-print"
+                                style={{
+                                    flexShrink: 0,
+                                    width: '100%',
+                                    boxSizing: 'border-box',
+                                    padding: '10px 12px',
+                                    background: '#f8fafc',
+                                    border: '1px solid #e2e8f0',
+                                    borderRadius: '8px',
+                                    boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        alignItems: 'center',
+                                        justifyContent: 'flex-start',
+                                        gap: '10px 16px',
+                                        rowGap: '10px',
+                                        width: '100%',
+                                    }}
+                                >
+                                    <label
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            margin: 0,
+                                        }}
+                                    >
+                                        Category
+                                        <select
+                                            value={quoteListCategory}
+                                            onChange={(e) => {
+                                                const v = e.target.value;
+                                                setQuoteListCategory(v);
+                                                if (v === QUOTE_LIST_CATEGORY.PENDING) {
+                                                    setQuoteSearchResults([]);
+                                                }
+                                            }}
+                                            style={{
+                                                minWidth: '148px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#fff',
+                                                color: '#334155',
+                                                cursor: 'pointer',
+                                            }}
+                                        >
+                                            <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
+                                            <option value={QUOTE_LIST_CATEGORY.SEARCH}>Search Quote</option>
+                                        </select>
+                                    </label>
+                                    <label
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            margin: 0,
+                                            flex: '1 1 200px',
+                                            minWidth: '160px',
+                                            maxWidth: '360px',
+                                        }}
+                                    >
+                                        Search criteria
+                                        <input
+                                            type="text"
+                                            value={quoteListSearchCriteria}
+                                            onChange={(e) => setQuoteListSearchCriteria(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key !== 'Enter') return;
+                                                e.preventDefault();
+                                                if (quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading) return;
+                                                handleQuoteListSearch();
+                                            }}
+                                            disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                            placeholder={
+                                                quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                                                    ? 'Quote ref, project, enquiry no., customer, client, consultant, prepared by…'
+                                                    : 'Select "Search Quote" to enable'
+                                            }
+                                            style={{
+                                                flex: 1,
+                                                minWidth: '120px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
+                                                color: '#334155',
+                                                opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                                cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
+                                            }}
+                                        />
+                                    </label>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                        }}
+                                    >
+                                        <span style={{ whiteSpace: 'nowrap' }}>From</span>
+                                        <div
+                                            style={{
+                                                width: '128px',
+                                                pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
+                                            }}
+                                        >
+                                            <DateInput
+                                                value={quoteListDateFrom}
+                                                onChange={(e) => setQuoteListDateFrom(e.target.value)}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                                placeholder="DD-MMM-YYYY"
+                                                style={{
+                                                    fontSize: '12px',
+                                                    padding: '6px 8px',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                                }}
+                                            />
+                                        </div>
+                                        <span style={{ whiteSpace: 'nowrap' }}>To</span>
+                                        <div
+                                            style={{
+                                                width: '128px',
+                                                pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
+                                            }}
+                                        >
+                                            <DateInput
+                                                value={quoteListDateTo}
+                                                onChange={(e) => setQuoteListDateTo(e.target.value)}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                                placeholder="DD-MMM-YYYY"
+                                                style={{
+                                                    fontSize: '12px',
+                                                    padding: '6px 8px',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                                }}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                                            <button
+                                                type="button"
+                                                className="no-print"
+                                                onClick={handleQuoteListSearch}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
+                                                style={{
+                                                    padding: '6px 14px',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid #2563eb',
+                                                    background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
+                                                    color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                                }}
+                                            >
+                                                {quoteSearchLoading ? 'Searching…' : 'Search'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="no-print"
+                                                onClick={handleQuoteListClear}
+                                                style={{
+                                                    padding: '6px 14px',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid #cbd5e1',
+                                                    background: '#fff',
+                                                    color: '#475569',
+                                                    cursor: 'pointer',
+                                                }}
+                                            >
+                                                Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {quoteListDisplayRows.length > 0 ? (
                                 (() => {
-                                    const sortedPendingQuotes = [...pendingQuotes].sort((a, b) => {
+                                    const sortedPendingQuotes = [...quoteListDisplayRows].sort((a, b) => {
                                         const { field, direction } = pendingQuotesSortConfig;
                                         let aVal = a[field];
                                         let bVal = b[field];
-                                        if (field === 'DueDate' || field === 'EnquiryDate') {
+                                        if (field === 'DueDate' || field === 'EnquiryDate' || field === 'ListQuoteDate') {
                                             aVal = aVal ? new Date(aVal).getTime() : Infinity;
                                             bVal = bVal ? new Date(bVal).getTime() : Infinity;
                                         } else {
@@ -6865,10 +8434,13 @@ const QuoteForm = () => {
                                     const activeSortLabel = quoteSortField === 'DueDate' ? 'Due Date'
                                         : quoteSortField === 'RequestNo' ? 'Enquiry No.'
                                             : quoteSortField === 'ProjectName' ? 'Project Name'
-                                                : quoteSortField === 'CustomerName' ? 'Customer'
-                                                    : quoteSortField === 'ClientName' ? 'Client Name'
-                                                        : quoteSortField === 'ConsultantName' ? 'Consultant Name'
-                                                            : quoteSortField;
+                                                : quoteSortField === 'ListQuoteRef' ? 'Quote ref.'
+                                                    : quoteSortField === 'ListQuoteDate' ? 'Quote date'
+                                                        : quoteSortField === 'CustomerName' ? 'Customer'
+                                                            : quoteSortField === 'ClientName' ? 'Client Name'
+                                                                : quoteSortField === 'ConsultantName' ? 'Consultant Name'
+                                                                    : quoteSortField === 'ListPreparedBy' ? 'Prepared by'
+                                                                        : quoteSortField;
                                     const renderQSH = (field, label, style = {}) => {
                                         const isActive = quoteSortField === field;
                                         const isAsc = quoteSortDir === 'asc';
@@ -6895,7 +8467,10 @@ const QuoteForm = () => {
                                         <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', width: '100%', margin: '0 auto' }}>
                                             <div style={{ padding: '16px 24px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                                 <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                                    <FileText size={20} className="text-blue-600" /> Pending Updates ({pendingQuotes.length})
+                                                    <FileText size={20} className="text-blue-600" />{' '}
+                                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                                                        ? `Search results (${quoteListDisplayRows.length})`
+                                                        : `Pending updates (${quoteListDisplayRows.length})`}
                                                 </h2>
                                                 <span style={{ fontSize: '12px', color: '#64748b' }}>
                                                     Sorted by <strong>{activeSortLabel}</strong> {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
@@ -6907,24 +8482,54 @@ const QuoteForm = () => {
                                                         <tr>
                                                             {renderQSH('RequestNo', 'Enquiry No.', { width: '80px' })}
                                                             {renderQSH('ProjectName', 'Project Name', { minWidth: '234px' })}
+                                                            {renderQSH('ListQuoteRef', 'Quote ref.', { minWidth: '120px' })}
+                                                            {renderQSH('ListQuoteDate', 'Quote date', { minWidth: '110px' })}
                                                             {renderQSH('CustomerName', 'Customer Name')}
                                                             {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
                                                             <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                                             {renderQSH('ClientName', 'Client Name', { minWidth: '200px' })}
                                                             {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
+                                                            {renderQSH('ListPreparedBy', 'Prepared by', { minWidth: '160px' })}
                                                         </tr>
                                                     </thead>
                                                     <tbody>
                                                         {sortedPendingQuotes.map((enq, idx) => (
                                                             <tr
-                                                                key={enq.RequestNo || idx}
+                                                                key={enq.QuoteListKind ? `${enq.RequestNo}-${enq.QuoteListKind}` : `${String(enq.RequestNo ?? 'r')}-${String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`}`}
                                                                 style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
                                                                 onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
                                                                 onMouseOut={(e) => e.currentTarget.style.background = 'white'}
                                                                 onClick={() => handleSelectEnquiry(enq)}
                                                             >
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
+                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>
+                                                                    {enq.RequestNo}
+                                                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && enq.QuoteListKind ? (
+                                                                        <span style={{ marginLeft: '6px', fontSize: '10px', fontWeight: '600', color: enq.QuoteListKind === 'pending' ? '#b45309' : '#047857', textTransform: 'uppercase' }}>
+                                                                            {enq.QuoteListKind === 'pending' ? 'To quote' : 'Quoted'}
+                                                                        </span>
+                                                                    ) : null}
+                                                                </td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>{enq.ProjectName || '-'}</td>
+                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '132px' }}>
+                                                                    <div style={{ whiteSpace: 'nowrap' }}>{enq.ListQuoteRef || '-'}</div>
+                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
+                                                                        <div style={{ marginTop: '6px', fontSize: '11px', fontWeight: '600', color: '#166534', whiteSpace: 'nowrap' }}>
+                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                                        </div>
+                                                                    ) : null}
+                                                                </td>
+                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>
+                                                                    {enq.ListQuoteDate
+                                                                        ? (() => {
+                                                                            try {
+                                                                                const d = new Date(enq.ListQuoteDate);
+                                                                                return Number.isNaN(d.getTime()) ? '-' : format(d, 'dd-MMM-yyyy');
+                                                                            } catch {
+                                                                                return '-';
+                                                                            }
+                                                                        })()
+                                                                        : '-'}
+                                                                </td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
                                                                     {enq.CustomerName ? enq.CustomerName.split(',').map((cust, i) => {
                                                                         const cName = cust.trim();
@@ -7048,6 +8653,7 @@ const QuoteForm = () => {
                                                                 </td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ClientName || enq.clientName || '-'}</td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ConsultantName || enq.consultantName || '-'}</td>
+                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '160px' }}>{enq.ListPreparedBy || enq.listpreparedby || '-'}</td>
                                                             </tr>
                                                         ))}
                                                     </tbody>
@@ -7058,7 +8664,9 @@ const QuoteForm = () => {
                                 })()
                             ) : (
                                 <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', fontStyle: 'italic', background: 'white', borderRadius: '8px', border: '1px dashed #e2e8f0' }}>
-                                    No pending updates found. Start by entering an enquiry number above.
+                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                                        ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
+                                        : 'No pending updates found. Start by entering an enquiry number above.'}
                                 </div>
                             )}
                         </div>
@@ -7085,7 +8693,214 @@ const QuoteForm = () => {
                             </p>
                         </div>
                     ) : (
-                        <>
+                        <div
+                            style={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                width: '100%',
+                                minHeight: 0,
+                            }}
+                        >
+                            {/* Sticky top bar — horizontal, left-aligned; stays under right-panel scroll */}
+                            <div
+                                className="no-print"
+                                style={{
+                                    position: 'sticky',
+                                    top: 0,
+                                    zIndex: 20,
+                                    flexShrink: 0,
+                                    width: '100%',
+                                    boxSizing: 'border-box',
+                                    marginBottom: '12px',
+                                    padding: '10px 12px',
+                                    background: '#f8fafc',
+                                    border: '1px solid #e2e8f0',
+                                    borderRadius: '8px',
+                                    boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        alignItems: 'center',
+                                        justifyContent: 'flex-start',
+                                        gap: '10px 16px',
+                                        rowGap: '10px',
+                                        width: '100%',
+                                    }}
+                                >
+                                    <label
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            margin: 0,
+                                        }}
+                                    >
+                                        Category
+                                        <select
+                                            value={quoteListCategory}
+                                            onChange={(e) => {
+                                                const v = e.target.value;
+                                                setQuoteListCategory(v);
+                                                if (v === QUOTE_LIST_CATEGORY.PENDING) {
+                                                    setQuoteSearchResults([]);
+                                                }
+                                            }}
+                                            style={{
+                                                minWidth: '148px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#fff',
+                                                color: '#334155',
+                                                cursor: 'pointer',
+                                            }}
+                                        >
+                                            <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
+                                            <option value={QUOTE_LIST_CATEGORY.SEARCH}>Search Quote</option>
+                                        </select>
+                                    </label>
+                                    <label
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            margin: 0,
+                                            flex: '1 1 200px',
+                                            minWidth: '160px',
+                                            maxWidth: '360px',
+                                        }}
+                                    >
+                                        Search criteria
+                                        <input
+                                            type="text"
+                                            value={quoteListSearchCriteria}
+                                            onChange={(e) => setQuoteListSearchCriteria(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key !== 'Enter') return;
+                                                e.preventDefault();
+                                                if (quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading) return;
+                                                handleQuoteListSearch();
+                                            }}
+                                            disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                            placeholder={
+                                                quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                                                    ? 'Quote ref, project, enquiry no., customer, client, consultant, prepared by…'
+                                                    : 'Select "Search Quote" to enable'
+                                            }
+                                            style={{
+                                                flex: 1,
+                                                minWidth: '120px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
+                                                color: '#334155',
+                                                opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                                cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
+                                            }}
+                                        />
+                                    </label>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            color: '#475569',
+                                            opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                        }}
+                                    >
+                                        <span style={{ whiteSpace: 'nowrap' }}>From</span>
+                                        <div
+                                            style={{
+                                                width: '128px',
+                                                pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
+                                            }}
+                                        >
+                                            <DateInput
+                                                value={quoteListDateFrom}
+                                                onChange={(e) => setQuoteListDateFrom(e.target.value)}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                                placeholder="DD-MMM-YYYY"
+                                                style={{
+                                                    fontSize: '12px',
+                                                    padding: '6px 8px',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                                }}
+                                            />
+                                        </div>
+                                        <span style={{ whiteSpace: 'nowrap' }}>To</span>
+                                        <div
+                                            style={{
+                                                width: '128px',
+                                                pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
+                                            }}
+                                        >
+                                            <DateInput
+                                                value={quoteListDateTo}
+                                                onChange={(e) => setQuoteListDateTo(e.target.value)}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
+                                                placeholder="DD-MMM-YYYY"
+                                                style={{
+                                                    fontSize: '12px',
+                                                    padding: '6px 8px',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                                }}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                                            <button
+                                                type="button"
+                                                className="no-print"
+                                                onClick={handleQuoteListSearch}
+                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
+                                                style={{
+                                                    padding: '6px 14px',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid #2563eb',
+                                                    background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
+                                                    color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
+                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                                }}
+                                            >
+                                                {quoteSearchLoading ? 'Searching…' : 'Search'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="no-print"
+                                                onClick={handleQuoteListClear}
+                                                style={{
+                                                    padding: '6px 14px',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    borderRadius: '6px',
+                                                    border: '1px solid #cbd5e1',
+                                                    background: '#fff',
+                                                    color: '#475569',
+                                                    cursor: 'pointer',
+                                                }}
+                                            >
+                                                Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             {/* Attachments Bar (Outlook Style) */}
                             <div className="no-print" style={{
                                 marginBottom: '16px',
@@ -7293,61 +9108,394 @@ const QuoteForm = () => {
                                 )}
                             </div>
 
+                            {/* Print root: repeat header/footer are siblings of #quote-preview so position:fixed works in print (not inside absolute #quote-preview). */}
+                            <div
+                                id="quote-print-root"
+                                data-print-with-header={printWithHeader ? '1' : '0'}
+                                style={{ maxWidth: '210mm', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}
+                            >
+                                <div className="quote-print-repeat-strip" aria-hidden="true">
+                                    <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'flex-end' }}>
+                                        {quoteLogoDisplaySrc ? (
+                                            <img src={quoteLogoDisplaySrc} alt="" style={{ height: '48px', width: 'auto', maxWidth: '180px', objectFit: 'contain' }} />
+                                        ) : null}
+                                    </div>
+                                </div>
+                                <div className="quote-print-page-indicator" aria-hidden="true" />
+                                <div className="quote-print-footer-rule" aria-hidden="true" />
+
                             <style>{tableStyles}</style>
                             <style>
                                 {`
+                                .quote-print-repeat-strip,
+                                .quote-print-page-indicator {
+                                    display: none;
+                                }
+                                .header-section.quote-header-row {
+                                    width: 100%;
+                                    box-sizing: border-box;
+                                }
+                                .quote-header-address-col,
+                                .quote-header-quote-col {
+                                    min-width: 0;
+                                }
+                                .quote-clause-measure-host {
+                                    position: absolute;
+                                    left: -99999px;
+                                    top: 0;
+                                    pointer-events: none;
+                                    visibility: hidden;
+                                }
+                                #quote-preview {
+                                    display: flex;
+                                    flex-direction: column;
+                                    gap: 20px;
+                                    border: none !important;
+                                    outline: none !important;
+                                }
+                                .quote-document-root {
+                                    border: none !important;
+                                    outline: none !important;
+                                }
+                                .quote-a4-sheet {
+                                    position: relative;
+                                    background: #fff;
+                                    box-sizing: border-box;
+                                    max-width: 210mm;
+                                    margin-left: auto;
+                                    margin-right: auto;
+                                    margin-bottom: 0;
+                                    padding: 15mm;
+                                    min-height: 297mm;
+                                    border: none !important;
+                                    outline: none !important;
+                                    box-shadow: none;
+                                    border-radius: 0;
+                                    display: grid;
+                                    grid-template-columns: minmax(0, 1fr);
+                                    grid-template-rows: auto minmax(0, 1fr) auto;
+                                    align-content: stretch;
+                                }
+                                .quote-sheet-main-flex {
+                                    min-width: 0;
+                                    min-height: 0;
+                                    height: 100%;
+                                    display: flex;
+                                    flex-direction: column;
+                                }
+                                .quote-sheet-footer-push {
+                                    flex-shrink: 0;
+                                }
+                                .quote-sheet-logo-row {
+                                    flex-shrink: 0;
+                                    display: flex;
+                                    justify-content: flex-end;
+                                    width: 100%;
+                                }
+                                .quote-continuation-header {
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: flex-end;
+                                    flex-shrink: 0;
+                                    margin-bottom: 16px;
+                                    padding-bottom: 0;
+                                    border-bottom: none;
+                                }
+                                .quote-footer-full-rule {
+                                    width: 100%;
+                                    margin: 10px 0 0 0;
+                                    padding: 0;
+                                    border: 0;
+                                    border-top: 1px solid #e2e8f0;
+                                    height: 0;
+                                    box-sizing: border-box;
+                                }
+                                .quote-print-footer-rule {
+                                    display: none;
+                                }
+                                .quote-page-num-screen {
+                                    margin-left: 50%;
+                                    width: 50%;
+                                    max-width: 50%;
+                                    box-sizing: border-box;
+                                    text-align: right;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #64748b;
+                                    padding-bottom: 6px;
+                                }
                                 @media print {
                                     body * {
                                         visibility: hidden;
                                     }
-                                    #quote-preview, #quote-preview * {
-                                        visibility: visible;
+                                    #quote-print-root,
+                                    #quote-print-root * {
+                                        visibility: visible !important;
                                     }
-                                    #quote-preview {
-                                        position: absolute;
+                                    #quote-print-root {
+                                        position: relative;
                                         left: 0;
                                         top: 0;
                                         width: 100%;
-                                        margin: 0;
-                                        padding: 0;
-                                        box-shadow: none !important;
+                                        max-width: none !important;
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        padding-top: 18mm !important;
+                                        padding-bottom: 44mm !important;
+                                        box-sizing: border-box;
                                         background: white;
+                                    }
+                                    #quote-preview {
+                                        position: relative !important;
+                                        left: auto !important;
+                                        top: auto !important;
+                                        width: 100% !important;
+                                        max-width: none !important;
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        box-shadow: none !important;
+                                        background: white !important;
+                                        border: none !important;
+                                        outline: none !important;
+                                        display: block !important;
+                                        gap: 0 !important;
+                                    }
+                                    .quote-clause-measure-host {
+                                        display: none !important;
+                                        visibility: hidden !important;
+                                        height: 0 !important;
+                                        overflow: hidden !important;
+                                    }
+                                    .quote-a4-sheet {
+                                        box-shadow: none !important;
+                                        border-radius: 0 !important;
+                                        margin-bottom: 0 !important;
+                                        min-height: 0 !important;
+                                        page-break-after: always !important;
+                                        break-after: page !important;
+                                        border: none !important;
+                                        outline: none !important;
+                                    }
+                                    .quote-a4-sheet:last-child {
+                                        page-break-after: auto !important;
+                                        break-after: auto !important;
                                     }
                                     @page {
                                         size: A4 portrait;
-                                        margin: 10mm;
+                                        margin: 12mm 14mm 14mm 14mm;
                                     }
                                     .no-print {
+                                        display: none !important;
+                                    }
+                                    .page-one { min-height: 0 !important; }
+                                    .page-break {
+                                        page-break-before: always !important;
+                                        break-before: page !important;
+                                        min-height: 0 !important;
+                                        margin-top: 0 !important;
+                                    }
+                                    .quote-header-address-col,
+                                    .quote-header-quote-col {
+                                        flex: 0 0 50% !important;
+                                        width: 50% !important;
+                                        max-width: 50% !important;
+                                    }
+                                    .quote-clause-block {
+                                        break-inside: avoid-page;
+                                        page-break-inside: avoid;
+                                    }
+                                    [data-print-with-header="1"] .quote-print-repeat-strip {
+                                        display: flex !important;
+                                        visibility: visible !important;
+                                        position: fixed !important;
+                                        top: 0;
+                                        left: 14mm;
+                                        right: 14mm;
+                                        height: 18mm;
+                                        align-items: center;
+                                        justify-content: flex-end;
+                                        gap: 10px;
+                                        background: #fff !important;
+                                        border-bottom: none !important;
+                                        z-index: 2147483646;
+                                        -webkit-print-color-adjust: exact !important;
+                                        print-color-adjust: exact !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-print-footer-rule {
+                                        display: block !important;
+                                        visibility: visible !important;
+                                        position: fixed !important;
+                                        left: 14mm;
+                                        right: 14mm;
+                                        bottom: 27mm;
+                                        height: 0;
+                                        margin: 0;
+                                        padding: 0;
+                                        border: 0;
+                                        border-top: 1px solid #e2e8f0;
+                                        z-index: 2147483645;
+                                        -webkit-print-color-adjust: exact !important;
+                                        print-color-adjust: exact !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-footer-full-rule {
+                                        visibility: hidden !important;
+                                        height: 0 !important;
+                                        margin: 0 !important;
+                                        border: none !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-print-repeat-strip img {
+                                        max-height: 14mm;
+                                        width: auto;
+                                        object-fit: contain;
+                                    }
+                                    [data-print-with-header="1"] .print-logo-section {
+                                        visibility: hidden !important;
+                                        height: 0 !important;
+                                        overflow: hidden !important;
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-sheet-logo-row {
+                                        display: none !important;
+                                        height: 0 !important;
+                                        overflow: hidden !important;
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-print-page-indicator {
+                                        display: block !important;
+                                        visibility: visible !important;
+                                        position: fixed !important;
+                                        bottom: 34mm;
+                                        right: 14mm;
+                                        width: 50%;
+                                        margin-left: 50%;
+                                        text-align: right;
+                                        font-size: 9pt;
+                                        color: #64748b;
+                                        z-index: 2147483645;
+                                    }
+                                    [data-print-with-header="1"] .quote-print-page-indicator::after {
+                                        content: "Page " counter(page);
+                                    }
+                                    [data-print-with-header="1"] .quote-print-page-indicator::after {
+                                        content: "Page " counter(page) " / " counter(pages);
+                                    }
+                                    [data-print-with-header="1"] .footer-section {
+                                        position: fixed !important;
+                                        visibility: visible !important;
+                                        bottom: 10mm;
+                                        right: 14mm;
+                                        width: 50% !important;
+                                        max-width: 50% !important;
+                                        margin: 0 !important;
+                                        margin-left: 50% !important;
+                                        padding: 8px 0 0 0 !important;
+                                        border-top: none !important;
+                                        font-size: 9pt !important;
+                                        text-align: right !important;
+                                        background: #fff !important;
+                                        z-index: 2147483646;
+                                    }
+                                    [data-print-with-header="0"] .quote-print-repeat-strip,
+                                    [data-print-with-header="0"] .quote-print-page-indicator {
+                                        display: none !important;
+                                    }
+                                    .quote-page-num-screen {
+                                        display: none !important;
+                                    }
+                                    .quote-a4-clause-sheet {
+                                        page-break-before: always !important;
+                                        break-before: page !important;
+                                    }
+                                    [data-print-with-header="1"] .quote-continuation-header {
                                         display: none !important;
                                     }
                                 }
                             `}
                             </style>
 
-                            {/* Document Container */}
-                            <div id="quote-preview" style={{
-                                background: 'white',
-                                padding: '40px',
-                                borderRadius: '8px',
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                                maxWidth: '800px',
-                                margin: '0 auto',
-                                minHeight: '280mm' // Ensures it looks like at least one page
-                            }}>
+                            {/* Document Container — dark stack behind A4 “sheets” (screen); print flattens to white. */}
+                            <div
+                                id="quote-preview"
+                                ref={quotePreviewLayoutRef}
+                                className="quote-document-root"
+                                style={{
+                                    background: '#3f3f46',
+                                    padding: 0,
+                                    border: 'none',
+                                    outline: 'none',
+                                    borderRadius: 0,
+                                    boxShadow: 'none',
+                                    maxWidth: '210mm',
+                                    margin: '0 auto',
+                                    minHeight: 'auto',
+                                    boxSizing: 'border-box',
+                                    position: 'relative',
+                                }}
+                            >
+                                <div
+                                    ref={clauseMeasureHostRef}
+                                    className="quote-clause-measure-host"
+                                    aria-hidden
+                                >
+                                    {activeClausesList.map((clause, i) => (
+                                        <div
+                                            key={`m-${clause.listKey}`}
+                                            data-clause-measure-index={i}
+                                            className="quote-clause-block"
+                                            style={{ marginBottom: '20px' }}
+                                        >
+                                            <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
+                                                {i + 1}. {clause.title}
+                                            </h3>
+                                            <div
+                                                style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
+                                                className="clause-content"
+                                                dangerouslySetInnerHTML={{ __html: clause.content || '' }}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
 
-                                {/* Page 1 Container */}
-                                <div className="page-one" style={{
-                                    minHeight: '260mm',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    position: 'relative'
-                                }}>
-                                    <div style={{ flex: 1 }}>
+                                <div className="quote-a4-sheet page-one">
+                                    {/* Logo-only row; address + quote table align below this */}
+                                    <div className="quote-sheet-logo-row" style={{ width: '100%', marginBottom: '20px' }}>
+                                        <div style={{ textAlign: 'right', width: '100%' }}>
+                                            {quoteLogoDisplaySrc ? (
+                                                <img
+                                                    src={quoteLogoDisplaySrc}
+                                                    onError={(e) => console.error('[QuoteForm] Logo load fail:', e.target.src)}
+                                                    alt="Company Logo"
+                                                    style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }}
+                                                />
+                                            ) : null}
+                                        </div>
+                                    </div>
 
-                                        {/* Header */}
-                                        <div className="header-section" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '40px', alignItems: 'flex-start' }}>
-                                            {/* To Section (Left) - Adjusted margin to align with Quote Info Table */}
-                                            <div style={{ flex: 1, marginTop: '40px', paddingRight: '20px' }}>
+                                    <div className="quote-sheet-main-flex">
+                                        {/* 50% address | 50% quote details — top-aligned with each other */}
+                                        <div
+                                            className="header-section quote-header-row"
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                marginBottom: '40px',
+                                                alignItems: 'flex-start',
+                                                width: '100%',
+                                                boxSizing: 'border-box',
+                                            }}
+                                        >
+                                            <div
+                                                className="quote-header-address-col"
+                                                style={{
+                                                    flex: '0 0 50%',
+                                                    width: '50%',
+                                                    maxWidth: '50%',
+                                                    boxSizing: 'border-box',
+                                                    paddingRight: '12px',
+                                                }}
+                                            >
                                                 <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '14px', color: '#334155' }}>To,</div>
                                                 <div style={{ fontWeight: 'bold', color: '#0f172a', marginBottom: '4px', fontSize: '14px' }}>{toName}</div>
                                                 {toAddress && <div style={{ fontSize: '13px', color: '#64748b', whiteSpace: 'pre-line', lineHeight: '1.5', marginBottom: '4px' }}>{toAddress}</div>}
@@ -7355,37 +9503,54 @@ const QuoteForm = () => {
                                                 {toEmail && <div style={{ fontSize: '13px', color: '#64748b' }}>Email: {toEmail}</div>}
                                             </div>
 
-                                            {/* Header & Quote Info (Right) */}
-                                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                                {/* Identity */}
-                                                <div className="print-logo-section" style={{ marginBottom: '12px', textAlign: 'right' }}>
-                                                    {quoteLogo ? (
-                                                        <img
-                                                            src={`/${quoteLogo.replace(/\\/g, '/')}`}
-                                                            onError={(e) => console.error('[QuoteForm] Logo load fail:', e.target.src)}
-                                                            alt="Company Logo"
-                                                            style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }}
-                                                        />
-                                                    ) : (
-                                                        <>
-                                                            <div style={{ fontSize: '14px', color: '#94a3b8', marginBottom: '2px' }}>
-                                                                {quoteCompanyName.toLowerCase().includes('conditioning') ? 'المؤيد لتكييف الهواء' : 'المؤيد للمقاولات'}
-                                                            </div>
-                                                            <div style={{ fontSize: '21px', fontWeight: 'bold', color: '#0284c7', letterSpacing: '-0.5px' }}>{quoteCompanyName}</div>
-                                                        </>
-                                                    )}
-                                                </div>
-                                                <table style={{ fontSize: '13px', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                            <div
+                                                className="quote-header-quote-col"
+                                                style={{
+                                                    flex: '0 0 50%',
+                                                    width: '50%',
+                                                    maxWidth: '50%',
+                                                    boxSizing: 'border-box',
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    alignItems: 'flex-start',
+                                                    paddingLeft: '12px',
+                                                }}
+                                            >
+                                                <table
+                                                    style={{
+                                                        fontSize: '13px',
+                                                        borderCollapse: 'collapse',
+                                                        textAlign: 'left',
+                                                        marginLeft: 'auto',
+                                                        width: '100%',
+                                                        tableLayout: 'fixed',
+                                                    }}
+                                                >
+                                                    <colgroup>
+                                                        <col style={{ width: '40%' }} />
+                                                        <col style={{ width: '60%' }} />
+                                                    </colgroup>
                                                     <tbody>
                                                         <tr style={{ background: '#f1f5f9', borderBottom: '1px solid #e2e8f0' }}>
-                                                            <td style={{ padding: '8px 16px', fontWeight: 'bold', color: '#334155' }}>Quote Ref:</td>
-                                                            <td style={{ padding: '8px 16px', fontWeight: 'bold', color: quoteId ? '#0f172a' : '#ef4444' }}>{quoteId ? quoteNumber : 'Draft'}</td>
+                                                            <td style={{ padding: '4px 16px', fontWeight: 'bold', color: '#334155', verticalAlign: 'top' }}>Quote Ref:</td>
+                                                            <td style={{ padding: '4px 16px', fontWeight: 'bold', color: loadedQuoteOutOfActiveTabScope ? '#ef4444' : (quoteNumber != null && String(quoteNumber).trim()) || (quoteId != null && String(quoteId).trim() !== '') ? '#0f172a' : '#ef4444', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{loadedQuoteOutOfActiveTabScope ? 'Draft' : (quoteNumber != null && String(quoteNumber).trim()) ? String(quoteNumber).trim() : (quoteId != null && String(quoteId).trim() !== '') ? '—' : 'Draft'}</td>
                                                         </tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Date:</td><td style={{ padding: '4px 16px' }}>{formatDate(quoteDate)}</td></tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Prepared By:</td><td style={{ padding: '4px 16px' }}>{preparedBy || 'N/A'}</td></tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Type:</td><td style={{ padding: '4px 16px' }}>{(quoteTypeList.length ? quoteTypeList.join(', ') : null) || enquiryData.enquiry.EnquiryType || 'Tender'}</td></tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Your Ref:</td><td style={{ padding: '4px 16px' }}>{customerReference}</td></tr>
-                                                        <tr><td style={{ padding: '4px 16px', fontWeight: '600', color: '#64748b' }}>Validity:</td><td style={{ padding: '4px 16px' }}>{getValidityDate()}</td></tr>
+                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Date:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{formatDate(quoteDate)}</td></tr>
+                                                        <tr>
+                                                            <td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Prepared By:</td>
+                                                            <td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>
+                                                                {preparedBy || 'N/A'}
+                                                                {preparedByContactFromMaster ? (
+                                                                    <>
+                                                                        <br />
+                                                                        <span style={{ fontWeight: '500', color: '#475569' }}>Tel: {preparedByContactFromMaster}</span>
+                                                                    </>
+                                                                ) : null}
+                                                            </td>
+                                                        </tr>
+                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Type:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{(quoteTypeList.length ? quoteTypeList.join(', ') : null) || enquiryData.enquiry.EnquiryType || 'Tender'}</td></tr>
+                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Your Ref:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{customerReference}</td></tr>
+                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Validity:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{getValidityDate()}</td></tr>
                                                     </tbody>
                                                 </table>
                                             </div>
@@ -7396,11 +9561,11 @@ const QuoteForm = () => {
                                             <tbody>
                                                 <tr style={{ background: '#f8fafc', borderTop: '1px solid #e2e8f0', borderBottom: '1px solid #e2e8f0' }}>
                                                     <td style={{ fontWeight: 'bold', padding: '10px 12px', width: '140px', color: '#334155' }}>Project Name:</td>
-                                                    <td style={{ padding: '10px 12px', fontWeight: '700', color: '#0f172a' }}>{enquiryData.enquiry.ProjectName}</td>
+                                                    <td style={{ padding: '10px 12px', fontWeight: '700', color: '#0f172a' }}>{quotePreviewProjectName || enquiryData.enquiry.ProjectName}</td>
                                                 </tr>
                                                 <tr>
                                                     <td style={{ fontWeight: '600', padding: '8px 12px', color: '#64748b' }}>Subject:</td>
-                                                    <td style={{ padding: '8px 12px' }}>{subject}</td>
+                                                    <td style={{ padding: '8px 12px' }}>{quotePreviewSubject || subject}</td>
                                                 </tr>
                                                 <tr>
                                                     <td style={{ fontWeight: '600', padding: '8px 12px', color: '#64748b' }}>Attention of:</td>
@@ -7417,98 +9582,173 @@ const QuoteForm = () => {
                                             <p>Thank you for providing us with this opportunity to submit our offer for the below-mentioned inclusions. We have carefully reviewed your requirements to ensure that our proposal aligns perfectly. We are pleased to submit our quotation as per the details mentioned below. It is our pleasure to serve you and we assure you that our best efforts will always be made to meet your needs.</p>
                                             <p>We hope you will find our offer competitive and kindly revert to us for any clarifications.</p>
                                         </div>
-                                    </div> {/* End of Flex-1 Content */}
 
-                                    {/* Bottom Section (Signature + Footer) */}
-                                    <div style={{ marginTop: 'auto', pageBreakInside: 'avoid' }}>
+                                        {sanitizedPageOneClauseIndices.map((clauseIdx) => {
+                                            const clause = activeClausesList[clauseIdx];
+                                            if (!clause) return null;
+                                            return (
+                                                <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px', pageBreakInside: 'avoid' }}>
+                                                    <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
+                                                        {clauseIdx + 1}. {clause.title}
+                                                    </h3>
+                                                    <div
+                                                        style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
+                                                        className="clause-content"
+                                                        dangerouslySetInnerHTML={{ __html: clause.content || '' }}
+                                                    />
+                                                </div>
+                                            );
+                                        })}
+                                        <div className="quote-sheet-main-flex-fill" style={{ flex: '1 1 auto', minHeight: 0 }} aria-hidden />
+                                    </div>
+
+                                    {/* Bottom Section (Signature + Footer) — pinned to sheet bottom when content is short */}
+                                    <div className="quote-sheet-footer-push" style={{ pageBreakInside: 'avoid' }}>
 
                                         {/* Signature Section */}
-                                        <div style={{ marginTop: '30px' }}>
-                                            <div style={{ marginBottom: '40px' }}>For {quoteCompanyName || enquiryData.companyDetails?.name || 'Almoayyed Contracting'},</div>
+                                        <div style={{ marginTop: 0 }}>
+                                            <div style={{ marginBottom: '112px' }}>
+                                                For {quoteCompanyName || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'},
+                                            </div>
                                             <div style={{ fontWeight: '600' }}>{signatory || 'N/A'}</div>
                                             <div style={{ fontSize: '13px', color: '#64748b' }}>{signatoryDesignation || ''}</div>
                                         </div>
 
-                                        {/* Footer */}
-                                        <div className="footer-section" style={{ marginTop: '30px', paddingTop: '15px', borderTop: '1px solid #e2e8f0', fontSize: '11px', color: '#64748b', textAlign: 'right' }}>
-                                            <div>{footerDetails?.name || enquiryData.companyDetails?.name || 'Almoayyed Contracting'}</div>
-                                            <div>{footerDetails?.address || enquiryData.companyDetails?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
+                                        {/* Page number (screen); print uses fixed strip / @page where supported */}
+                                        <div className="quote-page-num-screen">
+                                            Page 1 / {quotePreviewTotalPages}
+                                        </div>
+                                        <div className="quote-footer-full-rule" aria-hidden="true" />
+
+                                        {/* Footer: right half only (A4 / print layout) */}
+                                        <div
+                                            className="footer-section"
+                                            style={{
+                                                marginTop: '8px',
+                                                marginLeft: '50%',
+                                                width: '50%',
+                                                maxWidth: '50%',
+                                                paddingTop: '15px',
+                                                fontSize: '11px',
+                                                color: '#64748b',
+                                                textAlign: 'right',
+                                                boxSizing: 'border-box',
+                                            }}
+                                        >
+                                            <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
+                                            <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
                                             <div>
-                                                {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (enquiryData.companyDetails?.phone ? `Tel: ${enquiryData.companyDetails.phone}` : 'Tel: (+973) 17 400 407')}
+                                                {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
                                                 {' | '}
-                                                Fax: {footerDetails?.fax || enquiryData.companyDetails?.fax || '(+973) 17 400 396'}
+                                                Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
                                             </div>
-                                            <div>E-mail: {footerDetails?.email || enquiryData.companyDetails?.email || 'bms@almcg.com'}</div>
+                                            <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
                                         </div>
                                     </div>
-                                </div> {/* End of Page 1 Container */}
-
-                                {/* Clauses - Standard + Custom Mixed & Numbered via Ordered List */}
-                                <div className="page-break" style={{
-                                    marginTop: '40px',
-                                    minHeight: '100mm', // Forced height for visibility
-                                    paddingBottom: '40px',
-                                    background: 'white'
-                                }}>
-                                    {/* Visual Divider (Screen Only) */}
-                                    <div className="no-print" style={{
-                                        height: '1px',
-                                        borderTop: '2px dashed #3b82f6', // Changed to blue to be more visible
-                                        margin: '40px 0',
-                                        position: 'relative',
-                                        opacity: 1 // Full opacity for debug
-                                    }}>
-                                        <span style={{
-                                            position: 'absolute',
-                                            top: '-10px',
-                                            left: '50%',
-                                            transform: 'translateX(-50%)',
-                                            background: '#3b82f6',
-                                            padding: '2px 10px',
-                                            color: 'white',
-                                            fontSize: '11px',
-                                            fontWeight: '700',
-                                            borderRadius: '10px',
-                                            whiteSpace: 'nowrap'
-                                        }}>
-                                            PAGE 2 - Clauses & Conditions ({orderedClauses.filter(id => id.startsWith('custom_') ? customClauses.find(c => c.id === id)?.isChecked : clauses[id]).length} Active)
-                                        </span>
-                                    </div>
-
-                                    {orderedClauses.map(id => {
-                                        const isCustom = id.startsWith('custom_');
-                                        const customClause = isCustom ? customClauses.find(c => c.id === id) : null;
-                                        const standardClause = !isCustom ? clauseDefinitions.find(c => c.key === id) : null;
-
-                                        if (!customClause && !standardClause) return null;
-
-                                        return isCustom ?
-                                            { ...customClause, type: 'custom' } :
-                                            { ...standardClause, type: 'standard', isChecked: clauses[id], content: clauseContent[standardClause.contentKey] };
-                                    })
-                                        .filter(clause => clause && clause.isChecked)
-                                        .map((clause, index) => (
-                                            <div key={clause.key || clause.id} style={{ marginBottom: '20px', pageBreakInside: 'avoid' }}>
-                                                <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>{index + 1}. {clause.title}</h3>
-                                                <div
-                                                    style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
-                                                    className="clause-content"
-                                                    dangerouslySetInnerHTML={{ __html: clause.content }}
-                                                />
-                                            </div>
-                                        ))
-                                    }
-
-                                    {/* Placeholder to ensure we can see the bottom of the container */}
-                                    <div style={{ height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderTop: '1px solid #f1f5f9', marginTop: '20px', color: '#cbd5e1', fontSize: '10px' }}>
-                                        --- End of Quotation ---
-                                    </div>
+                                    {quoteDigitalStamps
+                                        .filter((s) => s.sheetIndex === 0)
+                                        .map((stamp) => (
+                                            <QuoteSignatureStamp
+                                                key={stamp.id}
+                                                stamp={stamp}
+                                                onRemove={handleRemoveDigitalStamp}
+                                                onMove={handleMoveDigitalStamp}
+                                                allowRemove={!hasPersistedQuoteForScope}
+                                            />
+                                        ))}
                                 </div>
+
+                                {sanitizedClausePageGroups.map((group, sheetIdx) => (
+                                    <div
+                                        key={`clause-page-${sheetIdx}-${group.join('-')}`}
+                                        className="quote-a4-sheet quote-a4-clause-sheet page-break"
+                                    >
+                                        <div className="quote-continuation-header">
+                                            {quoteLogoDisplaySrc ? (
+                                                <img
+                                                    src={quoteLogoDisplaySrc}
+                                                    alt=""
+                                                    style={{ height: '48px', width: 'auto', maxWidth: '180px', objectFit: 'contain' }}
+                                                />
+                                            ) : null}
+                                        </div>
+
+                                        <div className="quote-sheet-main-flex">
+                                            {group.map((clauseIdx) => {
+                                                const clause = activeClausesList[clauseIdx];
+                                                if (!clause) return null;
+                                                return (
+                                                    <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px', pageBreakInside: 'avoid' }}>
+                                                        <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
+                                                            {clauseIdx + 1}. {clause.title}
+                                                        </h3>
+                                                        <div
+                                                            style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
+                                                            className="clause-content"
+                                                            dangerouslySetInnerHTML={{ __html: clause.content }}
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+                                            <div className="quote-sheet-main-flex-fill" style={{ flex: '1 1 auto', minHeight: 0 }} aria-hidden />
+                                        </div>
+
+                                        <div className="quote-continuation-footer quote-sheet-footer-push">
+                                            <div className="quote-page-num-screen">
+                                                Page {sheetIdx + 2} / {quotePreviewTotalPages}
+                                            </div>
+                                            <div className="quote-footer-full-rule" aria-hidden="true" />
+                                            <div
+                                                style={{
+                                                    marginLeft: '50%',
+                                                    width: '50%',
+                                                    maxWidth: '50%',
+                                                    paddingTop: '12px',
+                                                    fontSize: '11px',
+                                                    color: '#64748b',
+                                                    textAlign: 'right',
+                                                    boxSizing: 'border-box',
+                                                }}
+                                            >
+                                                <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
+                                                <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
+                                                <div>
+                                                    {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
+                                                    {' | '}
+                                                    Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
+                                                </div>
+                                                <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
+                                            </div>
+                                        </div>
+                                        {quoteDigitalStamps
+                                            .filter((s) => s.sheetIndex === sheetIdx + 1)
+                                            .map((stamp) => (
+                                                <QuoteSignatureStamp
+                                                    key={stamp.id}
+                                                    stamp={stamp}
+                                                    onRemove={handleRemoveDigitalStamp}
+                                                    onMove={handleMoveDigitalStamp}
+                                                    allowRemove={!hasPersistedQuoteForScope}
+                                                />
+                                            ))}
+                                    </div>
+                                ))}
                             </div>
-                        </>
+                            </div>
+                        </div>
                     )
                 }
             </div >
+            <SignatureVaultModal
+                open={signatureVaultOpen}
+                onClose={() => setSignatureVaultOpen(false)}
+                userEmail={(currentUser?.EmailId || currentUser?.email || '').trim()}
+                placementEnabled
+                totalSheets={quotePreviewTotalPages}
+                onPlaceStamp={handlePlaceDigitalStamp}
+                displayName={signatory || preparedBy || currentUser?.FullName || currentUser?.name || ''}
+                designation={signatoryDesignation || ''}
+            />
         </div >
     );
 };

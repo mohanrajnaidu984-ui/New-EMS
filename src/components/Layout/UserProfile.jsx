@@ -1,16 +1,28 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
 import { useAuth, getStoredLoginEmail } from '../../context/AuthContext';
 import ProfileImageModal from '../Modals/ProfileImageModal';
 import ChangePasswordModal from '../Modals/ChangePasswordModal';
 import UserManagementModal from '../Modals/UserManagementModal';
+import {
+    SignatureVaultModal,
+    loadSignatureLibrary,
+    loadDefaultSignatureId,
+    saveDefaultSignatureId,
+    EMS_QUOTE_PLACE_STAMP_EVENT,
+} from '../Quote/QuoteDigitalSignature';
 
-const UserProfile = () => {
+/** `activeTab` used so Place on page in the dropdown only works on Quote (same event QuoteForm listens for). */
+const UserProfile = ({ activeTab = '' }) => {
     const { currentUser, logout, updateProfileImage } = useAuth();
     const [showModal, setShowModal] = useState(false);
     const [showPasswordModal, setShowPasswordModal] = useState(false);
     const [showUserManagementModal, setShowUserManagementModal] = useState(false);
+    const [showSignatureVault, setShowSignatureVault] = useState(false);
     const [dropdownOpen, setDropdownOpen] = useState(false);
+    const [signatureQuickList, setSignatureQuickList] = useState([]);
+    const [defaultSignatureId, setDefaultSignatureId] = useState('');
+    const [placePageIndex, setPlacePageIndex] = useState(0);
+    const [quotePageCount, setQuotePageCount] = useState(1);
     const dropdownRef = useRef(null);
     const timeoutRef = useRef(null);
 
@@ -55,10 +67,26 @@ const UserProfile = () => {
         };
     }, [dropdownOpen]);
 
-    if (!currentUser) return null;
-
     const displayEmail =
-        getStoredLoginEmail() || currentUser.email || currentUser.EmailId || '';
+        getStoredLoginEmail() || currentUser?.email || currentUser?.EmailId || '';
+
+    useEffect(() => {
+        if (!dropdownOpen || !displayEmail) return;
+        setSignatureQuickList(loadSignatureLibrary(displayEmail));
+        setDefaultSignatureId(loadDefaultSignatureId(displayEmail) || '');
+    }, [dropdownOpen, displayEmail]);
+
+    useEffect(() => {
+        if (!dropdownOpen) return;
+        const n =
+            typeof window !== 'undefined' && Number(window.__EMS_QUOTE_PREVIEW_TOTAL_PAGES) > 0
+                ? Number(window.__EMS_QUOTE_PREVIEW_TOTAL_PAGES)
+                : 1;
+        setQuotePageCount(n);
+        setPlacePageIndex((p) => Math.min(Math.max(0, p), Math.max(0, n - 1)));
+    }, [dropdownOpen, activeTab]);
+
+    if (!currentUser) return null;
 
     // Check Admin Role
     const roleString = currentUser.role || currentUser.Roles || '';
@@ -130,7 +158,7 @@ const UserProfile = () => {
                     style={{
                         top: '120%',
                         right: '0',
-                        minWidth: '220px',
+                        minWidth: '280px',
                         zIndex: 10000,
                         border: '1px solid #e0e0e0',
                         marginTop: '10px',
@@ -171,6 +199,116 @@ const UserProfile = () => {
                         <i className="bi bi-key me-2"></i>
                         Change Password
                     </button>
+
+                    <div
+                        className="px-3 py-2 border-top"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="text-muted text-uppercase mb-1" style={{ fontSize: '0.65rem', letterSpacing: '0.05em' }}>
+                            Quote digital signature
+                        </div>
+                        {signatureQuickList.length === 0 ? (
+                            <div className="text-muted" style={{ fontSize: '0.75rem' }}>
+                                No saved signatures. Use Manage to draw or upload.
+                            </div>
+                        ) : (
+                            <>
+                                <label className="form-label mb-1" style={{ fontSize: '0.7rem', color: '#64748b', marginBottom: '2px' }}>
+                                    Signature
+                                </label>
+                                <select
+                                    className="form-select form-select-sm"
+                                    value={defaultSignatureId}
+                                    onChange={(e) => {
+                                        const v = e.target.value;
+                                        saveDefaultSignatureId(displayEmail, v || null);
+                                        setDefaultSignatureId(v);
+                                    }}
+                                    aria-label="Signature to use on quote"
+                                >
+                                    <option value="">Select signature…</option>
+                                    {signatureQuickList.map((s) => (
+                                        <option key={s.id} value={s.id}>
+                                            {s.label}
+                                        </option>
+                                    ))}
+                                </select>
+                                <div className="d-flex align-items-center gap-2 mt-2 flex-wrap">
+                                    <label className="small text-muted mb-0" style={{ whiteSpace: 'nowrap' }}>
+                                        Page
+                                    </label>
+                                    <select
+                                        className="form-select form-select-sm"
+                                        style={{ width: 'auto', minWidth: '72px' }}
+                                        value={placePageIndex}
+                                        onChange={(e) => setPlacePageIndex(Number(e.target.value))}
+                                        disabled={activeTab !== 'Quote'}
+                                        aria-label="Quote page for stamp"
+                                    >
+                                        {Array.from({ length: quotePageCount }, (_, i) => (
+                                            <option key={i} value={i}>
+                                                {i + 1}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        className="btn btn-sm btn-primary flex-grow-1"
+                                        style={{ minWidth: '120px' }}
+                                        disabled={
+                                            activeTab !== 'Quote' ||
+                                            !defaultSignatureId ||
+                                            !signatureQuickList.some((s) => s.id === defaultSignatureId)
+                                        }
+                                        title={
+                                            activeTab !== 'Quote'
+                                                ? 'Open the Quote tab first'
+                                                : !defaultSignatureId
+                                                  ? 'Choose a signature above'
+                                                  : 'Adds stamp to the quote preview — then drag it where you need'
+                                        }
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const sig = signatureQuickList.find((s) => s.id === defaultSignatureId);
+                                            if (!sig || activeTab !== 'Quote') return;
+                                            window.dispatchEvent(
+                                                new CustomEvent(EMS_QUOTE_PLACE_STAMP_EVENT, {
+                                                    detail: {
+                                                        imageDataUrl: sig.imageDataUrl,
+                                                        sheetIndex: placePageIndex,
+                                                        displayName: (currentUser.FullName || currentUser.name || '').trim(),
+                                                        designation: (currentUser.Designation || '').trim(),
+                                                    },
+                                                })
+                                            );
+                                            setDropdownOpen(false);
+                                        }}
+                                    >
+                                        Place on page
+                                    </button>
+                                </div>
+                                <div className="text-muted mt-2" style={{ fontSize: '0.68rem', lineHeight: 1.35 }}>
+                                    On <strong>Quote</strong>: pick signature and page, then Place — drag the stamp on the preview (not ×). Other
+                                    tabs: use Manage only.
+                                </div>
+                            </>
+                        )}
+                        <button
+                            type="button"
+                            className="btn btn-sm btn-outline-primary w-100 mt-2"
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setDropdownOpen(false);
+                                setShowSignatureVault(true);
+                            }}
+                        >
+                            <i className="bi bi-pen me-1"></i>
+                            Manage signatures…
+                        </button>
+                    </div>
 
                     {isAdmin && (
                         <button
@@ -248,6 +386,19 @@ const UserProfile = () => {
             <UserManagementModal
                 show={showUserManagementModal}
                 onClose={() => setShowUserManagementModal(false)}
+            />
+
+            <SignatureVaultModal
+                open={showSignatureVault}
+                onClose={() => {
+                    setShowSignatureVault(false);
+                    if (displayEmail) {
+                        setSignatureQuickList(loadSignatureLibrary(displayEmail));
+                        setDefaultSignatureId(loadDefaultSignatureId(displayEmail) || '');
+                    }
+                }}
+                userEmail={displayEmail}
+                placementEnabled={false}
             />
         </div>
     );

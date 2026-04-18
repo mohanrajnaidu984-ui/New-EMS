@@ -389,10 +389,12 @@ const apiRoutes = require('./routes/api');
 const dashboardRoutes = require('./routes/dashboard'); // New Dashboard Routes
 const pricingRoutes = require('./routes/pricing'); // Pricing Module Routes
 const quotesRoutes = require('./routes/quotes'); // Quote Module Routes
+const quotePdfRoutes = require('./routes/quotePdf');
 app.use('/api', apiRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/quotes', quotesRoutes);
+app.use('/api/quote-pdf', quotePdfRoutes);
 const probabilityRoutes = require('./routes/probabilityRoutes');
 app.use('/api/probability', probabilityRoutes);
 const salesReportRoutes = require('./routes/salesReportRoutes');

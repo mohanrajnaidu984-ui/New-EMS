@@ -2,8 +2,15 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, FileSpreadsheet, X } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth, getStoredLoginEmail } from '../../context/AuthContext';
+import DateInput from '../Enquiry/DateInput';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
+/** List mode: pending pricing work vs search (same UX pattern as Quote list) */
+const PRICING_LIST_CATEGORY = {
+    PENDING: 'pending',
+    SEARCH: 'search',
+};
 
 /** Normalize EnquiryFor IDs from API (number vs string) for Set/hierarchy lookups */
 const nid = (v) => {
@@ -63,8 +70,14 @@ const PricingForm = () => {
     }, [currentUser?.EmailId, currentUser?.email, currentUser?.MailId]);
 
 
-    // Search state
-    const [searchTerm, setSearchTerm] = useState(() => localStorage.getItem('pricing_searchTerm') || '');
+    // Search / list state (aligned with Quote list: category, criteria, enquiry date range)
+    const [pricingListCategory, setPricingListCategory] = useState(PRICING_LIST_CATEGORY.PENDING);
+    const [pricingListSearchCriteria, setPricingListSearchCriteria] = useState(() =>
+        localStorage.getItem('pricing_listSearchCriteria') || localStorage.getItem('pricing_searchTerm') || ''
+    );
+    const [pricingListDateFrom, setPricingListDateFrom] = useState('');
+    const [pricingListDateTo, setPricingListDateTo] = useState('');
+    const [pricingSearchAttempted, setPricingSearchAttempted] = useState(false);
     const [suggestions, setSuggestions] = useState([]);
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [searchResults, setSearchResults] = useState([]);
@@ -111,8 +124,8 @@ const PricingForm = () => {
 
     // -- Persistence --
     useEffect(() => {
-        localStorage.setItem('pricing_searchTerm', searchTerm);
-    }, [searchTerm]);
+        localStorage.setItem('pricing_listSearchCriteria', pricingListSearchCriteria);
+    }, [pricingListSearchCriteria]);
 
     useEffect(() => {
         localStorage.setItem('pricing_selectedCustomer', selectedCustomer);
@@ -154,26 +167,29 @@ const PricingForm = () => {
 
 
 
-    // Fetch suggestions as user types
-    const handleSearchInput = (value) => {
-        setSearchTerm(value);
+    // Suggestions while typing (Search Pricing mode only)
+    const handlePricingListCriteriaInput = (value) => {
+        setPricingListSearchCriteria(value);
         setSuggestions([]);
-        // We only clear searchResults if the value is cleared
         if (!value.trim()) {
             setSearchResults([]);
             setPricingData(null);
         }
 
+        if (pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH) {
+            setSuggestions([]);
+            setShowSuggestions(false);
+            return;
+        }
+
         if (debounceRef.current) clearTimeout(debounceRef.current);
 
-        // Allow suggestions from 1 character for numbers (Enquiry No) or 2+ for text
         const shouldSuggest = value.trim().length >= 1;
 
         if (shouldSuggest) {
             debounceRef.current = setTimeout(async () => {
                 try {
                     const userEmail = resolvePricingUserEmail();
-                    // Note: Use pendingOnly=false for search bar to find everything
                     const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(value.trim())}&userEmail=${encodeURIComponent(userEmail)}&pendingOnly=false`);
                     if (res.ok) {
                         const data = await res.json();
@@ -190,49 +206,74 @@ const PricingForm = () => {
         }
     };
 
-    // Select a suggestion
     const handleSelectSuggestion = (enq) => {
-        setSearchTerm(enq.RequestNo);
+        setPricingListSearchCriteria(String(enq.RequestNo || ''));
         setSuggestions([]);
         setShowSuggestions(false);
-        setSearchResults([enq]); // Show only the selected enquiry
+        setSearchResults([enq]);
     };
 
-    // Manual search
-    const handleSearch = async () => {
-        if (!searchTerm.trim()) return;
+    const handlePricingListSearch = async () => {
+        if (pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH) return;
+        const q = pricingListSearchCriteria.trim();
+        const df = (pricingListDateFrom || '').trim();
+        const dt = (pricingListDateTo || '').trim();
+        if (!q && !(df && dt)) {
+            setSearchResults([]);
+            setPricingSearchAttempted(false);
+            return;
+        }
+        setPricingSearchAttempted(true);
         setShowSuggestions(false);
+        if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+            debounceRef.current = null;
+        }
+        if (searching) return;
         setSearching(true);
         setPricingData(null);
 
         try {
             const userEmail = resolvePricingUserEmail();
-            const res = await fetch(`${API_BASE}/api/pricing/list?search=${encodeURIComponent(searchTerm.trim())}&userEmail=${encodeURIComponent(userEmail)}&pendingOnly=false`);
+            const params = new URLSearchParams();
+            params.set('userEmail', userEmail);
+            params.set('pendingOnly', 'false');
+            if (q) params.set('search', q);
+            if (df) params.set('dateFrom', df);
+            if (dt) params.set('dateTo', dt);
+            const res = await fetch(`${API_BASE}/api/pricing/list?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
-                setSearchResults(data);
+                setSearchResults(Array.isArray(data) ? data : []);
                 setSuggestions([]);
+            } else {
+                setSearchResults([]);
             }
         } catch (err) {
-            console.error('Manual search error:', err);
+            console.error('Pricing list search error:', err);
             alert('Search failed. Please try again.');
+            setSearchResults([]);
         } finally {
             setSearching(false);
         }
     };
 
-    // Clear search
-    const handleClear = () => {
-        setSearchTerm('');
+    const handlePricingListClear = () => {
+        setPricingListSearchCriteria('');
+        setPricingListDateFrom('');
+        setPricingListDateTo('');
+        setSearchResults([]);
+        setPricingListCategory(PRICING_LIST_CATEGORY.PENDING);
+        setPricingSearchAttempted(false);
         setSuggestions([]);
         setShowSuggestions(false);
-        setSearchResults([]);
         setPricingData(null);
         setSelectedEnquiry(null);
         setValues({});
         setSelectedCustomer('');
         setAddingCustomer(false);
         setNewCustomerName('');
+        refreshPendingRequests();
     };
 
     // Load pricing for selected enquiry
@@ -1833,94 +1874,219 @@ const PricingForm = () => {
 
     return (
         <div style={{ padding: '20px', background: '#f5f7fa', minHeight: 'calc(100vh - 80px)' }}>
-            {/* Search Bar with Autocomplete */}
+            {/* List filters (same pattern as Quote: category, criteria, enquiry dates, Search / Clear) */}
             <div style={{ background: 'white', padding: '16px 20px', borderRadius: '8px', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }} ref={searchRef}>
-                    <div style={{ position: 'relative', flex: 1, maxWidth: '400px' }}>
-                        <input
-                            type="text"
-                            placeholder="Search by Enquiry No., Project, or Customer..."
-                            value={searchTerm}
-                            onChange={(e) => handleSearchInput(e.target.value)}
-                            onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                            style={{
-                                width: '100%',
-                                padding: '10px 14px',
-                                border: '1px solid #e2e8f0',
-                                borderRadius: '6px',
-                                fontSize: '14px'
+                <div
+                    ref={searchRef}
+                    style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'flex-start',
+                        gap: '10px 16px',
+                        rowGap: '10px',
+                        width: '100%',
+                    }}
+                >
+                    <label
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            fontSize: '12px',
+                            fontWeight: '600',
+                            color: '#475569',
+                            margin: 0,
+                        }}
+                    >
+                        Category
+                        <select
+                            value={pricingListCategory}
+                            onChange={(e) => {
+                                const v = e.target.value;
+                                setPricingListCategory(v);
+                                if (v === PRICING_LIST_CATEGORY.PENDING) {
+                                    setSearchResults([]);
+                                    setPricingSearchAttempted(false);
+                                }
                             }}
-                        />
-                        {/* Suggestions Dropdown */}
-                        {showSuggestions && suggestions.length > 0 && (
-                            <div style={{
-                                position: 'absolute',
-                                top: '100%',
-                                left: 0,
-                                right: 0,
-                                background: 'white',
-                                border: '1px solid #e2e8f0',
+                            style={{
+                                minWidth: '148px',
+                                padding: '6px 10px',
+                                fontSize: '12px',
                                 borderRadius: '6px',
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                                zIndex: 1000,
-                                maxHeight: '300px',
-                                overflowY: 'auto',
-                                marginTop: '4px'
-                            }}>
-                                {suggestions.map((enq, idx) => (
-                                    <div
-                                        key={enq.RequestNo || idx}
-                                        onClick={() => handleSelectSuggestion(enq)}
-                                        style={{
-                                            padding: '10px 14px',
-                                            cursor: 'pointer',
-                                            borderBottom: idx < suggestions.length - 1 ? '1px solid #f1f5f9' : 'none',
-                                            transition: 'background 0.15s'
-                                        }}
-                                        onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                        onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                    >
-                                        <div style={{ fontWeight: '600', fontSize: '13px', color: '#1e293b' }}>
-                                            {enq.RequestNo}
+                                border: '1px solid #cbd5e1',
+                                background: '#fff',
+                                color: '#334155',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            <option value={PRICING_LIST_CATEGORY.PENDING}>Pending Pricing</option>
+                            <option value={PRICING_LIST_CATEGORY.SEARCH}>Search Price</option>
+                        </select>
+                    </label>
+                    <label
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            fontSize: '12px',
+                            fontWeight: '600',
+                            color: '#475569',
+                            margin: 0,
+                            flex: '2 1 280px',
+                            minWidth: '220px',
+                            maxWidth: '640px',
+                        }}
+                    >
+                        Search criteria
+                        <div style={{ position: 'relative', flex: 1, minWidth: '200px' }}>
+                            <input
+                                type="text"
+                                autoComplete="off"
+                                value={pricingListSearchCriteria}
+                                onChange={(e) => handlePricingListCriteriaInput(e.target.value)}
+                                onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+                                onKeyDown={(e) => {
+                                    if (e.key !== 'Enter') return;
+                                    e.preventDefault();
+                                    if (pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH || searching) return;
+                                    handlePricingListSearch();
+                                }}
+                                disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
+                                placeholder={
+                                    pricingListCategory === PRICING_LIST_CATEGORY.SEARCH
+                                        ? 'Enquiry no., project, customer, client, consultant, updated by… (use From/To for enquiry date)'
+                                        : 'Select "Search Price" to enable'
+                                }
+                                style={{
+                                    width: '100%',
+                                    padding: '6px 10px',
+                                    fontSize: '12px',
+                                    borderRadius: '6px',
+                                    border: '1px solid #cbd5e1',
+                                    background: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
+                                    color: '#334155',
+                                    opacity: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                    cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
+                                }}
+                            />
+                            {showSuggestions && suggestions.length > 0 && (
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '100%',
+                                    left: 0,
+                                    right: 0,
+                                    background: 'white',
+                                    border: '1px solid #e2e8f0',
+                                    borderRadius: '6px',
+                                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                                    zIndex: 1000,
+                                    maxHeight: '300px',
+                                    overflowY: 'auto',
+                                    marginTop: '4px'
+                                }}>
+                                    {suggestions.map((enq, idx) => (
+                                        <div
+                                            key={enq.RequestNo || idx}
+                                            onClick={() => handleSelectSuggestion(enq)}
+                                            style={{
+                                                padding: '10px 14px',
+                                                cursor: 'pointer',
+                                                borderBottom: idx < suggestions.length - 1 ? '1px solid #f1f5f9' : 'none',
+                                                transition: 'background 0.15s'
+                                            }}
+                                            onMouseOver={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
+                                            onMouseOut={(e) => { e.currentTarget.style.background = 'white'; }}
+                                        >
+                                            <div style={{ fontWeight: '600', fontSize: '13px', color: '#1e293b' }}>
+                                                {enq.RequestNo}
+                                            </div>
+                                            <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
+                                                {enq.ProjectName || 'No project'} • {enq.CustomerName || 'No customer'}
+                                            </div>
                                         </div>
-                                        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
-                                            {enq.ProjectName || 'No project'} • {enq.CustomerName || 'No customer'}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </label>
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: '8px',
+                            fontSize: '12px',
+                            fontWeight: '600',
+                            color: '#475569',
+                            opacity: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                        }}
+                    >
+                        <span style={{ whiteSpace: 'nowrap' }}>From</span>
+                        <div style={{ width: '128px', pointerEvents: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'auto' : 'none' }}>
+                            <DateInput
+                                value={pricingListDateFrom}
+                                onChange={(e) => setPricingListDateFrom(e.target.value)}
+                                disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
+                                placeholder="DD-MMM-YYYY"
+                                style={{
+                                    fontSize: '12px',
+                                    padding: '6px 8px',
+                                    cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                }}
+                            />
+                        </div>
+                        <span style={{ whiteSpace: 'nowrap' }}>To</span>
+                        <div style={{ width: '128px', pointerEvents: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'auto' : 'none' }}>
+                            <DateInput
+                                value={pricingListDateTo}
+                                onChange={(e) => setPricingListDateTo(e.target.value)}
+                                disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
+                                placeholder="DD-MMM-YYYY"
+                                style={{
+                                    fontSize: '12px',
+                                    padding: '6px 8px',
+                                    cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
+                                }}
+                            />
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                            <button
+                                type="button"
+                                onClick={handlePricingListSearch}
+                                disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH || searching}
+                                style={{
+                                    padding: '6px 14px',
+                                    fontSize: '12px',
+                                    fontWeight: '600',
+                                    borderRadius: '6px',
+                                    border: '1px solid #2563eb',
+                                    background: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
+                                    color: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
+                                    cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && !searching ? 'pointer' : 'not-allowed',
+                                }}
+                            >
+                                {searching ? 'Searching…' : 'Search'}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handlePricingListClear}
+                                style={{
+                                    padding: '6px 14px',
+                                    fontSize: '12px',
+                                    fontWeight: '600',
+                                    borderRadius: '6px',
+                                    border: '1px solid #cbd5e1',
+                                    background: '#fff',
+                                    color: '#475569',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                Clear
+                            </button>
+                        </div>
                     </div>
-                    <button
-                        onClick={handleSearch}
-                        disabled={searching}
-                        style={{
-                            padding: '10px 20px',
-                            background: 'white',
-                            color: '#1e293b',
-                            border: '1px solid #cbd5e1',
-                            borderRadius: '6px',
-                            fontWeight: '600',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        SEARCH
-                    </button>
-                    <button
-                        onClick={handleClear}
-                        style={{
-                            padding: '10px 20px',
-                            background: 'white',
-                            color: '#64748b',
-                            border: '1px solid #e2e8f0',
-                            borderRadius: '6px',
-                            fontWeight: '600',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        CLEAR
-                    </button>
                 </div>
             </div>
 
@@ -1933,13 +2099,23 @@ const PricingForm = () => {
 
             {/* Search Results Table */}
             {
-                searchResults.length > 0 && !pricingData && (
+                pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && searchResults.length > 0 && !pricingData && (
                     <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
                         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <Search size={16} /> Search Results ({searchResults.length})
                             </h3>
-                            <button onClick={() => setSearchResults([])} style={{ fontSize: '12px', color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}>Close Results</button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setSearchResults([]);
+                                    setPricingListCategory(PRICING_LIST_CATEGORY.PENDING);
+                                    setPricingSearchAttempted(false);
+                                }}
+                                style={{ fontSize: '12px', color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}
+                            >
+                                Close Results
+                            </button>
                         </div>
                         <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -1952,6 +2128,7 @@ const PricingForm = () => {
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Enquiry Date</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -2035,6 +2212,9 @@ const PricingForm = () => {
                                                 })}
                                                 {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8 italic' }}>No assigned jobs</span>}
                                             </td>
+                                            <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
+                                                {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
+                                            </td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -2044,9 +2224,9 @@ const PricingForm = () => {
                 )
             }
 
-            {/* Pending Requests List - Display when no search and no pricing loaded */}
+            {/* Pending Requests List */}
             {
-                !pricingData && searchResults.length === 0 && !searchTerm && pendingRequests.length > 0 && (() => {
+                pricingListCategory === PRICING_LIST_CATEGORY.PENDING && !pricingData && pendingRequests.length > 0 && (() => {
                     // --- Sort Logic ---
                     const sortedPending = [...pendingRequests].sort((a, b) => {
                         const { field, direction } = pendingSortConfig;
@@ -2113,6 +2293,7 @@ const PricingForm = () => {
                                             <SortableHeader field="ConsultantName" label="Consultant Name" />
                                             <SortableHeader field="DueDate" label="Due Date" style={{ width: '120px' }} />
                                             <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
+                                            <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -2196,6 +2377,9 @@ const PricingForm = () => {
                                                         );
                                                     })}
                                                 </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
+                                                    {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -2206,11 +2390,17 @@ const PricingForm = () => {
                 })()
             }
 
-            {/* No Results (Only show if truly no results and no pending list default) */}
+            {/* No results (Search Price mode, after running Search) */}
             {
-                searchResults.length === 0 && searchTerm && !searching && !pricingData && !showSuggestions && (
+                pricingListCategory === PRICING_LIST_CATEGORY.SEARCH
+                && !searching
+                && !pricingData
+                && searchResults.length === 0
+                && pricingSearchAttempted
+                && !showSuggestions
+                && (
                     <div style={{ background: 'white', padding: '40px', borderRadius: '8px', textAlign: 'center', color: '#64748b' }}>
-                        No results. Type to search or select from suggestions.
+                        No results. Enter search text and/or choose From and To enquiry dates, then click Search.
                     </div>
                 )
             }
