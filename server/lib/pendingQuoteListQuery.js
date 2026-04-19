@@ -3,7 +3,41 @@
 const { resolvePricingAccessContext, normalizePricingJobName } = require('./quotePricingAccess');
 
 /**
+ * Strip trailing " (L12)" / " (l1)" from customer / ToName so grid labels still match saved quotes.
+ */
+function sqlTupleCustomerKey(alias, col) {
+    const trimmed = `LTRIM(RTRIM(ISNULL(${alias}.${col}, N'')))`;
+    const stripped = `(CASE
+        WHEN PATINDEX(N'% (L[0-9]%', ${trimmed}) > 0 AND RIGHT(RTRIM(${trimmed}), 1) = N')'
+        THEN RTRIM(LEFT(${trimmed}, (LEN(${trimmed}) - CHARINDEX(N'(', REVERSE(${trimmed})) + 1) - 2))
+        ELSE ${trimmed}
+    END)`;
+    return `LOWER(LTRIM(RTRIM(${stripped})))`;
+}
+
+/** Step 2 tuple: EnquiryQuotes.OwnJob = PV.EnquiryForItem (case-insensitive, trimmed). */
+function sqlTupleOwnJobMatch(eqAlias, pvAlias = 'PV') {
+    return `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.EnquiryForItem, N''))))`;
+}
+
+/** Step 2 tuple: EnquiryQuotes.LeadJob = PV.LeadJobName (case-insensitive, trimmed). */
+function sqlTupleLeadJobMatch(eqAlias, pvAlias = 'PV') {
+    return `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.LeadJobName, N''))))`;
+}
+
+/** Step 2 tuple: EnquiryQuotes.ToName = PV.CustomerName (trim + optional (L#) strip + lower). */
+function sqlTupleCustomerMatch(eqAlias, pvAlias = 'PV') {
+    return `${sqlTupleCustomerKey(eqAlias, 'ToName')} = ${sqlTupleCustomerKey(pvAlias, 'CustomerName')}`;
+}
+
+/**
  * Raw pending-quote enquiries (priced tuples still missing a completed quote), with optional extra WHERE on EnquiryMaster E.
+ *
+ * Pending quote summary logic:
+ * - Step 1: EnquiryPricingValues for the enquiry has Price > 0 on a row keyed by
+ *   RequestNo + EnquiryForItem (own job) + LeadJobName + CustomerName (latest row per tuple).
+ * - Step 2: No EnquiryQuotes row for the same RequestNo + OwnJob + LeadJob + ToName with latest revision
+ *   and TotalAmount > 0 (quote not completed for that exact tuple).
  */
 async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '') {
         let userEmail = rawUserEmail;
@@ -49,8 +83,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 )`
                 : `1 = 1`;
 
-        // Spec: pending = EnquiryPricingValues has price for (RequestNo + EnquiryForItem + LeadJobName + customer)
-        // and no EnquiryQuotes row (latest revision) with TotalAmount > 0 for same RequestNo + OwnJob + LeadJob + ToName.
+        // Step 1 + 2: see module doc above; RequestNo is enforced by JOIN (E.RequestNo = PV via PO).
         const pvMatchesEfJobSql = `
             (
                 (PV.EnquiryForID IS NOT NULL AND PV.EnquiryForID <> 0 AND PV.EnquiryForID = EF.ID)
@@ -75,57 +108,24 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                         )
                   )
             )`;
-        // Pending rule:
-        // Keep enquiry in pending when ANY priced tuple is still missing a quote.
-        // Tuple = RequestNo + OwnJob + LeadJob + Customer.
+        // Pending: at least one Step-1 tuple exists where Step-2 has no completed quote for the same four keys.
         const noCompletedQuoteForSameTupleSql = `
             NOT EXISTS (
                 SELECT 1
                 FROM EnquiryQuotes EQ
                 WHERE EQ.RequestNo = E.RequestNo
-                AND LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.ToName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.CustomerName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                AND (
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.OwnJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                    OR (
-                        LEN(LTRIM(ISNULL(EQ.OwnJob, N''))) >= 2
-                        AND LOWER(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(EQ.OwnJob, N'')))) + N'%'
-                    )
-                )
-                AND (
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.LeadJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                    LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                    OR (
-                        LEN(LTRIM(ISNULL(EQ.LeadJob, N''))) >= 2
-                        AND LOWER(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(EQ.LeadJob, N'')))) + N'%'
-                    )
-                )
+                AND ${sqlTupleOwnJobMatch('EQ', 'PV')}
+                AND ${sqlTupleLeadJobMatch('EQ', 'PV')}
+                AND ${sqlTupleCustomerMatch('EQ', 'PV')}
                 AND EQ.RevisionNo = (SELECT MAX(EQ2.RevisionNo) FROM EnquiryQuotes EQ2 WHERE EQ2.QuoteNo = EQ.QuoteNo)
                 AND ISNULL(EQ.TotalAmount, 0) > 0
             )`;
 
-        // Align list "Quote ref. / date / amount" with the same pending tuple as PV (own job + lead + customer),
-        // not MAX(QuoteNo) across the whole enquiry (which mixed branches and broke the summary).
+        // List columns: same four-key match as Step 2 so Quote ref / date align with the pending PV row.
         const quoteMatchesPvTupleSql = (alias) => `
-            LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(${alias}.ToName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.CustomerName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-            AND (
-                LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(${alias}.OwnJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                OR (
-                    LEN(LTRIM(ISNULL(${alias}.OwnJob, N''))) >= 2
-                    AND LOWER(LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(${alias}.OwnJob, N'')))) + N'%'
-                )
-            )
-            AND (
-                LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(${alias}.LeadJob, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and')) =
-                LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N''))), N' ', N''), N'.', N''), N',', N''), N'-', N''), N'&', N'and'))
-                OR (
-                    LEN(LTRIM(ISNULL(${alias}.LeadJob, N''))) >= 2
-                    AND LOWER(LTRIM(RTRIM(ISNULL(PV.LeadJobName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(${alias}.LeadJob, N'')))) + N'%'
-                )
-            )`;
+            ${sqlTupleOwnJobMatch(alias, 'PV')}
+            AND ${sqlTupleLeadJobMatch(alias, 'PV')}
+            AND ${sqlTupleCustomerMatch(alias, 'PV')}`;
 
         let query;
         if (userEmail && !isAdmin) {

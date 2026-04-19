@@ -488,7 +488,8 @@ function clamp(n, lo, hi) {
 
 /**
  * Draggable stamp: signature image left; name, designation, date/time, code on the right (compact).
- * No card border on screen/print. Remove (×) only when allowRemove is true (draft quote).
+ * No card border on screen/print. Remove control only when allowRemove is true (draft: no saved quote
+ * for this enquiry scope yet). After save, QuoteForm passes allowRemove=false so stamps stay fixed.
  */
 export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = true }) {
     const rootRef = useRef(null);
@@ -578,23 +579,28 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = tru
                     <button
                         type="button"
                         className="no-print"
+                        aria-label="Remove signature from quote (only before this quote is saved for this customer and scope)"
+                        title="Remove signatures added after the last quote save. Saving the quote again locks every stamp."
                         onClick={(e) => {
                             e.stopPropagation();
                             onRemove(stamp.id);
                         }}
                         style={{
-                            border: 'none',
-                            background: '#fee2e2',
+                            border: '1px solid #fecaca',
+                            background: '#fef2f2',
                             color: '#b91c1c',
-                            borderRadius: '4px',
-                            padding: '1px 6px',
+                            borderRadius: '6px',
+                            padding: '2px 6px',
+                            minWidth: '28px',
+                            minHeight: '24px',
                             cursor: 'pointer',
-                            fontSize: '10px',
-                            fontWeight: '700',
-                            lineHeight: 1.2,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            lineHeight: 1,
                         }}
                     >
-                        ×
+                        <X size={14} strokeWidth={2.5} aria-hidden />
                     </button>
                 ) : null}
             </div>

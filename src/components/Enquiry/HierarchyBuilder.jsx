@@ -15,7 +15,6 @@ const HierarchyBuilder = ({
     onEditItem,
     canRemove = true,
     canRemoveItem = null, // Callback: (item) => boolean, determines if specific item can be removed
-    assigneeOptions = [],
     assigneeUsers = [],
     canEditAssignee = true
 }) => {
@@ -211,14 +210,23 @@ const HierarchyBuilder = ({
         return noPrefix;
     };
 
+    /** Row division label vs Master user Department (handles "HVAC" vs "HVAC Project", etc.). */
+    const departmentMatchesDivision = (userDept, rowDivisionNorm) => {
+        const d = normalize(userDept);
+        const r = rowDivisionNorm;
+        if (!d || !r) return false;
+        if (d === r) return true;
+        return r.includes(d) || d.includes(r);
+    };
+
     const getAssigneeOptionsForItem = (item) => {
         const base = normalize(itemBaseName(item));
         if (!base) return [];
-        const byDept = (assigneeUsers || [])
-            .filter((u) => normalize(u?.Department) === base)
+        const names = (assigneeUsers || [])
+            .filter((u) => departmentMatchesDivision(u?.Department, base))
             .map((u) => String(u?.FullName || '').trim())
             .filter(Boolean);
-        return [...new Set(byDept)].sort((a, b) => a.localeCompare(b));
+        return [...new Set(names)].sort((a, b) => a.localeCompare(b));
     };
 
     // Helper to get available options

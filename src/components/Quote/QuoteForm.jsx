@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenLine } from 'lucide-react';
+import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool } from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
 import { format } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
@@ -8,13 +8,15 @@ import ClauseEditor from './ClauseEditor';
 import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
 import ListBoxControl from '../Enquiry/ListBoxControl';
 import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
-import { buildQuotePrintDocumentHtml } from './quotePrintDocumentHtml';
+import { buildQuotePrintDocumentHtml, captureQuotePrintRootInnerHtmlForPdf } from './quotePrintDocumentHtml';
 import {
     SignatureVaultModal,
     QuoteSignatureStamp,
     makeVerificationCode,
     loadStampsForEnquiry,
     saveStampsForEnquiry,
+    loadSignatureLibrary,
+    resolveDefaultSignatureImage,
     EMS_QUOTE_PLACE_STAMP_EVENT,
 } from './QuoteDigitalSignature';
 
@@ -133,6 +135,39 @@ const normalizeCustomerKey = (s) =>
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]/g, '');
+
+/** e.g. AAC/BMP/9-L1/1-R0 → l1 (branch segment often matches when LeadJob column is a display name). */
+const leadSegmentFromQuoteNumber = (q) => {
+    const parts = String(q?.QuoteNumber || q?.quoteNumber || '').split('/');
+    const mid = (parts[2] || '').toUpperCase();
+    const m = mid.match(/(L\d+)/i);
+    return m ? m[1].toLowerCase() : '';
+};
+
+/**
+ * LeadJob on EnquiryQuotes vs scoped param: "L1", "L1 - Civil Project", or display-only names for the same branch.
+ */
+const matchLeadJobForQuoteScope = (rowLead, paramLead) => {
+    const a = normalize(String(rowLead || '').trim());
+    const c = normalize(String(paramLead || '').trim());
+    if (!c) return true;
+    if (!a) return false;
+    if (a === c) return true;
+    const codeFrom = (raw) => {
+        const t = String(raw || '').trim();
+        const m1 = t.match(/^(L\d+)/i);
+        if (m1) return m1[1].toLowerCase();
+        const n = normalize(t);
+        const m2 = n.match(/\b(l\d+)\b/);
+        return m2 ? m2[1] : '';
+    };
+    const ca = codeFrom(rowLead);
+    const cc = codeFrom(paramLead);
+    if (ca && cc && ca === cc) return true;
+    if (/^l\d+$/.test(c) && (a === c || a.startsWith(`${c} `) || a.startsWith(`${c}-`) || a.startsWith(`${c} -`))) return true;
+    if (/^l\d+$/.test(a) && (c === a || c.startsWith(`${a} `) || c.startsWith(`${a}-`) || c.startsWith(`${a} -`))) return true;
+    return false;
+};
 
 const stripQuoteJobPrefix = (name) =>
     String(name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
@@ -346,6 +381,67 @@ const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs,
     }
     return '';
 };
+
+/**
+ * Canonical LeadJob for EnquiryQuotes + scoped GET: prefer root LeadJobCode (L1, L2, …) so the same
+ * customer can have one quote per lead branch; fall back to root display name if code is missing.
+ */
+function resolveRootLeadJobLabelForQuotes(jobs, selectedLeadId, enquiryLeadPrefixFallback = '') {
+    const pool = Array.isArray(jobs) && jobs.length ? jobs : null;
+    if (!pool || selectedLeadId == null || String(selectedLeadId).trim() === '') {
+        return String(enquiryLeadPrefixFallback || '').trim();
+    }
+    const node = pool.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
+    if (!node) return String(enquiryLeadPrefixFallback || '').trim();
+
+    let root = node;
+    let safe = 0;
+    const vis = new Set();
+    while (
+        root &&
+        (root.parentId || root.ParentID) &&
+        (root.parentId || root.ParentID) !== '0' &&
+        (root.parentId || root.ParentID) !== 0 &&
+        safe < 25
+    ) {
+        const rid = String(root.id || root.ItemID);
+        if (vis.has(rid)) break;
+        vis.add(rid);
+        const pId = String(root.parentId || root.ParentID);
+        const p = pool.find((pj) => String(pj.id || pj.ItemID || pj.ID) === pId);
+        if (!p) break;
+        root = p;
+        safe++;
+    }
+
+    const codeRaw = String(root.leadJobCode || root.LeadJobCode || '').trim();
+    const codeM = codeRaw.toUpperCase().match(/^(L\d+)/);
+    if (codeM) return codeM[1];
+
+    const nm = String(root.itemName || root.ItemName || root.DivisionName || '').trim();
+    if (nm) return nm;
+    return String(enquiryLeadPrefixFallback || '').trim();
+}
+
+/**
+ * Same ToName string persisted on EnquiryQuotes and used in GET /by-enquiry filters (must match getQuotePayload).
+ */
+function resolveQuoteToNameForDbTuple(calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, jobPool) {
+    const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
+    if (!tabs || tabs.length < 2) return (toName || '').trim();
+    const tn = (toName || '').trim();
+    const key = collapseSpacesLower(stripQuoteJobPrefix(tn));
+    const pool = Array.isArray(jobPool) && jobPool.length ? jobPool : [];
+    const recipientIsInternalJobName = pool.some((j) => {
+        const jn = collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || ''));
+        return jn === key && jn.length > 0;
+    });
+    if (!recipientIsInternalJobName) return tn;
+    const firstId = String(tabs[0]?.id);
+    if (String(activeQuoteTab) === firstId) return tn;
+    const parentLabel = stripQuoteJobPrefix(tabs[0]?.label || tabs[0]?.name || '').trim();
+    return parentLabel || tn;
+}
 
 const normalizeName = normalize;
 
@@ -703,6 +799,8 @@ const QuoteForm = () => {
     const autoSelectCustomerAfterLeadChangeRef = useRef(false);
     /** When lead changes, keep quote id/number if auto-select picks the same customer again (avoids Quote Ref → Draft). */
     const preserveQuoteOnLeadChangeRef = useRef(null);
+    /** Latest commitQuoteDigitalStamps — saveQuote/handleRevise are declared above this callback in the file. */
+    const commitQuoteDigitalStampsRef = useRef(null);
     const [saving, setSaving] = useState(false);
 
     // Quote Context Scope (For viewing/revising previous quotes with specific scope)
@@ -779,6 +877,31 @@ const QuoteForm = () => {
 
     /** Per-enquiry draggable digital signatures on quote sheets (persisted in localStorage). */
     const [signatureVaultOpen, setSignatureVaultOpen] = useState(false);
+    /** dataTransfer cannot hold large data URLs — stash payload for the duration of the drag. */
+    const dragSignaturePayloadRef = useRef(null);
+    const sigDragActiveRef = useRef(false);
+    const signatureLibraryEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
+    /** Stored default only — used for click-to-place on page 1 (same as vault “Place on page” with default image). */
+    const defaultSignatureImageUrl = React.useMemo(() => {
+        if (!signatureLibraryEmail) return null;
+        return resolveDefaultSignatureImage(signatureLibraryEmail);
+    }, [signatureLibraryEmail, signatureVaultOpen]);
+    /** Default if set, else first library image — for dragging from the toolbar without opening the vault. */
+    const toolbarDragSignatureImageUrl = React.useMemo(() => {
+        if (!signatureLibraryEmail) return null;
+        if (defaultSignatureImageUrl) return defaultSignatureImageUrl;
+        const lib = loadSignatureLibrary(signatureLibraryEmail);
+        return lib[0]?.imageDataUrl || null;
+    }, [signatureLibraryEmail, signatureVaultOpen, defaultSignatureImageUrl]);
+    /** Digital stamp caption = logged-in user (merged profile), not quote Signatory / Prepared By. */
+    const digitalStampUserDisplayName = React.useMemo(
+        () => (currentUser?.FullName || currentUser?.name || '').trim(),
+        [currentUser?.FullName, currentUser?.name]
+    );
+    const digitalStampUserDesignation = React.useMemo(
+        () => (currentUser?.Designation || currentUser?.designation || '').trim(),
+        [currentUser?.Designation, currentUser?.designation]
+    );
     const [quoteDigitalStamps, setQuoteDigitalStamps] = useState([]);
 
     // Pending Files State
@@ -811,6 +934,8 @@ const QuoteForm = () => {
     const [quoteCompanyName, setQuoteCompanyName] = useState('Almoayyed Air Conditioning');
     const [quoteAttachments, setQuoteAttachments] = useState([]);
     const [isUploading, setIsUploading] = useState(false);
+    /** If auto-open fails, user can use this real link (second gesture) to open the same mailto: draft. */
+    const [quoteEmailDraftHref, setQuoteEmailDraftHref] = useState(null);
     const [quoteListCategory, setQuoteListCategory] = useState(QUOTE_LIST_CATEGORY.PENDING);
     const [quoteListSearchCriteria, setQuoteListSearchCriteria] = useState('');
     const [quoteListDateFrom, setQuoteListDateFrom] = useState('');
@@ -1183,11 +1308,10 @@ const QuoteForm = () => {
             return;
         }
 
-        const cs = getComputedStyle(preview);
-        const padL = parseFloat(cs.paddingLeft) || 0;
-        const padR = parseFloat(cs.paddingRight) || 0;
-        const innerW = Math.max(320, preview.clientWidth - padL - padR);
-        host.style.width = `${innerW}px`;
+        /* Match PDF: sheets are always 210mm wide (see .quote-a4-sheet). Measure at inner content width (210mm − 15mm padding each side, box-sizing: border-box). */
+        const sheetInnerContentMm = 210 - 15 * 2;
+        const innerW = Math.round(quoteMmToPx(sheetInnerContentMm));
+        host.style.width = `${Math.max(280, innerW)}px`;
 
         const measureHeights = () =>
             activeClausesList.map((_, i) => {
@@ -1206,9 +1330,9 @@ const QuoteForm = () => {
                 return;
             }
             const sheetInnerMm = 297 - 15 * 2;
-            /** Sheet 2+ chrome (continuation header); all clauses start after page 1 (letterhead through signatory). */
-            const continuationChromeMm = 62;
-            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 110));
+            /** Sheet 2+ chrome (continuation header); added +15mm safety buffer to prevent PDF rendering overflow/overlap. */
+            const continuationChromeMm = 62 + 15;
+            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 100));
 
             const pageOne = [];
             const remaining = activeClausesList.map((_, i) => i);
@@ -1226,7 +1350,7 @@ const QuoteForm = () => {
             applyPack();
         });
         return () => cancelAnimationFrame(id);
-    }, [clausePaginationLayoutKey, isQuotePreviewVisible, sidebarWidth]);
+    }, [clausePaginationLayoutKey, isQuotePreviewVisible]);
 
     const sanitizedPageOneClauseIndices = React.useMemo(() => {
         if (!activeClausesList.length) return [];
@@ -1735,7 +1859,6 @@ const QuoteForm = () => {
 
     // --- PROACTIVE IDENTITY SYNC (Step 4488) ---
     // ABSOLUTE LOCK: Ensure logo and footer are ALWAYS based on current user's personal profile.
-    // Placed after `calculatedTabs` — must not reference it in deps before initialization (TDZ crash).
     useEffect(() => {
         if (currentUser && enquiryData?.availableProfiles) {
             // Multiple branch tabs: header/footer follow active tab + division profile (do not force personal profile).
@@ -2167,10 +2290,9 @@ const QuoteForm = () => {
     /**
      * Params for GET /api/quotes/by-enquiry/:requestNo — matches EnquiryQuotes columns:
      * - RequestNo = enquiry number (path param).
-     * - LeadJob = lead job dropdown selection (selectedLeadId → job display name).
-     * - First tab selected: OwnJob = first tab job name; ToName = customer dropdown (external recipient).
-     * - Direct subjob tab (not first): OwnJob = selected tab’s job name (same label as the tab in “Previous Quotes”);
-     *   ToName = first tab’s job label (internal branch routing, not the customer dropdown).
+     * - LeadJob = root lead job code (L1, L2, …) when available, else root job display name.
+     * - OwnJob = first tab job (or department) vs selected subjob tab, same as saved EnquiryQuotes.OwnJob.
+     * - ToName = same rules as getQuotePayload (external customer name; internal job-as-customer uses parent tab label).
      */
     const scopedEnquiryQuotesParams = React.useMemo(() => {
         const tabs =
@@ -2193,7 +2315,6 @@ const QuoteForm = () => {
             /^own\s*job$/i.test(firstLabelRaw);
 
         let ownJobName = '';
-        let toNameParam = '';
         let useDepartmentForOwnJob = false;
 
         /** Same OwnJob / ToName strings as stored in EnquiryQuotes (full job name from hierarchy when possible). */
@@ -2212,33 +2333,25 @@ const QuoteForm = () => {
             } else {
                 ownJobName = firstTabJobNameForDb();
             }
-            toNameParam = (toName || '').trim();
         } else {
-            // Subjob tab (not first): OwnJob = selected tab; ToName = first tab label (internal “parent” job for the tuple)
+            // Subjob tab (not first): OwnJob = selected tab’s job (matches EnquiryQuotes.OwnJob intent)
             ownJobName = (ownJobNameFromJobNode(active) || activeLabelRaw).trim();
-            toNameParam = firstTabJobNameForDb();
         }
 
-        const leadJobName = (() => {
-            if (selectedLeadId) {
-                const node = mergedJobPool.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
-                const nm = (node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
-                if (nm) return nm;
-            }
-            const prefix = (enquiryData?.leadJobPrefix || '').trim();
-            if (prefix && mergedJobPool.length) {
-                const norm = (s) => String(s || '').replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
-                const target = norm(prefix);
-                const root = mergedJobPool.find((j) => {
-                    const isRoot = !j.parentId || j.parentId === '0' || j.parentId === 0;
-                    if (!isRoot) return false;
-                    const nm = j.itemName || j.ItemName || j.DivisionName || '';
-                    return norm(nm) === target || String(nm).trim().toLowerCase() === prefix.toLowerCase();
-                });
-                if (root) return (root.itemName || root.ItemName || root.DivisionName || '').trim();
-            }
-            return '';
-        })();
+        // ToName must match getQuotePayload (external customer stays HVAC; internal job-as-customer uses parent tab label).
+        const toNameParam = resolveQuoteToNameForDbTuple(
+            calculatedTabs,
+            effectiveQuoteTabs,
+            activeQuoteTab,
+            toName,
+            mergedJobPool
+        );
+
+        const leadJobName = resolveRootLeadJobLabelForQuotes(
+            mergedJobPool,
+            selectedLeadId,
+            enquiryData?.leadJobPrefix || ''
+        );
 
         if (!leadJobName || !toNameParam) return null;
         if (!useDepartmentForOwnJob && !ownJobName) return null;
@@ -2250,6 +2363,149 @@ const QuoteForm = () => {
             useDepartmentForOwnJob
         };
     }, [calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, selectedLeadId, pricingData, enquiryData?.leadJobPrefix, jobsPool, enquiryData?.divisionsHierarchy]);
+
+    /**
+     * Same quote filtering as "Previous Quotes / Revisions" tab content (for programmatic auto-select on tab switch).
+     * After `scopedEnquiryQuotesParams` — callback body and deps reference it (TDZ-safe).
+     */
+    const getFilteredQuotesForPreviousQuotesTab = React.useCallback(
+        (tabId) => {
+            let tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : [];
+            if (tabs.length === 0) {
+                tabs = [{ id: 'default', name: 'Own Job', label: 'Own Job', isSelf: true }];
+            }
+            const activeTabObj = tabs.find((t) => String(t.id) === String(tabId)) || tabs[0];
+            if (!activeTabObj) return [];
+
+            const activeTabRealId = activeTabObj.realId;
+
+            const currentLeadCode = (() => {
+                if (selectedLeadId && pricingData?.jobs) {
+                    let root = pricingData.jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+                    if (root) {
+                        const rCode = (root.leadJobCode || root.LeadJobCode || '').toUpperCase();
+                        if (rCode && rCode.match(/^L\d+/)) return rCode.split('-')[0].trim();
+                        if (root.itemName?.toUpperCase().match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+                    }
+                }
+                const prefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+                if (!prefix) return '';
+                if (prefix.match(/^L\d+/)) return prefix.split('-')[0].trim().toUpperCase();
+                const hierarchy = enquiryData?.divisionsHierarchy || [];
+                let job = hierarchy.find((j) => {
+                    const name = (j.itemName || j.ItemName || j.DivisionName || '').toUpperCase();
+                    const clean = name.replace(/^(L\d+\s*-\s*)/, '').trim();
+                    return name === prefix || clean === prefix || (j.leadJobCode && j.leadJobCode.toUpperCase() === prefix);
+                });
+                if (job) {
+                    let root = job;
+                    while (root && root.parentId && root.parentId !== '0' && root.parentId !== 0) {
+                        const parent = hierarchy.find((p) => String(p.id || p.ItemID) === String(root.parentId));
+                        if (parent) root = parent;
+                        else break;
+                    }
+                    if (root.leadJobCode || root.LeadJobCode) return (root.leadJobCode || root.LeadJobCode).toUpperCase();
+                    if (root.itemName?.match(/^L\d+/)) return root.itemName.split('-')[0].trim().toUpperCase();
+                }
+                return prefix;
+            })();
+
+            const useScopedPanel = quoteScopedForPanel.length > 0;
+            const quoteSourceList = useScopedPanel ? quoteScopedForPanel : existingQuotes;
+
+            return quoteSourceList.filter((q) => {
+                const normalizedQuoteTo = normalize(q.ToName || '');
+                const normalizedCurrentTo = normalize(toName || '');
+
+                if (!useScopedPanel) {
+                    const activeTabAncestors = [];
+                    let currAnc = activeTabRealId ? jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
+                    let ancSafety = 0;
+                    const ancVisited = new Set();
+                    while (
+                        currAnc &&
+                        (currAnc.parentId || currAnc.ParentID) &&
+                        (currAnc.parentId || currAnc.ParentID) !== '0' &&
+                        (currAnc.parentId || currAnc.ParentID) !== 0 &&
+                        ancSafety < 20
+                    ) {
+                        const pId = String(currAnc.parentId || currAnc.ParentID);
+                        if (ancVisited.has(pId)) break;
+                        ancVisited.add(pId);
+                        const parent = jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === pId);
+                        if (parent) {
+                            activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
+                            currAnc = parent;
+                            ancSafety++;
+                        } else {
+                            break;
+                        }
+                    }
+                    const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
+                    const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
+                    if (!normalizedCurrentTo) return false;
+                    if (!isExactMatch && !isAncestorMatch) return false;
+                }
+
+                if (useScopedPanel) {
+                    if (scopedEnquiryQuotesParams?.useDepartmentForOwnJob && tabs.length > 1) {
+                        return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                    }
+                    return true;
+                }
+
+                const parts = q.QuoteNumber?.split('/') || [];
+                const qDivCode = parts[1]?.toUpperCase();
+                const qLeadPart = parts[2] ? parts[2].toUpperCase() : '';
+                const qLeadCodeOnly = qLeadPart.match(/L\d+/) ? qLeadPart.match(/L\d+/)[0] : '';
+
+                const divisionMatchContextName = divisionMatchContextForQuoteTab(
+                    selectedLeadId,
+                    pricingData,
+                    activeTabRealId,
+                    activeTabObj,
+                    tabs.length,
+                    jobsPool
+                );
+
+                const ownJobMatchesTab =
+                    collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || '')) ===
+                    collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+                const isTypeMatch =
+                    ownJobMatchesTab || matchDivisionCode(qDivCode, divisionMatchContextName, activeTabObj.divisionCode);
+
+                if (!isTypeMatch) return false;
+                if (tabs.length > 1 && !quoteNumberDivisionMatchesTab(q, activeTabObj, true)) return false;
+
+                const currentLeadCodeClean = currentLeadCode.match(/L\d+/) ? currentLeadCode.match(/L\d+/)[0] : '';
+                if (qLeadCodeOnly && currentLeadCodeClean && qLeadCodeOnly !== currentLeadCodeClean) return false;
+
+                const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                const isSubUser = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
+                if (isSubUser) {
+                    const isParentCode = qDivCode === 'CVLP' || (qDivCode === 'AAC' && userDept !== 'air');
+                    const isMySpecificTab = isTypeMatch;
+                    if (isParentCode && !isMySpecificTab) return false;
+                }
+
+                return true;
+            });
+        },
+        [
+            calculatedTabs,
+            quoteScopedForPanel,
+            existingQuotes,
+            toName,
+            selectedLeadId,
+            pricingData,
+            enquiryData?.leadJobPrefix,
+            enquiryData?.divisionsHierarchy,
+            jobsPool,
+            currentUser,
+            isAdmin,
+            scopedEnquiryQuotesParams,
+        ]
+    );
 
     /**
      * Primitives-only key so the scoped-quote fetch does not re-run when `pricingData` / `jobsPool`
@@ -2377,22 +2633,86 @@ const QuoteForm = () => {
         quoteNumber,
     ]);
 
-    /** Save only when no DB quote for this enquiry+lead+ownjob+ToName tuple; Revision only when at least one exists (scoped API is source of truth when active). */
+    /**
+     * When GET /by-enquiry returns 0 rows (e.g. legacy OwnJob "BMS" vs client ownJobName "BMS Project"), still detect
+     * the same tuple on unscoped existingQuotes so Save/Revision and preview match the Previous Quotes list.
+     */
+    const quotesMatchingScopedTuple = React.useMemo(() => {
+        const rn = enquiryData?.enquiry?.RequestNo;
+        const p = scopedEnquiryQuotesParams;
+        if (!rn || !p) return [];
+
+        const rnNorm = String(rn).trim();
+        const matchOwn = (rowOwn, pOwn, useDept) => {
+            if (useDept) return true;
+            const a = normalize(String(rowOwn || '').trim());
+            const b = normalize(String(pOwn || '').trim());
+            if (!b) return true;
+            if (!a) return false;
+            if (a === b) return true;
+            if (a.startsWith(b) || b.startsWith(a)) return true;
+            if (a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+            return false;
+        };
+
+        return (existingQuotes || []).filter((q) => {
+            if (String(q.RequestNo ?? '').trim() !== rnNorm) return false;
+            const toRow = normalize(q.ToName || '');
+            const toP = normalize(p.toName || '');
+            const toKeyRow = normalizeCustomerKey(q.ToName || '');
+            const toKeyP = normalizeCustomerKey(p.toName || '');
+            if (toRow !== toP && !(toKeyRow && toKeyP && toKeyRow === toKeyP)) return false;
+            const leadOk =
+                matchLeadJobForQuoteScope(q.LeadJob, p.leadJobName) ||
+                matchLeadJobForQuoteScope(leadSegmentFromQuoteNumber(q), p.leadJobName);
+            if (!leadOk) return false;
+            return matchOwn(q.OwnJob, p.ownJobName || '', !!p.useDepartmentForOwnJob);
+        });
+    }, [enquiryData?.enquiry?.RequestNo, scopedEnquiryQuotesParams, existingQuotes]);
+
+    /** Save only when no DB quote for this enquiry+lead+ownjob+ToName tuple; Revision only when one exists. */
     const hasPersistedQuoteForScope = React.useMemo(() => {
         if (!enquiryData?.enquiry?.RequestNo) return false;
+        const qn = String(quoteNumber || '').trim();
+        const savedRefShape = qn.includes('/') && /-R\d+/i.test(qn);
+        const hasRowId = quoteId != null && String(quoteId).trim() !== '';
+
         if (scopedEnquiryQuotesParams) {
+            // Client-side tuple (unscoped list) — do not wait on scoped GET; fixes Save/Revision when API row shape or fetch key lags.
+            if (quotesMatchingScopedTuple.length > 0) return true;
+            if (hasRowId && savedRefShape) return true;
             if (scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey) return false;
             return quoteScopedForPanel.length > 0;
         }
-        return !!quoteId;
+        return hasRowId;
     }, [
         enquiryData?.enquiry?.RequestNo,
         scopedEnquiryQuotesParams,
         scopedQuotesFetchSettledKey,
         scopedQuotePanelFetchKey,
         quoteScopedForPanel.length,
+        quotesMatchingScopedTuple.length,
         quoteId,
+        quoteNumber,
     ]);
+
+    /** Enable Revision when quoteId is set or a matching tuple row has a DB id (scoped GET may be empty). */
+    const latestPersistedRowForRevise = React.useMemo(() => {
+        if (!quotesMatchingScopedTuple?.length) return null;
+        return [...quotesMatchingScopedTuple].sort((a, b) => {
+            const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+            if (r !== 0) return r;
+            const ta = Date.parse(a.QuoteDate || 0) || 0;
+            const tb = Date.parse(b.QuoteDate || 0) || 0;
+            return tb - ta;
+        })[0];
+    }, [quotesMatchingScopedTuple]);
+
+    const canRevisePersistedQuote = React.useMemo(() => {
+        if (quoteId != null && String(quoteId).trim() !== '') return true;
+        const rid = quoteRowId(latestPersistedRowForRevise);
+        return rid != null && String(rid).trim() !== '';
+    }, [quoteId, latestPersistedRowForRevise]);
 
     // Auto-resolve active tabs based on calculated permissions
     useEffect(() => {
@@ -3020,7 +3340,7 @@ const QuoteForm = () => {
         }
     };
 
-    /** Clears customer fields for a lead-only switch without wiping loaded quote metadata (see preserveQuoteOnLeadChangeRef). */
+    /** Clears customer fields for a lead-only switch. Quote id is never carried across lead branches. */
     const clearCustomerForLeadSwitch = () => {
         setToName('');
         setToAddress('');
@@ -3033,12 +3353,14 @@ const QuoteForm = () => {
     };
 
     // New handler for CreatableSelect
-    const handleCustomerChange = (selectedOption) => {
+    const handleCustomerChange = (selectedOption, opts = {}) => {
+        const leadJobAutoReselect = !!opts.leadJobAutoReselect;
         const selectedName = selectedOption ? selectedOption.value : '';
         console.log('[handleCustomerChange] Selected:', selectedName);
 
-        // Only reset if effectively changed (prevents auto-selection from clearing active quote)
-        if (normalize(selectedName) === normalize(toName)) {
+        // Only reset if effectively changed (prevents auto-selection from clearing active quote).
+        // After a lead-job change we may re-apply the same customer label; tuple changed so we must not no-op.
+        if (!leadJobAutoReselect && normalize(selectedName) === normalize(toName)) {
             console.log('[handleCustomerChange] Customer name unchanged (normalized), skipping reset.');
             return;
         }
@@ -3062,8 +3384,9 @@ const QuoteForm = () => {
         } else {
             preserveQuoteOnLeadChangeRef.current = null;
             autoSelectCustomerAfterLeadChangeRef.current = false;
-            setQuoteId(preserve.quoteId);
-            setQuoteNumber(preserve.quoteNumber || '');
+            // Same customer re-picked after a lead-job change: still a different tuple (enquiry + lead + customer).
+            setQuoteId(null);
+            setQuoteNumber('');
         }
 
         // Do NOT set activeQuoteTab to the external customer string. Previous-quotes tabs use lead-*/subjob-*
@@ -3239,7 +3562,8 @@ const QuoteForm = () => {
         // loadPricingData (handler + effect) and duplicate customer-filter runs / dropdown flicker.
     };
 
-    // Requirement: after changing lead job, auto-pick first customer from the newly filtered list.
+    // After changing lead job: re-apply the same customer when preserved (so scoped quote fetch matches saved ToName);
+    // otherwise auto-pick the first customer from the newly filtered list.
     useEffect(() => {
         if (!autoSelectCustomerAfterLeadChangeRef.current) return;
         if (!enquiryData) return;
@@ -3251,11 +3575,17 @@ const QuoteForm = () => {
             return;
         }
 
+        const preserved = (preserveQuoteOnLeadChangeRef.current?.toName || '').trim();
         const first = quoteCustomerDropdownOptions[0];
-        if (!first?.value) return; // Wait until options arrive/recompute.
+        const targetNorm = preserved ? normalize(preserved) : '';
+        const matchOpt =
+            (preserved &&
+                quoteCustomerDropdownOptions.find((o) => o?.value && normalize(o.value) === targetNorm)) ||
+            first;
+        if (!matchOpt?.value) return; // Wait until options arrive/recompute.
 
+        handleCustomerChange(matchOpt, { leadJobAutoReselect: true });
         autoSelectCustomerAfterLeadChangeRef.current = false;
-        handleCustomerChange(first);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [quoteCustomerDropdownOptions, toName, enquiryData]);
 
@@ -5201,20 +5531,31 @@ const QuoteForm = () => {
         jobsPool,
     ]);
 
-    // Hard fallback: when server-scoped rows exist, load the latest only if it belongs to the active tab.
+    // Hard fallback: when scoped API rows exist (or client-matched existingQuotes), load the latest for the active tab.
     // Never keep the full unfiltered panel when the tab filter is empty — that loaded another tab's Quote Ref (e.g. BMS on HVAC).
     useEffect(() => {
-        if (!quoteScopedForPanel || quoteScopedForPanel.length === 0) return;
+        if (!(toName || '').trim()) return;
+
+        const basePanel =
+            quoteScopedForPanel?.length > 0
+                ? quoteScopedForPanel
+                : quotesMatchingScopedTuple?.length > 0
+                  ? quotesMatchingScopedTuple
+                  : [];
+
+        // Only wait for scoped GET when we have no rows from API and no client-side tuple match yet.
         if (
             scopedEnquiryQuotesParams &&
-            scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey
+            scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey &&
+            basePanel.length === 0
         ) {
             return;
         }
-        if (!(toName || '').trim()) return;
+
+        if (!basePanel.length) return;
 
         const activeTabObj = calculatedTabs?.find((t) => String(t.id) === String(activeQuoteTab));
-        let panel = quoteScopedForPanel;
+        let panel = basePanel;
         const scopeP = scopedEnquiryQuotesParams;
         const multiTab = (calculatedTabs?.length || 0) > 1;
         const narrowed =
@@ -5223,10 +5564,15 @@ const QuoteForm = () => {
 
         if (narrowed) {
             const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
-            panel = quoteScopedForPanel.filter((q) => {
+            panel = basePanel.filter((q) => {
                 const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                const ownPrefixRelaxed =
+                    quoteOwnJob &&
+                    tabJobName &&
+                    (tabJobName.startsWith(quoteOwnJob) || quoteOwnJob.startsWith(tabJobName));
                 return (
                     quoteOwnJob === tabJobName ||
+                    ownPrefixRelaxed ||
                     (activeTabObj.realId && String(q.DepartmentID) === String(activeTabObj.realId)) ||
                     quoteNumberDivisionMatchesTab(q, activeTabObj, multiTab)
                 );
@@ -5261,7 +5607,61 @@ const QuoteForm = () => {
         }
         loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- calculatedTabs read from closure; quoteTabsFingerprint tracks meaningful tab/quoteNo changes
-    }, [quoteScopedForPanel, quoteId, quoteNumber, toName, activeQuoteTab, quoteTabsFingerprint, scopedEnquiryQuotesParams, scopedQuotesFetchSettledKey, scopedQuotePanelFetchKey]);
+    }, [
+        quoteScopedForPanel,
+        quotesMatchingScopedTuple,
+        quoteId,
+        quoteNumber,
+        toName,
+        activeQuoteTab,
+        quoteTabsFingerprint,
+        scopedEnquiryQuotesParams,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+    ]);
+
+    /** When the user switches Previous Quotes job tabs, load the latest saved quote for that tab (matches sidebar list). */
+    const prevQuoteTabForAutoLoadRef = React.useRef(null);
+    const lastTabAutoLoadEnquiryRef = React.useRef(null);
+    useEffect(() => {
+        const rn = enquiryData?.enquiry?.RequestNo;
+        if (rn && lastTabAutoLoadEnquiryRef.current !== rn) {
+            lastTabAutoLoadEnquiryRef.current = rn;
+            prevQuoteTabForAutoLoadRef.current = null;
+        }
+        if (!rn || !(toName || '').trim() || !activeQuoteTab || !calculatedTabs?.length) return;
+        if (!pricingData && !enquiryData) return;
+
+        const prevTab = prevQuoteTabForAutoLoadRef.current;
+        if (prevTab === null) {
+            prevQuoteTabForAutoLoadRef.current = activeQuoteTab;
+            return;
+        }
+        if (prevTab === activeQuoteTab) return;
+        prevQuoteTabForAutoLoadRef.current = activeQuoteTab;
+
+        const filtered = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
+        if (!filtered.length) return;
+
+        const latest = [...filtered].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
+        const latestId = quoteRowId(latest);
+        if (latestId != null && String(latestId) === String(quoteId ?? '')) return;
+
+        loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- loadQuote is defined in-component; tab-change guard uses ref
+    }, [
+        activeQuoteTab,
+        enquiryData?.enquiry?.RequestNo,
+        toName,
+        calculatedTabs,
+        getFilteredQuotesForPreviousQuotesTab,
+        quoteId,
+        quoteScopedForPanel,
+        existingQuotes,
+        quoteTabsFingerprint,
+        pricingData,
+        enquiryData,
+    ]);
 
 
 
@@ -5307,8 +5707,27 @@ const QuoteForm = () => {
     }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory, customerReference, quoteTypeList]);
 
     const handleRevise = async () => {
-        console.log('[handleRevise] Starting revision process. QuoteId:', quoteId);
-        if (!quoteId) {
+        const sortedTuple = (() => {
+            if (!quotesMatchingScopedTuple?.length) return [];
+            return [...quotesMatchingScopedTuple].sort((a, b) => {
+                const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+                if (r !== 0) return r;
+                const ta = Date.parse(a.QuoteDate || 0) || 0;
+                const tb = Date.parse(b.QuoteDate || 0) || 0;
+                return tb - ta;
+            });
+        })();
+        const tupleLatest = sortedTuple[0];
+        const idFromTuple = tupleLatest ? quoteRowId(tupleLatest) : undefined;
+        const effectiveReviseId =
+            quoteId != null && String(quoteId).trim() !== '' ? quoteId : idFromTuple;
+
+        if (tupleLatest && (!quoteId || String(quoteId).trim() === '') && idFromTuple) {
+            loadQuote(tupleLatest, { preserveRecipient: true, skipPreparedSignatory: true });
+        }
+
+        console.log('[handleRevise] Starting revision process. QuoteId:', effectiveReviseId);
+        if (effectiveReviseId == null || String(effectiveReviseId).trim() === '') {
             console.log('[handleRevise] No quoteId found, aborting');
             return;
         }
@@ -5325,9 +5744,9 @@ const QuoteForm = () => {
         try {
             const payload = getQuotePayload();
             console.log('[handleRevise] Payload:', payload);
-            console.log('[handleRevise] Calling API:', `${API_BASE}/api/quotes/${quoteId}/revise`);
+            console.log('[handleRevise] Calling API:', `${API_BASE}/api/quotes/${effectiveReviseId}/revise`);
 
-            const res = await fetch(`${API_BASE}/api/quotes/${quoteId}/revise`, {
+            const res = await fetch(`${API_BASE}/api/quotes/${effectiveReviseId}/revise`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -5378,7 +5797,9 @@ const QuoteForm = () => {
                     setQuoteScopedForPanel((prev) => {
                         const idStr = String(newRevId ?? '');
                         if (!idStr || idStr === 'undefined') return prev;
-                        const withoutOldRev = prev.filter((q) => String(quoteRowId(q) ?? '') !== String(quoteId ?? ''));
+                        const withoutOldRev = prev.filter(
+                            (q) => String(quoteRowId(q) ?? '') !== String(effectiveReviseId ?? '')
+                        );
                         if (withoutOldRev.some((q) => String(quoteRowId(q) ?? '') === idStr)) return withoutOldRev;
                         return [...withoutOldRev, optimisticRevRow];
                     });
@@ -6034,35 +6455,23 @@ const QuoteForm = () => {
             subject,
             signatory,
             signatoryDesignation,
-            toName: (() => {
-                const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
-                if (!tabs || tabs.length < 2) return toName;
-                const tn = (toName || '').trim();
-                const key = collapseSpacesLower(stripQuoteJobPrefix(tn));
-                const pool = jobsPool.length > 0 ? jobsPool : enquiryData?.divisionsHierarchy || [];
-                const recipientIsInternalJobName = pool.some((j) => {
-                    const jn = collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || ''));
-                    return jn === key && jn.length > 0;
-                });
-                // External recipient: ToName always stays the company name; internal job-as-customer may use lead label on subjob tabs.
-                if (!recipientIsInternalJobName) return toName;
-                const firstId = String(tabs[0]?.id);
-                if (String(activeQuoteTab) === firstId) return toName;
-                const parentLabel = stripQuoteJobPrefix(tabs[0]?.label || tabs[0]?.name || '').trim();
-                return parentLabel || toName;
-            })(),
+            toName: resolveQuoteToNameForDbTuple(
+                calculatedTabs,
+                effectiveQuoteTabs,
+                activeQuoteTab,
+                toName,
+                jobsPool.length > 0 ? jobsPool : enquiryData?.divisionsHierarchy || []
+            ),
             toAddress,
             toPhone,
             toEmail,
             toFax,
             toAttention,
-            leadJob: (() => {
-                if (selectedLeadId && pricingData?.jobs) {
-                    const found = pricingData.jobs.find(j => String(j.id || j.ItemID) === String(selectedLeadId));
-                    if (found) return found.itemName || found.ItemName || found.DivisionName;
-                }
-                return enquiryData.leadJobPrefix || '';
-            })(),
+            leadJob: resolveRootLeadJobLabelForQuotes(
+                pricingData?.jobs,
+                selectedLeadId,
+                enquiryData?.leadJobPrefix || ''
+            ),
             ownJob: (() => {
                 const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
                 if (activeQuoteTab && tabs) {
@@ -6140,7 +6549,19 @@ const QuoteForm = () => {
                         }
                     }
 
-                    return matchCustomer && matchLeadJob && matchDivision;
+                    const payloadLead = normalize(basePayload.leadJob || '');
+                    const rawRowLead = q.LeadJob != null && String(q.LeadJob).trim() ? String(q.LeadJob).trim() : '';
+                    const rowLead = normalize(rawRowLead);
+                    const matchLeadJobColumn =
+                        !payloadLead ||
+                        !rawRowLead ||
+                        payloadLead === rowLead ||
+                        (/^l\d+$/.test(payloadLead) &&
+                            (rowLead === payloadLead ||
+                                rowLead.startsWith(`${payloadLead} `) ||
+                                rowLead.startsWith(`${payloadLead}-`)));
+
+                    return matchCustomer && matchLeadJob && matchDivision && matchLeadJobColumn;
                 });
 
                 if (sameCustomerQuote) {
@@ -6231,6 +6652,11 @@ const QuoteForm = () => {
                 if (!isAutoSave) {
                     alert('Quote saved successfully!');
                 }
+
+                /* Lock all stamps to the quote as saved; new placements after this get removableBeforeNextCommit until the next save. */
+                commitQuoteDigitalStampsRef.current?.((prev) =>
+                    prev.map((s) => ({ ...s, removableBeforeNextCommit: false }))
+                );
 
                 // --- TAB STATE SYNC: Ensure the new ID is stored in the registry immediately ---
                 if (activeQuoteTab) {
@@ -6364,27 +6790,135 @@ const QuoteForm = () => {
             return next;
         });
     }, []);
+    useLayoutEffect(() => {
+        commitQuoteDigitalStampsRef.current = commitQuoteDigitalStamps;
+    }, [commitQuoteDigitalStamps]);
 
     const handlePlaceDigitalStamp = useCallback(
-        ({ imageDataUrl, sheetIndex, displayName, designation }) => {
+        ({ imageDataUrl, sheetIndex, displayName, designation, xPct: xIn, yPct: yIn }) => {
             const iso = new Date().toISOString();
             const email = currentUser?.EmailId || currentUser?.email || '';
+            const xPct = typeof xIn === 'number' && Number.isFinite(xIn) ? Math.min(96, Math.max(2, xIn)) : 82;
+            const yPct = typeof yIn === 'number' && Number.isFinite(yIn) ? Math.min(92, Math.max(2, yIn)) : 38;
             commitQuoteDigitalStamps((prev) => [
                 ...prev,
                 {
                     id: globalThis.crypto?.randomUUID?.() || `st-${Date.now()}`,
                     sheetIndex: Math.max(0, Number(sheetIndex) || 0),
-                    xPct: 82,
-                    yPct: 38,
+                    xPct,
+                    yPct,
                     imageDataUrl,
                     displayName: (displayName || '').trim(),
                     designation: (designation || '').trim(),
                     placedAtIso: iso,
                     verificationCode: makeVerificationCode(email, iso),
+                    removableBeforeNextCommit: true,
                 },
             ]);
         },
         [currentUser, commitQuoteDigitalStamps]
+    );
+
+    const handleQuoteSheetSignatureDragOver = useCallback((e) => {
+        if (!sigDragActiveRef.current) return;
+        e.preventDefault();
+        try {
+            e.dataTransfer.dropEffect = 'copy';
+        } catch {
+            /* ignore */
+        }
+    }, []);
+
+    const handleQuotePreviewSignatureDrop = useCallback(
+        (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            let marker = '';
+            try {
+                marker = e.dataTransfer.getData('text/plain');
+            } catch {
+                /* ignore */
+            }
+            if (marker !== 'ems-quote-signature-drag') return;
+            const payload = dragSignaturePayloadRef.current;
+            if (!payload?.imageDataUrl) {
+                sigDragActiveRef.current = false;
+                return;
+            }
+
+            const sheet = e.currentTarget;
+            const rect = sheet.getBoundingClientRect();
+            if (!rect.width || !rect.height) {
+                sigDragActiveRef.current = false;
+                return;
+            }
+            const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+            const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+
+            const preview = document.getElementById('quote-preview');
+            const sheets = preview ? [...preview.querySelectorAll('.quote-a4-sheet')] : [];
+            const sheetIndex = Math.max(0, sheets.indexOf(sheet));
+
+            dragSignaturePayloadRef.current = null;
+            handlePlaceDigitalStamp({
+                imageDataUrl: payload.imageDataUrl,
+                sheetIndex,
+                displayName: digitalStampUserDisplayName,
+                designation: digitalStampUserDesignation,
+                xPct,
+                yPct,
+            });
+            sigDragActiveRef.current = false;
+        },
+        [handlePlaceDigitalStamp, digitalStampUserDisplayName, digitalStampUserDesignation]
+    );
+
+    const handleToolbarSignatureDragStart = useCallback(
+        (e) => {
+            if (!toolbarDragSignatureImageUrl) return;
+            dragSignaturePayloadRef.current = { imageDataUrl: toolbarDragSignatureImageUrl };
+            try {
+                e.dataTransfer.setData('text/plain', 'ems-quote-signature-drag');
+                e.dataTransfer.effectAllowed = 'copy';
+            } catch {
+                /* ignore */
+            }
+            sigDragActiveRef.current = true;
+        },
+        [toolbarDragSignatureImageUrl]
+    );
+
+    const handleToolbarSignatureDragEnd = useCallback(() => {
+        sigDragActiveRef.current = false;
+        dragSignaturePayloadRef.current = null;
+    }, []);
+
+    const handleSignaturesToolbarPrimaryClick = useCallback(
+        (e) => {
+            if (!hasUserPricing || !enquiryData?.enquiry?.RequestNo) return;
+            if (e?.shiftKey) {
+                setSignatureVaultOpen(true);
+                return;
+            }
+            if (defaultSignatureImageUrl) {
+                handlePlaceDigitalStamp({
+                    imageDataUrl: defaultSignatureImageUrl,
+                    sheetIndex: 0,
+                    displayName: digitalStampUserDisplayName,
+                    designation: digitalStampUserDesignation,
+                });
+                return;
+            }
+            setSignatureVaultOpen(true);
+        },
+        [
+            hasUserPricing,
+            enquiryData?.enquiry?.RequestNo,
+            defaultSignatureImageUrl,
+            handlePlaceDigitalStamp,
+            digitalStampUserDisplayName,
+            digitalStampUserDesignation,
+        ]
     );
 
     const handleMoveDigitalStamp = useCallback(
@@ -6409,23 +6943,38 @@ const QuoteForm = () => {
             handlePlaceDigitalStamp({
                 imageDataUrl: d.imageDataUrl,
                 sheetIndex: d.sheetIndex ?? 0,
-                displayName: (d.displayName || '').trim(),
-                designation: (d.designation || '').trim(),
+                displayName: digitalStampUserDisplayName,
+                designation: digitalStampUserDesignation,
             });
         };
         window.addEventListener(EMS_QUOTE_PLACE_STAMP_EVENT, onPlaceFromProfile);
         return () => window.removeEventListener(EMS_QUOTE_PLACE_STAMP_EVENT, onPlaceFromProfile);
-    }, [handlePlaceDigitalStamp]);
+    }, [handlePlaceDigitalStamp, digitalStampUserDisplayName, digitalStampUserDesignation]);
 
-    // Print quote
-    const printQuote = () => {
+    // Print quote — same HTML shell as vector PDF preview (`buildQuotePrintDocumentHtml` preview mode).
+    const printQuote = useCallback(() => {
         const printRoot = document.getElementById('quote-print-root');
         const printContent = document.getElementById('quote-preview');
-        const fragmentHtml = printRoot ? printRoot.innerHTML : printContent ? printContent.innerHTML : '';
+        const fragmentHtml = printRoot
+            ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
+            : printContent
+              ? printContent.innerHTML
+              : '';
         if (fragmentHtml) {
+            const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
+            const serverOrigin = envOrigin
+                ? String(envOrigin).replace(/\/$/, '')
+                : `${window.location.protocol}//${window.location.hostname}:5002`;
             const printWindow = window.open('', '_blank');
+            if (!printWindow) {
+                window.alert('Pop-up blocked — allow pop-ups for this site to print, or use the Print button in the quote panel.');
+                return;
+            }
+            /* Same HTML path as PDF download (preview mode) so Print and Download stay aligned */
             printWindow.document.write(
-                buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, '')
+                buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, 'preview', {
+                    pdfAssetOriginRewriteFrom: typeof window !== 'undefined' ? window.location.origin : '',
+                })
             );
             printWindow.document.close();
             printWindow.focus();
@@ -6436,48 +6985,96 @@ const QuoteForm = () => {
                 printWindow.close();
             }, 500);
         }
+    }, [printWithHeader]);
+
+    /** Browser Ctrl+P prints the whole flex layout (narrow quote column). Route to the same window as the Print button. */
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (String(e.key).toLowerCase() !== 'p') return;
+            if (!e.ctrlKey && !e.metaKey) return;
+            if (!hasUserPricing) return;
+            const printRoot = document.getElementById('quote-print-root');
+            const printContent = document.getElementById('quote-preview');
+            const fragmentHtml = (
+                printRoot ? captureQuotePrintRootInnerHtmlForPdf(printRoot) : printContent?.innerHTML || ''
+            ).trim();
+            if (!fragmentHtml) return;
+            e.preventDefault();
+            e.stopPropagation();
+            printQuote();
+        };
+        window.addEventListener('keydown', onKeyDown, true);
+        return () => window.removeEventListener('keydown', onKeyDown, true);
+    }, [hasUserPricing, printQuote]);
+
+    const triggerBlobDownload = (blob, fileName) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke after a delay so chained downloads (email flow) are not cancelled by Chrome.
+        window.setTimeout(() => {
+            try {
+                URL.revokeObjectURL(url);
+            } catch (_) {
+                /* ignore */
+            }
+        }, 4500);
     };
 
-    /** Vector PDF via server Puppeteer (selectable text — not canvas screenshots). */
-    const downloadPDF = async () => {
+    /** Same PDF bytes as Download PDF — used by download + Outlook email flow */
+    const fetchQuotePdfBlob = async () => {
         const printRoot = document.getElementById('quote-print-root');
         const printContent = document.getElementById('quote-preview');
-        const fragmentHtml = printRoot ? printRoot.innerHTML : printContent ? printContent.innerHTML : '';
-        if (!fragmentHtml) return;
+        const fragmentHtml = printRoot
+            ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
+            : printContent
+              ? printContent.innerHTML
+              : '';
+        if (!fragmentHtml) throw new Error('No quote document to export');
 
         const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
         const serverOrigin = envOrigin
             ? String(envOrigin).replace(/\/$/, '')
             : `${window.location.protocol}//${window.location.hostname}:5002`;
 
+        const html = buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, 'preview', {
+            pdfAssetOriginRewriteFrom: typeof window !== 'undefined' ? window.location.origin : '',
+        });
+        const safeRef = String(quoteNumber || quoteId || 'Draft').replace(/\//g, '_');
+        const fname = `Quote_${safeRef}.pdf`;
+        const res = await fetch(`${API_BASE}/api/quote-pdf/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ html, filename: fname, emulateScreen: true }),
+        });
+        if (!res.ok) {
+            const raw = await res.text();
+            let detail = res.statusText;
+            try {
+                const j = JSON.parse(raw);
+                detail = j.message || j.error || detail;
+                if (j.hint && String(j.hint).trim()) {
+                    detail = `${detail}\n\n${String(j.hint).trim()}`;
+                }
+            } catch {
+                if (raw && raw.trim()) detail = raw.trim().slice(0, 400);
+            }
+            throw new Error(detail || `HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        return { blob, fileName: fname };
+    };
+
+    /** Vector PDF via server Puppeteer (selectable text — not canvas screenshots). */
+    const downloadPDF = async () => {
         setIsUploading(true);
         try {
-            const html = buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, true);
-            const fname = `Quote_${quoteNumber.replace(/\//g, '_')}.pdf`;
-            const res = await fetch(`${API_BASE}/api/quote-pdf/generate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ html, filename: fname }),
-            });
-            if (!res.ok) {
-                let detail = res.statusText;
-                try {
-                    const j = await res.json();
-                    detail = j.message || j.error || detail;
-                } catch {
-                    /* ignore */
-                }
-                throw new Error(detail);
-            }
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = fname;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
+            const { blob, fileName } = await fetchQuotePdfBlob();
+            triggerBlobDownload(blob, fileName);
         } catch (err) {
             console.error('PDF generation error:', err);
             alert(
@@ -6490,7 +7087,193 @@ const QuoteForm = () => {
         }
     };
 
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+    /**
+     * Browsers cannot attach files to Outlook directly. Open mailto: from a **synchronous** click handler (not an
+     * async function entry), try window.open first, then defer PDF/attachment downloads so they do not compete with
+     * the mail-client handoff.
+     */
+    const openMailtoFromUserClick = React.useCallback((href) => {
+        try {
+            const popup = window.open(href, '_blank', 'noopener,noreferrer');
+            if (popup != null) {
+                return;
+            }
+        } catch (e) {
+            console.warn('[email-quote] window.open(mailto)', e);
+        }
+        try {
+            if (window.top && window.top !== window.self) {
+                window.top.location.href = href;
+                return;
+            }
+        } catch (e) {
+            console.warn('[email-quote] top mailto (cross-origin iframe?)', e);
+        }
+        try {
+            window.location.assign(href);
+            return;
+        } catch (e) {
+            console.warn('[email-quote] location.assign(mailto)', e);
+        }
+        try {
+            const ifr = document.createElement('iframe');
+            ifr.setAttribute('aria-hidden', 'true');
+            Object.assign(ifr.style, {
+                position: 'fixed',
+                width: '1px',
+                height: '1px',
+                left: '-20px',
+                top: '0',
+                border: '0',
+                opacity: '0',
+                pointerEvents: 'none',
+            });
+            document.body.appendChild(ifr);
+            ifr.src = href;
+            window.setTimeout(() => {
+                try {
+                    ifr.remove();
+                } catch (_) {
+                    /* ignore */
+                }
+            }, 10000);
+            return;
+        } catch (e) {
+            console.warn('[email-quote] iframe mailto', e);
+        }
+        try {
+            const mailA = document.createElement('a');
+            mailA.href = href;
+            mailA.target = '_top';
+            mailA.rel = 'noopener noreferrer';
+            document.body.appendChild(mailA);
+            mailA.click();
+            mailA.remove();
+        } catch (e2) {
+            console.error('[email-quote] mailto anchor', e2);
+            alert(
+                'Could not open Outlook from this page.\n\n' +
+                    'Try “Open mail draft (mailto)” again, or use Windows Default apps to confirm MAILTO is set to Outlook.'
+            );
+        }
+    }, []);
+
+    /** ASCII-only subject line avoids odd mailto decoding; Unicode em dash can confuse some clients. */
+    const sanitizeMailLine = (s) =>
+        String(s || '')
+            .replace(/\u2013|\u2014|\u2212/g, '-')
+            .replace(/\r\n|\r|\n/g, ' ')
+            .trim();
+
+    /** Returns mailto href + text used for the email body. */
+    const buildQuoteEmailDraftPayload = () => {
+        if (!enquiryData?.enquiry?.RequestNo || !toName?.trim()) {
+            alert('Select an enquiry and customer before emailing the quote.');
+            return null;
+        }
+        const printRoot = document.getElementById('quote-print-root');
+        const printContent = document.getElementById('quote-preview');
+        const fragmentHtml = printRoot ? printRoot.innerHTML : printContent ? printContent.innerHTML : '';
+        if (!fragmentHtml) {
+            alert('Quote preview is not ready yet.');
+            return null;
+        }
+
+        const to = (toEmail || '').trim();
+        const reqNo = enquiryData.enquiry.RequestNo;
+        const subj = sanitizeMailLine(
+            `Quotation ${String(quoteNumber || '').trim() || '(draft)'} - ${toName.trim()}`
+        );
+        const amt = typeof grandTotal !== 'undefined' && grandTotal != null ? String(grandTotal) : '';
+        const attCount = (quoteAttachments || []).length;
+        const pendingNote =
+            pendingFiles?.length > 0
+                ? ` ${pendingFiles.length} extra file(s) are only in EMS (not uploaded yet) - add manually if needed.`
+                : '';
+
+        const mailBodyCompact = [
+            ...(to ? [] : ['(Fill the To line in Outlook; the Email field on this quote in EMS is empty.)']),
+            'Dear Sir/Madam,',
+            '',
+            `EMS will download the quote PDF and ${attCount} saved attachment(s) to your Downloads folder.${pendingNote}`,
+            'Attach those files to this message in Outlook.',
+            '',
+            `Enquiry: ${reqNo}`,
+            `Quote: ${String(quoteNumber || '-').trim()}`,
+            amt ? `Amount: ${amt}` : '',
+            `Customer: ${toName.trim()}`,
+            '',
+            'Kind regards,',
+            String(currentUser?.FullName || currentUser?.name || '').trim() || '',
+        ]
+            .filter((line) => line !== '')
+            .join('\r\n');
+
+        const subjShort = subj.length > 200 ? `${subj.slice(0, 197)}...` : subj;
+        const encSubject = encodeURIComponent(subjShort);
+        let encBody = encodeURIComponent(mailBodyCompact);
+        const toAddr = to.length > 320 ? `${to.slice(0, 317)}...` : to;
+        let mailtoHref = toAddr
+            ? `mailto:${encodeURIComponent(toAddr)}?subject=${encSubject}&body=${encBody}`
+            : `mailto:?subject=${encSubject}&body=${encBody}`;
+        if (mailtoHref.length > 2000) {
+            encBody = encodeURIComponent(
+                `Quote ${String(quoteNumber || reqNo).trim()}: PDF + ${attCount} file(s) downloading to Downloads - attach in Outlook.`
+            );
+            mailtoHref = toAddr
+                ? `mailto:${encodeURIComponent(toAddr)}?subject=${encSubject}&body=${encBody}`
+                : `mailto:?subject=${encSubject}&body=${encBody}`;
+        }
+        return {
+            mailtoHref,
+            subjectLine: subjShort,
+            bodyText: mailBodyCompact,
+            toAddr,
+        };
+    };
+
+    const runQuoteEmailDownloads = async () => {
+        setIsUploading(true);
+        try {
+            const { blob, fileName } = await fetchQuotePdfBlob();
+            triggerBlobDownload(blob, fileName);
+            await sleep(450);
+
+            for (const att of quoteAttachments || []) {
+                if (!att?.ID) continue;
+                try {
+                    const url = `${API_BASE}/api/quotes/attachments/download/${att.ID}?download=true`;
+                    const r = await fetch(url, { credentials: 'include' });
+                    if (!r.ok) continue;
+                    const b = await r.blob();
+                    const nm = String(att.FileName || `attachment-${att.ID}`).replace(/[/\\?%*:|"<>]/g, '_');
+                    triggerBlobDownload(b, nm);
+                    await sleep(350);
+                } catch (e) {
+                    console.warn('[email-quote] attachment skip', att?.ID, e);
+                }
+            }
+        } catch (err) {
+            console.error('Email quote flow error:', err);
+            alert(`Could not prepare the quote PDF for email: ${err.message || err}`);
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
+    /** Sync entry from the button — avoids async wrapper eating transient activation for mailto:. */
+    const startQuoteEmailFlow = () => {
+        if (!hasUserPricing) return;
+        const payload = buildQuoteEmailDraftPayload();
+        if (!payload) return;
+        setQuoteEmailDraftHref(payload.mailtoHref);
+        openMailtoFromUserClick(payload.mailtoHref);
+        queueMicrotask(() => {
+            void runQuoteEmailDownloads();
+        });
+    };
 
     // Helper to format date as DD-MMM-YYYY
     const formatDate = (dateString) => {
@@ -6943,7 +7726,7 @@ const QuoteForm = () => {
     const activeGlobalTabName = activeGlobalTabObj ? (activeGlobalTabObj.name || activeGlobalTabObj.label) : 'Project';
 
     return (
-        <div style={{ display: 'flex', height: 'calc(100vh - 80px)', background: '#f5f7fa' }}>
+        <div style={{ display: 'flex', height: 'calc(100vh - 100px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
             <div style={{ width: `${sidebarWidth}px`, background: 'white', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'visible' }}>
                 {/* Search Section */}
@@ -7187,14 +7970,15 @@ const QuoteForm = () => {
                                                             if (didLeadChange) {
                                                                 autoSelectCustomerAfterLeadChangeRef.current = true;
                                                                 const tn = (toName || '').trim();
-                                                                preserveQuoteOnLeadChangeRef.current =
-                                                                    quoteId && tn
-                                                                        ? {
-                                                                              quoteId,
-                                                                              quoteNumber: quoteNumber || '',
-                                                                              toName: tn
-                                                                          }
-                                                                        : null;
+                                                                // Never reuse another lead branch's saved quote when only ToName is re-applied.
+                                                                preserveQuoteOnLeadChangeRef.current = tn ? { toName: tn } : null;
+                                                                setQuoteId(null);
+                                                                setQuoteNumber('');
+                                                                const reg = tabStateRegistry.current[activeQuoteTab];
+                                                                if (reg && typeof reg === 'object') {
+                                                                    reg.quoteId = null;
+                                                                    reg.quoteNumber = '';
+                                                                }
                                                                 clearCustomerForLeadSwitch();
                                                             }
                                                             leadChoiceFingerprintRef.current = nextFp || prevFp;
@@ -7315,9 +8099,9 @@ const QuoteForm = () => {
                 {/* Action Buttons (Clear lives next to Search above) */}
                 {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected */}
                 {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
-                    <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                    <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '6px' }}>
 
-                        {/* Left Actions: Save, Revision */}
+                        {/* Save, Revision — PDF / Email / With Header / Print / Signatures are icon buttons on the quote filter row (next to Clear). */}
                         <div style={{ display: 'flex', gap: '6px' }}>
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
@@ -7351,56 +8135,41 @@ const QuoteForm = () => {
 
                             {/* Revision Button */}
                             {hasPersistedQuoteForScope && (
-                                <button onClick={handleRevise} disabled={saving || !canEdit() || isEditingRestricted || !quoteId} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: (!canEdit() || isEditingRestricted || !quoteId) ? '#94a3b8' : '#0284c7', color: 'white', border: 'none', borderRadius: '4px', cursor: (!canEdit() || isEditingRestricted || !quoteId) ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '12px' }} title={isEditingRestricted ? "Editing is restricted for this tab" : !canEdit() ? "No permission to revise" : !quoteId ? "Loading quote…" : ""}>
+                                <button
+                                    onClick={handleRevise}
+                                    disabled={saving || !canEdit() || isEditingRestricted || !canRevisePersistedQuote}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        padding: '6px 12px',
+                                        background:
+                                            !canEdit() || isEditingRestricted || !canRevisePersistedQuote
+                                                ? '#94a3b8'
+                                                : '#0284c7',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '4px',
+                                        cursor:
+                                            !canEdit() || isEditingRestricted || !canRevisePersistedQuote
+                                                ? 'not-allowed'
+                                                : 'pointer',
+                                        fontWeight: '600',
+                                        fontSize: '12px',
+                                    }}
+                                    title={
+                                        isEditingRestricted
+                                            ? 'Editing is restricted for this tab'
+                                            : !canEdit()
+                                              ? 'No permission to revise'
+                                              : !canRevisePersistedQuote
+                                                ? 'Loading quote…'
+                                                : ''
+                                    }
+                                >
                                     <Plus size={14} /> Revision
                                 </button>
                             )}
-                        </div>
-
-                        {/* Right Actions: Print, Email */}
-                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-
-                            {/* Print with Header Checkbox */}
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#64748b', cursor: 'pointer', marginRight: '4px' }}>
-                                <input
-                                    type="checkbox"
-                                    checked={printWithHeader}
-                                    onChange={(e) => setPrintWithHeader(e.target.checked)}
-                                />
-                                With Header
-                            </label>
-
-                            {/* Print Preview - Icon Only */}
-                            <button onClick={printQuote} disabled={!hasUserPricing} title="Print Preview" style={{ width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'white', color: '#1e293b', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', opacity: !hasUserPricing ? 0.5 : 1 }}>
-                                <Printer size={16} />
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => setSignatureVaultOpen(true)}
-                                disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
-                                title="Signatures: open this, save to library, then use Place on page. On the quote preview, drag the stamp anywhere (except ×) to move it. Profile menu can manage defaults."
-                                style={{
-                                    width: '30px',
-                                    height: '30px',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    background: 'white',
-                                    color: '#1e293b',
-                                    border: '1px solid #cbd5e1',
-                                    borderRadius: '4px',
-                                    cursor: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 'not-allowed' : 'pointer',
-                                    opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
-                                }}
-                            >
-                                <PenLine size={16} />
-                            </button>
-
-                            {/* Email - Icon Only */}
-                            <button title="Email Quote" style={{ width: '30px', height: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'white', color: '#1e293b', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer' }}>
-                                <Mail size={16} />
-                            </button>
                         </div>
                     </div>
                 )}
@@ -8209,7 +8978,7 @@ const QuoteForm = () => {
             </div >
 
             {/* Right Panel - Quote Preview */}
-            < div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
+            < div style={{ flex: 1, overflow: 'auto', padding: '0 20px 20px 20px' }}>
                 {
                     loading ? (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }} >
@@ -8711,11 +9480,13 @@ const QuoteForm = () => {
                                     flexShrink: 0,
                                     width: '100%',
                                     boxSizing: 'border-box',
-                                    marginBottom: '12px',
-                                    padding: '10px 12px',
+                                    marginTop: 0,
+                                    marginBottom: '8px',
+                                    padding: '8px 12px',
                                     background: '#f8fafc',
                                     border: '1px solid #e2e8f0',
-                                    borderRadius: '8px',
+                                    borderTop: 'none',
+                                    borderRadius: '0 0 8px 8px',
                                     boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
                                 }}
                             >
@@ -8725,8 +9496,8 @@ const QuoteForm = () => {
                                         flexWrap: 'wrap',
                                         alignItems: 'center',
                                         justifyContent: 'flex-start',
-                                        gap: '10px 16px',
-                                        rowGap: '10px',
+                                        gap: '8px 14px',
+                                        rowGap: '8px',
                                         width: '100%',
                                     }}
                                 >
@@ -8899,75 +9670,232 @@ const QuoteForm = () => {
                                             </button>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                            {/* Attachments Bar (Outlook Style) */}
-                            <div className="no-print" style={{
-                                marginBottom: '16px',
-                                padding: '12px 16px',
-                                background: '#f8fafc',
-                                border: '1px solid #e2e8f0',
-                                borderRadius: '8px',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '12px'
-                            }}>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#475569', fontSize: '13px', fontWeight: '600' }}>
-                                        <Paperclip size={18} className="text-blue-500" />
-                                        <span>Attachments {quoteAttachments.length > 0 && `(${quoteAttachments.length})`}</span>
-                                        <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 'normal', marginLeft: '8px' }}>
-                                            (Click 'Add Files' or <span style={{ color: '#3b82f6', fontWeight: '500' }}>Paste (Ctrl+V)</span> files - <span style={{ color: '#10b981', fontWeight: '600' }}>{quoteId ? 'Ready' : 'Pending Save'}</span>)
-                                        </span>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                    <div
+                                        className="no-print"
+                                        style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            marginLeft: 'auto',
+                                        }}
+                                    >
                                         <button
+                                            type="button"
                                             onClick={downloadPDF}
                                             disabled={!hasUserPricing}
+                                            title="Download quote PDF"
+                                            aria-label="Download quote PDF"
                                             style={{
-                                                fontSize: '11px',
+                                                width: '32px',
+                                                height: '32px',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
                                                 color: 'white',
                                                 background: '#ef4444',
                                                 border: '1px solid #ef4444',
-                                                padding: '4px 12px',
-                                                borderRadius: '4px',
-                                                cursor: 'pointer',
-                                                fontWeight: '600',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '4px',
-                                                opacity: !hasUserPricing ? 0.5 : 1
+                                                borderRadius: '6px',
+                                                cursor: !hasUserPricing ? 'not-allowed' : 'pointer',
+                                                opacity: !hasUserPricing ? 0.5 : 1,
                                             }}
                                         >
-                                            <Download size={14} /> PDF Download
+                                            <Download size={16} />
                                         </button>
                                         <button
-                                            onClick={() => fileInputRef.current?.click()}
+                                            type="button"
+                                            onClick={startQuoteEmailFlow}
+                                            disabled={!hasUserPricing || isUploading}
+                                            title={
+                                                !toEmail?.trim()
+                                                    ? 'Opens a draft without To — fill recipient in Outlook. Enter Email on the quote (left) to pre-fill next time.'
+                                                    : 'Tries desktop Outlook (mailto), then downloads the quote PDF and saved attachments to Downloads — attach them in Outlook.'
+                                            }
+                                            aria-label="Email quote"
                                             style={{
-                                                fontSize: '11px',
-                                                color: '#3b82f6',
-                                                background: 'white',
-                                                border: '1px solid #3b82f6',
-                                                padding: '4px 12px',
-                                                borderRadius: '4px',
-                                                cursor: 'pointer',
-                                                fontWeight: '600',
+                                                width: '32px',
+                                                height: '32px',
                                                 display: 'flex',
                                                 alignItems: 'center',
-                                                gap: '4px'
+                                                justifyContent: 'center',
+                                                color: '#1e40af',
+                                                background: 'white',
+                                                border: '1px solid #3b82f6',
+                                                borderRadius: '6px',
+                                                cursor: !hasUserPricing || isUploading ? 'not-allowed' : 'pointer',
+                                                opacity: !hasUserPricing || isUploading ? 0.5 : 1,
                                             }}
                                         >
-                                            <Plus size={14} /> Add Files
+                                            <Mail size={16} />
+                                        </button>
+                                        <label
+                                            className="no-print"
+                                            style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#64748b', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={printWithHeader}
+                                                onChange={(e) => setPrintWithHeader(e.target.checked)}
+                                            />
+                                            With Header
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={printQuote}
+                                            disabled={!hasUserPricing}
+                                            title="Print preview (uses With Header)"
+                                            aria-label="Print quote"
+                                            style={{
+                                                width: '32px',
+                                                height: '32px',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                background: 'white',
+                                                color: '#1e293b',
+                                                border: '1px solid #cbd5e1',
+                                                borderRadius: '6px',
+                                                cursor: !hasUserPricing ? 'not-allowed' : 'pointer',
+                                                opacity: !hasUserPricing ? 0.5 : 1,
+                                            }}
+                                        >
+                                            <Printer size={16} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleSignaturesToolbarPrimaryClick}
+                                            disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
+                                            draggable={
+                                                Boolean(
+                                                    hasUserPricing &&
+                                                        enquiryData?.enquiry?.RequestNo &&
+                                                        toolbarDragSignatureImageUrl
+                                                )
+                                            }
+                                            onDragStart={handleToolbarSignatureDragStart}
+                                            onDragEnd={handleToolbarSignatureDragEnd}
+                                            title={
+                                                !hasUserPricing || !enquiryData?.enquiry?.RequestNo
+                                                    ? 'Save the quote context to use signatures.'
+                                                    : defaultSignatureImageUrl
+                                                      ? 'Click: place default on page 1. Drag onto the quote for position/page. Shift+click: open signature library.'
+                                                      : toolbarDragSignatureImageUrl
+                                                        ? 'Click opens the library — set a default, then click Signatures to place on page 1. Or drag this button. Shift+click: library.'
+                                                        : 'Click to open the signature library. Shift+click also opens the library once you have a default.'
+                                            }
+                                            aria-label="Signatures"
+                                            style={{
+                                                width: '32px',
+                                                height: '32px',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                color: '#475569',
+                                                background: 'white',
+                                                border: '1px solid #cbd5e1',
+                                                borderRadius: '6px',
+                                                cursor: !hasUserPricing || !enquiryData?.enquiry?.RequestNo
+                                                    ? 'not-allowed'
+                                                    : toolbarDragSignatureImageUrl
+                                                      ? 'grab'
+                                                      : 'pointer',
+                                                opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
+                                            }}
+                                        >
+                                            <PenTool size={16} />
                                         </button>
                                     </div>
-                                    <input
-                                        type="file"
-                                        multiple
-                                        ref={fileInputRef}
-                                        onChange={(e) => uploadFiles(e.target.files)}
-                                        style={{ display: 'none' }}
-                                    />
                                 </div>
+                            </div>
+                            {/* Attachments column (left) + PDF preview (right). Do not wrap #quote-print-root in no-print — browser print must see the quote. */}
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'row',
+                                    flex: 1,
+                                    minHeight: 0,
+                                    gap: '16px',
+                                    alignItems: 'stretch',
+                                    width: '100%',
+                                    marginTop: 0,
+                                }}
+                            >
+                            <div
+                                className="no-print"
+                                style={{
+                                    width: '280px',
+                                    minWidth: '220px',
+                                    maxWidth: '320px',
+                                    flexShrink: 0,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '12px',
+                                    minHeight: 0,
+                                    overflowY: 'auto',
+                                    padding: '12px 14px',
+                                    background: '#f8fafc',
+                                    border: '1px solid #e2e8f0',
+                                    borderRadius: '8px',
+                                    boxSizing: 'border-box',
+                                }}
+                            >
+                                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#475569', fontSize: '13px', fontWeight: '600' }}>
+                                            <Paperclip size={18} className="text-blue-500" />
+                                            <span>Attachments {quoteAttachments.length > 0 && `(${quoteAttachments.length})`}</span>
+                                        </div>
+                                        <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 'normal', lineHeight: 1.4 }}>
+                                            Click &quot;Add Files&quot; or <span style={{ color: '#3b82f6', fontWeight: '500' }}>Paste (Ctrl+V)</span> —{' '}
+                                            <span style={{ color: '#10b981', fontWeight: '600' }}>{quoteId ? 'Ready' : 'Pending Save'}</span>
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => fileInputRef.current?.click()}
+                                        style={{
+                                            fontSize: '11px',
+                                            color: '#3b82f6',
+                                            background: 'white',
+                                            border: '1px solid #3b82f6',
+                                            padding: '4px 10px',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontWeight: '600',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px',
+                                            flexShrink: 0,
+                                        }}
+                                    >
+                                        <Plus size={14} /> Add Files
+                                    </button>
+                                </div>
+                                {quoteEmailDraftHref && (
+                                    <div style={{ fontSize: '11px', color: '#475569', lineHeight: 1.45 }}>
+                                        <div style={{ color: '#334155', marginBottom: '4px' }}>
+                                            <strong>Desktop Outlook:</strong> some builds log a successful{' '}
+                                            <code style={{ fontSize: '10px', background: '#f1f5f9', padding: '1px 4px' }}>mailto:</code>
+                                            {' '}hand-off but do not show a new message window. Use the link below to retry, then attach the PDF/files from Downloads if needed.
+                                        </div>
+                                        <div>
+                                            <a
+                                                href={quoteEmailDraftHref}
+                                                style={{ color: '#2563eb', fontWeight: 600, textDecoration: 'underline' }}
+                                            >
+                                                Open mail draft (mailto)
+                                            </a>
+                                            <span style={{ marginLeft: '6px', color: '#94a3b8' }}>same draft as Email.</span>
+                                        </div>
+                                    </div>
+                                )}
+                                <input
+                                    type="file"
+                                    multiple
+                                    ref={fileInputRef}
+                                    onChange={(e) => uploadFiles(e.target.files)}
+                                    style={{ display: 'none' }}
+                                />
 
                                 {(quoteAttachments.length > 0 || pendingFiles.length > 0) ? (
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
@@ -9112,17 +10040,26 @@ const QuoteForm = () => {
                             <div
                                 id="quote-print-root"
                                 data-print-with-header={printWithHeader ? '1' : '0'}
-                                style={{ maxWidth: '210mm', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}
+                                style={{
+                                    flex: 1,
+                                    minWidth: 0,
+                                    minHeight: 0,
+                                    overflow: 'auto',
+                                    maxWidth: '100%',
+                                    margin: '0 auto',
+                                    width: '100%',
+                                    boxSizing: 'border-box',
+                                }}
                             >
                                 <div className="quote-print-repeat-strip" aria-hidden="true">
                                     <div style={{ display: 'flex', alignItems: 'center', width: '100%', justifyContent: 'flex-end' }}>
                                         {quoteLogoDisplaySrc ? (
-                                            <img src={quoteLogoDisplaySrc} alt="" style={{ height: '48px', width: 'auto', maxWidth: '180px', objectFit: 'contain' }} />
+                                            <img src={quoteLogoDisplaySrc} alt="" style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }} />
                                         ) : null}
                                     </div>
                                 </div>
-                                <div className="quote-print-page-indicator" aria-hidden="true" />
-                                <div className="quote-print-footer-rule" aria-hidden="true" />
+                                <div className="quote-print-page-indicator" aria-hidden="true"></div>
+                                <div className="quote-print-footer-rule" aria-hidden="true"></div>
 
                             <style>{tableStyles}</style>
                             <style>
@@ -9146,12 +10083,22 @@ const QuoteForm = () => {
                                     pointer-events: none;
                                     visibility: hidden;
                                 }
+                                /* PDF-style viewer: matting + true A4 width (210mm). Horizontal scroll if panel is narrow — same line breaks as Puppeteer PDF (794px viewport). */
                                 #quote-preview {
                                     display: flex;
                                     flex-direction: column;
-                                    gap: 20px;
+                                    align-items: center;
+                                    gap: 10px;
+                                    width: 100%;
+                                    min-width: 210mm;
+                                    max-width: 100%;
+                                    box-sizing: border-box;
+                                    padding: 20px 16px 28px;
+                                    background: #e2e8f0;
                                     border: none !important;
                                     outline: none !important;
+                                    overflow-x: auto;
+                                    overflow-y: visible;
                                 }
                                 .quote-document-root {
                                     border: none !important;
@@ -9161,7 +10108,9 @@ const QuoteForm = () => {
                                     position: relative;
                                     background: #fff;
                                     box-sizing: border-box;
-                                    max-width: 210mm;
+                                    width: 210mm;
+                                    min-width: 210mm;
+                                    max-width: none;
                                     margin-left: auto;
                                     margin-right: auto;
                                     margin-bottom: 0;
@@ -9169,12 +10118,29 @@ const QuoteForm = () => {
                                     min-height: 297mm;
                                     border: none !important;
                                     outline: none !important;
-                                    box-shadow: none;
-                                    border-radius: 0;
+                                    box-shadow:
+                                        0 1px 2px rgba(0, 0, 0, 0.12),
+                                        0 6px 16px rgba(0, 0, 0, 0.14),
+                                        0 0 0 1px rgba(0, 0, 0, 0.06);
+                                    border-radius: 1px;
                                     display: grid;
                                     grid-template-columns: minmax(0, 1fr);
                                     grid-template-rows: auto minmax(0, 1fr) auto;
                                     align-content: stretch;
+                                    /* Same rules as @media print below: Puppeteer PDF uses screen — @media print is ignored */
+                                    page-break-after: always;
+                                    break-after: page;
+                                }
+                                .quote-a4-sheet:last-child {
+                                    page-break-after: auto;
+                                    break-after: auto;
+                                }
+                                /* Each sheet already ends with break-after: page — do not add break-before on the next sheet
+                                   or Chromium inserts an extra blank page (PDF page N empty, body on N+1). */
+                                .quote-a4-sheet.page-one + .quote-a4-clause-sheet,
+                                .quote-a4-clause-sheet + .quote-a4-clause-sheet {
+                                    page-break-before: auto;
+                                    break-before: auto;
                                 }
                                 .quote-sheet-main-flex {
                                     min-width: 0;
@@ -9185,6 +10151,11 @@ const QuoteForm = () => {
                                 }
                                 .quote-sheet-footer-push {
                                     flex-shrink: 0;
+                                }
+                                /* Keep company lines + email on one fragment (PDF was orphaning “E-mail: …” on the next page). */
+                                .quote-a4-sheet .footer-section {
+                                    break-inside: avoid;
+                                    page-break-inside: avoid;
                                 }
                                 .quote-sheet-logo-row {
                                     flex-shrink: 0;
@@ -9225,6 +10196,15 @@ const QuoteForm = () => {
                                     padding-bottom: 6px;
                                 }
                                 @media print {
+                                    html, body {
+                                        width: 100% !important;
+                                        max-width: 100% !important;
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        overflow: visible !important;
+                                        height: auto !important;
+                                        background: #fff !important;
+                                    }
                                     body * {
                                         visibility: hidden;
                                     }
@@ -9232,26 +10212,31 @@ const QuoteForm = () => {
                                     #quote-print-root * {
                                         visibility: visible !important;
                                     }
+                                    /* Screen layout keeps #quote-print-root inside a narrow flex sibling — use full viewport for print. */
                                     #quote-print-root {
-                                        position: relative;
-                                        left: 0;
-                                        top: 0;
-                                        width: 100%;
-                                        max-width: none !important;
+                                        position: fixed !important;
+                                        left: 0 !important;
+                                        top: 0 !important;
+                                        right: 0 !important;
+                                        width: 100vw !important;
+                                        max-width: 100vw !important;
                                         margin: 0 !important;
                                         padding: 0 !important;
                                         padding-top: 18mm !important;
                                         padding-bottom: 44mm !important;
-                                        box-sizing: border-box;
-                                        background: white;
+                                        box-sizing: border-box !important;
+                                        background: white !important;
+                                        z-index: 2147483640 !important;
+                                        transform: none !important;
                                     }
                                     #quote-preview {
                                         position: relative !important;
                                         left: auto !important;
                                         top: auto !important;
                                         width: 100% !important;
-                                        max-width: none !important;
-                                        margin: 0 !important;
+                                        max-width: 210mm !important;
+                                        margin-left: auto !important;
+                                        margin-right: auto !important;
                                         padding: 0 !important;
                                         box-shadow: none !important;
                                         background: white !important;
@@ -9269,6 +10254,8 @@ const QuoteForm = () => {
                                     .quote-a4-sheet {
                                         box-shadow: none !important;
                                         border-radius: 0 !important;
+                                        width: 100% !important;
+                                        max-width: 210mm !important;
                                         margin-bottom: 0 !important;
                                         min-height: 0 !important;
                                         page-break-after: always !important;
@@ -9362,24 +10349,9 @@ const QuoteForm = () => {
                                         margin: 0 !important;
                                         padding: 0 !important;
                                     }
+                                    /* counter(page)/counter(pages) often renders as 0/0 in Chrome print preview; page lines come from .quote-page-num-screen */
                                     [data-print-with-header="1"] .quote-print-page-indicator {
-                                        display: block !important;
-                                        visibility: visible !important;
-                                        position: fixed !important;
-                                        bottom: 34mm;
-                                        right: 14mm;
-                                        width: 50%;
-                                        margin-left: 50%;
-                                        text-align: right;
-                                        font-size: 9pt;
-                                        color: #64748b;
-                                        z-index: 2147483645;
-                                    }
-                                    [data-print-with-header="1"] .quote-print-page-indicator::after {
-                                        content: "Page " counter(page);
-                                    }
-                                    [data-print-with-header="1"] .quote-print-page-indicator::after {
-                                        content: "Page " counter(page) " / " counter(pages);
+                                        display: none !important;
                                     }
                                     [data-print-with-header="1"] .footer-section {
                                         position: fixed !important;
@@ -9401,12 +10373,10 @@ const QuoteForm = () => {
                                     [data-print-with-header="0"] .quote-print-page-indicator {
                                         display: none !important;
                                     }
-                                    .quote-page-num-screen {
-                                        display: none !important;
-                                    }
-                                    .quote-a4-clause-sheet {
-                                        page-break-before: always !important;
-                                        break-before: page !important;
+                                    .quote-a4-sheet.page-one + .quote-a4-clause-sheet,
+                                    .quote-a4-clause-sheet + .quote-a4-clause-sheet {
+                                        page-break-before: auto !important;
+                                        break-before: auto !important;
                                     }
                                     [data-print-with-header="1"] .quote-continuation-header {
                                         display: none !important;
@@ -9415,19 +10385,19 @@ const QuoteForm = () => {
                             `}
                             </style>
 
-                            {/* Document Container — dark stack behind A4 “sheets” (screen); print flattens to white. */}
+                            {/* Document container — screen: PDF viewer matting + A4 sheets (CSS); print: flattened in @media print */}
                             <div
                                 id="quote-preview"
                                 ref={quotePreviewLayoutRef}
                                 className="quote-document-root"
                                 style={{
-                                    background: '#3f3f46',
                                     padding: 0,
                                     border: 'none',
                                     outline: 'none',
                                     borderRadius: 0,
                                     boxShadow: 'none',
-                                    maxWidth: '210mm',
+                                    width: '100%',
+                                    maxWidth: '100%',
                                     margin: '0 auto',
                                     minHeight: 'auto',
                                     boxSizing: 'border-box',
@@ -9458,7 +10428,11 @@ const QuoteForm = () => {
                                     ))}
                                 </div>
 
-                                <div className="quote-a4-sheet page-one">
+                                <div
+                                    className="quote-a4-sheet page-one"
+                                    onDragOver={handleQuoteSheetSignatureDragOver}
+                                    onDrop={handleQuotePreviewSignatureDrop}
+                                >
                                     {/* Logo-only row; address + quote table align below this */}
                                     <div className="quote-sheet-logo-row" style={{ width: '100%', marginBottom: '20px' }}>
                                         <div style={{ textAlign: 'right', width: '100%' }}>
@@ -9587,7 +10561,7 @@ const QuoteForm = () => {
                                             const clause = activeClausesList[clauseIdx];
                                             if (!clause) return null;
                                             return (
-                                                <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px', pageBreakInside: 'avoid' }}>
+                                                <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px' }}>
                                                     <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
                                                         {clauseIdx + 1}. {clause.title}
                                                     </h3>
@@ -9603,18 +10577,18 @@ const QuoteForm = () => {
                                     </div>
 
                                     {/* Bottom Section (Signature + Footer) — pinned to sheet bottom when content is short */}
-                                    <div className="quote-sheet-footer-push" style={{ pageBreakInside: 'avoid' }}>
+                                    <div className="quote-sheet-footer-push">
 
                                         {/* Signature Section */}
                                         <div style={{ marginTop: 0 }}>
-                                            <div style={{ marginBottom: '112px' }}>
+                                            <div className="quote-signature-spacer" style={{ marginBottom: '112px' }}>
                                                 For {quoteCompanyName || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'},
                                             </div>
                                             <div style={{ fontWeight: '600' }}>{signatory || 'N/A'}</div>
                                             <div style={{ fontSize: '13px', color: '#64748b' }}>{signatoryDesignation || ''}</div>
                                         </div>
 
-                                        {/* Page number (screen); print uses fixed strip / @page where supported */}
+                                        {/* Page number on each sheet; print uses this text (CSS page counters are unreliable in browser print) */}
                                         <div className="quote-page-num-screen">
                                             Page 1 / {quotePreviewTotalPages}
                                         </div>
@@ -9653,7 +10627,9 @@ const QuoteForm = () => {
                                                 stamp={stamp}
                                                 onRemove={handleRemoveDigitalStamp}
                                                 onMove={handleMoveDigitalStamp}
-                                                allowRemove={!hasPersistedQuoteForScope}
+                                                allowRemove={
+                                                    !hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true
+                                                }
                                             />
                                         ))}
                                 </div>
@@ -9661,14 +10637,16 @@ const QuoteForm = () => {
                                 {sanitizedClausePageGroups.map((group, sheetIdx) => (
                                     <div
                                         key={`clause-page-${sheetIdx}-${group.join('-')}`}
-                                        className="quote-a4-sheet quote-a4-clause-sheet page-break"
+                                        className="quote-a4-sheet quote-a4-clause-sheet"
+                                        onDragOver={handleQuoteSheetSignatureDragOver}
+                                        onDrop={handleQuotePreviewSignatureDrop}
                                     >
                                         <div className="quote-continuation-header">
                                             {quoteLogoDisplaySrc ? (
                                                 <img
                                                     src={quoteLogoDisplaySrc}
                                                     alt=""
-                                                    style={{ height: '48px', width: 'auto', maxWidth: '180px', objectFit: 'contain' }}
+                                                    style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }}
                                                 />
                                             ) : null}
                                         </div>
@@ -9678,7 +10656,7 @@ const QuoteForm = () => {
                                                 const clause = activeClausesList[clauseIdx];
                                                 if (!clause) return null;
                                                 return (
-                                                    <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px', pageBreakInside: 'avoid' }}>
+                                                    <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px' }}>
                                                         <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
                                                             {clauseIdx + 1}. {clause.title}
                                                         </h3>
@@ -9699,6 +10677,7 @@ const QuoteForm = () => {
                                             </div>
                                             <div className="quote-footer-full-rule" aria-hidden="true" />
                                             <div
+                                                className="footer-section"
                                                 style={{
                                                     marginLeft: '50%',
                                                     width: '50%',
@@ -9728,13 +10707,16 @@ const QuoteForm = () => {
                                                     stamp={stamp}
                                                     onRemove={handleRemoveDigitalStamp}
                                                     onMove={handleMoveDigitalStamp}
-                                                    allowRemove={!hasPersistedQuoteForScope}
+                                                    allowRemove={
+                                                        !hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true
+                                                    }
                                                 />
                                             ))}
                                     </div>
                                 ))}
                             </div>
                             </div>
+                        </div>
                         </div>
                     )
                 }
@@ -9746,8 +10728,8 @@ const QuoteForm = () => {
                 placementEnabled
                 totalSheets={quotePreviewTotalPages}
                 onPlaceStamp={handlePlaceDigitalStamp}
-                displayName={signatory || preparedBy || currentUser?.FullName || currentUser?.name || ''}
-                designation={signatoryDesignation || ''}
+                displayName={digitalStampUserDisplayName}
+                designation={digitalStampUserDesignation}
             />
         </div >
     );

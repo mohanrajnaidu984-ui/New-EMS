@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import excelIcon from '../../assets/excel_icon.png';
+import DateInput from './DateInput';
 
 const SearchEnquiry = ({ onOpen }) => {
     const { enquiries } = useData();
@@ -9,17 +10,29 @@ const SearchEnquiry = ({ onOpen }) => {
 
     // Search filters
     const [searchQuery, setSearchQuery] = useState(() => localStorage.getItem('enquiry_searchQuery') || '');
+    const [dateFrom, setDateFrom] = useState(() => localStorage.getItem('enquiry_searchDateFrom') || '');
+    const [dateTo, setDateTo] = useState(() => localStorage.getItem('enquiry_searchDateTo') || '');
 
     // -- Persistence --
     useEffect(() => {
         localStorage.setItem('enquiry_searchQuery', searchQuery);
     }, [searchQuery]);
+    useEffect(() => {
+        if (dateFrom) localStorage.setItem('enquiry_searchDateFrom', dateFrom);
+        else localStorage.removeItem('enquiry_searchDateFrom');
+    }, [dateFrom]);
+    useEffect(() => {
+        if (dateTo) localStorage.setItem('enquiry_searchDateTo', dateTo);
+        else localStorage.removeItem('enquiry_searchDateTo');
+    }, [dateTo]);
 
     const [resetKey, setResetKey] = useState(0);
 
     const [results, setResults] = useState([]);
     const [filteredEnquiries, setFilteredEnquiries] = useState([]);
     const searchInputRef = useRef(null);
+    /** After Clear, keep the table empty until the user runs a search again (text and/or both dates). */
+    const resultsLockedEmptyRef = useRef(false);
 
     const currentUserName = (currentUser?.name || '').trim().toLowerCase();
 
@@ -95,7 +108,6 @@ const SearchEnquiry = ({ onOpen }) => {
         }));
 
         setFilteredEnquiries(allowed);
-        setResults(allowed);
     }, [enquiries, currentUser, currentUserName]);
 
     const [sortConfig, setSortConfig] = useState({ key: 'EnquiryDate', direction: 'desc' });
@@ -162,12 +174,43 @@ const SearchEnquiry = ({ onOpen }) => {
         return sortableItems;
     }, [results, sortConfig]);
 
-    const handleSearch = () => {
+    const handleSearch = useCallback(() => {
+        const q = String(searchQuery || '').trim();
+        const hasDateRange = Boolean(dateFrom && dateTo);
+        if (!q && !hasDateRange) {
+            setResults([]);
+            return;
+        }
+
         let filtered = [...filteredEnquiries];
 
+        // Enquiry date range — only when both From and To are set (inclusive, by calendar day)
+        if (dateFrom && dateTo) {
+            let from = new Date(dateFrom);
+            let to = new Date(dateTo);
+            if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+                /* ignore invalid */
+            } else {
+                if (from > to) {
+                    const swap = from;
+                    from = to;
+                    to = swap;
+                }
+                from.setHours(0, 0, 0, 0);
+                to.setHours(23, 59, 59, 999);
+                filtered = filtered.filter((e) => {
+                    const raw = e.EnquiryDate || e.CreatedAt;
+                    if (!raw) return false;
+                    const d = new Date(raw);
+                    if (Number.isNaN(d.getTime())) return false;
+                    return d >= from && d <= to;
+                });
+            }
+        }
+
         // Search text filter
-        if (searchQuery) {
-            const lowerText = searchQuery.toLowerCase();
+        if (q) {
+            const lowerText = q.toLowerCase();
             filtered = filtered.filter(e =>
                 e.RequestNo?.toLowerCase().includes(lowerText) ||
                 e.CustomerName?.toLowerCase().includes(lowerText) ||
@@ -179,33 +222,38 @@ const SearchEnquiry = ({ onOpen }) => {
             );
         }
 
-
-
         setResults(filtered);
-    };
+    }, [filteredEnquiries, searchQuery, dateFrom, dateTo]);
 
-    // Live Search: Automatically search when filters change
-    useEffect(() => {
+    const runSearch = useCallback(() => {
+        resultsLockedEmptyRef.current = false;
         handleSearch();
-    }, [searchQuery]);
+    }, [handleSearch]);
+
+    // Live search when text or date range changes (skipped while table is cleared until user filters again)
+    useEffect(() => {
+        if (resultsLockedEmptyRef.current) {
+            const hasFilter = Boolean(String(searchQuery || '').trim()) || Boolean(dateFrom && dateTo);
+            if (hasFilter) {
+                resultsLockedEmptyRef.current = false;
+                handleSearch();
+            }
+            return;
+        }
+        handleSearch();
+    }, [handleSearch, searchQuery, dateFrom, dateTo]);
 
     const handleClear = () => {
-
-        // 1. Reset all state variables
-        setSearchQuery("");
+        resultsLockedEmptyRef.current = true;
+        setSearchQuery('');
+        setDateFrom('');
+        setDateTo('');
         setSortConfig({ key: 'EnquiryDate', direction: 'desc' });
-
-        // 2. Increment key to force remount of input fields (extra safety)
-        setResetKey(prev => prev + 1);
-
-        // 3. Clear the DOM ref directly as well
+        setResetKey((prev) => prev + 1);
         if (searchInputRef.current) {
-            searchInputRef.current.value = "";
+            searchInputRef.current.value = '';
         }
-
-        // 4. Reset the results list
-        setResults([...filteredEnquiries]);
-
+        setResults([]);
     };
 
     const handleExport = () => {
@@ -256,16 +304,56 @@ const SearchEnquiry = ({ onOpen }) => {
     };
 
     return (
-        <div style={{ position: 'relative', zIndex: 100 }}>
-            {/* Search Filters Row - Clean & Simple */}
-            {/* Search Filters Row - Single Line */}
-            <div className="d-flex align-items-center gap-2 mb-4" style={{
-                position: 'relative',
-                zIndex: 1000,
-                pointerEvents: 'auto'
-            }}>
+        <div
+            className="px-3 px-lg-4"
+            style={{ position: 'relative', zIndex: 100, boxSizing: 'border-box' }}
+        >
+            {/* Sticky under app header (100px) so this bar stays visible while scrolling results */}
+            <div
+                style={{
+                    position: 'sticky',
+                    top: '100px',
+                    zIndex: 200,
+                    backgroundColor: '#ffffff',
+                    paddingTop: '4px',
+                    paddingBottom: '12px',
+                    marginBottom: '12px',
+                    borderBottom: '1px solid #e0e0e0',
+                    boxShadow: '0 4px 12px rgba(15, 23, 42, 0.06)',
+                }}
+            >
+            <div
+                className="d-flex align-items-center flex-wrap gap-2"
+                style={{
+                    position: 'relative',
+                    zIndex: 1000,
+                    pointerEvents: 'auto',
+                    rowGap: '8px',
+                }}
+            >
+                <div className="d-flex align-items-center flex-wrap gap-2" style={{ fontSize: '12px', color: '#475569' }}>
+                    <span className="text-nowrap fw-semibold">From</span>
+                    <div style={{ width: '132px' }}>
+                        <DateInput
+                            value={dateFrom}
+                            onChange={(e) => setDateFrom(e.target.value)}
+                            placeholder="DD-MMM-YYYY"
+                            style={{ fontSize: '12px', padding: '6px 8px', height: '36px' }}
+                        />
+                    </div>
+                    <span className="text-nowrap fw-semibold">To</span>
+                    <div style={{ width: '132px' }}>
+                        <DateInput
+                            value={dateTo}
+                            onChange={(e) => setDateTo(e.target.value)}
+                            placeholder="DD-MMM-YYYY"
+                            style={{ fontSize: '12px', padding: '6px 8px', height: '36px' }}
+                        />
+                    </div>
+                </div>
+
                 {/* Search Text */}
-                <div style={{ width: '400px' }} key={`search-${resetKey}`}>
+                <div style={{ flex: '1 1 220px', minWidth: '180px', maxWidth: '480px' }} key={`search-${resetKey}`}>
                     <input
                         id="globalSearchInput"
                         ref={searchInputRef}
@@ -276,7 +364,7 @@ const SearchEnquiry = ({ onOpen }) => {
                         placeholder="Search anything..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                        onKeyDown={(e) => e.key === 'Enter' && runSearch()}
                         style={{ fontSize: '12.5px', borderRadius: '4px', border: '1px solid #d1d5db', height: '36px' }}
                     />
                 </div>
@@ -285,7 +373,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 <button
                     type="button"
                     className="btn btn-primary py-0 search-btn-hover"
-                    onClick={handleSearch}
+                    onClick={runSearch}
                     style={{
                         fontSize: '12px',
                         borderRadius: '4px',
@@ -342,6 +430,16 @@ const SearchEnquiry = ({ onOpen }) => {
                     <img src={excelIcon} alt="Export to Excel" style={{ height: '24px', width: 'auto' }} />
                 </button>
             </div>
+            {dateFrom && dateTo ? (
+                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '6px' }}>
+                    Filtering by enquiry date between selected dates (inclusive). Clear dates to show all dates again.
+                </div>
+            ) : (dateFrom || dateTo) ? (
+                <div style={{ fontSize: '11px', color: '#b45309', marginTop: '6px' }}>
+                    Select both From and To dates to filter the list by enquiry date.
+                </div>
+            ) : null}
+            </div>
 
             <style>
                 {`
@@ -376,6 +474,12 @@ const SearchEnquiry = ({ onOpen }) => {
                 }
                 .sortable-header:hover {
                     background-color: #f0f4f8;
+                }
+                tbody tr.enquiry-search-row-open {
+                    cursor: pointer;
+                }
+                tbody tr.enquiry-search-row-open:hover {
+                    background-color: #eff6ff !important;
                 }
                 `}
             </style>
@@ -423,15 +527,24 @@ const SearchEnquiry = ({ onOpen }) => {
                             <tr><td colSpan="11" className="text-muted text-center">No results.</td></tr>
                         ) : (
                             sortedResults.map((r, idx) => (
-                                <tr key={`${r.RequestNo}-${idx}`}>
+                                <tr
+                                    key={`${r.RequestNo}-${idx}`}
+                                    className="enquiry-search-row-open"
+                                    tabIndex={0}
+                                    role="button"
+                                    title={r._canEdit ? 'Open enquiry (edit)' : 'Open enquiry (view)'}
+                                    onClick={() => r.RequestNo && onOpen(r.RequestNo)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            if (r.RequestNo) onOpen(r.RequestNo);
+                                        }
+                                    }}
+                                >
                                     <td className="position-relative">
                                         <div
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                onOpen(r.RequestNo);
-                                            }}
+                                            aria-hidden
                                             style={{
-                                                cursor: 'pointer',
                                                 display: 'inline-flex',
                                                 alignItems: 'center',
                                                 justifyContent: 'center',
@@ -443,7 +556,6 @@ const SearchEnquiry = ({ onOpen }) => {
                                                 color: r._canEdit ? '#0d6efd' : '#6c757d'
                                             }}
                                             className="action-icon-hover"
-                                            title={r._canEdit ? 'Edit Enquiry' : 'View Enquiry'}
                                         >
                                             {r._canEdit ? (
                                                 <i className="bi bi-pencil-square" style={{ fontSize: '16px' }}></i>

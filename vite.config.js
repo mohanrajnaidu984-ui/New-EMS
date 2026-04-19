@@ -10,6 +10,9 @@ export default defineConfig({
         target: 'http://localhost:5002',
         changeOrigin: true,
         secure: false,
+        /** Quote PDF (Puppeteer) can run longer than the default proxy timeout */
+        timeout: 600000,
+        proxyTimeout: 600000,
       },
       '/uploads': {
         target: 'http://localhost:5002',

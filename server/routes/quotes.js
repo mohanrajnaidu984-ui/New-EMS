@@ -135,7 +135,7 @@ router.get('/attention-by-department', async (req, res) => {
         const names = (masterSeRes.recordset || [])
             .filter((r) => normDeptLabel(r.Department) === target)
             .map((r) => String(r.FullName || '').trim())
-            .filter(Boolean);
+                    .filter(Boolean);
         res.json([...new Set(names)].sort((a, b) => a.localeCompare(b)));
     } catch (e) {
         console.error('[quotes] attention-by-department:', e);
@@ -313,8 +313,33 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
             FROM EnquiryQuotes
             WHERE LTRIM(RTRIM(ISNULL(CAST(RequestNo AS NVARCHAR(50)), ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
               AND (@toName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N'')))))
-              AND (@leadJobName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))))
-              AND (@ownJobName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N'')))))
+              AND (
+                @leadJobName IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
+                OR (
+                  LTRIM(RTRIM(ISNULL(@leadJobName, N''))) <> N''
+                  AND LEN(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) <= 6
+                  AND LEFT(UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))), 1) = N'L'
+                  AND TRY_CONVERT(INT, SUBSTRING(LTRIM(RTRIM(ISNULL(@leadJobName, N''))), 2, 4)) IS NOT NULL
+                  AND (
+                    UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
+                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N' %'
+                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N'-%'
+                  )
+                )
+              )
+              AND (
+                @ownJobName IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N''))))
+                OR (
+                  LTRIM(RTRIM(ISNULL(@ownJobName, N''))) <> N''
+                  AND LTRIM(RTRIM(ISNULL(OwnJob, N''))) <> N''
+                  AND (
+                    LOWER(LTRIM(RTRIM(@ownJobName))) LIKE LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) + N'%'
+                    OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) LIKE LOWER(LTRIM(RTRIM(@ownJobName))) + N'%'
+                  )
+                )
+              )
             ORDER BY QuoteNo, RevisionNo DESC
         `);
 
@@ -1938,6 +1963,32 @@ router.get('/attachments/download/:id', async (req, res) => {
     } catch (err) {
         console.error('Error downloading quote attachment:', err);
         res.status(500).json({ error: 'Failed to download attachment' });
+    }
+});
+
+// POST /api/quotes/email-draft-eml — return .eml bytes as a normal HTTP attachment (more reliable than blob-only saves in some browsers).
+router.post('/email-draft-eml', express.json({ limit: '512kb' }), (req, res) => {
+    try {
+        const raw = typeof req.body?.rawEml === 'string' ? req.body.rawEml : '';
+        if (!raw || raw.length < 20) {
+            return res.status(400).json({ error: 'rawEml is required' });
+        }
+        let base = String(req.body?.filename || 'Quote_draft.eml')
+            .replace(/[/\\?%*:|"<>]/g, '_')
+            .replace(/[^\w.\-]+/g, '_')
+            .replace(/_+/g, '_')
+            .slice(0, 160);
+        if (!base.toLowerCase().endsWith('.eml')) {
+            base = `${base}.eml`;
+        }
+        const buf = Buffer.from(raw, 'utf8');
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${base}"`);
+        res.setHeader('Content-Length', String(buf.length));
+        res.send(buf);
+    } catch (err) {
+        console.error('email-draft-eml:', err);
+        res.status(500).json({ error: 'Failed to send draft file' });
     }
 });
 
