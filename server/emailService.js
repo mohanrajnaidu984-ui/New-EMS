@@ -96,4 +96,24 @@ const sendAcknowledgementEmail = async (enquiryData, customerEmail, seEmail, ceo
     }
 };
 
-module.exports = { sendAcknowledgementEmail };
+const sendGeneralEmail = async ({ to, cc, bcc, subject, html, attachments }) => {
+    try {
+        const mailOptions = {
+            from: 'ems@almoayyedcg.com', // Consistent with other emails
+            to,
+            cc,
+            bcc,
+            subject,
+            html,
+            attachments // Array of { filename, content, contentType }
+        };
+
+        const info = await transporter.sendMail(mailOptions);
+        return { success: true, messageId: info.messageId };
+    } catch (error) {
+        console.error('Error sending general email:', error);
+        return { success: false, error: error.message };
+    }
+};
+
+module.exports = { sendAcknowledgementEmail, sendGeneralEmail };

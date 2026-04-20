@@ -5,6 +5,9 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    /** Stable URL for bookmarks; if busy Vite tries the next port (strictPort: false). */
+    port: 5174,
+    strictPort: false,
     proxy: {
       '/api': {
         target: 'http://localhost:5002',

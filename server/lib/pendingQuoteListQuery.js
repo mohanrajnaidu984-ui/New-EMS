@@ -15,14 +15,40 @@ function sqlTupleCustomerKey(alias, col) {
     return `LOWER(LTRIM(RTRIM(${stripped})))`;
 }
 
-/** Step 2 tuple: EnquiryQuotes.OwnJob = PV.EnquiryForItem (case-insensitive, trimmed). */
+/**
+ * Step 2 tuple: EnquiryQuotes.OwnJob vs PV.EnquiryForItem.
+ * Saved quotes often persist Master_ConcernedSE.Department (short label) while pricing uses full EnquiryFor line text.
+ */
 function sqlTupleOwnJobMatch(eqAlias, pvAlias = 'PV') {
-    return `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.EnquiryForItem, N''))))`;
+    const eqO = `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.OwnJob, N''))))`;
+    const pvO = `LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.EnquiryForItem, N''))))`;
+    return `(
+        ${eqO} = ${pvO}
+        OR (${pvO} LIKE ${eqO} + N'-%' OR ${pvO} LIKE ${eqO} + N' %')
+        OR (${eqO} LIKE ${pvO} + N'-%' OR ${eqO} LIKE ${pvO} + N' %')
+        OR (LEN(${eqO}) >= 3 AND LEN(${eqO}) <= 80 AND ${pvO} LIKE N'%' + ${eqO} + N'%')
+    )`;
 }
 
-/** Step 2 tuple: EnquiryQuotes.LeadJob = PV.LeadJobName (case-insensitive, trimmed). */
+/**
+ * Step 2 tuple: EnquiryQuotes.LeadJob vs PV.LeadJobName.
+ * Quotes persist root **LeadJobName** / display name (QuoteForm); bare L-codes are legacy rows only.
+ * EnquiryPricingValues.LeadJobName is usually the full grid label (`L1 - HVAC Project`, `BMS Project (L2)`).
+ * Exact equality missed completed quotes and left rows stuck on the pending list.
+ */
 function sqlTupleLeadJobMatch(eqAlias, pvAlias = 'PV') {
-    return `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.LeadJobName, N''))))`;
+    const eqL = `LOWER(LTRIM(RTRIM(ISNULL(${eqAlias}.LeadJob, N''))))`;
+    const pvL = `LOWER(LTRIM(RTRIM(ISNULL(${pvAlias}.LeadJobName, N''))))`;
+    return `(
+        ${eqL} = ${pvL}
+        OR (${pvL} LIKE ${eqL} + N'-%' OR ${pvL} LIKE ${eqL} + N' %')
+        OR (${eqL} LIKE ${pvL} + N'-%' OR ${eqL} LIKE ${pvL} + N' %')
+        OR (
+            LEN(${eqL}) >= 2 AND LEN(${eqL}) <= 14
+            AND ${eqL} LIKE N'l[0-9]%'
+            AND CHARINDEX(${eqL} + N')', ${pvL}) > 0
+        )
+    )`;
 }
 
 /** Step 2 tuple: EnquiryQuotes.ToName = PV.CustomerName (trim + optional (L#) strip + lower). */
@@ -36,8 +62,8 @@ function sqlTupleCustomerMatch(eqAlias, pvAlias = 'PV') {
  * Pending quote summary logic:
  * - Step 1: EnquiryPricingValues for the enquiry has Price > 0 on a row keyed by
  *   RequestNo + EnquiryForItem (own job) + LeadJobName + CustomerName (latest row per tuple).
- * - Step 2: No EnquiryQuotes row for the same RequestNo + OwnJob + LeadJob + ToName with latest revision
- *   and TotalAmount > 0 (quote not completed for that exact tuple).
+ * - Step 2: No EnquiryQuotes row yet for the same RequestNo + OwnJob + LeadJob + ToName (any revision / draft counts
+ *   as “quote created” per business rule). LeadJob / OwnJob use tolerant matching vs pricing labels (see sqlTuple*Match).
  */
 async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '') {
         let userEmail = rawUserEmail;
@@ -61,8 +87,21 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
         // Match getPricingAnchorJobs: strip "L1 - " / "Sub Job - " from Department so SQL scope aligns with pricing UI.
         const deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
         const hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
+        /** CC: must be on CCMailIds AND (when we have a department) see only that department’s jobs/subjobs — same shape as non-CC scope. */
         const mefAccessPredicate = isCcUser
-            ? `REPLACE(ISNULL(MEF.CCMailIds, ''), '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'`
+            ? `(
+                REPLACE(ISNULL(MEF.CCMailIds, ''), '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    hasDeptScope
+                        ? `AND (
+                    LOWER(LTRIM(RTRIM(MEF.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
+                    OR LOWER(LTRIM(RTRIM(EF.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
+                    OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
+                    OR LOWER(LTRIM(RTRIM(EF.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
+                )`
+                        : ''
+                }
+            )`
             : hasDeptScope
                 ? `(
                     LOWER(LTRIM(RTRIM(MEF.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
@@ -73,7 +112,19 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 : `1 = 1`;
 
         const scopedJobIdsSubquery = isCcUser
-            ? `REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'`
+            ? `(
+                REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    hasDeptScope
+                        ? `AND (
+                    LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
+                    OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
+                    OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
+                    OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
+                )`
+                        : ''
+                }
+            )`
             : hasDeptScope
                 ? `(
                     LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
@@ -108,7 +159,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                         )
                   )
             )`;
-        // Pending: at least one Step-1 tuple exists where Step-2 has no completed quote for the same four keys.
+        // Pending: Step-1 tuple exists and no EnquiryQuotes row yet for that tuple (draft counts as created).
         const noCompletedQuoteForSameTupleSql = `
             NOT EXISTS (
                 SELECT 1
@@ -117,8 +168,6 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 AND ${sqlTupleOwnJobMatch('EQ', 'PV')}
                 AND ${sqlTupleLeadJobMatch('EQ', 'PV')}
                 AND ${sqlTupleCustomerMatch('EQ', 'PV')}
-                AND EQ.RevisionNo = (SELECT MAX(EQ2.RevisionNo) FROM EnquiryQuotes EQ2 WHERE EQ2.QuoteNo = EQ.QuoteNo)
-                AND ISNULL(EQ.TotalAmount, 0) > 0
             )`;
 
         // List columns: same four-key match as Step 2 so Quote ref / date align with the pending PV row.

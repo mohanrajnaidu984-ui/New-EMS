@@ -15,6 +15,7 @@ const mapQuoteListingRows = require('../lib/mapQuoteListingRows');
 const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
 const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
+const { sendGeneralEmail } = require('../emailService');
 
 // Configure Multer Storage for Quote Attachments
 const uploadDir = path.join(__dirname, '..', 'uploads', 'quotes');
@@ -31,6 +32,41 @@ const storage = multer.diskStorage({
     }
 });
 const upload = multer({ storage: storage });
+
+// POST /api/quotes/send-email - Send quote email with attachment
+router.post('/send-email', express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+        const { to, cc, bcc, subject, body, attachmentName, pdfBase64 } = req.body;
+        
+        if (!to || !pdfBase64) {
+            return res.status(400).json({ error: 'Recipients and PDF content are required' });
+        }
+
+        const result = await sendGeneralEmail({
+            to,
+            cc,
+            bcc,
+            subject,
+            html: body,
+            attachments: [
+                {
+                    filename: attachmentName || 'Quote.pdf',
+                    content: Buffer.from(pdfBase64, 'base64'),
+                    contentType: 'application/pdf'
+                }
+            ]
+        });
+
+        if (result.success) {
+            res.json({ success: true, messageId: result.messageId });
+        } else {
+            res.status(500).json({ error: 'Failed to send email', details: result.error });
+        }
+    } catch (err) {
+        console.error('Error in /send-email route:', err);
+        res.status(500).json({ error: 'Internal server error', details: err.message });
+    }
+});
 
 // NOTE: Static routes MUST be defined BEFORE dynamic parameter routes
 // to prevent Express from interpreting path segments like 'lists' as parameter values
@@ -216,7 +252,9 @@ router.get('/single/:id', async (req, res) => {
         const userEmail = (req.query.userEmail || '').toString().trim();
 
         const result = await sql.query`
-            SELECT * FROM EnquiryQuotes WHERE ID = ${id}
+            SELECT *,
+                   CONVERT(varchar(10), CAST(QuoteDate AS DATE), 23) AS QuoteDateYmd
+            FROM EnquiryQuotes WHERE ID = ${id}
         `;
 
         if (result.recordset.length === 0) {
@@ -301,7 +339,9 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         request.input('ownJobName', sql.NVarChar, ownJobName || null);
 
         const result = await request.query(`
-            SELECT ID, QuoteNumber, QuoteDate, ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention,
+            SELECT ID, QuoteNumber, QuoteDate,
+                   CONVERT(varchar(10), CAST(QuoteDate AS DATE), 23) AS QuoteDateYmd,
+                   ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention,
                    Subject, CustomerReference, YourRef, QuoteType, ValidityDays, PreparedBy, PreparedByEmail,
                    Signatory, SignatoryDesignation, Status, RevisionNo, TotalAmount, QuoteNo,
                    RequestNo, CreatedAt, UpdatedAt, OwnJob, LeadJob,

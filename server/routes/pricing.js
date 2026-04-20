@@ -421,6 +421,15 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
         const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
+        const internalCustomerNormForLabel = normalize(internalCustomer);
+        /** Base-price row CustomerName is "external" when not the internal root customer and not another EnquiryFor job name (aligns with quote lead labels). */
+        const isExternalPricingCustomer = (customerName) => {
+            const cn = String(customerName || '')
+                .replace(/\s*\(L\d+\)\s*$/i, '')
+                .trim();
+            const cnN = normalize(cn);
+            return Boolean(cn && cnN !== internalCustomerNormForLabel && !jobNameSetNorm.has(cnN));
+        };
 
         // Customer column: lead anchors → EnquiryCustomer (external) only; subjob-only anchors → immediate parent job name(s) only (never both).
         const finalSet = new Set();
@@ -558,7 +567,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
          */
         const getDivisionPrice = (jobId, optionName) => {
             const job = jobMap[String(jobId)];
-            if (!job) return { price: 0, updatedAt: null };
+            if (!job) return { price: 0, updatedAt: null, customerName: null };
 
             const optNameLower = normOptName(optionName);
 
@@ -606,27 +615,67 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             }
 
             if (bestRow) {
-                return { price: parsePriceNum(bestRow.Price), updatedAt: bestRow.UpdatedAt };
+                const cust = String(bestRow.CustomerName ?? bestRow.customerName ?? '').trim();
+                return {
+                    price: parsePriceNum(bestRow.Price),
+                    updatedAt: bestRow.UpdatedAt,
+                    customerName: cust || null,
+                };
             }
-            return { price: 0, updatedAt: null };
+            return { price: 0, updatedAt: null, customerName: null };
         };
 
-        flatList.forEach(job => {
-            const jid = job.ID ?? job.id;
+        /**
+         * Subjob Prices column label: parent job + L# when the priced node is a subjob; external customer + L# when
+         * the Base Price row targets an external customer (same idea as quote module quote details).
+         */
+        const buildSubjobPriceDisplayLabel = (jobRec, jobFallback, displayCode, priceCustomerName) => {
+            const dc = displayCode || 'L1';
+            if (priceCustomerName && isExternalPricingCustomer(priceCustomerName)) {
+                const base = stripLeadName(priceCustomerName) || priceCustomerName;
+                return `${base} (${dc})`;
+            }
+            if (jobRec) {
+                const pid = jobRec.ParentID;
+                if (
+                    pid != null &&
+                    String(pid) !== '0' &&
+                    String(pid) !== '' &&
+                    visibleJobs.has(String(pid)) &&
+                    jobMap[String(pid)]
+                ) {
+                    const par = jobMap[String(pid)];
+                    if (par?.ItemName) {
+                        const base = stripLeadName(par.ItemName) || String(par.ItemName).trim();
+                        return `${base} (${dc})`;
+                    }
+                }
+            }
+            const suffix = `(${dc})`;
+            const matchFinal = finalCustomers.find((c) => String(c).trim().endsWith(suffix));
+            if (matchFinal) return String(matchFinal).trim();
+            const nm =
+                stripLeadName(jobRec?.ItemName || jobFallback?.ItemName) ||
+                String(jobRec?.ItemName || jobFallback?.ItemName || '').trim();
+            return `${nm} (${dc})`;
+        };
+
+        flatList.forEach((job) => {
+            const jid = jobIdOf(job);
             const targetOptionNames = ['Base Price', 'Optional'];
 
-            targetOptionNames.forEach(optName => {
-                const { price, updatedAt } = getDivisionPrice(jid, optName);
+            targetOptionNames.forEach((optName) => {
+                const { price, updatedAt, customerName } = getDivisionPrice(jid, optName);
 
                 if (price > 0 || optName === 'Base Price') {
-                    // Use Inherited LeadJobCode (Step 3339) - Lead Job Fix
-                    const displayCode = jobLeadMap[String(jid)];
-                    // STRICT label rule:
-                    // always display the current job itself (no parent/lead replacement).
-                    const jobLabel = `${job.ItemName} (${displayCode})`;
+                    const displayCode = jobLeadMap[String(jid)] || 'L1';
+                    const jobRec = jid != null ? jobMap[String(jid)] : null;
+                    const jobLabel = buildSubjobPriceDisplayLabel(jobRec, job, displayCode, customerName);
                     const displayName = optName === 'Base Price' ? jobLabel : `${jobLabel} (${optName})`;
 
-                    displayItems.push(`${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`);
+                    displayItems.push(
+                        `${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`
+                    );
                 }
             });
         });

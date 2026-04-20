@@ -155,20 +155,45 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo) {
     if (Number.isNaN(rn)) return false;
 
     if (!ctx.isCcUser) {
+        /** Same gate as pending quote list: ConcernedSE row + login email on Master_ConcernedSE (not FullName-only). */
         const cse = await sql.query`
-            SELECT TOP 1 1 AS ok FROM ConcernedSE
-            WHERE RequestNo = ${rn}
-              AND UPPER(LTRIM(RTRIM(ISNULL(SEName, '')))) = UPPER(LTRIM(RTRIM(${ctx.userFullName})))
+            SELECT TOP 1 1 AS ok
+            FROM ConcernedSE cs
+            INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+            WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
+              AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
         `;
         if ((cse.recordset?.length || 0) === 0) return false;
     } else {
-        const cc = await sql.query`
-            SELECT TOP 1 1 AS ok
-            FROM EnquiryFor ef
-            INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
-            WHERE ef.RequestNo = ${rn}
-              AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${`%,${ctx.normalizedEmail},%`}
-        `;
+        const td = (ctx.userDepartment || '').trim();
+        const deptNorm = normalizePricingJobName(td);
+        const ccListPat = `%,${ctx.normalizedEmail},%`;
+        let cc;
+        if (!td) {
+            cc = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+        } else {
+            const deptLike = `%${td.toLowerCase()}%`;
+            const normLike = `%${deptNorm}%`;
+            cc = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+                  AND (
+                    LOWER(LTRIM(RTRIM(mef.ItemName))) LIKE ${deptLike}
+                    OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${deptLike}
+                    OR LOWER(LTRIM(RTRIM(mef.ItemName))) LIKE ${normLike}
+                    OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${normLike}
+                )
+            `;
+        }
         if ((cc.recordset?.length || 0) === 0) return false;
     }
 

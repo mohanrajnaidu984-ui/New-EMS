@@ -90,25 +90,20 @@ async function renderPdfBuffer(page) {
         preferCSSPageSize: false,
     };
     try {
+        /**
+         * Use format: 'A4' and margin: 0 strictly.
+         * The HTML sheets are already 210mm x 297mm. Any non-zero margin here
+         * will push the sheets onto new pages, causing blank Page 1 / extra pages.
+         */
         return await page.pdf(stableA4);
     } catch (e1) {
-        console.warn('[quote-pdf] pdf stable A4 retry preferCSSPageSize:', e1 && e1.message);
-        try {
-            return await page.pdf({
-                printBackground: true,
-                format: 'A4',
-                margin: { top: '0', right: '0', bottom: '0', left: '0' },
-                preferCSSPageSize: true,
-            });
-        } catch (e2) {
-            console.warn('[quote-pdf] pdf fallback margins:', e2 && e2.message);
-            return await page.pdf({
-                printBackground: true,
-                format: 'A4',
-                margin: { top: '12mm', right: '14mm', bottom: '14mm', left: '14mm' },
-                preferCSSPageSize: false,
-            });
-        }
+        console.warn('[quote-pdf] pdf stable A4 retry:', e1 && e1.message);
+        return await page.pdf({
+            printBackground: true,
+            format: 'A4',
+            margin: { top: '0', right: '0', bottom: '0', left: '0' },
+            preferCSSPageSize: true,
+        });
     }
 }
 
@@ -121,6 +116,14 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
     }
 
     const htmlForPdf = rewriteHtmlAssetHostsForPuppeteer(html);
+
+    if (process.env.DEBUG_QUOTE_PDF_HTML === '1') {
+        try {
+            fs.writeFileSync(path.join(__dirname, '../debug_pdf_structure.html'), htmlForPdf, 'utf8');
+        } catch (e) {
+            console.error('Debug save failed', e);
+        }
+    }
 
     let puppeteer;
     try {
@@ -153,7 +156,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         page.setDefaultNavigationTimeout(180000);
         // screen = same cascade as Quote preview (embedded fragment styles target screen; @media print ignored).
         await page.emulateMediaType(useScreenMedia ? 'screen' : 'print');
-        await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 });
+        /** ~A4 width at 96 CSS px/mm; deviceScaleFactor 2 improves border/text rasterization in PDF output. */
+        await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 2 });
         tmpHtmlPath = await loadHtmlInPage(page, htmlForPdf);
         try {
             await waitForImagesLoaded(page);
@@ -170,17 +174,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         } catch {
             /* ignore */
         }
-        try {
-            await page.evaluate(() => {
-                document
-                    .querySelectorAll(
-                        '.quote-clause-measure-host, .quote-print-repeat-strip, .quote-print-page-indicator, .quote-print-footer-rule'
-                    )
-                    .forEach((n) => n.remove());
-            });
-        } catch {
-            /* ignore */
-        }
+        /* Removed manual element removal to avoid layout shifts; visibility is handled via CSS in quotePrintDocumentHtml.js */
+
         const buf = await renderPdfBuffer(page);
         const safeName = String(filename || 'quote.pdf').replace(/[^\w.\-]+/g, '_');
         res.setHeader('Content-Type', 'application/pdf');

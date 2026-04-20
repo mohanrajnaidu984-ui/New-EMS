@@ -2123,11 +2123,10 @@ const PricingForm = () => {
                                     <tr>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Project Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Customer Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '280px' }}>Customer Name & Prices (Base Price)</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Enquiry Date</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                         <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
                                     </tr>
                                 </thead>
@@ -2142,17 +2141,7 @@ const PricingForm = () => {
                                         >
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
-                                                {(enq.CustomerName || '-').split(',').map((cust, i) => (
-                                                    <div key={i} style={{ marginBottom: '4px' }}>
-                                                        <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cust.trim()}</span>
-                                                    </div>
-                                                ))}
-                                            </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
-                                            <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '280px' }}>
                                                 {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
                                                     const parts = s.split('|');
                                                     const name = parts[0];
@@ -2169,7 +2158,6 @@ const PricingForm = () => {
                                                         if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
                                                     }
 
-                                                    // Format Date
                                                     let displayDate = '';
                                                     if (rawDate) {
                                                         try {
@@ -2180,7 +2168,7 @@ const PricingForm = () => {
                                                     }
 
                                                     return (
-                                                        <div key={i} style={{
+                                                        <div key={`p-${i}`} style={{
                                                             fontSize: '11px',
                                                             marginBottom: '4px',
                                                             marginLeft: `${level * 20}px`,
@@ -2210,8 +2198,11 @@ const PricingForm = () => {
                                                         </div>
                                                     );
                                                 })}
-                                                {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8 italic' }}>No assigned jobs</span>}
+                                                {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>}
                                             </td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
                                             <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
                                                 {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
                                             </td>
@@ -2278,7 +2269,7 @@ const PricingForm = () => {
                                     <FileText size={16} /> Pending Updates ({pendingRequests.length})
                                 </h3>
                                 <span style={{ fontSize: '12px', color: '#64748b' }}>
-                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer & Prices' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
                                 </span>
                             </div>
                             {/* Make the pending list fill the viewport height (instead of a fixed 400px). */}
@@ -2288,11 +2279,10 @@ const PricingForm = () => {
                                         <tr>
                                             <SortableHeader field="RequestNo" label="Enquiry No." style={{ width: '80px' }} />
                                             <SortableHeader field="ProjectName" label="Project Name" />
-                                            <SortableHeader field="CustomerName" label="Customer Name" />
+                                            <SortableHeader field="CustomerName" label="Customer Name & Prices (Base Price)" style={{ minWidth: '280px' }} />
                                             <SortableHeader field="ClientName" label="Client Name" />
                                             <SortableHeader field="ConsultantName" label="Consultant Name" />
                                             <SortableHeader field="DueDate" label="Due Date" style={{ width: '120px' }} />
-                                            <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
                                             <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
                                         </tr>
                                     </thead>
@@ -2307,35 +2297,23 @@ const PricingForm = () => {
                                             >
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
-                                                    {(enq.CustomerName || '-').split(',').map((cust, i) => (
-                                                        <div key={i} style={{ marginBottom: '4px' }}>
-                                                            <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cust.trim()}</span>
-                                                        </div>
-                                                    ))}
-                                                </td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                                <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '280px' }}>
                                                     {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
                                                         const parts = s.split('|');
                                                         const name = parts[0];
                                                         const rawPrice = parts[1];
-                                                        const rawDate = parts[2]; // ISODate
-                                                        const rawLevel = parts[3]; // Level (Depth)
+                                                        const rawDate = parts[2];
+                                                        const rawLevel = parts[3];
 
                                                         const level = parseInt(rawLevel) || 0;
                                                         const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
 
-                                                        // Format price if numeric
                                                         let displayPrice = rawPrice;
                                                         if (isUpdated) {
                                                             const num = parseFloat(rawPrice);
                                                             if (!isNaN(num)) displayPrice = num.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
                                                         }
 
-                                                        // Format Date
                                                         let displayDate = '';
                                                         if (rawDate) {
                                                             try {
@@ -2346,7 +2324,7 @@ const PricingForm = () => {
                                                         }
 
                                                         return (
-                                                            <div key={i} style={{
+                                                            <div key={`p-${i}`} style={{
                                                                 fontSize: '11px',
                                                                 marginBottom: '4px',
                                                                 whiteSpace: 'nowrap',
@@ -2376,7 +2354,11 @@ const PricingForm = () => {
                                                             </div>
                                                         );
                                                     })}
+                                                    {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>}
                                                 </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
                                                 <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
                                                     {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
                                                 </td>

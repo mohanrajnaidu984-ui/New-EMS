@@ -2,6 +2,836 @@
 
 const { getPricingAnchorJobs, expandVisibleJobIdsFromAnchors } = require('./quotePricingAccess');
 
+function jsNormKey(s) {
+    return String(s || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+}
+
+/** Strip trailing " (L12)" from customer labels (align with pendingQuoteListQuery sqlTupleCustomerKey). */
+function jsStripCustomerLeadSuffix(s) {
+    const t = String(s || '').trim();
+    const m = t.match(/^(.+)\s+\(L\d+\)\s*$/i);
+    return m ? m[1].trim() : t;
+}
+
+/** Quote / pricing OwnJob vs EnquiryForItem (same shape as sqlTupleOwnJobMatch). */
+function jsTupleOwnJobMatch(quoteOwn, pvEnquiryForItem) {
+    const eqO = jsNormKey(quoteOwn);
+    const pvO = jsNormKey(pvEnquiryForItem);
+    if (!eqO || !pvO) return false;
+    return (
+        eqO === pvO ||
+        pvO.startsWith(`${eqO}-`) ||
+        pvO.startsWith(`${eqO} `) ||
+        eqO.startsWith(`${pvO}-`) ||
+        eqO.startsWith(`${pvO} `) ||
+        (eqO.length >= 3 && eqO.length <= 80 && pvO.includes(eqO)) ||
+        /** QuoteForm often persists OwnJob as "L1 - BMS Project" while PV is "BMS Project". */
+        (pvO.length >= 3 && pvO.length <= 80 && eqO.includes(pvO))
+    );
+}
+
+/** EnquiryQuotes.LeadJob vs pricing LeadJobName (same shape as sqlTupleLeadJobMatch). */
+function jsTupleLeadJobMatch(quoteLead, pvLeadName) {
+    const eqL = jsNormKey(quoteLead);
+    const pvL = jsNormKey(pvLeadName);
+    if (!eqL || !pvL) return false;
+    if (eqL === pvL) return true;
+    if (pvL.startsWith(`${eqL}-`) || pvL.startsWith(`${eqL} `)) return true;
+    if (eqL.startsWith(`${pvL}-`) || eqL.startsWith(`${pvL} `)) return true;
+    if (eqL.length >= 2 && eqL.length <= 14 && /^l\d+/.test(eqL) && pvL.includes(eqL + ')')) return true;
+    /** Same L-code on both strings (e.g. quote "L1 - Civil" vs PV "Civil Project (L1)"). */
+    const lq = extractLCodeFromLeadJobName(quoteLead);
+    const lp = extractLCodeFromLeadJobName(pvLeadName);
+    if (lq && lp && lq === lp) return true;
+    /**
+     * Quotes persist root label only ("Civil Project"); PV often has "Civil Project (L1)".
+     * jsNormKey keeps spaces, so prefix match is safe for longer root names.
+     */
+    if (eqL.length >= 5 && pvL.startsWith(eqL)) return true;
+    if (pvL.length >= 5 && eqL.startsWith(pvL)) return true;
+    return false;
+}
+
+/** Quote ToName vs pricing CustomerName (sqlTupleCustomerMatch). */
+function jsTupleCustomerMatch(quoteToName, pvCustomerName) {
+    const a = jsNormKey(jsStripCustomerLeadSuffix(quoteToName));
+    const b = jsNormKey(jsStripCustomerLeadSuffix(pvCustomerName));
+    return a === b && a.length > 0;
+}
+
+function isBasePricePricingRow(p) {
+    const po = String(p.PriceOption ?? p.priceOption ?? p.priceoption ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    return po === 'base price';
+}
+
+function quoteRowMatchesTuple(q, pvOwn, pvLeadName, pvCust) {
+    return (
+        jsTupleOwnJobMatch(q.OwnJob, pvOwn) &&
+        jsTupleLeadJobMatch(q.LeadJob, pvLeadName) &&
+        jsTupleCustomerMatch(q.ToName, pvCust)
+    );
+}
+
+/** EMS QuoteNumber paths include the lead segment, e.g. AAC/BMP/9-L1/1-R0 — use when LeadJob text omits L#. */
+function quoteNumberEmbedsLeadCode(quoteNumber, lineLeadCode) {
+    const qn = String(quoteNumber || '').toUpperCase();
+    const lc = String(lineLeadCode || '').trim().toUpperCase();
+    if (!qn || !/^L\d+$/.test(lc)) return false;
+    return qn.includes(`-${lc}/`) || qn.includes(`-${lc}-`) || qn.includes(`/${lc}/`);
+}
+
+/** Quotes may use ToName = parent job (HVAC) while pending tuple customer is AAC/BMS — try several names. */
+function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandidates, lineLeadCode) {
+    const cands = (customerCandidates || [])
+        .map((c) => jsStripCustomerLeadSuffix(String(c || '').trim()))
+        .filter(Boolean);
+    const seen = new Set();
+    const uniq = [];
+    for (const c of cands) {
+        const k = jsNormKey(c);
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        uniq.push(c);
+    }
+    const strict = quotesForReq.filter(
+        (q) =>
+            jsTupleOwnJobMatch(q.OwnJob, pvOwn) &&
+            jsTupleLeadJobMatch(q.LeadJob, pvLeadName) &&
+            uniq.some((c) => jsTupleCustomerMatch(q.ToName, c))
+    );
+    let best = pickLatestQuoteRow(strict);
+    if (best && String(best.QuoteNumber || '').trim()) return best;
+    const loose = quotesForReq.filter(
+        (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && jsTupleLeadJobMatch(q.LeadJob, pvLeadName)
+    );
+    if (loose.length === 1) return pickLatestQuoteRow(loose);
+    if (loose.length > 1) {
+        const narrowed = loose.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+        if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+        return pickLatestQuoteRow(loose);
+    }
+    /** LeadJob in DB is often root-only ("Civil Project"); extract L# from PV and match saved quotes. */
+    if (lineLeadCode && pvOwn) {
+        const byL = quotesForReq.filter((q) => {
+            if (!jsTupleOwnJobMatch(q.OwnJob, pvOwn)) return false;
+            const lq = extractLCodeFromLeadJobName(q.LeadJob || '');
+            if (lq && lq === lineLeadCode) return true;
+            return jsTupleLeadJobMatch(q.LeadJob, pvLeadName);
+        });
+        if (byL.length >= 1) {
+            const narrowed = byL.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+            return pickLatestQuoteRow(narrowed.length ? narrowed : byL);
+        }
+    }
+    /** Quote LeadJob may be root-only ("Civil Project") while PV/pricing pvLead is another branch label — match via QuoteNumber. */
+    if (lineLeadCode && pvOwn && quotesForReq.length) {
+        const byRef = quotesForReq.filter(
+            (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && quoteNumberEmbedsLeadCode(q.QuoteNumber, lineLeadCode)
+        );
+        if (byRef.length >= 1) {
+            const narrowed = byRef.filter((q) => !uniq.length || uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+            return pickLatestQuoteRow(narrowed.length ? narrowed : byRef);
+        }
+    }
+    /**
+     * QuoteNumber may embed the wrong L segment (e.g. AAC/.../9-L1/3-R0 for L3 + BEMCO).
+     * When QuoteNo matches the lead index (L3 → 3), resolve by own job + optional ToName candidates.
+     */
+    if ((!best || !String(best.QuoteNumber || '').trim()) && lineLeadCode && pvOwn && quotesForReq.length) {
+        const lm = String(lineLeadCode).trim().match(/^L(\d+)$/i);
+        const wantNo = lm ? parseInt(lm[1], 10) : 0;
+        if (wantNo > 0) {
+            const pool = quotesForReq.filter((q) => {
+                if (!jsTupleOwnJobMatch(q.OwnJob, pvOwn)) return false;
+                const qn = parseInt(String(q.QuoteNo ?? q.quoteNo ?? ''), 10) || 0;
+                return qn === wantNo;
+            });
+            if (pool.length) {
+                if (uniq.length) {
+                    const narrowed = pool.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+                    if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+                }
+                return pickLatestQuoteRow(pool);
+            }
+        }
+    }
+    return best;
+}
+
+function pickLatestQuoteRow(rows) {
+    if (!rows || rows.length === 0) return null;
+    const sorted = [...rows].sort((a, b) => {
+        const qnA = Number(a.QuoteNo) || 0;
+        const qnB = Number(b.QuoteNo) || 0;
+        if (qnB !== qnA) return qnB - qnA;
+        const rA = Number(a.RevisionNo) || 0;
+        const rB = Number(b.RevisionNo) || 0;
+        return rB - rA;
+    });
+    return sorted[0];
+}
+
+function preparedByFromQuoteNumber(allQuotes, requestNo, quoteNumber) {
+    const req = String(requestNo || '').trim();
+    const want = String(quoteNumber || '').trim();
+    if (!req || !want) return '';
+    const matches = (allQuotes || []).filter(
+        (q) => String(q.RequestNo ?? '').trim() === req && String(q.QuoteNumber || '').trim() === want
+    );
+    if (!matches.length) return '';
+    const best = pickLatestQuoteRow(matches);
+    return best ? String(best.PreparedBy ?? best.preparedBy ?? '').trim() : '';
+}
+
+/** Union SQL ListPreparedBy with PreparedBy from each quoted QuoteNumber on the row (merged or single). */
+function collectPreparedByForMappedRow(requestNo, row, allQuotes) {
+    const out = new Set();
+    const add = (v) => {
+        const t = String(v || '').trim();
+        if (!t) return;
+        t.split(',')
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .forEach((x) => out.add(x));
+    };
+    add(row.ListPreparedBy ?? row.listpreparedby);
+    const refSet = new Set();
+    if (Array.isArray(row.ListMultiLeadQuoteRefs)) {
+        for (const e of row.ListMultiLeadQuoteRefs) {
+            if (e.quoteNumber) refSet.add(String(e.quoteNumber).trim());
+        }
+    }
+    if (row.ListQuoteRef) {
+        String(row.ListQuoteRef)
+            .split(/\s*\|\s*/)
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .forEach((x) => refSet.add(x));
+    }
+    for (const qn of refSet) {
+        add(preparedByFromQuoteNumber(allQuotes, requestNo, qn));
+    }
+    return Array.from(out)
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+        .join(', ');
+}
+
+function enrichRowPreparedBy(row, allQuotes) {
+    if (!row) return row;
+    const req = String(row.RequestNo ?? '').trim();
+    const combined = collectPreparedByForMappedRow(req, row, allQuotes).trim();
+    const existing = String(row.ListPreparedBy ?? row.listpreparedby ?? '').trim();
+    const next = combined || existing;
+    return next ? { ...row, ListPreparedBy: next } : row;
+}
+
+/**
+ * When the same own-job + customer has Base Price rows under multiple LeadJobName values, roll up
+ * quote refs (latest revision per lead) + None / Partial / All Quoted status for the summary grid.
+ */
+function isPendingPvListRow(row) {
+    const pv = row.ListPendingPvId ?? row.listpendingpvid;
+    const n = Number(pv);
+    return pv != null && pv !== '' && !Number.isNaN(n) && n > 0;
+}
+
+function mergeRollupStatuses(statuses) {
+    const ranks = statuses
+        .map((s) => {
+            if (!s) return -1;
+            if (s === 'None Quoted') return 0;
+            if (s === 'Partial Quoted') return 1;
+            if (s === 'All Quoted') return 2;
+            return -1;
+        })
+        .filter((x) => x >= 0);
+    if (ranks.length === 0) return null;
+    const mx = Math.max(...ranks);
+    const mn = Math.min(...ranks);
+    if (mx === 2 && mn === 2) return 'All Quoted';
+    if (mx >= 1) return 'Partial Quoted';
+    return 'None Quoted';
+}
+
+/** None / Partial / All from the same per-lead lines as Quote details (fixes merged PV rows where SQL tuple status is always None). */
+function rollupStatusFromLeadDetailLines(lines) {
+    if (!Array.isArray(lines) || lines.length === 0) return null;
+    let nQuoted = 0;
+    for (const ln of lines) {
+        const t = String(ln?.textLine || '');
+        if (/\(Not Quoted\)/.test(t)) continue;
+        nQuoted++;
+    }
+    const n = lines.length;
+    if (nQuoted === 0) return 'None Quoted';
+    if (nQuoted === n) return 'All Quoted';
+    return 'Partial Quoted';
+}
+
+function uniqueSubjobPriceSegments(rows) {
+    const seen = new Set();
+    const out = [];
+    for (const r of rows) {
+        const raw = r.SubJobPrices || r.subJobPrices || '';
+        for (const seg of String(raw).split(';;').filter(Boolean)) {
+            if (seen.has(seg)) continue;
+            seen.add(seg);
+            out.push(seg);
+        }
+    }
+    return out.join(';;');
+}
+
+function mergeMultiLeadQuoteRefEntries(rows) {
+    const seen = new Set();
+    const out = [];
+    for (const r of rows) {
+        const arr = r.ListMultiLeadQuoteRefs;
+        if (!Array.isArray(arr)) continue;
+        for (const e of arr) {
+            const qn = String(e.quoteNumber || '').trim();
+            if (!qn) continue;
+            const lc = extractLCodeFromLeadJobName(String(e.leadName || '')) || '_';
+            const k = `${lc}|${qn}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            out.push(e);
+        }
+    }
+    return out.length ? out : null;
+}
+
+/**
+ * When buildMultiLeadQuoteRollup already resolved a quote per pricing lead, reuse QuoteNumber
+ * so detail lines match the grid even if tuple matching on LeadJob strings differs slightly.
+ */
+function pickQuoteRowFromMultiLeadRefs(mergedRefs, lineLeadCode, quotesForReq, pvLeadForLine) {
+    if (!Array.isArray(mergedRefs) || mergedRefs.length === 0) return null;
+    const lc = String(lineLeadCode || '').trim().toUpperCase();
+    if (!/^L\d+$/.test(lc)) return null;
+    let entry = mergedRefs.find((e) => extractLCodeFromLeadJobName(String(e.leadName || '')) === lc);
+    if (!entry && pvLeadForLine) {
+        entry = mergedRefs.find((e) => jsTupleLeadJobMatch(String(e.leadName || ''), String(pvLeadForLine || '')));
+    }
+    if (!entry || !String(entry.quoteNumber || '').trim()) return null;
+    const qn = String(entry.quoteNumber).trim();
+    const matches = (quotesForReq || []).filter((q) => String(q.QuoteNumber ?? q.quoteNumber ?? '').trim() === qn);
+    return pickLatestQuoteRow(matches);
+}
+
+function fmtRowDetailDate(raw) {
+    try {
+        const dt = raw ? new Date(raw) : null;
+        if (!dt || Number.isNaN(dt.getTime())) return '—';
+        const d = dt.getDate();
+        const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][dt.getMonth()];
+        const y = dt.getFullYear();
+        return `${String(d).padStart(2, '0')}-${mon}-${y}`;
+    } catch {
+        return '—';
+    }
+}
+
+/** L1 / L2 / L3 from pricing LeadJobName or pending tuple label (e.g. "… (L2)", "L1 - HVAC"). */
+function extractLCodeFromLeadJobName(s) {
+    const t = String(s || '').trim();
+    if (!t) return '';
+    const mParen = t.match(/\(([lL]\d+)\)\s*$/);
+    if (mParen) return mParen[1].toUpperCase();
+    const mStart = t.match(/^\s*([lL]\d+)\b/);
+    if (mStart) return mStart[1].toUpperCase();
+    const mAny = t.match(/\b([lL]\d+)\b/);
+    if (mAny) return mAny[1].toUpperCase();
+    return '';
+}
+
+function lCodeSortKey(code) {
+    const m = String(code || '').match(/^L(\d+)$/i);
+    return m ? Number(m[1]) : 999;
+}
+
+/**
+ * Job-tree + pricing context so each enquiry root (L1, L2, …) gets a stable label and LeadJobName for quote matching.
+ * Parent job repeats per lead when the user's subjob sits under the same parent across leads; otherwise external customer (e.g. BEMCO on L3).
+ */
+function buildListQuoteLeadContext({
+    enqJobs,
+    roots,
+    rootLabelMap,
+    stringChildrenMap,
+    enqPrices,
+    pendingOwnItem,
+    stripLeadPrefix,
+    normalize,
+    internalCustomerNorm,
+    jobNameSetNorm,
+    externalCustomers,
+}) {
+    const collectBranch = (root) => {
+        const out = [];
+        const stack = [root];
+        const seen = new Set();
+        while (stack.length) {
+            const cur = stack.pop();
+            const sid = String(cur.ID);
+            if (seen.has(sid)) continue;
+            seen.add(sid);
+            out.push(cur);
+            const kids = stringChildrenMap[sid] || [];
+            for (const k of kids) stack.push(k);
+        }
+        return out;
+    };
+
+    const ownNorm = normalize(stripLeadPrefix(String(pendingOwnItem || '')));
+    const jobSet = jobNameSetNorm instanceof Set ? jobNameSetNorm : new Set(Array.from(jobNameSetNorm || []));
+
+    const isExternalPricingCustomer = (customerName) => {
+        const cn = jsStripCustomerLeadSuffix(String(customerName || '').trim());
+        const cnN = normalize(cn);
+        return Boolean(cn && cnN !== internalCustomerNorm && !jobSet.has(cnN));
+    };
+
+    const priceRowsForLead = (leadCode) =>
+        (enqPrices || []).filter(
+            (p) =>
+                isBasePricePricingRow(p) &&
+                parseFloat(p.Price || 0) > 0 &&
+                extractLCodeFromLeadJobName(p.LeadJobName || '') === leadCode
+        );
+
+    const bestPriceRowForLead = (leadCode, preferExternalWhenNoOwnInBranch) => {
+        const rows = priceRowsForLead(leadCode);
+        if (!rows.length) return null;
+        if (preferExternalWhenNoOwnInBranch) {
+            const ext = rows.find((p) => isExternalPricingCustomer(p.CustomerName));
+            if (ext) return ext;
+        }
+        const byOwn = rows.filter((p) => jsTupleOwnJobMatch(pendingOwnItem, p.EnquiryForItem));
+        return byOwn[0] || rows[0];
+    };
+
+    const allCodes = [];
+    const leadLabelsByCode = {};
+    const pvLeadByCode = {};
+
+    const extList = Array.isArray(externalCustomers) ? externalCustomers.filter(Boolean) : [];
+
+    for (const root of roots || []) {
+        const leadCode = String(rootLabelMap[root.ID] || '').trim().toUpperCase();
+        if (!/^L\d+$/.test(leadCode)) continue;
+        allCodes.push(leadCode);
+        const branch = collectBranch(root);
+        const ownNode = ownNorm
+            ? branch.find((j) => normalize(stripLeadPrefix(String(j.ItemName || ''))) === ownNorm)
+            : null;
+        const preferExternal = !ownNode;
+
+        const rootNorm = normalize(stripLeadPrefix(String(root.ItemName || '')));
+        const isOwnThisLeadRoot = Boolean(ownNorm && rootNorm && ownNorm === rootNorm && extList.length > 0);
+
+        let label = '';
+        if (isOwnThisLeadRoot) {
+            label = extList
+                .map((c) => jsStripCustomerLeadSuffix(String(c || '').replace(/,\s*$/, '').trim()))
+                .filter(Boolean)
+                .join(', ');
+        }
+        if (!label && ownNode && ownNode.ParentID != null && ownNode.ParentID !== '' && ownNode.ParentID !== 0 && ownNode.ParentID !== '0') {
+            const par = enqJobs.find((pj) => String(pj.ID) === String(ownNode.ParentID));
+            if (par) {
+                label = stripLeadPrefix(String(par.ItemName || '')).trim() || String(par.ItemName || '').trim();
+            }
+        }
+        if (!label) {
+            const prow = bestPriceRowForLead(leadCode, preferExternal);
+            if (prow && isExternalPricingCustomer(prow.CustomerName)) {
+                label = jsStripCustomerLeadSuffix(String(prow.CustomerName || '').trim());
+            }
+        }
+        if (!label) {
+            const prow = bestPriceRowForLead(leadCode, false);
+            if (prow) {
+                const cn = jsStripCustomerLeadSuffix(String(prow.CustomerName || '').trim());
+                const cnN = normalize(cn);
+                if (cn && cnN !== internalCustomerNorm && !jobSet.has(cnN)) {
+                    label = cn;
+                }
+            }
+        }
+        if (!label) {
+            label = stripLeadPrefix(String(root.ItemName || '')).trim() || String(root.ItemName || '').trim();
+        }
+        leadLabelsByCode[leadCode] = label;
+
+        const prow2 = bestPriceRowForLead(leadCode, preferExternal);
+        pvLeadByCode[leadCode] = prow2 && String(prow2.LeadJobName || '').trim()
+            ? String(prow2.LeadJobName).trim()
+            : leadCode;
+    }
+
+    const extraFromPrices = new Set();
+    for (const p of enqPrices || []) {
+        if (!isBasePricePricingRow(p) || parseFloat(p.Price || 0) <= 0) continue;
+        const c = extractLCodeFromLeadJobName(p.LeadJobName || '');
+        if (c && !leadLabelsByCode[c]) extraFromPrices.add(c);
+    }
+    for (const c of extraFromPrices) {
+        allCodes.push(c);
+        const rows = priceRowsForLead(c);
+        const ext = rows.find((p) => isExternalPricingCustomer(p.CustomerName));
+        const prow = ext || rows.find((p) => jsTupleOwnJobMatch(pendingOwnItem, p.EnquiryForItem)) || rows[0];
+        if (prow) {
+            if (ext) {
+                leadLabelsByCode[c] = jsStripCustomerLeadSuffix(String(ext.CustomerName || '').trim());
+            } else {
+                leadLabelsByCode[c] =
+                    jsStripCustomerLeadSuffix(String(prow.CustomerName || '').trim()) || c;
+            }
+            pvLeadByCode[c] = String(prow.LeadJobName || '').trim() || c;
+        } else {
+            leadLabelsByCode[c] = c;
+            pvLeadByCode[c] = c;
+        }
+    }
+
+    const allLeadCodesSorted = [...new Set(allCodes)].sort((a, b) => lCodeSortKey(a) - lCodeSortKey(b));
+    return { allLeadCodesSorted, leadLabelsByCode, pvLeadByCode };
+}
+
+/**
+ * One line per lead job (L1, L2, …): "{Parent or customer} - L# (QuoteNo - date time) BD …" or "(Not Quoted)".
+ * @param {object|null} lineCtx from buildListQuoteLeadContext (optional; legacy behaviour if null).
+ */
+function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, pricesForReq, lineCtx) {
+    const req = String(requestNo || '').trim();
+    if (!req || !Array.isArray(groupRows) || groupRows.length === 0) return [];
+    const quotesForReq = (allQuotes || []).filter((q) => String(q.RequestNo ?? '').trim() === req);
+
+    /** ToName / customer for label when ListQuoteDetailToName is blank on merged rows. */
+    const displayCustomerLabelForLeadRow = (g) => {
+        const raw =
+            String(g.ListQuoteDetailToName || '').trim() ||
+            String(g.ListPendingCustomerName ?? g.listpendingcustomername ?? '').trim() ||
+            String(g.CustomerName || '')
+                .split(',')
+                .map((x) => x.trim())
+                .filter(Boolean)[0] ||
+            '';
+        const stripped = jsStripCustomerLeadSuffix(raw);
+        return stripped || raw || '—';
+    };
+
+    const g0 = groupRows[0];
+    const leadToRow = new Map();
+
+    if (lineCtx && Array.isArray(lineCtx.allLeadCodesSorted) && lineCtx.allLeadCodesSorted.length > 0) {
+        for (const code of lineCtx.allLeadCodesSorted) {
+            const specific = groupRows.find(
+                (r) => extractLCodeFromLeadJobName(r.ListPendingLeadJobName ?? r.listpendingleadjobname ?? '') === code
+            );
+            const base = specific || g0;
+            let pvLead = '';
+            if (specific) {
+                pvLead = String(specific.ListPendingLeadJobName ?? specific.listpendingleadjobname ?? '').trim();
+            }
+            if (!pvLead && lineCtx.pvLeadByCode && lineCtx.pvLeadByCode[code]) {
+                pvLead = String(lineCtx.pvLeadByCode[code]).trim();
+            }
+            if (!pvLead) {
+                const gen = String(g0.ListPendingLeadJobName ?? g0.listpendingleadjobname ?? '').trim();
+                if (gen && extractLCodeFromLeadJobName(gen) === code) {
+                    pvLead = gen;
+                }
+            }
+            if (!pvLead) pvLead = code;
+            /** Per-lead customer/label for ToName matching (g0 alone is enquiry-wide and misses e.g. BEMCO on L3). */
+            const leadLabelRaw =
+                lineCtx.leadLabelsByCode && String(lineCtx.leadLabelsByCode[code] || '').trim()
+                    ? String(lineCtx.leadLabelsByCode[code]).trim()
+                    : '';
+            const leadLabelPrimary = leadLabelRaw.split(',')[0].trim();
+            const leadLabelForCust = leadLabelPrimary ? jsStripCustomerLeadSuffix(leadLabelPrimary) : '';
+            leadToRow.set(code, {
+                ...base,
+                ListPendingLeadJobName: pvLead,
+                ...(leadLabelForCust
+                    ? {
+                          ListQuoteDetailToName: leadLabelForCust,
+                          ListPendingCustomerName: leadLabelForCust,
+                      }
+                    : {}),
+            });
+        }
+    }
+
+    for (const g of groupRows) {
+        const code = extractLCodeFromLeadJobName(g.ListPendingLeadJobName ?? g.listpendingleadjobname ?? '');
+        if (!code) continue;
+        if (!leadToRow.has(code)) leadToRow.set(code, g);
+    }
+
+    for (const p of pricesForReq || []) {
+        if (!isBasePricePricingRow(p) || parseFloat(p.Price || 0) <= 0) continue;
+        const code = extractLCodeFromLeadJobName(p.LeadJobName || '');
+        if (!code || leadToRow.has(code)) continue;
+        let matchedG = null;
+        for (const g of groupRows) {
+            const own = String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim();
+            const cust =
+                String(g.ListQuoteDetailToName ?? '').trim() ||
+                String(g.ListPendingCustomerName ?? g.listpendingcustomername ?? '').trim() ||
+                displayCustomerLabelForLeadRow(g);
+            if (jsTupleOwnJobMatch(own, p.EnquiryForItem) && jsTupleCustomerMatch(cust, p.CustomerName)) {
+                matchedG = g;
+                break;
+            }
+        }
+        if (!matchedG) {
+            for (const g of groupRows) {
+                const own = String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim();
+                if (jsTupleOwnJobMatch(own, p.EnquiryForItem)) {
+                    matchedG = g;
+                    break;
+                }
+            }
+        }
+        if (!matchedG) continue;
+        leadToRow.set(code, {
+            ListQuoteDetailToName: String(p.CustomerName || '').trim(),
+            ListPendingCustomerName:
+                matchedG.ListPendingCustomerName ?? matchedG.listpendingcustomername ?? '',
+            CustomerName: matchedG.CustomerName ?? '',
+            ListPendingLeadJobName: p.LeadJobName,
+            ListPendingOwnJobItem: matchedG.ListPendingOwnJobItem ?? matchedG.listpendingownjobitem ?? '',
+            ListQuoteUnderRefTotal: null,
+            ListMultiLeadQuoteRefs: null,
+            ListQuoteRef: '',
+            ListQuoteDate: null,
+        });
+    }
+
+    const codes = [...leadToRow.keys()].sort((a, b) => lCodeSortKey(a) - lCodeSortKey(b));
+    const mergedRollupRefs = mergeMultiLeadQuoteRefEntries(groupRows);
+    const lines = [];
+    for (const code of codes) {
+        const g = leadToRow.get(code);
+        const namePartRaw =
+            lineCtx &&
+            lineCtx.leadLabelsByCode &&
+            String(lineCtx.leadLabelsByCode[code] || '').trim()
+                ? String(lineCtx.leadLabelsByCode[code]).trim()
+                : displayCustomerLabelForLeadRow(g);
+        const namePart =
+            jsStripCustomerLeadSuffix(String(namePartRaw || '').trim()) || String(namePartRaw || '').trim();
+        const label = `${namePart} - ${code}`;
+        const pvOwnRaw = String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim();
+        const pvOwn =
+            pvOwnRaw ||
+            String(g0.ListPendingOwnJobItem ?? g0.listpendingownjobitem ?? '').trim();
+        const pvLead = String(g.ListPendingLeadJobName ?? g.listpendingleadjobname ?? '').trim();
+        const pvCustForMatch =
+            String(g.ListQuoteDetailToName || '').trim() ||
+            String(g.ListPendingCustomerName ?? g.listpendingcustomername ?? '').trim() ||
+            displayCustomerLabelForLeadRow(g);
+        const customerCandidates = [
+            pvCustForMatch,
+            namePart,
+            namePartRaw,
+            String(g.CustomerName || '')
+                .split(',')
+                .map((x) => x.trim())
+                .filter(Boolean)[0] || '',
+        ];
+
+        let qt = pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, pvLead);
+        if (!qt || !String(qt.QuoteNumber || '').trim()) {
+            qt = findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLead, customerCandidates, code);
+        }
+        if ((!qt || !String(qt.QuoteNumber || '').trim()) && lineCtx && lineCtx.pvLeadByCode && lineCtx.pvLeadByCode[code]) {
+            const altLead = String(lineCtx.pvLeadByCode[code]).trim();
+            if (altLead && altLead !== pvLead) {
+                qt =
+                    pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, altLead) ||
+                    findQuoteRowForLeadLine(quotesForReq, pvOwn, altLead, customerCandidates, code);
+            }
+        }
+        let textLine;
+        let bdTotal = null;
+        if (qt && String(qt.QuoteNumber || '').trim()) {
+            textLine = `${label} (${String(qt.QuoteNumber).trim()} - ${fmtRowDetailDate(qt.QuoteDate)})`;
+            const ta = parseFloat(qt.TotalAmount);
+            if (!Number.isNaN(ta) && ta > 0) {
+                bdTotal = ta;
+            }
+        } else {
+            textLine = `${label} (Not Quoted)`;
+        }
+        lines.push({ textLine, bdTotal: bdTotal != null && bdTotal > 0 ? bdTotal : null });
+    }
+    return lines;
+}
+
+/** One compact display line per pending tuple (ToName (ref - date) + optional BD on same row). */
+function buildQuoteDetailLineForRow(g) {
+    const toName = String(g.ListQuoteDetailToName || '').trim() || '—';
+    const parts = [];
+    if (Array.isArray(g.ListMultiLeadQuoteRefs) && g.ListMultiLeadQuoteRefs.length > 0) {
+        for (const line of g.ListMultiLeadQuoteRefs) {
+            parts.push(`${toName} (${line.quoteNumber} - ${fmtRowDetailDate(line.quoteDate)})`);
+        }
+    } else if (g.ListQuoteRef) {
+        parts.push(`${toName} (${g.ListQuoteRef} - ${fmtRowDetailDate(g.ListQuoteDate)})`);
+    } else {
+        parts.push(`${toName} (—)`);
+    }
+    const textLine = parts.join(' · ');
+    const bd =
+        g.ListQuoteUnderRefTotal != null && !Number.isNaN(parseFloat(g.ListQuoteUnderRefTotal))
+            ? parseFloat(g.ListQuoteUnderRefTotal)
+            : null;
+    const bdOut = bd != null && bd > 0 ? bd : null;
+    return { textLine, bdTotal: bdOut };
+}
+
+function mergePendingRowsByRequestNo(rows, allQuotes, allPrices) {
+    const consumed = new Set();
+    const out = [];
+    for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!isPendingPvListRow(row)) {
+            out.push(enrichRowPreparedBy(row, allQuotes));
+            continue;
+        }
+        const req = String(row.RequestNo ?? '').trim();
+        const ck = `pv:${req}`;
+        if (consumed.has(ck)) continue;
+        consumed.add(ck);
+        const group = rows.filter((r) => isPendingPvListRow(r) && String(r.RequestNo ?? '').trim() === req);
+        const pricesForEnq = (allPrices || []).filter((p) => String(p.RequestNo ?? '').trim() === req);
+        if (group.length === 1) {
+            const r0 = group[0];
+            const lineCtx = r0.ListQuoteLeadContext ?? null;
+            const leadLines = buildEnquiryLeadQuoteDetailLines(req, [r0], allQuotes, pricesForEnq, lineCtx);
+            const rollLines = rollupStatusFromLeadDetailLines(leadLines);
+            out.push(
+                enrichRowPreparedBy(
+                    {
+                        ...r0,
+                        ListQuoteDetailLines: leadLines,
+                        ListQuoteRollupStatus: rollLines ?? r0.ListQuoteRollupStatus,
+                    },
+                    allQuotes
+                )
+            );
+            continue;
+        }
+        const base = { ...group[0] };
+        base.ListMergedPendingPvIds = group.map((g) => g.ListPendingPvId ?? g.listpendingpvid).filter((x) => x != null && x !== '');
+        base.SubJobPrices = uniqueSubjobPriceSegments(group);
+        base.CustomerName = [...new Set(group.map((g) => String(g.CustomerName || '').trim()).filter(Boolean))].join(', ') || base.CustomerName;
+        base.ListMultiLeadQuoteRefs = mergeMultiLeadQuoteRefEntries(group);
+        const mergeLineCtx = group[0].ListQuoteLeadContext ?? null;
+        base.ListQuoteDetailLines = buildEnquiryLeadQuoteDetailLines(req, group, allQuotes, pricesForEnq, mergeLineCtx);
+        base.ListQuoteRollupStatus =
+            rollupStatusFromLeadDetailLines(base.ListQuoteDetailLines) ||
+            mergeRollupStatuses(group.map((g) => g.ListQuoteRollupStatus));
+        const allRefs = [];
+        for (const g of group) {
+            if (g.ListQuoteRef) allRefs.push(String(g.ListQuoteRef));
+            if (Array.isArray(g.ListMultiLeadQuoteRefs)) {
+                for (const e of g.ListMultiLeadQuoteRefs) {
+                    if (e.quoteNumber) allRefs.push(String(e.quoteNumber));
+                }
+            }
+        }
+        base.ListQuoteRef = [...new Set(allRefs.map((s) => s.trim()).filter(Boolean))].join(' | ');
+        let maxT = 0;
+        for (const g of group) {
+            const t = g.ListQuoteDate ? new Date(g.ListQuoteDate).getTime() : 0;
+            if (!Number.isNaN(t) && t > maxT) maxT = t;
+        }
+        base.ListQuoteDate = maxT > 0 ? new Date(maxT) : null;
+        const rollNums = group
+            .map((g) => parseFloat(g.ListQuoteUnderRefTotal))
+            .filter((n) => !Number.isNaN(n) && n > 0);
+        base.ListQuoteUnderRefTotal = rollNums.length ? Math.max(...rollNums) : null;
+        base.ListQuoteDetailToName = '';
+        const prepSet = new Set();
+        for (const g of group) {
+            String(g.ListPreparedBy ?? g.listpreparedby ?? '')
+                .split(',')
+                .map((x) => x.trim())
+                .filter(Boolean)
+                .forEach((x) => prepSet.add(x));
+        }
+        base.ListPreparedBy = Array.from(prepSet).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join(', ');
+        out.push(enrichRowPreparedBy(base, allQuotes));
+    }
+    return out;
+}
+
+function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQuotes) {
+    const reqStr = String(enqRequestNo ?? '').trim();
+    const own = String(pvOwn || '').trim();
+    const cust = String(pvCust || '').trim();
+    if (!reqStr || !own || !cust) return null;
+
+    const priceRows = (allPrices || []).filter(
+        (p) =>
+            String(p.RequestNo ?? '')
+                .trim() === reqStr &&
+            isBasePricePricingRow(p) &&
+            parseFloat(p.Price || 0) > 0 &&
+            jsTupleOwnJobMatch(own, p.EnquiryForItem) &&
+            jsTupleCustomerMatch(cust, p.CustomerName)
+    );
+    const leadNames = [
+        ...new Set(priceRows.map((p) => String(p.LeadJobName || '').trim()).filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    if (leadNames.length <= 1) return null;
+
+    const quotesForReq = (allQuotes || []).filter((q) => String(q.RequestNo ?? '').trim() === reqStr);
+    const entries = [];
+    const custCands = [cust]
+        .concat(String(cust || '').split(',').map((x) => x.trim()).filter(Boolean))
+        .map((c) => jsStripCustomerLeadSuffix(String(c || '').trim()))
+        .filter(Boolean);
+    for (const leadName of leadNames) {
+        const lc = extractLCodeFromLeadJobName(leadName);
+        const best =
+            findQuoteRowForLeadLine(quotesForReq, own, leadName, custCands, lc) ||
+            pickLatestQuoteRow(quotesForReq.filter((q) => quoteRowMatchesTuple(q, own, leadName, cust)));
+        if (best && String(best.QuoteNumber || '').trim()) {
+            entries.push({
+                leadName,
+                quoteNumber: String(best.QuoteNumber).trim(),
+                quoteDate: best.QuoteDate,
+            });
+        }
+    }
+    const nQuoted = entries.length;
+    const nTotal = leadNames.length;
+    let status;
+    if (nQuoted === 0) status = 'None Quoted';
+    else if (nQuoted < nTotal) status = 'Partial Quoted';
+    else status = 'All Quoted';
+
+    const dates = entries
+        .map((e) => (e.quoteDate ? new Date(e.quoteDate).getTime() : 0))
+        .filter((t) => t > 0);
+    const listQuoteDateForSort = dates.length ? new Date(Math.max(...dates)) : null;
+
+    return { status, entries, listQuoteDateForSort, leadNames };
+}
+
 /**
  * Maps raw enquiry rows from list/pending / list/search SQL into the shape the Quote UI expects.
  */
@@ -101,6 +931,13 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
         `);
         const allEnquiryCustomers = enquiryCustomersRes.recordset;
 
+        const quotesRes = await sql.query(`
+            SELECT RequestNo, QuoteNumber, QuoteNo, RevisionNo, QuoteDate, OwnJob, LeadJob, ToName, PreparedBy, TotalAmount
+            FROM EnquiryQuotes
+            WHERE RequestNo IN (${requestNos})
+        `);
+        const allQuotes = quotesRes.recordset || [];
+
         console.log(`[API] Found ${allJobs.length} jobs and ${allPrices.length} prices for ${enquiriesToMap.length} enquiries.`);
 
         // Map subjob prices for each enquiry
@@ -191,6 +1028,14 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
             const internalCustomerNorm = normalize(internalCustomer);
             const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
+            const stripLeadPrefix = (s) => String(s || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+            const withLeadCode = (name, code) => {
+                const base = (name || '').replace(/,\s*$/, '').trim();
+                const c = String(code || '').trim().toUpperCase();
+                if (!base) return '';
+                if (!c || !/^L\d+$/.test(c)) return base;
+                return `${base} (${c})`;
+            };
 
             // External customers from EnquiryCustomer table (authoritative)
             let externalCustomers = allEnquiryCustomers
@@ -201,6 +1046,7 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
 
             // Pre-calculate Individual (Self) Prices (Latest Only) - STRICTLY Internal
             const selfPrices = {};
+            const selfPriceCustomers = {};
             const updateDates = {};
             flatList.forEach(job => {
                 const normOpt = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -245,40 +1091,8 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
 
                 selfPrices[job.ID] = priceRow ? parseFloat(priceRow.Price || 0) : 0;
                 updateDates[job.ID] = priceRow ? priceRow.UpdatedAt : null;
+                selfPriceCustomers[job.ID] = priceRow ? String(priceRow.CustomerName ?? '').trim() : '';
             });
-
-            const subJobPrices = filteredFlatList.map(job => {
-                const displayLevel = Math.max(0, (job.level || 0) - minLevel);
-
-                const displayName = (() => {
-                    // Inherit LeadJobCode from root ancestor
-                    let root = job;
-                    let visited = new Set();
-                    while (root.ParentID && root.ParentID != 0 && root.ParentID != '0' && !visited.has(root.ID)) {
-                        const p = enqJobs.find(j => j.ID == root.ParentID);
-                        if (!p) break;
-                        visited.add(root.ID);
-                        root = p;
-                    }
-
-                    const displayCode = rootLabelMap[root.ID] || 'L1';
-
-                    // STRICT label rule for pending summary:
-                    // always display the current job itself (never parent/lead alias).
-                    // This ensures subjob users see only ownjob + its descendants,
-                    // without parent/lead job labels appearing in the list.
-                    const labelBaseName = job.ItemName;
-                    return `${labelBaseName} (${displayCode})`;
-                })();
-
-                // Each row shows this department's own Base Price only (net), never a roll-up of descendants.
-                const totalVal = selfPrices[job.ID] || 0;
-
-                const updatedAtTs =
-                    (updateDates[job.ID] ? new Date(updateDates[job.ID]).getTime() : 0) || 0;
-
-                return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAtTs ? new Date(updatedAtTs).toISOString() : ''}|${displayLevel}`;
-            }).join(';;');
 
             // Aggregate PricingCustomerDetails (Hide Subjobs, Aggregate to Root)
             let aggregatedPricing = {};
@@ -308,16 +1122,8 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             // - If ownjob is subjob in a lead branch => include that branch parent job name.
             // - If ownjob is lead/root in a lead branch => include external customers.
             // - If both exist across branches => include both sets (deduped).
-            const stripLeadPrefix = (s) => String(s || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
             const finalCustomerSet = new Set();
             const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
-            const withLeadCode = (name, code) => {
-                const base = (name || '').replace(/,\s*$/, '').trim();
-                const c = String(code || '').trim().toUpperCase();
-                if (!base) return '';
-                if (!c || !/^L\d+$/.test(c)) return base;
-                return `${base} (${c})`;
-            };
             const anchorJobs = userEmail && accessCtx && accessCtx.user
                 ? getPricingAnchorJobs(enqJobs, accessCtx, userEmail)
                 : enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
@@ -430,6 +1236,62 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
 
             const fullCustomerName = finalCustomers.join(', ');
 
+            const isExternalPricingCustomerSub = (customerName) => {
+                const cn = String(customerName || '').replace(/\s*\(L\d+\)\s*$/i, '').trim();
+                const cnN = normalize(cn);
+                return Boolean(cn && cnN !== internalCustomerNorm && !jobNameSetNorm.has(cnN));
+            };
+            const jobMapForSubjobLabels = {};
+            enqJobs.forEach((j) => {
+                jobMapForSubjobLabels[String(j.ID)] = j;
+            });
+
+            const subJobPrices = filteredFlatList
+                .map((job) => {
+                    const displayLevel = Math.max(0, (job.level || 0) - minLevel);
+                    let root = job;
+                    const visited = new Set();
+                    while (root.ParentID && root.ParentID != 0 && root.ParentID != '0' && !visited.has(root.ID)) {
+                        const p = enqJobs.find((j) => j.ID == root.ParentID);
+                        if (!p) break;
+                        visited.add(root.ID);
+                        root = p;
+                    }
+                    const displayCode = rootLabelMap[root.ID] || 'L1';
+                    const jid = job.ID;
+                    const jobRec = jobMapForSubjobLabels[String(jid)];
+                    const priceCust = selfPriceCustomers[jid] || '';
+
+                    let displayName = '';
+                    if (priceCust && isExternalPricingCustomerSub(priceCust)) {
+                        const base = stripLeadPrefix(priceCust) || priceCust;
+                        displayName = `${base} (${displayCode})`;
+                    } else if (jobRec) {
+                        const pid = jobRec.ParentID;
+                        if (pid != null && pid !== '' && pid !== 0 && pid !== '0') {
+                            const par = jobMapForSubjobLabels[String(pid)];
+                            if (par?.ItemName) {
+                                const base = stripLeadPrefix(par.ItemName) || String(par.ItemName).trim();
+                                displayName = `${base} (${displayCode})`;
+                            }
+                        }
+                    }
+                    if (!displayName) {
+                        const suffix = `(${displayCode})`;
+                        const matchFinal = finalCustomers.find((c) => String(c).trim().endsWith(suffix));
+                        displayName = matchFinal
+                            ? String(matchFinal).trim()
+                            : `${stripLeadPrefix(jobRec?.ItemName || job.ItemName) || String(jobRec?.ItemName || job.ItemName).trim()} (${displayCode})`;
+                    }
+
+                    const totalVal = selfPrices[job.ID] || 0;
+                    const updatedAtTs =
+                        (updateDates[job.ID] ? new Date(updateDates[job.ID]).getTime() : 0) || 0;
+
+                    return `${displayName}|${totalVal > 0 ? totalVal.toFixed(2) : 'Not Updated'}|${updatedAtTs ? new Date(updatedAtTs).toISOString() : ''}|${displayLevel}`;
+                })
+                .join(';;');
+
             if (enq.RequestNo == '51') {
                 console.log(`[DEBUG 51] Root: ${internalCustomer}, External:`, externalCustomers);
                 console.log(`[DEBUG 51] JobSet:`, Array.from(jobNameSetNorm));
@@ -478,7 +1340,38 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             });
 
             const listRefRaw = enq.ListQuoteRef ?? enq.listquoteref;
-            const listRef = listRefRaw != null && String(listRefRaw).trim() !== '' ? String(listRefRaw).trim() : '';
+            let listRef = listRefRaw != null && String(listRefRaw).trim() !== '' ? String(listRefRaw).trim() : '';
+
+            /** Quoted / search-list rows omit pending tuple fields; use saved quote + enquiry customer for multi-lead rollup. */
+            const pvOwnT = ownJobFromQuote;
+            const pvCustT =
+                (enq.ListPendingCustomerName ?? enq.listpendingcustomername ?? '').toString().trim() ||
+                String(fullCustomerName || '').split(',')[0].trim() ||
+                String(enq.CustomerName ?? enq.customername ?? '')
+                    .split(',')
+                    .map((x) => x.trim())
+                    .filter(Boolean)[0] ||
+                '';
+            const multiRoll = buildMultiLeadQuoteRollup(enq.RequestNo, pvOwnT, pvCustT, allPrices, allQuotes);
+
+            let listQuoteRollupStatus = null;
+            let listMultiLeadQuoteRefs = null;
+            let listDtRaw = enq.ListQuoteDate ?? enq.listquotedate;
+
+            if (multiRoll) {
+                listQuoteRollupStatus = multiRoll.status;
+                listMultiLeadQuoteRefs = multiRoll.entries;
+                if (multiRoll.listQuoteDateForSort) {
+                    listDtRaw = multiRoll.listQuoteDateForSort;
+                } else if (multiRoll.entries.length === 0) {
+                    listDtRaw = null;
+                }
+                if (multiRoll.entries.length > 0) {
+                    listRef = multiRoll.entries.map((e) => e.quoteNumber).join(' | ');
+                } else {
+                    listRef = '';
+                }
+            }
 
             let listQuoteUnderRefTotal = null;
             if (quoteOwnJobNode) {
@@ -487,23 +1380,83 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             } else if (savedQuoteTotal != null && savedQuoteTotal > 0) {
                 listQuoteUnderRefTotal = savedQuoteTotal;
             }
-            // Do not show a roll-up amount in the "Quote ref." column when there is no quote number yet (pending / no draft row match).
-            if (!listRef) {
+            // Do not show a roll-up amount when no quote ref is shown (single-lead pending, or multi-lead with none quoted yet).
+            const hasDisplayedQuoteRef =
+                (listRef && String(listRef).trim() !== '') ||
+                (multiRoll && multiRoll.entries && multiRoll.entries.length > 0);
+            if (!hasDisplayedQuoteRef) {
                 listQuoteUnderRefTotal = null;
             }
 
-            const listDtRaw = enq.ListQuoteDate ?? enq.listquotedate;
             const listPbRaw = enq.ListPreparedBy ?? enq.listpreparedby;
-            const listPreparedBy = listPbRaw != null && String(listPbRaw).trim() !== '' ? String(listPbRaw).trim() : '';
+            let listPreparedBy = listPbRaw != null && String(listPbRaw).trim() !== '' ? String(listPbRaw).trim() : '';
+
+            /** ToName for quote-detail line: pending tuple customer, else first name in Customer column. */
+            const listQuoteDetailToName =
+                (enq.ListPendingCustomerName ?? enq.listpendingcustomername ?? '').toString().trim() ||
+                (String(fullCustomerName || '').split(',')[0].trim()) ||
+                '';
+
+            const rowDraft = {
+                ListPreparedBy: listPreparedBy,
+                ListMultiLeadQuoteRefs: listMultiLeadQuoteRefs,
+                ListQuoteRef: listRef,
+            };
+            listPreparedBy =
+                collectPreparedByForMappedRow(enq.RequestNo, rowDraft, allQuotes) || listPreparedBy;
+
+            const pendingLeadName = (enq.ListPendingLeadJobName ?? enq.listpendingleadjobname ?? '').toString().trim();
+            const pendingCustomerName = (enq.ListPendingCustomerName ?? enq.listpendingcustomername ?? '').toString().trim();
+            const listQuoteLeadContext = buildListQuoteLeadContext({
+                enqJobs,
+                roots,
+                rootLabelMap,
+                stringChildrenMap,
+                enqPrices,
+                pendingOwnItem: ownJobFromQuote,
+                stripLeadPrefix,
+                normalize,
+                internalCustomerNorm,
+                jobNameSetNorm,
+                externalCustomers,
+            });
+            const leadQuoteLines = buildEnquiryLeadQuoteDetailLines(
+                enqRequestNo,
+                [
+                    {
+                        ListPendingLeadJobName: pendingLeadName,
+                        ListPendingOwnJobItem: ownJobFromQuote,
+                        ListPendingCustomerName: pendingCustomerName,
+                        ListQuoteDetailToName: listQuoteDetailToName,
+                        CustomerName: fullCustomerName,
+                        ListQuoteUnderRefTotal: listQuoteUnderRefTotal,
+                        ListMultiLeadQuoteRefs: listMultiLeadQuoteRefs,
+                        ListQuoteRef: listRef,
+                        ListQuoteDate: listDtRaw != null && listDtRaw !== '' ? listDtRaw : null,
+                    },
+                ],
+                allQuotes,
+                enqPrices,
+                listQuoteLeadContext
+            );
+            const rollupFromDetailLines = rollupStatusFromLeadDetailLines(leadQuoteLines);
 
             return {
                 RequestNo: enq.RequestNo,
                 ListPendingPvId: enq.ListPendingPvId ?? enq.listpendingpvid ?? null,
+                ListPendingLeadJobName: pendingLeadName,
+                ListPendingOwnJobItem: ownJobFromQuote,
+                ListPendingCustomerName: pendingCustomerName,
+                ListQuoteLeadContext: listQuoteLeadContext,
                 ProjectName: enq.ProjectName,
                 ListQuoteRef: listRef,
+                ListQuoteDetailToName: listQuoteDetailToName,
+                ListQuoteRollupStatus: rollupFromDetailLines ?? listQuoteRollupStatus,
+                ListMultiLeadQuoteRefs: listMultiLeadQuoteRefs,
                 ListQuoteDate: listDtRaw != null && listDtRaw !== '' ? listDtRaw : null,
                 ListQuoteUnderRefTotal: listQuoteUnderRefTotal,
                 ListPreparedBy: listPreparedBy,
+                ListQuoteDetailLines: leadQuoteLines,
                 CustomerName: fullCustomerName,
                 PricingCustomerDetails: finalPricingStr,
                 ClientName: enq.ClientName || enq.clientname || '-',
@@ -534,6 +1487,8 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
                 dueIso(row.DueDate),
                 normKey(row.ProjectName),
                 normKey(row.ListQuoteRef),
+                normKey(row.ListQuoteRollupStatus),
+                normKey(JSON.stringify(row.ListMultiLeadQuoteRefs || [])),
                 normKey(row.CustomerName),
                 String(row.SubJobPrices ?? ''),
             ].join('\u0001');
@@ -546,9 +1501,9 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             mappedDeduped.push(row);
         }
 
-        let finalMapped = mappedDeduped;
+        let finalMapped = mergePendingRowsByRequestNo(mappedDeduped, allQuotes, allPrices);
         if (userEmail && accessCtx && !accessCtx.isAdmin) {
-            finalMapped = mappedDeduped.map(enq => {
+            finalMapped = finalMapped.map(enq => {
                 const accessRule = accessCtx.isCcUser ? 'cc_coordinator' : 'concerned_se';
                 return { ...enq, AccessRule: accessRule };
             });

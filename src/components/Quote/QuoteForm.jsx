@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool } from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
-import { format } from 'date-fns';
+import { format, parseISO, addDays } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
@@ -30,6 +30,66 @@ const QUOTE_LIST_CATEGORY = {
     PENDING: 'pending_quote',
     SEARCH: 'search_quote',
 };
+
+/** Calendar YYYY-MM-DD for <input type="date" /> from EnquiryQuotes row (avoids TZ off-by-one on ISO datetimes). */
+function quoteRowDateToInputYmd(quote) {
+    if (!quote) return new Date().toISOString().split('T')[0];
+    const ymd = quote.QuoteDateYmd ?? quote.quoteDateYmd;
+    if (ymd && /^\d{4}-\d{2}-\d{2}$/.test(String(ymd).trim())) return String(ymd).trim();
+    const raw = quote.QuoteDate ?? quote.quoteDate;
+    if (raw == null || raw === '') return new Date().toISOString().split('T')[0];
+    if (typeof raw === 'string') {
+        const m = raw.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+        if (m) return m[1];
+    }
+    if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
+        const y = raw.getFullYear();
+        const mo = String(raw.getMonth() + 1).padStart(2, '0');
+        const da = String(raw.getDate()).padStart(2, '0');
+        return `${y}-${mo}-${da}`;
+    }
+    return new Date().toISOString().split('T')[0];
+}
+
+function formatQuoteYmdForDisplay(ymd) {
+    if (!ymd) return '';
+    const s = String(ymd).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        try {
+            return format(parseISO(s), 'dd-MMM-yyyy');
+        } catch {
+            return s;
+        }
+    }
+    try {
+        return format(new Date(s), 'dd-MMM-yyyy');
+    } catch {
+        return s;
+    }
+}
+
+/**
+ * Rollup key from API for colour + label. Accepts optional trailing "(…)" and ignores it for display.
+ * Shown text is only: None Quoted | Partial Quoted | All Quoted (no parenthetical hint).
+ */
+function normalizeListQuoteRollupKey(raw) {
+    let s = String(raw || '').trim();
+    if (s === 'All Quoted' || s === 'Partial Quoted' || s === 'None Quoted') return s;
+    const base = s.replace(/\s*\([^)]*\)\s*$/g, '').trim();
+    if (base === 'All Quoted' || base === 'Partial Quoted' || base === 'None Quoted') return base;
+    return 'None Quoted';
+}
+
+function formatListQuoteRollupStatusLine(raw) {
+    return normalizeListQuoteRollupKey(raw);
+}
+
+function listQuoteRollupStatusColor(raw) {
+    const k = normalizeListQuoteRollupKey(raw);
+    if (k === 'All Quoted') return '#047857';
+    if (k === 'Partial Quoted') return '#b45309';
+    return '#64748b';
+}
 
 /** Stable reference when there are zero quote tabs (avoids new [] every memo pass). */
 const EMPTY_CALCULATED_TABS = [];
@@ -383,8 +443,9 @@ const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs,
 };
 
 /**
- * Canonical LeadJob for EnquiryQuotes + scoped GET: prefer root LeadJobCode (L1, L2, …) so the same
- * customer can have one quote per lead branch; fall back to root display name if code is missing.
+ * Canonical LeadJob for EnquiryQuotes + scoped GET: persist the root **lead job name** (EnquiryFor.LeadJobName
+ * or display ItemName), not bare L1/L2 codes — must align with EnquiryPricingValues.LeadJobName for pending-quote logic.
+ * QuoteNumber / branch identity still uses leadJobPrefix (L-code) from getQuotePayload separately.
  */
 function resolveRootLeadJobLabelForQuotes(jobs, selectedLeadId, enquiryLeadPrefixFallback = '') {
     const pool = Array.isArray(jobs) && jobs.length ? jobs : null;
@@ -414,12 +475,16 @@ function resolveRootLeadJobLabelForQuotes(jobs, selectedLeadId, enquiryLeadPrefi
         safe++;
     }
 
+    const leadName = String(root.leadJobName || root.LeadJobName || '').trim();
+    if (leadName) return leadName;
+
+    const nm = String(root.itemName || root.ItemName || root.DivisionName || '').trim();
+    if (nm) return nm;
+
     const codeRaw = String(root.leadJobCode || root.LeadJobCode || '').trim();
     const codeM = codeRaw.toUpperCase().match(/^(L\d+)/);
     if (codeM) return codeM[1];
 
-    const nm = String(root.itemName || root.ItemName || root.DivisionName || '').trim();
-    if (nm) return nm;
     return String(enquiryLeadPrefixFallback || '').trim();
 }
 
@@ -940,6 +1005,9 @@ const QuoteForm = () => {
     const [quoteListSearchCriteria, setQuoteListSearchCriteria] = useState('');
     const [quoteListDateFrom, setQuoteListDateFrom] = useState('');
     const [quoteListDateTo, setQuoteListDateTo] = useState('');
+    const [showEmailModal, setShowEmailModal] = useState(false);
+    const [emailSending, setEmailSending] = useState(false);
+    const [emailDetails, setEmailDetails] = useState({ to: '', cc: '', bcc: '', subject: '', body: '', pdfBlob: null, pdfName: '' });
     const fileInputRef = useRef(null);
     const [footerDetails, setFooterDetails] = useState(null);
     const [companyProfiles, setCompanyProfiles] = useState([]);
@@ -1331,8 +1399,8 @@ const QuoteForm = () => {
             }
             const sheetInnerMm = 297 - 15 * 2;
             /** Sheet 2+ chrome (continuation header); added +15mm safety buffer to prevent PDF rendering overflow/overlap. */
-            const continuationChromeMm = 62 + 15;
-            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 100));
+            const continuationChromeMm = 100 + 15; // Extremely safe buffer for vertical drift
+            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 150));
 
             const pageOne = [];
             const remaining = activeClausesList.map((_, i) => i);
@@ -1376,9 +1444,26 @@ const QuoteForm = () => {
         if (p1f.length) return [];
         return [activeClausesList.map((_, i) => i)];
     }, [clausePaginate.continuation, clausePaginate.pageOne, activeClausesList]);
+ 
+    const sheets = React.useMemo(() => {
+        const res = [];
+        // Page 1
+        res.push({
+            isFirstPage: true,
+            clauses: sanitizedPageOneClauseIndices.map((idx) => activeClausesList[idx]),
+        });
+        // Subsequent continuation pages
+        sanitizedClausePageGroups.forEach((group) => {
+            res.push({
+                isFirstPage: false,
+                clauses: group.map((idx) => activeClausesList[idx]),
+            });
+        });
+        return res;
+    }, [sanitizedPageOneClauseIndices, sanitizedClausePageGroups, activeClausesList]);
 
     const quotePreviewTotalPages =
-        activeClausesList.length === 0 ? 1 : 1 + sanitizedClausePageGroups.length;
+        activeClausesList.length === 0 ? 1 : sheets.length;
 
     /** So profile “Manage signatures” modal can build the Page list while Quote is open. */
     useLayoutEffect(() => {
@@ -2004,6 +2089,12 @@ const QuoteForm = () => {
         return s;
     }, [subject, quotePreviewProjectName, calculatedTabs]);
 
+    /** Company line in the standard cover letter (first page) — same source as print footer when possible. */
+    const quoteCoverOfferCompanyName = React.useMemo(() => {
+        const n = String(footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || '').trim();
+        return n || 'Almoayyed Air Conditioning W.L.L.';
+    }, [footerDetails?.name, quotePreviewEnquiryCompanyFallback?.name]);
+
     /** Own-job + subjob tabs: all pricing summary rows start checked; tab switch reapplies defaults (user can still uncheck). */
     const prevQuoteTabForDefaultsRef = React.useRef(null);
     React.useEffect(() => {
@@ -2290,7 +2381,7 @@ const QuoteForm = () => {
     /**
      * Params for GET /api/quotes/by-enquiry/:requestNo — matches EnquiryQuotes columns:
      * - RequestNo = enquiry number (path param).
-     * - LeadJob = root lead job code (L1, L2, …) when available, else root job display name.
+     * - LeadJob = root lead job **name** (LeadJobName / ItemName), same as persisted on save — not bare L-codes.
      * - OwnJob = first tab job (or department) vs selected subjob tab, same as saved EnquiryQuotes.OwnJob.
      * - ToName = same rules as getQuotePayload (external customer name; internal job-as-customer uses parent tab label).
      */
@@ -4996,7 +5087,7 @@ const QuoteForm = () => {
         const qRowId = quoteRowId(quote);
         setQuoteId(qRowId !== undefined ? qRowId : null);
         setQuoteNumber(quote.QuoteNumber ?? quote.quoteNumber ?? '');
-        setQuoteDate(quote.QuoteDate ? quote.QuoteDate.split('T')[0] : new Date().toISOString().split('T')[0]);
+        setQuoteDate(quoteRowDateToInputYmd(quote));
         setValidityDays(quote.ValidityDays || 30);
         setCustomerReference(quote.CustomerReference || quote.YourRef || '');
         setSubject(quote.Subject || '');
@@ -6468,7 +6559,7 @@ const QuoteForm = () => {
             toFax,
             toAttention,
             leadJob: resolveRootLeadJobLabelForQuotes(
-                pricingData?.jobs,
+                (pricingData?.jobs && pricingData.jobs.length > 0 ? pricingData.jobs : null) || jobsPool || [],
                 selectedLeadId,
                 enquiryData?.leadJobPrefix || ''
             ),
@@ -7263,34 +7354,132 @@ const QuoteForm = () => {
         }
     };
 
-    /** Sync entry from the button — avoids async wrapper eating transient activation for mailto:. */
-    const startQuoteEmailFlow = () => {
+    /** Sync entry from the button — now shows the internal Email Compose modal. */
+    const startQuoteEmailFlow = async () => {
         if (!hasUserPricing) return;
+        
+        setIsUploading(true);
+        try {
+            // 1. Generate the PDF
+            const { blob, fileName } = await fetchQuotePdfBlob();
+            
+            // 2. Build default mail details
+            const payload = buildQuoteEmailDraftPayload();
+            if (!payload) return;
+
+            // 3. Prepare body with a nice message
+            const initialBody = `Dear Sir/Madam,\n\nPlease find attached the quotation for your kind consideration.\n\nEnquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'}\nProject: ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}\n\nShould you have any queries, feel free to contact us.\n\nBest Regards,\n${(currentUser?.FullName || currentUser?.name || '').trim()}`;
+
+            setEmailDetails({
+                to: payload.toAddr || '',
+                cc: '', // Can be pre-filled from division CCMailIds if needed
+                bcc: '',
+                subject: payload.subjectLine || `Quotation - ${enquiryData?.enquiry?.ProjectName || ''}`,
+                body: initialBody,
+                pdfBlob: blob,
+                pdfName: fileName
+            });
+
+            setShowEmailModal(true);
+        } catch (err) {
+            console.error('Email preparation failed:', err);
+            alert('Failed to prepare quote PDF for email.');
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
+    const handleSendEmailViaApi = async () => {
+        if (!emailDetails.to || !emailDetails.pdfBlob) {
+            alert('Recipients and PDF attachment are missing.');
+            return;
+        }
+
+        setEmailSending(true);
+        try {
+            const pdfBase64 = await blobToBase64(emailDetails.pdfBlob);
+            
+            const res = await fetch(`${API_BASE}/api/quotes/send-email`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    to: emailDetails.to,
+                    cc: emailDetails.cc,
+                    bcc: emailDetails.bcc,
+                    subject: emailDetails.subject,
+                    body: emailDetails.body.replace(/\n/g, '<br>'), // Convert newlines to HTML
+                    attachmentName: emailDetails.pdfName,
+                    pdfBase64,
+                    reqNo: enquiryData?.enquiry?.RequestNo
+                })
+            });
+
+            if (res.ok) {
+                alert('Email sent successfully!');
+                setShowEmailModal(false);
+            } else {
+                const data = await res.json();
+                throw new Error(data.error || 'Failed to send email');
+            }
+        } catch (err) {
+            console.error('Email send error:', err);
+            alert(`Failed to send email: ${err.message}`);
+        } finally {
+            setEmailSending(false);
+        }
+    };
+
+    const handleOpenInOutlook = () => {
         const payload = buildQuoteEmailDraftPayload();
         if (!payload) return;
+        
+        // Use the old mailto flow
         setQuoteEmailDraftHref(payload.mailtoHref);
         openMailtoFromUserClick(payload.mailtoHref);
-        queueMicrotask(() => {
-            void runQuoteEmailDownloads();
+        
+        // Also trigger the downloads so user can manually attach
+        triggerBlobDownload(emailDetails.pdfBlob, emailDetails.pdfName);
+        setShowEmailModal(false);
+    };
+
+    const blobToBase64 = (blob) => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
         });
     };
 
     // Helper to format date as DD-MMM-YYYY
-    const formatDate = (dateString) => {
-        if (!dateString) return '';
+    const formatDate = (dateInput) => {
+        if (!dateInput) return '';
         try {
-            return format(new Date(dateString), 'dd-MMM-yyyy');
+            if (dateInput instanceof Date && !Number.isNaN(dateInput.getTime())) {
+                return format(dateInput, 'dd-MMM-yyyy');
+            }
+            const ds = String(dateInput).trim();
+            if (/^\d{4}-\d{2}-\d{2}$/.test(ds)) {
+                return format(parseISO(ds), 'dd-MMM-yyyy');
+            }
+            return format(new Date(ds), 'dd-MMM-yyyy');
         } catch (e) {
-            return dateString;
+            return String(dateInput);
         }
     };
 
     // Calculate validity date
     const getValidityDate = () => {
         if (!quoteDate) return '';
-        const date = new Date(quoteDate);
-        date.setDate(date.getDate() + parseInt(validityDays || 0));
-        return formatDate(date);
+        try {
+            const base = /^\d{4}-\d{2}-\d{2}$/.test(String(quoteDate).trim())
+                ? parseISO(String(quoteDate).trim())
+                : new Date(quoteDate);
+            if (Number.isNaN(base.getTime())) return '';
+            return format(addDays(base, parseInt(validityDays || 0, 10)), 'dd-MMM-yyyy');
+        } catch {
+            return '';
+        }
     };
 
     // Helper: Check if job is descendant of ancestor (Recursive) - Scoped to Component
@@ -7539,6 +7728,20 @@ const QuoteForm = () => {
         return '';
     }, [preparedBy, usersList, preparedByOptions, currentUser]);
 
+    /** Quote preview / PDF: enquiry types as a single line (reference “Type” row). */
+    const quotePreviewTypeLine = React.useMemo(() => {
+        const parts = (quoteTypeList || []).map((x) => String(x || '').trim()).filter(Boolean);
+        return parts.length ? parts.join(', ') : '—';
+    }, [quoteTypeList]);
+
+    /** Prepared By sub-line: Tel … (from master / options / profile). */
+    const quotePreviewPreparedByTelLine = React.useMemo(() => {
+        const t = String(preparedByContactFromMaster || '').trim();
+        if (!t) return '';
+        if (/^tel\s*:/i.test(t)) return t;
+        return `Tel: ${t}`;
+    }, [preparedByContactFromMaster]);
+
     const attentionSelectOptions = React.useMemo(() => {
         const finish = (rawList) => {
             const norm = (Array.isArray(rawList) ? rawList : [])
@@ -7726,7 +7929,8 @@ const QuoteForm = () => {
     const activeGlobalTabName = activeGlobalTabObj ? (activeGlobalTabObj.name || activeGlobalTabObj.label) : 'Project';
 
     return (
-        <div style={{ display: 'flex', height: 'calc(100vh - 100px)', background: '#f5f7fa' }}>
+        <>
+            <div style={{ display: 'flex', height: 'calc(100vh - 100px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
             <div style={{ width: `${sidebarWidth}px`, background: 'white', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'visible' }}>
                 {/* Search Section */}
@@ -8955,10 +9159,10 @@ const QuoteForm = () => {
                     </div>
                 )
                 }
-            </div >
+            </div>
 
             {/* Resizer Handle */}
-            < div
+            <div
                 onMouseDown={startResizing}
                 title="Drag to resize sidebar"
                 style={{
@@ -8975,15 +9179,15 @@ const QuoteForm = () => {
                 }}
             >
                 <div style={{ width: '4px', height: '32px', backgroundColor: '#cbd5e1', borderRadius: '2px' }}></div>
-            </div >
+            </div>
 
             {/* Right Panel - Quote Preview */}
-            < div style={{ flex: 1, overflow: 'auto', padding: '0 20px 20px 20px' }}>
+            <div style={{ flex: 1, overflow: 'auto', padding: '0 20px 20px 20px' }}>
                 {
                     loading ? (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }} >
                             Loading enquiry data...
-                        </div >
+                        </div>
                     ) : !enquiryData ? (
                         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             <div
@@ -9074,7 +9278,7 @@ const QuoteForm = () => {
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                             placeholder={
                                                 quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                                    ? 'Quote ref, project, enquiry no., customer, client, consultant, prepared by…'
+                                                    ? 'Quote details, project, enquiry no., client, consultant, prepared by…'
                                                     : 'Select "Search Quote" to enable'
                                             }
                                             style={{
@@ -9203,13 +9407,12 @@ const QuoteForm = () => {
                                     const activeSortLabel = quoteSortField === 'DueDate' ? 'Due Date'
                                         : quoteSortField === 'RequestNo' ? 'Enquiry No.'
                                             : quoteSortField === 'ProjectName' ? 'Project Name'
-                                                : quoteSortField === 'ListQuoteRef' ? 'Quote ref.'
+                                                : quoteSortField === 'ListQuoteRef' ? 'Quote details'
                                                     : quoteSortField === 'ListQuoteDate' ? 'Quote date'
                                                         : quoteSortField === 'CustomerName' ? 'Customer'
-                                                            : quoteSortField === 'ClientName' ? 'Client Name'
-                                                                : quoteSortField === 'ConsultantName' ? 'Consultant Name'
-                                                                    : quoteSortField === 'ListPreparedBy' ? 'Prepared by'
-                                                                        : quoteSortField;
+                                                            : quoteSortField === 'ConsultantName' ? 'Consultant Name'
+                                                                : quoteSortField === 'ListPreparedBy' ? 'Prepared by'
+                                                                    : quoteSortField;
                                     const renderQSH = (field, label, style = {}) => {
                                         const isActive = quoteSortField === field;
                                         const isAsc = quoteSortDir === 'asc';
@@ -9245,18 +9448,14 @@ const QuoteForm = () => {
                                                     Sorted by <strong>{activeSortLabel}</strong> {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
                                                 </span>
                                             </div>
-                                            <div style={{ flex: 1, overflowY: 'auto' }}>
-                                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                            <div style={{ flex: 1, overflowX: 'auto', overflowY: 'auto' }}>
+                                                <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
                                                     <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
                                                         <tr>
-                                                            {renderQSH('RequestNo', 'Enquiry No.', { width: '80px' })}
-                                                            {renderQSH('ProjectName', 'Project Name', { minWidth: '234px' })}
-                                                            {renderQSH('ListQuoteRef', 'Quote ref.', { minWidth: '120px' })}
-                                                            {renderQSH('ListQuoteDate', 'Quote date', { minWidth: '110px' })}
-                                                            {renderQSH('CustomerName', 'Customer Name')}
+                                                            {renderQSH('RequestNo', 'Enquiry No.', { width: '96px' })}
+                                                            {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
+                                                            {renderQSH('ListQuoteRef', 'Quote details', { minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal' })}
                                                             {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                                                            <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Subjob Prices (Base Price)</th>
-                                                            {renderQSH('ClientName', 'Client Name', { minWidth: '200px' })}
                                                             {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
                                                             {renderQSH('ListPreparedBy', 'Prepared by', { minWidth: '160px' })}
                                                         </tr>
@@ -9264,163 +9463,107 @@ const QuoteForm = () => {
                                                     <tbody>
                                                         {sortedPendingQuotes.map((enq, idx) => (
                                                             <tr
-                                                                key={enq.QuoteListKind ? `${enq.RequestNo}-${enq.QuoteListKind}` : `${String(enq.RequestNo ?? 'r')}-${String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`}`}
+                                                                key={enq.QuoteListKind ? `${enq.RequestNo}-${enq.QuoteListKind}` : `${String(enq.RequestNo ?? 'r')}-${Array.isArray(enq.ListMergedPendingPvIds) ? enq.ListMergedPendingPvIds.join('-') : String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`}`}
                                                                 style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
                                                                 onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
                                                                 onMouseOut={(e) => e.currentTarget.style.background = 'white'}
                                                                 onClick={() => handleSelectEnquiry(enq)}
                                                             >
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>
-                                                                    {enq.RequestNo}
-                                                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && enq.QuoteListKind ? (
-                                                                        <span style={{ marginLeft: '6px', fontSize: '10px', fontWeight: '600', color: enq.QuoteListKind === 'pending' ? '#b45309' : '#047857', textTransform: 'uppercase' }}>
-                                                                            {enq.QuoteListKind === 'pending' ? 'To quote' : 'Quoted'}
-                                                                        </span>
-                                                                    ) : null}
+                                                                    <div>{enq.RequestNo}</div>
+                                                                    <div
+                                                                        style={{
+                                                                            marginTop: '8px',
+                                                                            fontSize: '11px',
+                                                                            fontWeight: 700,
+                                                                            letterSpacing: '0.02em',
+                                                                            color: listQuoteRollupStatusColor(enq.ListQuoteRollupStatus),
+                                                                        }}
+                                                                    >
+                                                                        {formatListQuoteRollupStatusLine(enq.ListQuoteRollupStatus)}
+                                                                    </div>
                                                                 </td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>{enq.ProjectName || '-'}</td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '132px' }}>
-                                                                    <div style={{ whiteSpace: 'nowrap' }}>{enq.ListQuoteRef || '-'}</div>
-                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
-                                                                        <div style={{ marginTop: '6px', fontSize: '11px', fontWeight: '600', color: '#166534', whiteSpace: 'nowrap' }}>
-                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                        </div>
-                                                                    ) : null}
-                                                                </td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>
-                                                                    {enq.ListQuoteDate
-                                                                        ? (() => {
+                                                                <td style={{ padding: '12px 16px', fontSize: '11px', color: '#64748b', verticalAlign: 'top', minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                                                                    {(() => {
+                                                                        const fmtQuoteDate = (raw) => {
                                                                             try {
-                                                                                const d = new Date(enq.ListQuoteDate);
-                                                                                return Number.isNaN(d.getTime()) ? '-' : format(d, 'dd-MMM-yyyy');
+                                                                                const d = raw ? new Date(raw) : null;
+                                                                                return d && !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '—';
                                                                             } catch {
-                                                                                return '-';
+                                                                                return '—';
                                                                             }
-                                                                        })()
-                                                                        : '-'}
-                                                                </td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '250px' }}>
-                                                                    {enq.CustomerName ? enq.CustomerName.split(',').map((cust, i) => {
-                                                                        const cName = cust.trim();
-                                                                        if (!cName) return null;
+                                                                        };
+                                                                        const compactLineStyle = {
+                                                                            display: 'flex',
+                                                                            flexWrap: 'wrap',
+                                                                            alignItems: 'baseline',
+                                                                            gap: '6px',
+                                                                            fontSize: '11px',
+                                                                            lineHeight: 1.35,
+                                                                            color: '#334155',
+                                                                        };
+                                                                        const refDateStyle = { fontSize: '11px', color: '#475569', wordBreak: 'break-word' };
+                                                                        const bdStyle = {
+                                                                            fontSize: '11px',
+                                                                            fontWeight: 600,
+                                                                            color: '#166534',
+                                                                            whiteSpace: 'nowrap',
+                                                                            background: '#dcfce7',
+                                                                            padding: '2px 8px',
+                                                                            borderRadius: '4px',
+                                                                        };
 
-                                                                        // Skip the user's own division/job — they are the quoting party, not a customer
-                                                                        const userDept = (currentUser?.Department || '').trim().toLowerCase();
-                                                                        const cNorm = normalize(cName);
-                                                                        const deptNorm = normalize(userDept);
-                                                                        if (userDept && (cNorm === deptNorm || cNorm.includes(deptNorm) || deptNorm.includes(cNorm))) return null;
-
-                                                                        const quoteMap = {};
-                                                                        (enq.QuotedCustomers || '').split(';;').filter(Boolean).forEach(p => {
-                                                                            const parts = p.split('|');
-                                                                            if (parts.length >= 2) {
-                                                                                const key = normalize(parts[0]);
-                                                                                const valStr = parts[1].replace(/,/g, '');
-                                                                                const val = parseFloat(valStr) || 0;
-                                                                                quoteMap[key] = (quoteMap[key] || 0) + val;
-                                                                            }
-                                                                        });
-                                                                        const pricingMap = {};
-                                                                        (enq.PricingCustomerDetails || '').split(';;').filter(Boolean).forEach(p => {
-                                                                            const parts = p.split('|');
-                                                                            if (parts.length >= 2) {
-                                                                                const key = normalize(parts[0]);
-                                                                                const val = parseFloat(parts[1]) || 0;
-                                                                                pricingMap[key] = (pricingMap[key] || 0) + val;
-                                                                            }
-                                                                        });
-
-
-                                                                        const cNameNorm = normalize(cName);
-                                                                        let quotedVal = quoteMap[cNameNorm];
-                                                                        let pricingVal = pricingMap[cNameNorm];
-
-                                                                        if (quotedVal === undefined) {
-                                                                            // Fuzzy match: check if one contains the other
-                                                                            const fuzzyKey = Object.keys(quoteMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
-                                                                            if (fuzzyKey) quotedVal = quoteMap[fuzzyKey];
-                                                                        }
-                                                                        if (pricingVal === undefined) {
-                                                                            const fuzzyKey = Object.keys(pricingMap).find(k => cNameNorm.includes(k) || k.includes(cNameNorm));
-                                                                            if (fuzzyKey) pricingVal = pricingMap[fuzzyKey];
+                                                                        if (Array.isArray(enq.ListQuoteDetailLines) && enq.ListQuoteDetailLines.length > 0) {
+                                                                            return enq.ListQuoteDetailLines.map((ln, li) => (
+                                                                                <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 8 : 0 }}>
+                                                                                    <span style={refDateStyle}>{ln.textLine}</span>
+                                                                                    {ln.bdTotal != null && ln.bdTotal > 0 ? (
+                                                                                        <span style={{ ...bdStyle, fontSize: '10px' }}>
+                                                                                            BD {Number(ln.bdTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                                                        </span>
+                                                                                    ) : null}
+                                                                                </div>
+                                                                            ));
                                                                         }
 
-                                                                        const displayQuoted = quotedVal !== undefined
-                                                                            ? quotedVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                                                                            : null;
-
-                                                                        const displayPricing = pricingVal !== undefined && pricingVal > 0
-                                                                            ? pricingVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                                                                            : null;
-
-                                                                        return (
-                                                                            <div key={i} style={{ marginBottom: '4px' }}>
-                                                                                <span style={{ fontWeight: '500', color: '#334155', whiteSpace: 'nowrap' }}>{cName}</span>
-                                                                            </div>
-                                                                        );
-                                                                    }) : '-'}
-                                                                </td>
-
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                                                <td style={{ padding: '12px 16px', verticalAlign: 'top' }}>
-                                                                    {(enq.SubJobPrices || enq.subJobPrices) ? (enq.SubJobPrices || enq.subJobPrices).split(';;').filter(Boolean).map((s, i) => {
-                                                                        const parts = s.split('|');
-                                                                        const name = parts[0];
-                                                                        const rawPrice = parts[1];
-                                                                        const rawDate = parts[2];
-                                                                        const rawLevel = parts[3];
-
-                                                                        const level = parseInt(rawLevel) || 0;
-                                                                        const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
-
-                                                                        let displayPrice = rawPrice;
-                                                                        if (isUpdated) {
-                                                                            const num = parseFloat(rawPrice);
-                                                                            if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                                                        const toName = String(enq.ListQuoteDetailToName ?? '').trim() || '—';
+                                                                        if (Array.isArray(enq.ListMultiLeadQuoteRefs) && enq.ListMultiLeadQuoteRefs.length > 0) {
+                                                                            const joined = enq.ListMultiLeadQuoteRefs
+                                                                                .map(
+                                                                                    (line) =>
+                                                                                        `${toName} (${line.quoteNumber} - ${fmtQuoteDate(line.quoteDate)})`
+                                                                                )
+                                                                                .join(' · ');
+                                                                            return (
+                                                                                <div style={compactLineStyle}>
+                                                                                    <span style={refDateStyle}>{joined}</span>
+                                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
+                                                                                        <span style={bdStyle}>
+                                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                                                        </span>
+                                                                                    ) : null}
+                                                                                </div>
+                                                                            );
                                                                         }
-
-                                                                        let displayDate = '';
-                                                                        if (rawDate) {
-                                                                            try {
-                                                                                displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
-                                                                            } catch (e) { }
-                                                                        }
-
-                                                                        return (
-                                                                            <div key={i} style={{
-                                                                                fontSize: '11px',
-                                                                                marginBottom: '4px',
-                                                                                whiteSpace: 'nowrap',
-                                                                                marginLeft: `${level * 20}px`,
-                                                                                display: 'flex',
-                                                                                alignItems: 'center',
-                                                                                gap: '4px'
-                                                                            }}>
-                                                                                {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
-                                                                                <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
-                                                                                <span style={{
-                                                                                    color: isUpdated ? '#166534' : '#94a3b8',
-                                                                                    marginLeft: '4px',
-                                                                                    fontStyle: isUpdated ? 'normal' : 'italic',
-                                                                                    background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                                                                                    padding: '1px 6px',
-                                                                                    borderRadius: '4px',
-                                                                                    fontSize: '10px'
-                                                                                }}>
-                                                                                    {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
-                                                                                </span>
-                                                                                {isUpdated && displayDate && (
-                                                                                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
-                                                                                        ({displayDate})
+                                                                        if (enq.ListQuoteRef) {
+                                                                            return (
+                                                                                <div style={compactLineStyle}>
+                                                                                    <span style={refDateStyle}>
+                                                                                        {toName} ({enq.ListQuoteRef} - {fmtQuoteDate(enq.ListQuoteDate)})
                                                                                     </span>
-                                                                                )}
-                                                                            </div>
-                                                                        );
-                                                                    }) : (
-                                                                        <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No subjobs found</div>
-                                                                    )}
+                                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
+                                                                                        <span style={bdStyle}>
+                                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                                                        </span>
+                                                                                    ) : null}
+                                                                                </div>
+                                                                            );
+                                                                        }
+                                                                        return <div style={{ color: '#94a3b8', fontSize: '12px' }}>—</div>;
+                                                                    })()}
                                                                 </td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ClientName || enq.clientName || '-'}</td>
+                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ConsultantName || enq.consultantName || '-'}</td>
                                                                 <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '160px' }}>{enq.ListPreparedBy || enq.listpreparedby || '-'}</td>
                                                             </tr>
@@ -9565,7 +9708,7 @@ const QuoteForm = () => {
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                             placeholder={
                                                 quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                                    ? 'Quote ref, project, enquiry no., customer, client, consultant, prepared by…'
+                                                    ? 'Quote details, project, enquiry no., client, consultant, prepared by…'
                                                     : 'Select "Search Quote" to enable'
                                             }
                                             style={{
@@ -10058,669 +10201,536 @@ const QuoteForm = () => {
                                         ) : null}
                                     </div>
                                 </div>
-                                <div className="quote-print-page-indicator" aria-hidden="true"></div>
-                                <div className="quote-print-footer-rule" aria-hidden="true"></div>
-
-                            <style>{tableStyles}</style>
-                            <style>
-                                {`
-                                .quote-print-repeat-strip,
-                                .quote-print-page-indicator {
-                                    display: none;
-                                }
-                                .header-section.quote-header-row {
-                                    width: 100%;
-                                    box-sizing: border-box;
-                                }
-                                .quote-header-address-col,
-                                .quote-header-quote-col {
-                                    min-width: 0;
-                                }
-                                .quote-clause-measure-host {
-                                    position: absolute;
-                                    left: -99999px;
-                                    top: 0;
-                                    pointer-events: none;
-                                    visibility: hidden;
-                                }
-                                /* PDF-style viewer: matting + true A4 width (210mm). Horizontal scroll if panel is narrow — same line breaks as Puppeteer PDF (794px viewport). */
-                                #quote-preview {
-                                    display: flex;
-                                    flex-direction: column;
-                                    align-items: center;
-                                    gap: 10px;
-                                    width: 100%;
-                                    min-width: 210mm;
-                                    max-width: 100%;
-                                    box-sizing: border-box;
-                                    padding: 20px 16px 28px;
-                                    background: #e2e8f0;
-                                    border: none !important;
-                                    outline: none !important;
-                                    overflow-x: auto;
-                                    overflow-y: visible;
-                                }
-                                .quote-document-root {
-                                    border: none !important;
-                                    outline: none !important;
-                                }
-                                .quote-a4-sheet {
-                                    position: relative;
-                                    background: #fff;
-                                    box-sizing: border-box;
-                                    width: 210mm;
-                                    min-width: 210mm;
-                                    max-width: none;
-                                    margin-left: auto;
-                                    margin-right: auto;
-                                    margin-bottom: 0;
-                                    padding: 15mm;
-                                    min-height: 297mm;
-                                    border: none !important;
-                                    outline: none !important;
-                                    box-shadow:
-                                        0 1px 2px rgba(0, 0, 0, 0.12),
-                                        0 6px 16px rgba(0, 0, 0, 0.14),
-                                        0 0 0 1px rgba(0, 0, 0, 0.06);
-                                    border-radius: 1px;
-                                    display: grid;
-                                    grid-template-columns: minmax(0, 1fr);
-                                    grid-template-rows: auto minmax(0, 1fr) auto;
-                                    align-content: stretch;
-                                    /* Same rules as @media print below: Puppeteer PDF uses screen — @media print is ignored */
-                                    page-break-after: always;
-                                    break-after: page;
-                                }
-                                .quote-a4-sheet:last-child {
-                                    page-break-after: auto;
-                                    break-after: auto;
-                                }
-                                /* Each sheet already ends with break-after: page — do not add break-before on the next sheet
-                                   or Chromium inserts an extra blank page (PDF page N empty, body on N+1). */
-                                .quote-a4-sheet.page-one + .quote-a4-clause-sheet,
-                                .quote-a4-clause-sheet + .quote-a4-clause-sheet {
-                                    page-break-before: auto;
-                                    break-before: auto;
-                                }
-                                .quote-sheet-main-flex {
-                                    min-width: 0;
-                                    min-height: 0;
-                                    height: 100%;
-                                    display: flex;
-                                    flex-direction: column;
-                                }
-                                .quote-sheet-footer-push {
-                                    flex-shrink: 0;
-                                }
-                                /* Keep company lines + email on one fragment (PDF was orphaning “E-mail: …” on the next page). */
-                                .quote-a4-sheet .footer-section {
-                                    break-inside: avoid;
-                                    page-break-inside: avoid;
-                                }
-                                .quote-sheet-logo-row {
-                                    flex-shrink: 0;
-                                    display: flex;
-                                    justify-content: flex-end;
-                                    width: 100%;
-                                }
-                                .quote-continuation-header {
-                                    display: flex;
-                                    align-items: center;
-                                    justify-content: flex-end;
-                                    flex-shrink: 0;
-                                    margin-bottom: 16px;
-                                    padding-bottom: 0;
-                                    border-bottom: none;
-                                }
-                                .quote-footer-full-rule {
-                                    width: 100%;
-                                    margin: 10px 0 0 0;
-                                    padding: 0;
-                                    border: 0;
-                                    border-top: 1px solid #e2e8f0;
-                                    height: 0;
-                                    box-sizing: border-box;
-                                }
-                                .quote-print-footer-rule {
-                                    display: none;
-                                }
-                                .quote-page-num-screen {
-                                    margin-left: 50%;
-                                    width: 50%;
-                                    max-width: 50%;
-                                    box-sizing: border-box;
-                                    text-align: right;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    color: #64748b;
-                                    padding-bottom: 6px;
-                                }
-                                @media print {
-                                    html, body {
-                                        width: 100% !important;
-                                        max-width: 100% !important;
-                                        margin: 0 !important;
-                                        padding: 0 !important;
-                                        overflow: visible !important;
-                                        height: auto !important;
-                                        background: #fff !important;
+                                <style>{tableStyles}</style>
+                                <style>
+                                    {`
+                                    .quote-print-repeat-strip,
+                                    .quote-print-page-indicator {
+                                        display: none;
                                     }
-                                    body * {
-                                        visibility: hidden;
-                                    }
-                                    #quote-print-root,
-                                    #quote-print-root * {
-                                        visibility: visible !important;
-                                    }
-                                    /* Screen layout keeps #quote-print-root inside a narrow flex sibling — use full viewport for print. */
-                                    #quote-print-root {
-                                        position: fixed !important;
-                                        left: 0 !important;
-                                        top: 0 !important;
-                                        right: 0 !important;
-                                        width: 100vw !important;
-                                        max-width: 100vw !important;
-                                        margin: 0 !important;
-                                        padding: 0 !important;
-                                        padding-top: 18mm !important;
-                                        padding-bottom: 44mm !important;
-                                        box-sizing: border-box !important;
-                                        background: white !important;
-                                        z-index: 2147483640 !important;
-                                        transform: none !important;
-                                    }
-                                    #quote-preview {
-                                        position: relative !important;
-                                        left: auto !important;
-                                        top: auto !important;
-                                        width: 100% !important;
-                                        max-width: 210mm !important;
-                                        margin-left: auto !important;
-                                        margin-right: auto !important;
-                                        padding: 0 !important;
-                                        box-shadow: none !important;
-                                        background: white !important;
-                                        border: none !important;
-                                        outline: none !important;
-                                        display: block !important;
-                                        gap: 0 !important;
-                                    }
-                                    .quote-clause-measure-host {
-                                        display: none !important;
-                                        visibility: hidden !important;
-                                        height: 0 !important;
-                                        overflow: hidden !important;
-                                    }
-                                    .quote-a4-sheet {
-                                        box-shadow: none !important;
-                                        border-radius: 0 !important;
-                                        width: 100% !important;
-                                        max-width: 210mm !important;
-                                        margin-bottom: 0 !important;
-                                        min-height: 0 !important;
-                                        page-break-after: always !important;
-                                        break-after: page !important;
-                                        border: none !important;
-                                        outline: none !important;
-                                    }
-                                    .quote-a4-sheet:last-child {
-                                        page-break-after: auto !important;
-                                        break-after: auto !important;
-                                    }
-                                    @page {
-                                        size: A4 portrait;
-                                        margin: 12mm 14mm 14mm 14mm;
-                                    }
-                                    .no-print {
-                                        display: none !important;
-                                    }
-                                    .page-one { min-height: 0 !important; }
-                                    .page-break {
-                                        page-break-before: always !important;
-                                        break-before: page !important;
-                                        min-height: 0 !important;
-                                        margin-top: 0 !important;
+                                    .header-section.quote-header-row {
+                                        width: 100%;
+                                        box-sizing: border-box;
                                     }
                                     .quote-header-address-col,
                                     .quote-header-quote-col {
-                                        flex: 0 0 50% !important;
-                                        width: 50% !important;
-                                        max-width: 50% !important;
+                                        min-width: 0;
                                     }
-                                    .quote-clause-block {
-                                        break-inside: avoid-page;
-                                        page-break-inside: avoid;
-                                    }
-                                    [data-print-with-header="1"] .quote-print-repeat-strip {
-                                        display: flex !important;
-                                        visibility: visible !important;
-                                        position: fixed !important;
+                                    .quote-clause-measure-host {
+                                        position: absolute;
+                                        left: -99999px;
                                         top: 0;
-                                        left: 14mm;
-                                        right: 14mm;
-                                        height: 18mm;
+                                        pointer-events: none;
+                                        visibility: hidden;
+                                    }
+                                    #quote-preview {
+                                        display: flex;
+                                        flex-direction: column;
                                         align-items: center;
-                                        justify-content: flex-end;
                                         gap: 10px;
-                                        background: #fff !important;
-                                        border-bottom: none !important;
-                                        z-index: 2147483646;
+                                        width: 210mm !important;
+                                        min-width: 210mm !important;
+                                        max-width: 210mm !important;
+                                        box-sizing: border-box;
+                                        padding: 20px 0 28px;
+                                        background: #e2e8f0;
+                                        border: none !important;
+                                        outline: none !important;
+                                        overflow-x: visible;
+                                        overflow-y: visible;
+                                        margin: 0 auto;
+                                    }
+                                    .quote-document-root {
+                                        border: none !important;
+                                        outline: none !important;
+                                    }
+                                    .quote-a4-sheet {
+                                        position: relative;
+                                        background: #fff;
+                                        box-sizing: border-box;
+                                        width: 210mm;
+                                        min-width: 210mm;
+                                        max-width: none;
+                                        margin-left: auto;
+                                        margin-right: auto;
+                                        margin-bottom: 0;
+                                        padding: 15mm;
+                                        min-height: 297mm;
+                                        border: none !important;
+                                        outline: none !important;
+                                        box-shadow:
+                                            0 1px 2px rgba(0, 0, 0, 0.12),
+                                            0 6px 16px rgba(0, 0, 0, 0.14),
+                                            0 0 0 1px rgba(0, 0, 0, 0.06);
+                                        border-radius: 1px;
+                                        display: grid;
+                                        grid-template-columns: minmax(0, 1fr);
+                                        grid-template-rows: auto minmax(0, 1fr) auto;
+                                        align-content: stretch;
+                                        page-break-after: always;
+                                        break-after: page;
+                                    }
+                                    .quote-a4-sheet:last-child {
+                                        page-break-after: auto;
+                                        break-after: auto;
+                                    }
+                                    .quote-sheet-main-flex {
+                                        min-width: 0;
+                                        min-height: 0;
+                                        height: 100%;
+                                        display: flex;
+                                        flex-direction: column;
+                                    }
+                                    .quote-sheet-logo-row {
+                                        flex-shrink: 0;
+                                        display: flex;
+                                        justify-content: flex-end;
+                                        width: 100%;
+                                    }
+                                    .quote-cover-first-page {
+                                        margin-bottom: 22px;
+                                    }
+                                    .quote-section-rule {
+                                        border: 0;
+                                        border-top: 1px solid #94a3b8;
+                                        margin: 0 0 16px 0;
+                                        height: 0;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-quote-panel {
+                                        width: 100%;
+                                        border: 1px solid #cbd5e1;
+                                        border-radius: 2px;
+                                        overflow: hidden;
+                                        font-size: 13px;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-quote-panel-head {
+                                        display: flex;
+                                        justify-content: space-between;
+                                        align-items: center;
+                                        gap: 12px;
+                                        background: #e2e8f0;
+                                        padding: 8px 12px;
+                                        font-weight: 600;
+                                        color: #1e293b;
+                                        -webkit-print-color-adjust: exact;
+                                        print-color-adjust: exact;
+                                    }
+                                    .quote-header-quote-panel-body {
+                                        width: 100%;
+                                        border-collapse: collapse;
+                                        table-layout: fixed;
+                                    }
+                                    .quote-header-quote-panel-body td {
+                                        border: none;
+                                        border-bottom: 1px solid #e2e8f0;
+                                        padding: 8px 12px;
+                                        vertical-align: top;
+                                        line-height: 1.45;
+                                    }
+                                    .quote-header-quote-panel-body tr:last-child td {
+                                        border-bottom: none;
+                                    }
+                                    .quote-header-quote-panel-body td:first-child {
+                                        width: 38%;
+                                        max-width: 140px;
+                                        color: #64748b;
+                                        font-weight: 600;
+                                    }
+                                    .quote-header-quote-panel-body td:last-child {
+                                        color: #0f172a;
+                                        font-weight: 500;
+                                    }
+                                    .quote-cover-signatory-line {
+                                        margin-top: 28px;
+                                        font-size: 13px;
+                                        color: #0f172a;
+                                    }
+                                    .quote-cover-meta-table {
+                                        width: 100%;
+                                        table-layout: fixed;
+                                        border-collapse: collapse;
+                                        font-size: 13px;
+                                        margin-bottom: 0;
+                                    }
+                                    .quote-cover-meta-table td {
+                                        border: none !important;
+                                        padding: 7px 10px 7px 0;
+                                        vertical-align: top;
+                                        line-height: 1.45;
+                                    }
+                                    .quote-cover-meta-table td:first-child {
+                                        width: 26%;
+                                        max-width: 132px;
+                                        color: #64748b;
+                                        font-weight: 500;
+                                    }
+                                    .quote-cover-meta-table td:last-child {
+                                        color: #0f172a;
+                                        font-weight: 400;
+                                    }
+                                    .quote-cover-meta-row-project td {
+                                        background: #e8edf4 !important;
                                         -webkit-print-color-adjust: exact !important;
                                         print-color-adjust: exact !important;
+                                        padding-top: 9px;
+                                        padding-bottom: 9px;
                                     }
-                                    [data-print-with-header="1"] .quote-print-footer-rule {
-                                        display: block !important;
-                                        visibility: visible !important;
-                                        position: fixed !important;
-                                        left: 14mm;
-                                        right: 14mm;
-                                        bottom: 27mm;
-                                        height: 0;
-                                        margin: 0;
+                                    .quote-cover-meta-row-project td:first-child {
+                                        font-weight: 600 !important;
+                                        color: #475569 !important;
+                                    }
+                                    .quote-cover-meta-row-project td:last-child {
+                                        font-weight: 700 !important;
+                                        color: #0f172a !important;
+                                    }
+                                    .quote-cover-letter p {
+                                        margin: 0 0 11px 0;
+                                        font-size: 13px;
+                                        line-height: 1.58;
+                                        color: #0f172a;
+                                    }
+                                    .quote-cover-letter p:last-of-type {
+                                        margin-bottom: 0;
+                                        font-weight: 600;
+                                    }
+                                    .quote-continuation-header {
+                                        display: flex;
+                                        align-items: center;
+                                        justify-content: flex-end;
+                                        flex-shrink: 0;
+                                        margin-bottom: 16px;
+                                        padding-bottom: 0;
+                                        border-bottom: none;
+                                    }
+                                    .quote-footer-full-rule {
+                                        width: 100%;
+                                        margin: 10px 0 0 0;
                                         padding: 0;
                                         border: 0;
                                         border-top: 1px solid #e2e8f0;
-                                        z-index: 2147483645;
-                                        -webkit-print-color-adjust: exact !important;
-                                        print-color-adjust: exact !important;
+                                        height: 0;
+                                        box-sizing: border-box;
                                     }
-                                    [data-print-with-header="1"] .quote-footer-full-rule {
-                                        visibility: hidden !important;
-                                        height: 0 !important;
-                                        margin: 0 !important;
-                                        border: none !important;
+                                    .quote-print-footer-rule {
+                                        display: none;
                                     }
-                                    [data-print-with-header="1"] .quote-print-repeat-strip img {
-                                        max-height: 14mm;
-                                        width: auto;
-                                        object-fit: contain;
+                                    .quote-page-num-screen {
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #64748b;
+                                        padding-bottom: 6px;
                                     }
-                                    [data-print-with-header="1"] .print-logo-section {
-                                        visibility: hidden !important;
-                                        height: 0 !important;
-                                        overflow: hidden !important;
-                                        margin: 0 !important;
-                                        padding: 0 !important;
-                                    }
-                                    [data-print-with-header="1"] .quote-sheet-logo-row {
-                                        display: none !important;
-                                        height: 0 !important;
-                                        overflow: hidden !important;
-                                        margin: 0 !important;
-                                        padding: 0 !important;
-                                    }
-                                    /* counter(page)/counter(pages) often renders as 0/0 in Chrome print preview; page lines come from .quote-page-num-screen */
-                                    [data-print-with-header="1"] .quote-print-page-indicator {
-                                        display: none !important;
-                                    }
-                                    [data-print-with-header="1"] .footer-section {
-                                        position: fixed !important;
-                                        visibility: visible !important;
-                                        bottom: 10mm;
-                                        right: 14mm;
-                                        width: 50% !important;
-                                        max-width: 50% !important;
-                                        margin: 0 !important;
-                                        margin-left: 50% !important;
-                                        padding: 8px 0 0 0 !important;
-                                        border-top: none !important;
-                                        font-size: 9pt !important;
-                                        text-align: right !important;
-                                        background: #fff !important;
-                                        z-index: 2147483646;
-                                    }
-                                    [data-print-with-header="0"] .quote-print-repeat-strip,
-                                    [data-print-with-header="0"] .quote-print-page-indicator {
-                                        display: none !important;
-                                    }
-                                    .quote-a4-sheet.page-one + .quote-a4-clause-sheet,
-                                    .quote-a4-clause-sheet + .quote-a4-clause-sheet {
-                                        page-break-before: auto !important;
-                                        break-before: auto !important;
-                                    }
-                                    [data-print-with-header="1"] .quote-continuation-header {
-                                        display: none !important;
-                                    }
-                                }
-                            `}
-                            </style>
+                                    @media print {
+                                        /* Hide everything first */
+                                        .no-print, 
+                                        .sidebar-container, 
+                                        .top-nav, 
+                                        [role="complementary"],
+                                        [role="navigation"],
+                                        button,
+                                        .modal-backdrop {
+                                            display: none !important;
+                                        }
 
-                            {/* Document container — screen: PDF viewer matting + A4 sheets (CSS); print: flattened in @media print */}
-                            <div
-                                id="quote-preview"
-                                ref={quotePreviewLayoutRef}
-                                className="quote-document-root"
-                                style={{
-                                    padding: 0,
-                                    border: 'none',
-                                    outline: 'none',
-                                    borderRadius: 0,
-                                    boxShadow: 'none',
-                                    width: '100%',
-                                    maxWidth: '100%',
-                                    margin: '0 auto',
-                                    minHeight: 'auto',
-                                    boxSizing: 'border-box',
-                                    position: 'relative',
-                                }}
-                            >
-                                <div
-                                    ref={clauseMeasureHostRef}
-                                    className="quote-clause-measure-host"
-                                    aria-hidden
-                                >
-                                    {activeClausesList.map((clause, i) => (
-                                        <div
-                                            key={`m-${clause.listKey}`}
-                                            data-clause-measure-index={i}
-                                            className="quote-clause-block"
-                                            style={{ marginBottom: '20px' }}
-                                        >
-                                            <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
-                                                {i + 1}. {clause.title}
-                                            </h3>
-                                            <div
-                                                style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
-                                                className="clause-content"
-                                                dangerouslySetInnerHTML={{ __html: clause.content || '' }}
-                                            />
-                                        </div>
-                                    ))}
-                                </div>
+                                        html, body {
+                                            width: 210mm !important;
+                                            height: auto !important;
+                                            margin: 0 !important;
+                                            padding: 0 !important;
+                                            background: #fff !important;
+                                            overflow: visible !important;
+                                        }
+
+                                        /* Force show only the print root and its hierarchy */
+                                        #quote-print-root {
+                                            display: block !important;
+                                            position: static !important;
+                                            width: 210mm !important;
+                                            margin: 0 !important;
+                                            padding: 0 !important;
+                                            visibility: visible !important;
+                                            overflow: visible !important;
+                                        }
+
+                                        #quote-preview {
+                                            display: block !important;
+                                            width: 210mm !important;
+                                            margin: 0 !important;
+                                            padding: 0 !important;
+                                        }
+
+                                        .quote-a4-sheet {
+                                            display: grid !important;
+                                            grid-template-columns: minmax(0, 1fr) !important;
+                                            grid-template-rows: auto minmax(0, 1fr) auto !important;
+                                            width: 210mm !important;
+                                            height: 296.5mm !important; /* Slightly less than 297 to avoid overflow blank pages */
+                                            padding: 15mm !important;
+                                            margin: 0 !important;
+                                            page-break-after: always !important;
+                                            break-after: page !important;
+                                            border: none !important;
+                                            box-shadow: none !important;
+                                            box-sizing: border-box !important;
+                                            background: white !important;
+                                            visibility: visible !important;
+                                        }
+
+                                        .quote-sheet-logo-row, 
+                                        .quote-continuation-header,
+                                        .footer-section {
+                                            display: flex !important;
+                                            visibility: visible !important;
+                                        }
+
+                                        img {
+                                            -webkit-print-color-adjust: exact !important;
+                                            print-color-adjust: exact !important;
+                                            display: block !important;
+                                        }
+
+                                        /* Fix for logo specifically */
+                                        .quote-sheet-logo-row img {
+                                            max-height: 68px !important;
+                                        }
+                                        .no-print { display: none !important; }
+                                        #quote-preview { background: none !important; padding: 0 !important; width: 100% !important; margin: 0 !important; }
+                                        .quote-a4-sheet { box-shadow: none !important; margin: 0 !important; page-break-after: always; }
+                                        .quote-cover-meta-row-project td {
+                                            -webkit-print-color-adjust: exact !important;
+                                            print-color-adjust: exact !important;
+                                            background: #e8edf4 !important;
+                                        }
+                                        .quote-header-quote-panel-head {
+                                            -webkit-print-color-adjust: exact !important;
+                                            print-color-adjust: exact !important;
+                                            background: #e2e8f0 !important;
+                                        }
+                                    }
+                                    `}
+                                </style>
 
                                 <div
-                                    className="quote-a4-sheet page-one"
-                                    onDragOver={handleQuoteSheetSignatureDragOver}
-                                    onDrop={handleQuotePreviewSignatureDrop}
+                                    id="quote-preview"
+                                    ref={quotePreviewLayoutRef}
+                                    className="quote-document-root"
+                                    style={{
+                                        padding: 0,
+                                        border: 'none',
+                                        outline: 'none',
+                                        borderRadius: 0,
+                                        boxShadow: 'none',
+                                        width: '210mm',
+                                        minWidth: '210mm',
+                                        maxWidth: '210mm',
+                                        margin: '0 auto',
+                                        minHeight: 'auto',
+                                        boxSizing: 'border-box',
+                                        position: 'relative',
+                                    }}
                                 >
-                                    {/* Logo-only row; address + quote table align below this */}
-                                    <div className="quote-sheet-logo-row" style={{ width: '100%', marginBottom: '20px' }}>
-                                        <div style={{ textAlign: 'right', width: '100%' }}>
-                                            {quoteLogoDisplaySrc ? (
-                                                <img
-                                                    src={quoteLogoDisplaySrc}
-                                                    onError={(e) => console.error('[QuoteForm] Logo load fail:', e.target.src)}
-                                                    alt="Company Logo"
-                                                    style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }}
-                                                />
-                                            ) : null}
-                                        </div>
-                                    </div>
-
-                                    <div className="quote-sheet-main-flex">
-                                        {/* 50% address | 50% quote details — top-aligned with each other */}
-                                        <div
-                                            className="header-section quote-header-row"
-                                            style={{
-                                                display: 'flex',
-                                                justifyContent: 'space-between',
-                                                marginBottom: '40px',
-                                                alignItems: 'flex-start',
-                                                width: '100%',
-                                                boxSizing: 'border-box',
-                                            }}
-                                        >
+                                    <div
+                                        ref={clauseMeasureHostRef}
+                                        className="quote-clause-measure-host"
+                                        aria-hidden
+                                    >
+                                        {activeClausesList.map((clause) => (
                                             <div
-                                                className="quote-header-address-col"
-                                                style={{
-                                                    flex: '0 0 50%',
-                                                    width: '50%',
-                                                    maxWidth: '50%',
-                                                    boxSizing: 'border-box',
-                                                    paddingRight: '12px',
-                                                }}
-                                            >
-                                                <div style={{ fontWeight: '600', marginBottom: '8px', fontSize: '14px', color: '#334155' }}>To,</div>
-                                                <div style={{ fontWeight: 'bold', color: '#0f172a', marginBottom: '4px', fontSize: '14px' }}>{toName}</div>
-                                                {toAddress && <div style={{ fontSize: '13px', color: '#64748b', whiteSpace: 'pre-line', lineHeight: '1.5', marginBottom: '4px' }}>{toAddress}</div>}
-                                                {toPhone && <div style={{ fontSize: '13px', color: '#64748b' }}>Tel: {toPhone} {toFax ? ` | Fax: ${toFax}` : ''}</div>}
-                                                {toEmail && <div style={{ fontSize: '13px', color: '#64748b' }}>Email: {toEmail}</div>}
-                                            </div>
-
-                                            <div
-                                                className="quote-header-quote-col"
-                                                style={{
-                                                    flex: '0 0 50%',
-                                                    width: '50%',
-                                                    maxWidth: '50%',
-                                                    boxSizing: 'border-box',
-                                                    display: 'flex',
-                                                    flexDirection: 'column',
-                                                    alignItems: 'flex-start',
-                                                    paddingLeft: '12px',
-                                                }}
-                                            >
-                                                <table
-                                                    style={{
-                                                        fontSize: '13px',
-                                                        borderCollapse: 'collapse',
-                                                        textAlign: 'left',
-                                                        marginLeft: 'auto',
-                                                        width: '100%',
-                                                        tableLayout: 'fixed',
-                                                    }}
-                                                >
-                                                    <colgroup>
-                                                        <col style={{ width: '40%' }} />
-                                                        <col style={{ width: '60%' }} />
-                                                    </colgroup>
-                                                    <tbody>
-                                                        <tr style={{ background: '#f1f5f9', borderBottom: '1px solid #e2e8f0' }}>
-                                                            <td style={{ padding: '4px 16px', fontWeight: 'bold', color: '#334155', verticalAlign: 'top' }}>Quote Ref:</td>
-                                                            <td style={{ padding: '4px 16px', fontWeight: 'bold', color: loadedQuoteOutOfActiveTabScope ? '#ef4444' : (quoteNumber != null && String(quoteNumber).trim()) || (quoteId != null && String(quoteId).trim() !== '') ? '#0f172a' : '#ef4444', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{loadedQuoteOutOfActiveTabScope ? 'Draft' : (quoteNumber != null && String(quoteNumber).trim()) ? String(quoteNumber).trim() : (quoteId != null && String(quoteId).trim() !== '') ? '—' : 'Draft'}</td>
-                                                        </tr>
-                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Date:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{formatDate(quoteDate)}</td></tr>
-                                                        <tr>
-                                                            <td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Prepared By:</td>
-                                                            <td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>
-                                                                {preparedBy || 'N/A'}
-                                                                {preparedByContactFromMaster ? (
-                                                                    <>
-                                                                        <br />
-                                                                        <span style={{ fontWeight: '500', color: '#475569' }}>Tel: {preparedByContactFromMaster}</span>
-                                                                    </>
-                                                                ) : null}
-                                                            </td>
-                                                        </tr>
-                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Type:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{(quoteTypeList.length ? quoteTypeList.join(', ') : null) || enquiryData.enquiry.EnquiryType || 'Tender'}</td></tr>
-                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Your Ref:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{customerReference}</td></tr>
-                                                        <tr><td style={{ padding: '2px 16px', fontWeight: '600', color: '#64748b', verticalAlign: 'top' }}>Validity:</td><td style={{ padding: '2px 16px', wordBreak: 'break-word', overflowWrap: 'anywhere', verticalAlign: 'top' }}>{getValidityDate()}</td></tr>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-
-                                        {/* Subject Section */}
-                                        <table style={{ width: '100%', marginBottom: '24px', fontSize: '14px', borderCollapse: 'collapse' }}>
-                                            <tbody>
-                                                <tr style={{ background: '#f8fafc', borderTop: '1px solid #e2e8f0', borderBottom: '1px solid #e2e8f0' }}>
-                                                    <td style={{ fontWeight: 'bold', padding: '10px 12px', width: '140px', color: '#334155' }}>Project Name:</td>
-                                                    <td style={{ padding: '10px 12px', fontWeight: '700', color: '#0f172a' }}>{quotePreviewProjectName || enquiryData.enquiry.ProjectName}</td>
-                                                </tr>
-                                                <tr>
-                                                    <td style={{ fontWeight: '600', padding: '8px 12px', color: '#64748b' }}>Subject:</td>
-                                                    <td style={{ padding: '8px 12px' }}>{quotePreviewSubject || subject}</td>
-                                                </tr>
-                                                <tr>
-                                                    <td style={{ fontWeight: '600', padding: '8px 12px', color: '#64748b' }}>Attention of:</td>
-                                                    <td style={{ padding: '8px 12px', fontWeight: '500' }}>
-                                                        {toAttention ? toAttention.split(',').map(n => n.trim()).join(', ') : 'N/A'}
-                                                    </td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-
-                                        {/* Dear Sir/Madam */}
-                                        <div style={{ marginBottom: '20px' }}>
-                                            <p>Dear Sir/Madam,</p>
-                                            <p>Thank you for providing us with this opportunity to submit our offer for the below-mentioned inclusions. We have carefully reviewed your requirements to ensure that our proposal aligns perfectly. We are pleased to submit our quotation as per the details mentioned below. It is our pleasure to serve you and we assure you that our best efforts will always be made to meet your needs.</p>
-                                            <p>We hope you will find our offer competitive and kindly revert to us for any clarifications.</p>
-                                        </div>
-
-                                        {sanitizedPageOneClauseIndices.map((clauseIdx) => {
-                                            const clause = activeClausesList[clauseIdx];
-                                            if (!clause) return null;
-                                            return (
-                                                <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px' }}>
-                                                    <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
-                                                        {clauseIdx + 1}. {clause.title}
-                                                    </h3>
-                                                    <div
-                                                        style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
-                                                        className="clause-content"
-                                                        dangerouslySetInnerHTML={{ __html: clause.content || '' }}
-                                                    />
-                                                </div>
-                                            );
-                                        })}
-                                        <div className="quote-sheet-main-flex-fill" style={{ flex: '1 1 auto', minHeight: 0 }} aria-hidden />
-                                    </div>
-
-                                    {/* Bottom Section (Signature + Footer) — pinned to sheet bottom when content is short */}
-                                    <div className="quote-sheet-footer-push">
-
-                                        {/* Signature Section */}
-                                        <div style={{ marginTop: 0 }}>
-                                            <div className="quote-signature-spacer" style={{ marginBottom: '112px' }}>
-                                                For {quoteCompanyName || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'},
-                                            </div>
-                                            <div style={{ fontWeight: '600' }}>{signatory || 'N/A'}</div>
-                                            <div style={{ fontSize: '13px', color: '#64748b' }}>{signatoryDesignation || ''}</div>
-                                        </div>
-
-                                        {/* Page number on each sheet; print uses this text (CSS page counters are unreliable in browser print) */}
-                                        <div className="quote-page-num-screen">
-                                            Page 1 / {quotePreviewTotalPages}
-                                        </div>
-                                        <div className="quote-footer-full-rule" aria-hidden="true" />
-
-                                        {/* Footer: right half only (A4 / print layout) */}
-                                        <div
-                                            className="footer-section"
-                                            style={{
-                                                marginTop: '8px',
-                                                marginLeft: '50%',
-                                                width: '50%',
-                                                maxWidth: '50%',
-                                                paddingTop: '15px',
-                                                fontSize: '11px',
-                                                color: '#64748b',
-                                                textAlign: 'right',
-                                                boxSizing: 'border-box',
-                                            }}
-                                        >
-                                            <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
-                                            <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
-                                            <div>
-                                                {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
-                                                {' | '}
-                                                Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
-                                            </div>
-                                            <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
-                                        </div>
-                                    </div>
-                                    {quoteDigitalStamps
-                                        .filter((s) => s.sheetIndex === 0)
-                                        .map((stamp) => (
-                                            <QuoteSignatureStamp
-                                                key={stamp.id}
-                                                stamp={stamp}
-                                                onRemove={handleRemoveDigitalStamp}
-                                                onMove={handleMoveDigitalStamp}
-                                                allowRemove={
-                                                    !hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true
-                                                }
+                                                key={`measure-${clause.key}`}
+                                                id={`measure-clause-${clause.key}`}
+                                                className="quote-clause-section"
+                                                style={{ width: '180mm', padding: '0', margin: '0' }}
+                                                dangerouslySetInnerHTML={{ __html: clause.content }}
                                             />
                                         ))}
-                                </div>
-
-                                {sanitizedClausePageGroups.map((group, sheetIdx) => (
-                                    <div
-                                        key={`clause-page-${sheetIdx}-${group.join('-')}`}
-                                        className="quote-a4-sheet quote-a4-clause-sheet"
-                                        onDragOver={handleQuoteSheetSignatureDragOver}
-                                        onDrop={handleQuotePreviewSignatureDrop}
-                                    >
-                                        <div className="quote-continuation-header">
-                                            {quoteLogoDisplaySrc ? (
-                                                <img
-                                                    src={quoteLogoDisplaySrc}
-                                                    alt=""
-                                                    style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }}
-                                                />
-                                            ) : null}
-                                        </div>
-
-                                        <div className="quote-sheet-main-flex">
-                                            {group.map((clauseIdx) => {
-                                                const clause = activeClausesList[clauseIdx];
-                                                if (!clause) return null;
-                                                return (
-                                                    <div key={clause.listKey} className="quote-clause-block" style={{ marginBottom: '20px' }}>
-                                                        <h3 style={{ fontSize: '15px', fontWeight: '600', color: '#1e293b', marginBottom: '10px' }}>
-                                                            {clauseIdx + 1}. {clause.title}
-                                                        </h3>
-                                                        <div
-                                                            style={{ fontSize: '13px', lineHeight: '1.6', paddingLeft: '15px', whiteSpace: 'pre-wrap' }}
-                                                            className="clause-content"
-                                                            dangerouslySetInnerHTML={{ __html: clause.content }}
-                                                        />
-                                                    </div>
-                                                );
-                                            })}
-                                            <div className="quote-sheet-main-flex-fill" style={{ flex: '1 1 auto', minHeight: 0 }} aria-hidden />
-                                        </div>
-
-                                        <div className="quote-continuation-footer quote-sheet-footer-push">
-                                            <div className="quote-page-num-screen">
-                                                Page {sheetIdx + 2} / {quotePreviewTotalPages}
-                                            </div>
-                                            <div className="quote-footer-full-rule" aria-hidden="true" />
-                                            <div
-                                                className="footer-section"
-                                                style={{
-                                                    marginLeft: '50%',
-                                                    width: '50%',
-                                                    maxWidth: '50%',
-                                                    paddingTop: '12px',
-                                                    fontSize: '11px',
-                                                    color: '#64748b',
-                                                    textAlign: 'right',
-                                                    boxSizing: 'border-box',
-                                                }}
-                                            >
-                                                <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
-                                                <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
-                                                <div>
-                                                    {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
-                                                    {' | '}
-                                                    Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
-                                                </div>
-                                                <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
-                                            </div>
-                                        </div>
-                                        {quoteDigitalStamps
-                                            .filter((s) => s.sheetIndex === sheetIdx + 1)
-                                            .map((stamp) => (
-                                                <QuoteSignatureStamp
-                                                    key={stamp.id}
-                                                    stamp={stamp}
-                                                    onRemove={handleRemoveDigitalStamp}
-                                                    onMove={handleMoveDigitalStamp}
-                                                    allowRemove={
-                                                        !hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true
-                                                    }
-                                                />
-                                            ))}
                                     </div>
-                                ))}
-                            </div>
+
+                                    {sheets.map((sheet, sheetIdx) => (
+                                        <div 
+                                            key={`sheet-${sheetIdx}`} 
+                                            className="quote-a4-sheet"
+                                            onDragOver={handleQuoteSheetSignatureDragOver}
+                                            onDrop={handleQuotePreviewSignatureDrop}
+                                        >
+                                            {/* Repeating Header (Logo) for Print */}
+                                            <div className="quote-print-repeat-strip" aria-hidden="true" style={{ width: '100%', marginBottom: '20px' }}>
+                                                <div style={{ textAlign: 'right', width: '100%' }}>
+                                                    {quoteLogoDisplaySrc ? (
+                                                        <img src={quoteLogoDisplaySrc} alt="" style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }} />
+                                                    ) : null}
+                                                </div>
+                                            </div>
+
+                                            {/* Page Content */}
+                                            <div className="quote-sheet-main-flex" style={{ minHeight: '250mm', display: 'flex', flexDirection: 'column' }}>
+                                                {sheetIdx === 0 && (
+                                                    <div className="header-section quote-header-row" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0' }}>
+                                                        <div className="quote-header-address-col" style={{ width: '50%' }}>
+                                                            <div style={{ fontWeight: '600', marginBottom: '8px' }}>To,</div>
+                                                            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{toName}</div>
+                                                            <div style={{ fontSize: '13px', color: '#475569', whiteSpace: 'pre-line' }}>{toAddress}</div>
+                                                            {(toPhone || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569', marginTop: '6px' }}>Tel: {toPhone.trim()}</div>
+                                                            ) : null}
+                                                            {(toFax || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569' }}>Fax: {toFax.trim()}</div>
+                                                            ) : null}
+                                                            {(toEmail || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569' }}>E-mail: {toEmail.trim()}</div>
+                                                            ) : null}
+                                                        </div>
+                                                        <div className="quote-header-quote-col" style={{ width: '45%' }}>
+                                                            <div className="quote-header-quote-panel">
+                                                                <div className="quote-header-quote-panel-head">
+                                                                    <span>Quote Ref:</span>
+                                                                    <span>{String(quoteNumber || '').trim() || 'Draft'}</span>
+                                                                </div>
+                                                                <table className="quote-header-quote-panel-body" role="presentation">
+                                                                    <tbody>
+                                                                        <tr>
+                                                                            <td>Date:</td>
+                                                                            <td>
+                                                                                {formatQuoteYmdForDisplay(quoteDate) || '—'}
+                                                                            </td>
+                                                                        </tr>
+                                                                        <tr>
+                                                                            <td>Prepared By:</td>
+                                                                            <td>
+                                                                                <div>{String(preparedBy || '').trim() || '—'}</div>
+                                                                                {quotePreviewPreparedByTelLine ? (
+                                                                                    <div
+                                                                                        style={{
+                                                                                            marginTop: '3px',
+                                                                                            fontSize: '12px',
+                                                                                            color: '#475569',
+                                                                                            fontWeight: 500,
+                                                                                        }}
+                                                                                    >
+                                                                                        {quotePreviewPreparedByTelLine}
+                                                                                    </div>
+                                                                                ) : null}
+                                                                            </td>
+                                                                        </tr>
+                                                                        <tr>
+                                                                            <td>Type:</td>
+                                                                            <td>{quotePreviewTypeLine}</td>
+                                                                        </tr>
+                                                                        <tr>
+                                                                            <td>Your Ref:</td>
+                                                                            <td>{String(customerReference || '').trim() || '—'}</td>
+                                                                        </tr>
+                                                                        <tr>
+                                                                            <td>Validity:</td>
+                                                                            <td>{getValidityDate() || '—'}</td>
+                                                                        </tr>
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {sheetIdx === 0 ? (
+                                                    <hr className="quote-section-rule" aria-hidden="true" />
+                                                ) : null}
+
+                                                <div className="content-section" style={{ flex: 1 }}>
+                                                    {sheetIdx === 0 && (
+                                                        <div className="quote-cover-first-page">
+                                                            <table className="quote-cover-meta-table" role="presentation">
+                                                                <tbody>
+                                                                    <tr className="quote-cover-meta-row-project">
+                                                                        <td>Project Name:</td>
+                                                                        <td>{String(quotePreviewProjectName || '').trim() || '—'}</td>
+                                                                    </tr>
+                                                                    <tr>
+                                                                        <td>Subject:</td>
+                                                                        <td>{String(quotePreviewSubject || '').trim() || '—'}</td>
+                                                                    </tr>
+                                                                    <tr>
+                                                                        <td>Attention of:</td>
+                                                                        <td>{String(toAttention || '').trim() || '—'}</td>
+                                                                    </tr>
+                                                                </tbody>
+                                                            </table>
+                                                            <hr className="quote-section-rule" aria-hidden="true" />
+                                                            <div className="quote-cover-letter">
+                                                                <p>Dear Sir/Madam,</p>
+                                                                <p>Thank you for inviting us to submit our proposal.</p>
+                                                                <p>
+                                                                    We have carefully examined your tender document, drawings,
+                                                                    specifications and related documents pertaining to the
+                                                                    captioned subject and are pleased to offer on behalf of{' '}
+                                                                    {quoteCoverOfferCompanyName}.
+                                                                </p>
+                                                                <p>
+                                                                    We hope you will find our offer competitive and kindly revert
+                                                                    to us for any clarifications.
+                                                                </p>
+                                                                <p>For {quoteCoverOfferCompanyName},</p>
+                                                            </div>
+                                                            <div className="quote-cover-signatory-line">
+                                                                {String(signatory || '').trim() || 'N/A'}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {sheet.clauses.map((clause) => (
+                                                        <div key={clause.key} className="quote-clause-block" style={{ marginBottom: '20px' }}>
+                                                            <h3 style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: '8px' }}>{clause.title}</h3>
+                                                            <div style={{ fontSize: '13px', lineHeight: '1.6' }} dangerouslySetInnerHTML={{ __html: clause.content }} />
+                                                        </div>
+                                                    ))}
+                                                </div>
+
+                                                <div className="footer-section" style={{ marginTop: 'auto', paddingTop: '20px' }}>
+                                                     <div className="quote-print-page-indicator" style={{ textAlign: 'right', fontSize: '11px', color: '#64748b', fontWeight: 600 }}>
+                                                         Page {sheetIdx + 1} of {sheets.length}
+                                                     </div>
+                                                     <hr className="quote-section-rule" style={{ marginTop: '8px', marginBottom: '10px' }} aria-hidden="true" />
+                                                     <div
+                                                         style={{
+                                                             textAlign: 'right',
+                                                             fontSize: '11px',
+                                                             color: '#64748b',
+                                                         }}
+                                                     >
+                                                         <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
+                                                         <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
+                                                         <div>
+                                                             {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
+                                                             {' | '}
+                                                             Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
+                                                         </div>
+                                                         <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
+                                                     </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Digital Stamps */}
+                                            {quoteDigitalStamps
+                                                .filter((s) => s.sheetIndex === sheetIdx + 1)
+                                                .map((stamp) => (
+                                                    <QuoteSignatureStamp
+                                                        key={stamp.id}
+                                                        stamp={stamp}
+                                                        onRemove={handleRemoveDigitalStamp}
+                                                        onMove={handleMoveDigitalStamp}
+                                                        allowRemove={!hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true}
+                                                    />
+                                                ))}
+                                        </div>
+                                    ))}
+                                 </div>
                             </div>
                         </div>
-                        </div>
-                    )
-                }
-            </div >
+                    </div>
+                )}
+            </div>
+        </div>
+
             <SignatureVaultModal
                 open={signatureVaultOpen}
                 onClose={() => setSignatureVaultOpen(false)}
@@ -10731,8 +10741,113 @@ const QuoteForm = () => {
                 displayName={digitalStampUserDisplayName}
                 designation={digitalStampUserDesignation}
             />
-        </div >
-    );
+
+            {/* Email Compose Modal */}
+            {showEmailModal && (
+                <div className="modal show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1060 }}>
+                    <div className="modal-dialog modal-lg modal-dialog-centered">
+                        <div className="modal-content border-0 shadow-lg">
+                            <div className="modal-header bg-primary text-white">
+                                <h5 className="modal-title d-flex align-items-center">
+                                    <i className="bi bi-envelope-paper-fill me-2"></i>
+                                    Draft Quote Email
+                                </h5>
+                                <button type="button" className="btn-close btn-close-white" onClick={() => setShowEmailModal(false)}></button>
+                            </div>
+                            <div className="modal-body p-4">
+                                <div className="mb-4">
+                                    <label className="form-label fw-bold text-muted small text-uppercase">Recipient</label>
+                                    <div className="input-group">
+                                        <span className="input-group-text bg-light border-end-0"><i className="bi bi-person-fill text-primary"></i></span>
+                                        <input
+                                            type="email"
+                                            className="form-control border-start-0 ps-0"
+                                            placeholder="recipient@example.com"
+                                            value={emailDetails.to}
+                                            onChange={(e) => setEmailDetails({ ...emailDetails, to: e.target.value })}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="form-label fw-bold text-muted small text-uppercase">Subject</label>
+                                    <div className="input-group">
+                                        <span className="input-group-text bg-light border-end-0"><i className="bi bi-type text-primary"></i></span>
+                                        <input
+                                            type="text"
+                                            className="form-control border-start-0 ps-0"
+                                            placeholder="Email subject..."
+                                            value={emailDetails.subject}
+                                            readOnly={emailDetails.isDefault}
+                                            onChange={(e) => setEmailDetails({ ...emailDetails, subject: e.target.value })}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="form-label fw-bold text-muted small text-uppercase">Message (Optional)</label>
+                                    <textarea
+                                        className="form-control"
+                                        rows={4}
+                                        placeholder="Add a personal message to the recipient..."
+                                        value={emailDetails.body}
+                                        onChange={(e) => setEmailDetails({ ...emailDetails, body: e.target.value })}
+                                    ></textarea>
+                                </div>
+                                <div className="p-3 bg-light rounded-3 border d-flex align-items-center">
+                                    <div className="bg-white p-2 rounded shadow-sm me-3">
+                                        <i className="bi bi-file-earmark-pdf-fill text-danger fs-4"></i>
+                                    </div>
+                                    <div className="flex-grow-1">
+                                                 <div className="text-success small fw-bold">
+                                        <i className="bi bi-check-circle-fill me-1"></i>
+                                        Ready
+                                    </div>
+                                </div>
+                            </div>
+                            </div>
+                            <div className="modal-footer bg-light border-0 px-4 pb-4">
+                                <button
+                                    type="button"
+                                    className="btn btn-outline-secondary me-auto"
+                                    onClick={handleOpenInOutlook}
+                                >
+                                    <i className="bi bi-microsoft me-2"></i>
+                                    Open in Outlook
+                                </button>
+                                
+                                <button
+                                    type="button"
+                                    className="btn btn-light"
+                                    onClick={() => setShowEmailModal(false)}
+                                    disabled={emailSending}
+                                >
+                                    Cancel
+                                </button>
+                                
+                                <button
+                                    type="button"
+                                    className="btn btn-primary px-4 shadow"
+                                    onClick={handleSendEmailViaApi}
+                                    disabled={emailSending || !emailDetails.to}
+                                >
+                                    {emailSending ? (
+                                         <>
+                                             <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                             Sending...
+                                         </>
+                                     ) : (
+                                         <>
+                                             <i className="bi bi-send-fill me-2"></i>
+                                             Send Quote
+                                         </>
+                                     )}
+                                 </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+    </>
+);
 };
 
 export default QuoteForm;
