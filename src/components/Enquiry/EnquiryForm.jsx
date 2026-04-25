@@ -143,6 +143,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     const [modifyRequestNo, setModifyRequestNo] = useState('');
     const [isModifyMode, setIsModifyMode] = useState(false);
     const [hasOpenedFromProp, setHasOpenedFromProp] = useState(false);
+    /** Activity-based workflow from GET /api/enquiries/:id/milestone-status (per-branch pricing + quotes). */
+    const [workflowComputed, setWorkflowComputed] = useState(null);
 
     // Effect to open from prop
     useEffect(() => {
@@ -1197,6 +1199,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setAckSEList([]); // Clear acknowledgement SE list
         setIsModifyMode(false);
         setModifyRequestNo('');
+        setWorkflowComputed(null);
         setAttachments([]);
         setPendingFiles([]);
         setProjectSuggestions([]);
@@ -1303,6 +1306,23 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
             if (enq.RequestNo) {
                 await loadAttachmentsForEnquiry(enq.RequestNo);
+            }
+
+            setWorkflowComputed(null);
+            try {
+                const q = new URLSearchParams({
+                    userEmail: currentUser?.EmailId || currentUser?.email || '',
+                    userName: currentUser?.FullName || currentUser?.name || '',
+                    userRole: currentUser?.Roles || currentUser?.role || '',
+                });
+                const msRes = await fetch(
+                    `/api/enquiries/${encodeURIComponent(requestNo)}/milestone-status?${q}`
+                );
+                if (msRes.ok) {
+                    setWorkflowComputed(await msRes.json());
+                }
+            } catch (e) {
+                console.warn('[loadEnquiry] milestone-status', e);
             }
         } else {
             console.warn('Enquiry not found:', requestNo);
@@ -1761,59 +1781,134 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                         <div className="card mb-2 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
                                             <div className="card-body p-2">
                                                 <h6 className="card-title fw-bold mb-2" style={{ color: '#2d3748', fontSize: '14px' }}>Enquiry Status Tracker</h6>
+                                                {isModifyMode && workflowComputed && (
+                                                    <div className="mb-2 text-muted" style={{ fontSize: '11px', lineHeight: 1.35 }}>
+                                                        <strong>Activity-based:</strong> {workflowComputed.displayLabel}
+                                                        {workflowComputed.detail ? ` — ${workflowComputed.detail}` : ''}
+                                                    </div>
+                                                )}
                                                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', marginTop: '5px', marginBottom: '5px' }}>
                                                     {['Enquiry', 'Pricing', 'Quote', 'Follow-up', 'Won'].map((step, index) => {
                                                         const stepNum = index + 1;
 
-                                                        // Determine current step number based on formData.Status
-                                                        let currentStep = 1;
                                                         const status = (formData.Status || 'Enquiry').trim();
                                                         const statusLower = status.toLowerCase();
 
-                                                        if (statusLower === 'enquiry' || statusLower === 'open') currentStep = 1;
-                                                        else if (statusLower === 'pricing') currentStep = 2;
-                                                        else if (statusLower === 'quote') currentStep = 3;
-                                                        else if (statusLower === 'follow-up' || statusLower === 'followup') currentStep = 4;
-                                                        else if (statusLower === 'won' || statusLower === 'lost') currentStep = 5;
+                                                        let currentStep = 1;
+                                                        if (isModifyMode && workflowComputed && typeof workflowComputed.step === 'number') {
+                                                            currentStep = workflowComputed.step;
+                                                        } else {
+                                                            if (statusLower === 'enquiry' || statusLower === 'open') currentStep = 1;
+                                                            else if (statusLower === 'pricing') currentStep = 2;
+                                                            else if (statusLower === 'quote') currentStep = 3;
+                                                            else if (statusLower === 'follow-up' || statusLower === 'followup') currentStep = 4;
+                                                            else if (statusLower === 'won' || statusLower === 'lost') currentStep = 5;
+                                                        }
 
                                                         const isActive = stepNum === currentStep;
                                                         const isCompleted = stepNum < currentStep;
                                                         const isLast = index === 4;
 
-                                                        // Dynamic label for the last step
                                                         let label = step;
+                                                        const lostVisual =
+                                                            status === 'Lost' ||
+                                                            (workflowComputed && workflowComputed.stepKey === 'lost');
                                                         if (isLast) {
-                                                            if (status === 'Lost') label = 'Lost';
+                                                            if (lostVisual) label = 'Lost';
                                                             else label = 'Won';
                                                         }
 
+                                                        const sub = workflowComputed?.stepSubLabels;
+                                                        const subLineBase = {
+                                                            marginTop: '2px',
+                                                            fontSize: '10px',
+                                                            textAlign: 'center',
+                                                            lineHeight: 1.25,
+                                                            maxWidth: '76px',
+                                                            wordBreak: 'break-word',
+                                                        };
+                                                        const subLineHighlight =
+                                                            isActive || isCompleted
+                                                                ? lostVisual && isLast
+                                                                    ? { color: '#b91c1c', fontWeight: 700 }
+                                                                    : { color: '#1d4ed8', fontWeight: 700 }
+                                                                : { color: '#334155', fontWeight: 600 };
+                                                        const subLineStyle = { ...subLineBase, ...subLineHighlight };
+                                                        const subLineWonStyle = {
+                                                            ...subLineBase,
+                                                            ...(isActive || isCompleted
+                                                                ? lostVisual && isLast
+                                                                    ? { color: '#57534e', fontWeight: 700 }
+                                                                    : { color: '#047857', fontWeight: 700 }
+                                                                : { color: '#334155', fontWeight: 600 }),
+                                                        };
+                                                        const subLineLostStyle = {
+                                                            ...subLineBase,
+                                                            ...(isActive || isCompleted
+                                                                ? lostVisual && isLast
+                                                                    ? { color: '#991b1b', fontWeight: 700 }
+                                                                    : { color: '#b91c1c', fontWeight: 700 }
+                                                                : { color: '#334155', fontWeight: 600 }),
+                                                        };
+
                                                         return (
                                                             <React.Fragment key={step}>
-                                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', zIndex: 2 }}>
+                                                                <div
+                                                                    style={{
+                                                                        display: 'flex',
+                                                                        flexDirection: 'column',
+                                                                        alignItems: 'center',
+                                                                        zIndex: 2,
+                                                                        minWidth: '76px',
+                                                                    }}
+                                                                >
                                                                     <div style={{
                                                                         width: '20px',
                                                                         height: '20px',
                                                                         borderRadius: '50%',
-                                                                        backgroundColor: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#e2e8f0', // Blue generally, Red if Lost and active/completed
+                                                                        backgroundColor: isActive || isCompleted ? (lostVisual && isLast ? '#ef4444' : '#3b82f6') : '#e2e8f0', // Blue generally, Red if Lost and active/completed
                                                                         color: isActive || isCompleted ? '#ffffff' : '#718096',
                                                                         display: 'flex',
                                                                         alignItems: 'center',
                                                                         justifyContent: 'center',
                                                                         fontWeight: 'bold',
                                                                         fontSize: '10px',
-                                                                        border: isActive ? `1px solid ${status === 'Lost' && isLast ? '#fca5a5' : '#ebf8ff'}` : 'none',
-                                                                        boxShadow: isActive ? `0 0 0 2px ${status === 'Lost' && isLast ? '#fecaca' : '#bfdbfe'}` : 'none'
+                                                                        border: isActive ? `1px solid ${lostVisual && isLast ? '#fca5a5' : '#ebf8ff'}` : 'none',
+                                                                        boxShadow: isActive ? `0 0 0 2px ${lostVisual && isLast ? '#fecaca' : '#bfdbfe'}` : 'none'
                                                                     }}>
                                                                         {isCompleted ? '✓' : stepNum}
                                                                     </div>
                                                                     <span style={{
                                                                         marginTop: '4px',
                                                                         fontSize: '10px',
-                                                                        color: isActive || isCompleted ? (status === 'Lost' && isLast ? '#ef4444' : '#3b82f6') : '#a0aec0',
-                                                                        fontWeight: isActive ? '600' : '400'
+                                                                        color: isActive || isCompleted ? (lostVisual && isLast ? '#ef4444' : '#3b82f6') : '#a0aec0',
+                                                                        fontWeight: isActive ? '600' : '400',
+                                                                        textAlign: 'center',
                                                                     }}>
                                                                         {label}
                                                                     </span>
+                                                                    {sub && (
+                                                                        <>
+                                                                            {stepNum === 1 && (
+                                                                                <span style={subLineStyle}>{sub.enquiry}</span>
+                                                                            )}
+                                                                            {stepNum === 2 && (
+                                                                                <span style={subLineStyle}>{sub.pricing}</span>
+                                                                            )}
+                                                                            {stepNum === 3 && (
+                                                                                <span style={subLineStyle}>{sub.quote}</span>
+                                                                            )}
+                                                                            {stepNum === 4 && (
+                                                                                <span style={subLineStyle}>{sub.followUp}</span>
+                                                                            )}
+                                                                            {stepNum === 5 && (
+                                                                                <>
+                                                                                    <span style={subLineWonStyle}>{sub.won}</span>
+                                                                                    <span style={subLineLostStyle}>{sub.lost}</span>
+                                                                                </>
+                                                                            )}
+                                                                        </>
+                                                                    )}
                                                                 </div>
                                                                 {!isLast && (
                                                                     <div style={{

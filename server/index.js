@@ -11,6 +11,7 @@ const nodemailer = require('nodemailer');
 const Tesseract = require('tesseract.js');
 const multerMemory = multer({ storage: multer.memoryStorage() });
 const { parseContactCardFromOcrText } = require('./parseContactOcr');
+const { computeEnquiryWorkflowStatus } = require('./services/computeEnquiryWorkflowStatus');
 
 // Configure Nodemailer Transporter
 console.log('--- Email Config ---');
@@ -1525,6 +1526,116 @@ app.get('/api/enquiries/:id', async (req, res) => {
     } catch (err) {
         console.error('Error fetching single enquiry:', err);
         res.status(500).send('Server Error');
+    }
+});
+
+/**
+ * Activity-based workflow (pricing / quote per EnquiryFor branch + enquiry-level probability for follow-up/won).
+ */
+app.get('/api/enquiries/:id/milestone-status', async (req, res) => {
+    try {
+        const reqNo = req.params.id;
+        const userEmail = req.query.userEmail || '';
+        const userName = req.query.userName || '';
+        const userRole = req.query.userRole || '';
+        const vis = await resolveEnquiryVisibilityContext({ userEmail, userName, userRole });
+
+        const masterRes = await sql.query`
+            SELECT RequestNo, Status, WonQuoteRef
+            FROM EnquiryMaster
+            WHERE RequestNo = ${reqNo}
+        `;
+        if (masterRes.recordset.length === 0) {
+            return res.status(404).json({ message: 'Enquiry not found' });
+        }
+        const masterRow = masterRes.recordset[0];
+
+        const itemsResult = await sql.query`SELECT ID, ParentID, ItemName FROM EnquiryFor WHERE RequestNo = ${reqNo}`;
+        const masterEnqForRes =
+            !vis.isAdmin && vis.email && vis.accessMode === 'department'
+                ? await sql.query`SELECT ItemName, CCMailIds FROM Master_EnquiryFor`
+                : { recordset: [] };
+
+        if (!vis.isAdmin && vis.email) {
+            const normEmail = normalizeEmail(vis.email);
+            const assignedRes = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM ConcernedSE cs
+                INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+                WHERE LOWER(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(m.EmailId, N''))), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')) = ${normEmail}
+                  AND LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(${reqNo}))
+            `;
+            const assigned = (assignedRes.recordset?.length || 0) > 0;
+
+            let deptAllowed = false;
+            if (vis.accessMode === 'department') {
+                const emailLower = normEmail;
+                const masterRows = (masterEnqForRes.recordset || []).map((r) => ({
+                    itemKey: stripJobPrefix(r.ItemName).toLowerCase(),
+                    ccMails: splitMailList(r.CCMailIds).map((m) => normalizeEmail(m)),
+                }));
+                const masterByKey = new Map();
+                masterRows.forEach((r) => {
+                    if (!r.itemKey) return;
+                    const list = masterByKey.get(r.itemKey) || [];
+                    list.push(r);
+                    masterByKey.set(r.itemKey, list);
+                });
+                deptAllowed = (itemsResult.recordset || []).some((ef) => {
+                    const efKey = stripJobPrefix(ef.ItemName).toLowerCase();
+                    const candidates = masterByKey.get(efKey) || [];
+                    return candidates.some((c) => c.ccMails.includes(emailLower));
+                });
+            }
+
+            let allow = assigned || deptAllowed;
+            if (allow && vis.accessMode === 'assigned' && assigned) {
+                const ctx = await resolvePricingAccessContext(normEmail);
+                if (ctx.user && !ctx.isCcUser) {
+                    const jobRows = (itemsResult.recordset || []).map((i) => ({
+                        ID: i.ID,
+                        ParentID: i.ParentID,
+                        ItemName: i.ItemName,
+                    }));
+                    allow = getPricingAnchorJobs(jobRows, ctx, normEmail).length > 0;
+                }
+            }
+
+            if (!allow) {
+                return res.status(403).json({ message: 'Forbidden' });
+            }
+        }
+
+        const branches = (itemsResult.recordset || []).map((i) => ({
+            id: i.ID,
+            parentId: i.ParentID,
+            itemName: i.ItemName,
+        }));
+
+        const valuesRes = await sql.query`
+            SELECT v.EnquiryForID, v.EnquiryForItem, v.Price, po.OptionName
+            FROM dbo.EnquiryPricingValues v
+            INNER JOIN dbo.EnquiryPricingOptions po ON po.ID = v.OptionID
+            WHERE LTRIM(RTRIM(v.RequestNo)) = LTRIM(RTRIM(${reqNo}))
+        `;
+
+        const quotesRes = await sql.query`
+            SELECT OwnJob, LeadJob, Status, QuoteNumber
+            FROM dbo.EnquiryQuotes
+            WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(${reqNo}))
+        `;
+
+        const computed = computeEnquiryWorkflowStatus({
+            branches,
+            valueRows: valuesRes.recordset || [],
+            quoteRows: quotesRes.recordset || [],
+            masterRow: masterRow,
+        });
+
+        res.json(computed);
+    } catch (err) {
+        console.error('Error milestone-status:', err);
+        res.status(500).json({ error: 'Server Error' });
     }
 });
 
