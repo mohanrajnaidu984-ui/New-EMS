@@ -110,6 +110,17 @@ function rowDimsMatch(row, enquiryForItemWant, customerNameWant) {
     return okEpi && okCust;
 }
 
+/** Subjob rows: require exact EnquiryForItem / parent CustomerName match (no substring drift between siblings). */
+function rowDimsMatchStrictSubjob(row, enquiryForItemWant, customerNameWant) {
+    const rEpi = stripPricingName(row.EnquiryForItem || '');
+    const rCust = stripPricingName(row.CustomerName || '');
+    const wEpi = stripPricingName(enquiryForItemWant || '');
+    const wCust = stripPricingName(customerNameWant || '');
+    const okEpi = !wEpi || normDim(rEpi) === normDim(wEpi);
+    const okCust = !wCust || normDim(rCust) === normDim(wCust) || customerDimMatch(rCust, wCust);
+    return okEpi && okCust;
+}
+
 function pickLatestRow(matching) {
     if (!matching.length) return null;
     return [...matching].sort((a, b) => {
@@ -212,8 +223,9 @@ export function resolveQuoteSummaryPriceFromRows(rows, p) {
     const jId = String(job.id || job.ItemID || job.ID || '');
     const jobItem = stripPricingName(job.itemName || job.DivisionName || job.ItemName || '');
 
-    const tryPick = (enquiryForItem, customerName) => {
-        const m = scoped.filter((r) => rowDimsMatch(r, enquiryForItem, customerName));
+    const tryPick = (enquiryForItem, customerName, strictSubjobDims = false) => {
+        const matchFn = strictSubjobDims ? rowDimsMatchStrictSubjob : rowDimsMatch;
+        const m = scoped.filter((r) => matchFn(r, enquiryForItem, customerName));
         const row = pickLatestRow(m);
         if (!row) return null;
         const price = parseFloat(row.Price ?? row.price ?? 0) || 0;
@@ -224,13 +236,15 @@ export function resolveQuoteSummaryPriceFromRows(rows, p) {
     const deptOwn = isJobUsersOwnDepartmentRow(job, editableJobNames, userDepartment);
 
     // --- Case 1: Own-job pricing (first tab) — EnquiryForItem = first tab label; CustomerName = customer dropdown ---
-    // - Lead root row (Civil Project) always uses this when it is the priced job.
-    // - User’s own division / editableJobs row (e.g. HVAC) uses the same keys: pricing often stores EnquiryForItem as the first-tab (lead) context, not the sub-job column name.
-    // - Full lead with no department match: only the root row uses case 1 so sibling divisions keep case 2 / grid keys.
+    // Only the **first-tab root row** uses external customer + first-tab keys. Descendant subjobs must use Case 2
+    // (EnquiryForItem = subjob, CustomerName = immediate parent job name) or they all resolve to the same root price.
+    // (Removed `(leadUser && deptOwn)` without `jId === ownId` — that matched every division row to the root cell.)
     if (isFirstTab && firstLabel && custDrop && ownRootJob) {
         const ownId = String(ownRootJob.id || ownRootJob.ItemID || ownRootJob.ID);
         const isLeadRootRow = jId === ownId;
-        const useOwnJobKeys = isLeadRootRow || (!leadUser && deptOwn) || (leadUser && deptOwn);
+        const useOwnJobKeys =
+            isLeadRootRow ||
+            (!leadUser && deptOwn && jId === ownId);
 
         if (useOwnJobKeys) {
             const a = tryPick(firstLabel, custDrop);
@@ -250,30 +264,24 @@ export function resolveQuoteSummaryPriceFromRows(rows, p) {
     }
 
     // --- Case 2: First tab — subjobs; EnquiryForItem = subjob; CustomerName = parent of that subjob ---
-    // MUST run before Case 2b: otherwise every descendant reuses tryPick(firstLabel, custDrop) and shows
-    // the lead row Base Price for all subjobs (wrong duplicate amounts in Quote left panel).
+    // Aligns with EnquiryFor: match subjob ItemName + RequestNo, parentId → parent job name as CustomerName in EPV.
     if (isFirstTab && ownRootJob) {
         const ownId = String(ownRootJob.id || ownRootJob.ItemID || ownRootJob.ID);
         if (jId !== ownId && isStrictDescendantOf(jobsPool, jId, ownId)) {
+            const byEfId = scoped.filter((r) => {
+                const rid = r.EnquiryForID ?? r.enquiryForID ?? r.MatchedEnquiryForId;
+                return rid != null && String(rid).trim() !== '' && String(rid) === jId;
+            });
+            const rowById = pickLatestRow(byEfId);
+            if (rowById) {
+                const p = parseFloat(rowById.Price ?? rowById.price ?? 0) || 0;
+                return { found: true, price: p };
+            }
             const parent = getParentJob(jobsPool, job);
             const parentName = stripPricingName(parent?.itemName || parent?.DivisionName || '');
             if (jobItem && parentName) {
-                const c = tryPick(jobItem, parentName);
+                const c = tryPick(jobItem, parentName, true);
                 if (c) return { found: true, price: c.price };
-            }
-        }
-    }
-
-    // --- Case 2b (fallback): Descendant jobs — some grids store one "own job" cell (first tab + customer dropdown) ---
-    if (isFirstTab && ownRootJob && firstLabel && custDrop) {
-        const ownId2 = String(ownRootJob.id || ownRootJob.ItemID || ownRootJob.ID);
-        if (jId !== ownId2 && isStrictDescendantOf(jobsPool, jId, ownId2)) {
-            const f = tryPick(firstLabel, custDrop);
-            if (f) return { found: true, price: f.price };
-            const ownName2 = stripPricingName(ownRootJob.itemName || ownRootJob.DivisionName || '');
-            if (ownName2) {
-                const g = tryPick(ownName2, custDrop);
-                if (g) return { found: true, price: g.price };
             }
         }
     }
@@ -297,7 +305,7 @@ export function resolveQuoteSummaryPriceFromRows(rows, p) {
             const parentOfJob = getParentJob(jobsPool, job);
             const parentName = stripPricingName(parentOfJob?.itemName || parentOfJob?.DivisionName || '');
             if (jobItem && parentName) {
-                const e = tryPick(jobItem, parentName);
+                const e = tryPick(jobItem, parentName, true);
                 if (e) return { found: true, price: e.price };
             }
         }

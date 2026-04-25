@@ -260,8 +260,12 @@ const HierarchyBuilder = ({
             blockedNames = localItems.filter(i => !i.parentId).map(i => i.itemName);
         }
 
-        const available = options.filter(opt => opt && !blockedNames.includes(opt));
-        return [...new Set(available)];
+        const available = options.filter((opt) => opt && !blockedNames.includes(opt));
+        const unique = [...new Set(available)];
+        unique.sort((a, b) =>
+            String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' })
+        );
+        return unique;
     };
 
     // Helper: find root Lead prefix (L1, L2...) for any item based on root index

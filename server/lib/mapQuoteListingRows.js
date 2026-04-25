@@ -360,6 +360,7 @@ function lCodeSortKey(code) {
 /**
  * Job-tree + pricing context so each enquiry root (L1, L2, …) gets a stable label and LeadJobName for quote matching.
  * Parent job repeats per lead when the user's subjob sits under the same parent across leads; otherwise external customer (e.g. BEMCO on L3).
+ * When `quoteListShowAllLeadsForAdmin` is false and `pendingOwnItem` is set, only leads whose EnquiryFor branch contains that own job are included (avoids e.g. L2 HVAC line for a BMS-only pending row).
  */
 function buildListQuoteLeadContext({
     enqJobs,
@@ -373,6 +374,7 @@ function buildListQuoteLeadContext({
     internalCustomerNorm,
     jobNameSetNorm,
     externalCustomers,
+    quoteListShowAllLeadsForAdmin = false,
 }) {
     const collectBranch = (root) => {
         const out = [];
@@ -391,6 +393,19 @@ function buildListQuoteLeadContext({
     };
 
     const ownNorm = normalize(stripLeadPrefix(String(pendingOwnItem || '')));
+    const ownItemTrim = String(pendingOwnItem || '').trim();
+    const filterLeadsByOwnBranch = Boolean(ownItemTrim) && !quoteListShowAllLeadsForAdmin;
+    const leadCodesWhereOwnParticipates = new Set();
+    if (filterLeadsByOwnBranch) {
+        for (const root of roots || []) {
+            const lc = String(rootLabelMap[root.ID] || '').trim().toUpperCase();
+            if (!/^L\d+$/.test(lc)) continue;
+            const branch = collectBranch(root);
+            if (branch.some((j) => jsTupleOwnJobMatch(ownItemTrim, j.ItemName))) {
+                leadCodesWhereOwnParticipates.add(lc);
+            }
+        }
+    }
     const jobSet = jobNameSetNorm instanceof Set ? jobNameSetNorm : new Set(Array.from(jobNameSetNorm || []));
 
     const isExternalPricingCustomer = (customerName) => {
@@ -427,11 +442,12 @@ function buildListQuoteLeadContext({
     for (const root of roots || []) {
         const leadCode = String(rootLabelMap[root.ID] || '').trim().toUpperCase();
         if (!/^L\d+$/.test(leadCode)) continue;
+        if (filterLeadsByOwnBranch && !leadCodesWhereOwnParticipates.has(leadCode)) {
+            continue;
+        }
         allCodes.push(leadCode);
         const branch = collectBranch(root);
-        const ownNode = ownNorm
-            ? branch.find((j) => normalize(stripLeadPrefix(String(j.ItemName || ''))) === ownNorm)
-            : null;
+        const ownNode = ownItemTrim ? branch.find((j) => jsTupleOwnJobMatch(ownItemTrim, j.ItemName)) : null;
         const preferExternal = !ownNode;
 
         const rootNorm = normalize(stripLeadPrefix(String(root.ItemName || '')));
@@ -484,6 +500,9 @@ function buildListQuoteLeadContext({
         if (c && !leadLabelsByCode[c]) extraFromPrices.add(c);
     }
     for (const c of extraFromPrices) {
+        if (filterLeadsByOwnBranch && !leadCodesWhereOwnParticipates.has(c)) {
+            continue;
+        }
         allCodes.push(c);
         const rows = priceRowsForLead(c);
         const ext = rows.find((p) => isExternalPricingCustomer(p.CustomerName));
@@ -503,7 +522,12 @@ function buildListQuoteLeadContext({
     }
 
     const allLeadCodesSorted = [...new Set(allCodes)].sort((a, b) => lCodeSortKey(a) - lCodeSortKey(b));
-    return { allLeadCodesSorted, leadLabelsByCode, pvLeadByCode };
+    return {
+        allLeadCodesSorted,
+        leadLabelsByCode,
+        pvLeadByCode,
+        ownBranchLeadCodeSet: filterLeadsByOwnBranch ? leadCodesWhereOwnParticipates : null,
+    };
 }
 
 /**
@@ -514,6 +538,14 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
     const req = String(requestNo || '').trim();
     if (!req || !Array.isArray(groupRows) || groupRows.length === 0) return [];
     const quotesForReq = (allQuotes || []).filter((q) => String(q.RequestNo ?? '').trim() === req);
+    const ownBranchLeadSet =
+        lineCtx && lineCtx.ownBranchLeadCodeSet instanceof Set ? lineCtx.ownBranchLeadCodeSet : null;
+    const leadAllowed = (code) => {
+        const c = String(code || '').trim().toUpperCase();
+        if (!c) return false;
+        if (!ownBranchLeadSet) return true;
+        return ownBranchLeadSet.has(c);
+    };
 
     /** ToName / customer for label when ListQuoteDetailToName is blank on merged rows. */
     const displayCustomerLabelForLeadRow = (g) => {
@@ -534,6 +566,7 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
 
     if (lineCtx && Array.isArray(lineCtx.allLeadCodesSorted) && lineCtx.allLeadCodesSorted.length > 0) {
         for (const code of lineCtx.allLeadCodesSorted) {
+            if (!leadAllowed(code)) continue;
             const specific = groupRows.find(
                 (r) => extractLCodeFromLeadJobName(r.ListPendingLeadJobName ?? r.listpendingleadjobname ?? '') === code
             );
@@ -575,6 +608,7 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
     for (const g of groupRows) {
         const code = extractLCodeFromLeadJobName(g.ListPendingLeadJobName ?? g.listpendingleadjobname ?? '');
         if (!code) continue;
+        if (!leadAllowed(code)) continue;
         if (!leadToRow.has(code)) leadToRow.set(code, g);
     }
 
@@ -582,6 +616,7 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
         if (!isBasePricePricingRow(p) || parseFloat(p.Price || 0) <= 0) continue;
         const code = extractLCodeFromLeadJobName(p.LeadJobName || '');
         if (!code || leadToRow.has(code)) continue;
+        if (!leadAllowed(code)) continue;
         let matchedG = null;
         for (const g of groupRows) {
             const own = String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim();
@@ -1419,6 +1454,7 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
                 internalCustomerNorm,
                 jobNameSetNorm,
                 externalCustomers,
+                quoteListShowAllLeadsForAdmin: !!(accessCtx && accessCtx.isAdmin),
             });
             const leadQuoteLines = buildEnquiryLeadQuoteDetailLines(
                 enqRequestNo,

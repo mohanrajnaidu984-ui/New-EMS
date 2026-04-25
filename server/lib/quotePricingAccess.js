@@ -58,6 +58,27 @@ function normalizePricingJobName(s) {
     return (s || '').toString().replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
 }
 
+/** Jobs on this enquiry whose ItemName matches Master.Department (used for SE scoping and pending checks). */
+function getDepartmentPricingAnchors(enqJobs, userDepartment) {
+    const myJobs = [];
+    const deptNorm = normalizePricingJobName(userDepartment);
+    if (!deptNorm) return myJobs;
+    enqJobs.forEach((job) => {
+        const jNorm = normalizePricingJobName(job.ItemName);
+        const deptAnchors =
+            jNorm === deptNorm ||
+            (deptNorm.length >= 3 && jNorm.includes(deptNorm)) ||
+            (deptNorm.length >= 3 && deptNorm.includes(jNorm));
+        if (deptAnchors) {
+            const jId = jobIdOfPricing(job);
+            if (jId != null && !myJobs.find((x) => String(jobIdOfPricing(x)) === String(jId))) {
+                myJobs.push(job);
+            }
+        }
+    });
+    return myJobs;
+}
+
 function getPricingAnchorJobs(enqJobs, ctx, userEmail) {
     const { isAdmin, isCcUser, userDepartment } = ctx;
     if (isAdmin) return [...enqJobs];
@@ -72,21 +93,7 @@ function getPricingAnchorJobs(enqJobs, ctx, userEmail) {
             }
         });
     } else {
-        const deptNorm = normalizePricingJobName(userDepartment);
-        enqJobs.forEach(job => {
-            const jNorm = normalizePricingJobName(job.ItemName);
-            const deptAnchors =
-                deptNorm &&
-                (jNorm === deptNorm ||
-                    (deptNorm.length >= 3 && jNorm.includes(deptNorm)) ||
-                    (deptNorm.length >= 3 && deptNorm.includes(jNorm)));
-            if (deptAnchors) {
-                const jId = jobIdOfPricing(job);
-                if (jId != null && !myJobs.find(x => String(jobIdOfPricing(x)) === String(jId))) {
-                    myJobs.push(job);
-                }
-            }
-        });
+        myJobs = getDepartmentPricingAnchors(enqJobs, userDepartment);
     }
     return myJobs;
 }
@@ -220,6 +227,7 @@ module.exports = {
     ccMailIdsContainsUser,
     jobIdOfPricing,
     normalizePricingJobName,
+    getDepartmentPricingAnchors,
     getPricingAnchorJobs,
     expandVisibleJobIdsFromAnchors,
     expandVisibleJobIdsWithAncestors,

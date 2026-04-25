@@ -19,6 +19,10 @@ const ClauseEditor = ({ html, onChange, style }) => {
         height: style?.height || 400,
         minHeight: 200,
         enableDragAndDropFileToEditor: true,
+        /** Skip Word/Excel paste plugin so Jodit does not run applyStyles() (it strips border* from inline CSS). */
+        askBeforePasteFromWord: false,
+        askBeforePasteHTML: false,
+        processPasteFromWord: false,
         uploader: {
             insertImageAsBase64URI: true
         },
@@ -35,7 +39,12 @@ const ClauseEditor = ({ html, onChange, style }) => {
         ],
         showCharsCounter: false,
         showWordsCounter: false,
-        showXPathInStatusbar: false
+        showXPathInStatusbar: false,
+        table: {
+            splitBlockOnInsertTable: true,
+            useExtraClassesOptions: true,
+            selectionCellStyle: 'border: 1px solid #64748b !important;',
+        },
     }), [style?.height]);
 
     return (
@@ -59,6 +68,28 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 }
                 .jodit-workplace {
                     overflow-y: auto !important;
+                }
+                /* Left editor only: tight rhythm (~half cursor between paragraphs). */
+                .clause-editor-wrapper .jodit-wysiwyg {
+                    line-height: 1.25 !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg p,
+                .clause-editor-wrapper .jodit-wysiwyg li {
+                    margin: 0 !important;
+                    line-height: 1.25 !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg p + p {
+                    margin-top: 5px !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table,
+                .clause-editor-wrapper .jodit-wysiwyg td,
+                .clause-editor-wrapper .jodit-wysiwyg th {
+                    border: 1px solid #64748b !important;
+                    border-collapse: collapse !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table {
+                    border-collapse: collapse !important;
+                    border-spacing: 0 !important;
                 }
             `}
             </style>

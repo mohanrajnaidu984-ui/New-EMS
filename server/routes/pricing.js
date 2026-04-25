@@ -55,8 +55,8 @@ const {
     resolvePricingAccessContext,
     jobIdOfPricing,
     normalizePricingJobName,
+    getDepartmentPricingAnchors,
     getPricingAnchorJobs,
-    expandVisibleJobIdsFromAnchors,
     expandVisibleJobIdsWithAncestors,
 } = require('../lib/quotePricingAccess');
 const { filterJobsByDepartment } = require('../services/hierarchyService');
@@ -72,6 +72,91 @@ function parsePricingListYmd(s) {
     return t;
 }
 
+/**
+ * Pending/search list summaries do not read `EnquiryPricingOptions` — option classification for joins uses
+ * `EnquiryPricingValues.PriceOption` (latest row per OptionID when set; otherwise "Base Price" for legacy rows).
+ */
+function buildSyntheticPricingOptionsFromValuesRows(pricesForOneEnquiry) {
+    const byId = new Map();
+    for (const pr of pricesForOneEnquiry) {
+        const oidRaw = pr.OptionID ?? pr.optionID ?? pr.OptionId;
+        if (oidRaw == null || oidRaw === '' || String(oidRaw) === '0') continue;
+        const key = String(oidRaw).trim();
+        const po = pr.PriceOption ?? pr.priceOption;
+        const explicit = po != null && String(po).trim() !== '' ? String(po).trim() : null;
+        const t = pr.UpdatedAt ?? pr.updatedAt;
+        const at = t ? new Date(t).getTime() : 0;
+        const prev = byId.get(key);
+        if (!prev) {
+            byId.set(key, { optionName: explicit || 'Base Price', at, fromExplicit: Boolean(explicit) });
+            continue;
+        }
+        if (explicit) {
+            if (!prev.fromExplicit || at >= prev.at) {
+                byId.set(key, { optionName: explicit, at, fromExplicit: true });
+            }
+        } else if (!prev.fromExplicit && at >= prev.at) {
+            byId.set(key, { optionName: 'Base Price', at, fromExplicit: false });
+        }
+    }
+    return [...byId.entries()].map(([key, meta]) => {
+        const idVal = /^\d+$/.test(key) ? parseInt(key, 10) : key;
+        return {
+            OptionID: idVal,
+            optionID: idVal,
+            ID: idVal,
+            OptionName: meta.optionName,
+            optionName: meta.optionName,
+            CustomerName: '',
+            ItemName: '',
+            LeadJobName: '',
+        };
+    });
+}
+
+/**
+ * GET /api/pricing/:requestNo — option rows for the grid are derived only from `EnquiryPricingValues`
+ * (never read `EnquiryPricingOptions`).
+ */
+function buildDetailPricingOptionsFromValuesRows(valuesRows) {
+    const rows = (valuesRows || []).map((v) => normalizePricingValueRow({ ...v }));
+    const synthetic = buildSyntheticPricingOptionsFromValuesRows(rows);
+    return synthetic
+        .map((syn, idx) => {
+            const key = String(syn.ID ?? syn.OptionID ?? syn.optionID ?? '').trim();
+            let best = null;
+            let bestAt = -1;
+            for (const v of rows) {
+                const oid = String(v.OptionID ?? v.optionID ?? v.OptionId ?? '').trim();
+                if (oid !== key) continue;
+                const t = v.UpdatedAt ?? v.updatedAt;
+                const at = t ? new Date(t).getTime() : 0;
+                if (at >= bestAt) {
+                    bestAt = at;
+                    best = v;
+                }
+            }
+            return {
+                ID: syn.ID,
+                OptionName: syn.OptionName,
+                optionName: syn.optionName,
+                SortOrder: idx,
+                ItemName: best ? String(best.EnquiryForItem ?? best.enquiryForItem ?? '').trim() : '',
+                CustomerName: best ? String(best.CustomerName ?? best.customerName ?? '').trim() : '',
+                LeadJobName: best ? String(best.LeadJobName ?? best.leadJobName ?? '').trim() : '',
+            };
+        })
+        .sort((a, b) => {
+            const na = Number(a.ID);
+            const nb = Number(b.ID);
+            if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+            return String(a.ID).localeCompare(String(b.ID));
+        });
+}
+
+/**
+ * Pricing list (pending + search). Does not use `EnquiryMaster.Status` or `EnquiryPricingOptions` for list rows.
+ */
 // Helper to get Enquiry List with Pricing Tree
 async function getEnquiryPricingList(userEmail, search = null, pendingOnly = true, opts = {}) {
     if (!userEmail) return [];
@@ -84,41 +169,42 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     const request = new sql.Request();
     let baseQuery = `
         SELECT 
-            E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.DueDate, E.Status, E.CreatedBy, E.EnquiryDate
+            E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.DueDate, E.CreatedBy, E.EnquiryDate
         FROM EnquiryMaster E
         WHERE 1=1
     `;
 
     if (!isAdmin) {
+        // Always bind — CC branch may OR with ConcernedSE visibility for users who are both CC coordinators
+        // and assigned SEs. Previously CC-only EXISTS hid enquiries (e.g. RequestNo 11) where the user is on
+        // ConcernedSE but not listed on CCMailIds for any line on that enquiry.
+        request.input('pricingUserEmail', sql.NVarChar, normalizedEmail);
+        const concernedSeExistsSql = `
+            EXISTS (
+                SELECT 1
+                FROM ConcernedSE c
+                INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(c.SEName, N''))))
+                WHERE c.RequestNo = E.RequestNo
+                  AND LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(@pricingUserEmail))
+            )
+        `;
         if (isCcUser) {
             request.input('pricingCcPattern', sql.NVarChar, `%,${normalizedEmail},%`);
             baseQuery += `
-                AND EXISTS (
-                    SELECT 1
-                    FROM EnquiryFor ef
-                    INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
-                    WHERE ef.RequestNo = E.RequestNo
-                      AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE @pricingCcPattern
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM EnquiryFor ef
+                        INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                        WHERE ef.RequestNo = E.RequestNo
+                          AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE @pricingCcPattern
+                    )
+                    OR ${concernedSeExistsSql}
                 )
             `;
         } else {
-            // ConcernedSE.SEName = Master FullName; tie user by EmailId so NULL/typo FullName does not block lists.
-            request.input('pricingUserEmail', sql.NVarChar, normalizedEmail);
-            baseQuery += `
-                AND EXISTS (
-                    SELECT 1
-                    FROM ConcernedSE c
-                    INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(c.SEName, N''))))
-                    WHERE c.RequestNo = E.RequestNo
-                      AND LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(@pricingUserEmail))
-                )
-            `;
+            baseQuery += ` AND ${concernedSeExistsSql} `;
         }
-    }
-
-    if (pendingOnly) {
-        // Align with EMS_Production_recovered: include in-progress pricing states so Pending Updates matches search/list UX
-        baseQuery += ` AND (E.Status IN ('Open', 'Enquiry', 'Priced', 'Estimated', 'Quote', 'Pricing', 'Pending', 'Quoted', 'Submitted') OR E.Status IS NULL OR E.Status = '') `;
     }
 
     // Enquiry date range (Search Pricing list only — matches Quote list / EnquiryDate semantics)
@@ -163,15 +249,27 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     if (enquiries.length === 0) return [];
 
     const requestNos = enquiries.map(e => e.RequestNo);
-    const requestNosList = requestNos.map(r => `'${r.replace(/'/g, "''")}'`).join(',');
+    /** RequestNo may be int from SQL driver — never call .replace on a number (would throw and break the list). */
+    const requestNosList = requestNos.map((r) => `'${String(r).replace(/'/g, "''")}'`).join(',');
 
+    /**
+     * Must match the list gate for non-CC users (ConcernedSE + Master_ConcernedSE on EmailId).
+     * The old SEName-only lookup missed rows when SEName text drifted from Master.FullName even though
+     * the user still appears on the enquiry via the email join — then isConcernedSE was false and
+     * anchor / pending logic never treated them as assigned SE.
+     */
     let concernedRequestNos = new Set();
-    if (ctx.userFullName) {
+    if (normalizedEmail && requestNosList.length > 0) {
         const cseReq = new sql.Request();
-        cseReq.input('userFullName', sql.NVarChar, ctx.userFullName);
-        const cseRes = await cseReq.query(
-            `SELECT RequestNo FROM ConcernedSE WHERE SEName = @userFullName AND RequestNo IN (${requestNosList})`
-        );
+        cseReq.input('pricingListUserEmail', sql.NVarChar, normalizedEmail);
+        const cseRes = await cseReq.query(`
+            SELECT DISTINCT c.RequestNo
+            FROM ConcernedSE c
+            INNER JOIN Master_ConcernedSE m
+              ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(c.SEName, N''))))
+            WHERE LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(@pricingListUserEmail))
+              AND c.RequestNo IN (${requestNosList})
+        `);
         cseRes.recordset.forEach((row) => concernedRequestNos.add(String(row.RequestNo)));
     }
 
@@ -234,23 +332,6 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     `);
     const allPrices = (pricesRes.recordset || []).map(normalizePricingValueRow);
 
-    const valueOptionIdNums = [...new Set(
-        allPrices
-            .map(p => p.OptionID ?? p.optionID ?? p.OptionId)
-            .map(x => parseInt(String(x ?? ''), 10))
-            .filter(n => Number.isFinite(n) && n > 0)
-    )];
-    const valueOptionIdsSql = valueOptionIdNums.length > 0 ? valueOptionIdNums.join(',') : '0';
-
-    // 6. Pricing Options: by RequestNo OR by ID referenced in EnquiryPricingValues (fixes orphan / mismatched RequestNo on option rows)
-    const optionsRes = await sql.query(`
-        SELECT RequestNo, ID as OptionID, OptionName, ItemName, CustomerName, LeadJobName
-        FROM EnquiryPricingOptions
-        WHERE RequestNo IN (${requestNosList})
-           OR ID IN (${valueOptionIdsSql})
-    `);
-    const allOptions = optionsRes.recordset;
-
     // 7. Map and Process
     return enquiries.map(enq => {
         // SQL/JS type drift: RequestNo can be int 28 vs string "28" — loose == often works but not inside Set.has / strict filters.
@@ -270,15 +351,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         }
 
         const enqPrices = allPrices.filter(p => reqNoEq(p.RequestNo, enq.RequestNo));
-        const enqPriceOptionIdSet = new Set(
-            enqPrices.map(p => p.OptionID ?? p.optionID ?? p.OptionId).filter(x => x != null && x !== '').map(x => String(x).trim())
-        );
-        const enqOptions = allOptions.filter(o => {
-            if (reqNoEq(o.RequestNo, enq.RequestNo)) return true;
-            const oid = o.OptionID ?? o.optionID ?? o.ID;
-            if (oid == null || oid === '') return false;
-            return enqPriceOptionIdSet.has(String(oid).trim());
-        });
+        const enqOptions = buildSyntheticPricingOptionsFromValuesRows(enqPrices);
 
         const isCreator =
             ctx.userFullName &&
@@ -300,9 +373,41 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const jobIdOf = jobIdOfPricing;
 
         const normalizeName = normalizePricingJobName;
-        let myJobs = getPricingAnchorJobs(enqJobs, ctx, userEmail);
+        /** Anchors from Master department / CC — before intersecting with `filterJobsByDepartment` output. */
+        const anchorCandidates = getPricingAnchorJobs(enqJobs, ctx, userEmail);
+        let myJobs = anchorCandidates;
         if (!isAdmin) {
-            myJobs = myJobs.filter((j) => hierarchyJobIdSet.has(String(jobIdOf(j))));
+            if (isConcernedSE) {
+                // Assigned SE is already limited to enquiries they appear on (SQL list gate). Do not intersect
+                // with filterJobsByDepartment — a partial match (e.g. only BMS) would drop HVAC anchors while
+                // another division still has prices, and pending would miss missing HVAC base prices.
+                // If Master.Department / CC anchors resolve to nothing (common with blank Department), use every
+                // job on the enquiry so pending can still see missing HVAC base rows.
+                myJobs = anchorCandidates.length > 0 ? [...anchorCandidates] : [...enqJobs];
+            } else {
+                myJobs = myJobs.filter((j) => hierarchyJobIdSet.has(String(jobIdOf(j))));
+            }
+        }
+
+        /**
+         * `getPricingAnchorJobs` only links Master.Department / CC mails to EnquiryFor.ItemName text.
+         * Assigned ConcernedSE / creators / CC users can be SQL-scoped to the enquiry while that text match
+         * returns zero anchors — then the whole enquiry vanished from Pending Pricing (e.g. enquiry 9, bmsseng1).
+         * Fall back to hierarchy-visible jobs, or all jobs on the enquiry for these roles.
+         *
+         * ConcernedSE: if anchors are still empty, prefer full anchors when any exist; else hierarchy/enquiry jobs.
+         */
+        if (
+            !isAdmin &&
+            myJobs.length === 0 &&
+            enqJobs.length > 0 &&
+            (isConcernedSE || isCreator || isCcUser)
+        ) {
+            if (isConcernedSE && anchorCandidates.length > 0) {
+                myJobs = [...anchorCandidates];
+            } else {
+                myJobs = hierarchyScopedJobs.length > 0 ? [...hierarchyScopedJobs] : [...enqJobs];
+            }
         }
 
         if (myJobs.length === 0) {
@@ -311,7 +416,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             return null;
         }
 
-        const visibleJobs = expandVisibleJobIdsFromAnchors(myJobs, enqJobs);
+        // Include ancestor chain to each anchor so root (ownjob) stays in the tree when only subjobs
+        // match the user's department/CC anchor — otherwise flatList never visits ownjob Base Price and
+        // Pending Pricing wrongly drops the enquiry when subjobs are priced but lead Base Price is missing.
+        const visibleJobs = expandVisibleJobIdsWithAncestors(myJobs, enqJobs);
 
         // Build Display String
         const childrenMap = {};
@@ -406,18 +514,25 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             }
         });
 
-        // Collect Alternative (Option) Customers
+        // Extra customer names from value rows (not from EnquiryPricingOptions)
         const optionCustomers = new Set();
-        enqOptions.forEach(o => {
-            if (o.CustomerName && reqNoEq(o.RequestNo, enq.RequestNo)) {
-                const c = o.CustomerName.trim();
-                const norm = c.replace(/[.,\s]+$/, '').toLowerCase();
-                if (!normSet.has(norm)) {
-                    optionCustomers.add(c);
-                    normSet.add(norm);
-                }
+        const masterCustNorm = new Set(
+            (enq.CustomerName || '')
+                .split(',')
+                .map((s) => s.trim().toLowerCase())
+                .filter(Boolean)
+                .map((s) => s.replace(/[.,\s]+$/, ''))
+        );
+        for (const pr of enqPrices) {
+            const cn = String(pr.CustomerName ?? pr.customerName ?? '').trim();
+            if (!cn) continue;
+            const norm = cn.replace(/[.,\s]+$/, '').toLowerCase();
+            if (masterCustNorm.has(norm)) continue;
+            if (!normSet.has(norm)) {
+                optionCustomers.add(cn);
+                normSet.add(norm);
             }
-        });
+        }
 
         const rootJob = enqJobs.find(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
         const internalCustomer = rootJob ? rootJob.ItemName.trim() : 'Internal';
@@ -455,6 +570,16 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const hasSubjobAnchors = myJobs.some((j) => j.ParentID && String(j.ParentID) !== '0' && j.ParentID !== 0);
         const hasLeadAnchors = myJobs.some((j) => !j.ParentID || String(j.ParentID) === '0' || j.ParentID === 0);
+        /** User anchors only on subjobs (no lead row): summary shows parent job as label, hides parent prices, lists anchor's descendants' prices. */
+        const subjobOnlySummary = hasSubjobAnchors && !hasLeadAnchors;
+        const anchorsAsSubjobs = myJobs.filter(
+            (j) => j.ParentID && String(j.ParentID) !== '0' && j.ParentID !== 0
+        );
+        const anchorSubjobIdSet = new Set();
+        anchorsAsSubjobs.forEach((j) => {
+            const id = jobIdOf(j);
+            if (id != null && id !== '') anchorSubjobIdSet.add(String(id));
+        });
 
         // If ownjob is subjob in any visible lead branch, include parent job names.
         if (hasSubjobAnchors) {
@@ -498,6 +623,20 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                     leadCodes.forEach((code) => addDistinctCustomer(withLeadCode(c, code)));
                 }
             });
+            /*
+             * EnquiryCustomer rows are often empty while EnquiryMaster.CustomerName still lists externals.
+             * Without this, lead-job summary never gets the "external + ownjob price" header and falls back to DFS job names (e.g. BMS Project first).
+             */
+            if (hasLeadAnchors && enquiryCustomerNames.length === 0 && externalCustomers.length > 0) {
+                externalCustomers.forEach((c) => {
+                    if (!isExternalPricingCustomer(c)) return;
+                    if (leadCodes.length === 0) {
+                        addDistinctCustomer(c);
+                    } else {
+                        leadCodes.forEach((code) => addDistinctCustomer(withLeadCode(c, code)));
+                    }
+                });
+            }
         }
 
         const finalCustomers = Array.from(finalSet).map(v => v.split('||')[1]).filter(c => {
@@ -508,7 +647,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const fullCustomerName = finalCustomers.join(', ');
 
-        const displayItems = [];
+        /** Full tree lines — used for hasPendingItems (unchanged semantics). */
+        const displayItemsRaw = [];
 
         /** Mirrors sqlStripPricingName (quote sidebar): SUB JOB…-… and Ln - … prefixes on value rows. */
         const stripSqlStyleItemName = (s) => {
@@ -567,7 +707,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
          */
         const getDivisionPrice = (jobId, optionName) => {
             const job = jobMap[String(jobId)];
-            if (!job) return { price: 0, updatedAt: null, customerName: null };
+            if (!job) return { price: 0, updatedAt: null, customerName: null, updatedBy: null };
 
             const optNameLower = normOptName(optionName);
 
@@ -616,18 +756,58 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
             if (bestRow) {
                 const cust = String(bestRow.CustomerName ?? bestRow.customerName ?? '').trim();
+                const by = String(bestRow.UpdatedBy ?? bestRow.updatedBy ?? '').trim();
                 return {
                     price: parsePriceNum(bestRow.Price),
                     updatedAt: bestRow.UpdatedAt,
                     customerName: cust || null,
+                    updatedBy: by || null,
                 };
             }
-            return { price: 0, updatedAt: null, customerName: null };
+            return { price: 0, updatedAt: null, customerName: null, updatedBy: null };
         };
 
         /**
-         * Subjob Prices column label: parent job + L# when the priced node is a subjob; external customer + L# when
-         * the Base Price row targets an external customer (same idea as quote module quote details).
+         * Pending list only: require a priced base row that truly belongs to this EnquiryFor row (ID or exact
+         * item text). `getDivisionPrice` also uses `itemNamesAlign`, which can wrongly attach one division's
+         * price to a sibling when names partially overlap — then pending disappears while HVAC still has no row.
+         */
+        const valueRowIsBasePrice = (pr) => {
+            const po = pr.PriceOption ?? pr.priceOption;
+            if (po != null && String(po).trim() !== '') {
+                return matchesOptionTarget(po, 'base price');
+            }
+            const optIdRaw = pr.OptionID ?? pr.optionID ?? pr.OptionId;
+            const opt = optIdRaw != null && optIdRaw !== '' ? optionMap[String(optIdRaw)] : null;
+            return !!(opt && matchesOptionTarget(opt.OptionName ?? opt.optionName, 'base price'));
+        };
+        const strictPriceRowMatchesJobForBase = (pr, jobRec) => {
+            const jid = jobIdOf(jobRec);
+            const jidStr = jid != null && jid !== '' ? String(jid) : '';
+            if (!jidStr) return false;
+            const mid = pr.MatchedEnquiryForId ?? pr.matchedEnquiryForId ?? pr.MatchedEnquiryForID;
+            if (mid != null && String(mid) !== '' && String(mid) !== '0') {
+                return String(mid) === jidStr;
+            }
+            if (pr.EnquiryForID && pr.EnquiryForID != 0 && pr.EnquiryForID != '0') {
+                return String(pr.EnquiryForID) === jidStr;
+            }
+            const eit = stripSqlStyleItemName(pr.EnquiryForItem || '');
+            const jit = stripSqlStyleItemName(jobRec.ItemName || jobRec.itemName || '');
+            return eit.length > 0 && jit.length > 0 && eit.toLowerCase() === jit.toLowerCase();
+        };
+        const strictHasPositiveBaseForJob = (jobRec) =>
+            enqPrices.some(
+                (pr) =>
+                    parsePriceNum(pr.Price) > 0.01 &&
+                    valueRowIsBasePrice(pr) &&
+                    strictPriceRowMatchesJobForBase(pr, jobRec)
+            );
+
+        /**
+         * Subjob / grid line label: this job's ItemName + L# (tree indentation shows hierarchy — do not substitute
+         * parent job name). External customer + L# when the stored Base Price row targets an external customer.
+         * Lead/root rows may still resolve to enquiry customer header text via finalCustomers when it matches L#.
          */
         const buildSubjobPriceDisplayLabel = (jobRec, jobFallback, displayCode, priceCustomerName) => {
             const dc = displayCode || 'L1';
@@ -635,21 +815,18 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 const base = stripLeadName(priceCustomerName) || priceCustomerName;
                 return `${base} (${dc})`;
             }
-            if (jobRec) {
-                const pid = jobRec.ParentID;
-                if (
-                    pid != null &&
-                    String(pid) !== '0' &&
-                    String(pid) !== '' &&
-                    visibleJobs.has(String(pid)) &&
-                    jobMap[String(pid)]
-                ) {
-                    const par = jobMap[String(pid)];
-                    if (par?.ItemName) {
-                        const base = stripLeadName(par.ItemName) || String(par.ItemName).trim();
-                        return `${base} (${dc})`;
-                    }
-                }
+            const pid = jobRec?.ParentID;
+            const isSubjob =
+                jobRec &&
+                pid != null &&
+                String(pid) !== '0' &&
+                String(pid) !== '' &&
+                !(pid === 0);
+            if (isSubjob) {
+                const nm =
+                    stripLeadName(jobRec?.ItemName || jobFallback?.ItemName) ||
+                    String(jobRec?.ItemName || jobFallback?.ItemName || '').trim();
+                return `${nm} (${dc})`;
             }
             const suffix = `(${dc})`;
             const matchFinal = finalCustomers.find((c) => String(c).trim().endsWith(suffix));
@@ -659,6 +836,24 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 String(jobRec?.ItemName || jobFallback?.ItemName || '').trim();
             return `${nm} (${dc})`;
         };
+
+        /** True if `jobIdStr` is under `anchorIdStr` but is not the anchor itself (strict descendant). */
+        const isStrictDescendantOf = (jobIdStr, anchorIdStr) => {
+            if (!jobIdStr || !anchorIdStr || jobIdStr === anchorIdStr) return false;
+            let cur = jobMap[jobIdStr];
+            let guard = 0;
+            while (cur && guard < 50) {
+                const p = cur.ParentID;
+                if (!p || String(p) === '0' || p === 0) return false;
+                if (String(p) === anchorIdStr) return true;
+                cur = jobMap[String(p)];
+                guard += 1;
+            }
+            return false;
+        };
+
+        const isRootEnquiryForJob = (rec) =>
+            !rec || rec.ParentID == null || String(rec.ParentID) === '0' || rec.ParentID === 0;
 
         flatList.forEach((job) => {
             const jid = jobIdOf(job);
@@ -673,19 +868,424 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                     const jobLabel = buildSubjobPriceDisplayLabel(jobRec, job, displayCode, customerName);
                     const displayName = optName === 'Base Price' ? jobLabel : `${jobLabel} (${optName})`;
 
-                    displayItems.push(
+                    displayItemsRaw.push(
                         `${displayName}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${job.level || 0}`
                     );
                 }
             });
         });
 
-        // Derive pending status from final display lines.
-        // If any displayed line is "Not Updated", enquiry must stay in Pending Updates.
-        hasPendingItems = displayItems.some(item => {
+        /**
+         * Summary column "Customer Name & Prices (Base Price)":
+         * - Mixed lead + subjob anchors (same dept on L1 as subjob and L2 as lead): one compact row per myJobs anchor
+         *   (parent lead + subjob price, then external + lead price) — no full tree / no unrelated root prices.
+         * - Subjob-only anchors: parent + ownjob price, then strict descendants in tree levels.
+         * - Lead (+ externals): header row(s) + flatList remainder.
+         * - Otherwise: legacy line-per-job labels.
+         */
+        const displayItems = [];
+        const pushLine = (lineLabel, price, updatedAt, level) => {
+            displayItems.push(
+                `${lineLabel}|${price > 0 ? price : 'Not Updated'}|${updatedAt ? new Date(updatedAt).toISOString() : ''}|${level}`
+            );
+        };
+
+        const compactMixedAnchorsSummary = hasLeadAnchors && hasSubjobAnchors;
+        const leadCodeSortRank = (job) => {
+            const jc = String(jobLeadMap[String(jobIdOf(job))] || '');
+            const m = jc.match(/^L(\d+)$/i);
+            return m ? parseInt(m[1], 10) : 999;
+        };
+
+        if (compactMixedAnchorsSummary) {
+            const seenAnchorId = new Set();
+            const anchorsSorted = [...myJobs]
+                .filter((a) => {
+                    const id = String(jobIdOf(a));
+                    if (!id || seenAnchorId.has(id) || !visibleJobs.has(id)) return false;
+                    seenAnchorId.add(id);
+                    return true;
+                })
+                .sort((a, b) => {
+                    const ra = leadCodeSortRank(a);
+                    const rb = leadCodeSortRank(b);
+                    if (ra !== rb) return ra - rb;
+                    const subA = a.ParentID && String(a.ParentID) !== '0' && a.ParentID !== 0 ? 0 : 1;
+                    const subB = b.ParentID && String(b.ParentID) !== '0' && b.ParentID !== 0 ? 0 : 1;
+                    return subA - subB;
+                });
+
+            anchorsSorted.forEach((anchor) => {
+                const aid = jobIdOf(anchor);
+                const ajid = aid != null ? String(aid) : '';
+                if (!ajid) return;
+                const isSub =
+                    anchor.ParentID &&
+                    String(anchor.ParentID) !== '0' &&
+                    anchor.ParentID !== 0;
+                if (isSub) {
+                    const par = jobMap[String(anchor.ParentID)];
+                    if (!par?.ItemName) return;
+                    const pid = jobIdOf(par);
+                    const lc =
+                        (pid != null && jobLeadMap[String(pid)]) || jobLeadMap[ajid] || 'L1';
+                    const parentLabel = withLeadCode(
+                        stripLeadName(par.ItemName) || String(par.ItemName).trim(),
+                        lc
+                    );
+                    ['Base Price', 'Optional'].forEach((optName) => {
+                        const { price, updatedAt } = getDivisionPrice(aid, optName);
+                        if (price > 0 || optName === 'Base Price') {
+                            const dName =
+                                optName === 'Base Price' ? parentLabel : `${parentLabel} (${optName})`;
+                            pushLine(dName, price, updatedAt, 0);
+                        }
+                    });
+                } else {
+                    const leadCodeR = jobLeadMap[ajid] || 'L1';
+                    const suffixR = `(${String(leadCodeR).toUpperCase()})`;
+                    const namesForLead = finalCustomers.filter((c) =>
+                        String(c).trim().toUpperCase().endsWith(suffixR)
+                    );
+                    const headerName = namesForLead.length
+                        ? namesForLead.join(', ')
+                        : enquiryCustomerNames.length > 0
+                          ? enquiryCustomerNames.map((c) => withLeadCode(c, leadCodeR)).join(', ')
+                          : externalCustomers
+                                .filter((c) => isExternalPricingCustomer(c))
+                                .map((c) => withLeadCode(c, leadCodeR))
+                                .join(', ');
+                    if (!String(headerName || '').trim()) return;
+                    ['Base Price', 'Optional'].forEach((optName) => {
+                        const { price, updatedAt } = getDivisionPrice(aid, optName);
+                        if (price > 0 || optName === 'Base Price') {
+                            const dName =
+                                optName === 'Base Price' ? headerName : `${headerName} (${optName})`;
+                            pushLine(dName, price, updatedAt, 0);
+                        }
+                    });
+                }
+            });
+        } else if (subjobOnlySummary) {
+            const emittedDescendantLine = new Set();
+            const seenAnchorIds = new Set();
+            anchorsAsSubjobs.forEach((anchor) => {
+                const sid = String(jobIdOf(anchor));
+                if (!sid || seenAnchorIds.has(sid) || !visibleJobs.has(sid)) return;
+                seenAnchorIds.add(sid);
+                const anchorRec = jobMap[sid];
+                if (!anchorRec?.ParentID || String(anchorRec.ParentID) === '0' || anchorRec.ParentID === 0) return;
+                const par = jobMap[String(anchorRec.ParentID)];
+                if (!par?.ItemName) return;
+                const pid = jobIdOf(par);
+                const lc =
+                    (pid != null && jobLeadMap[String(pid)]) ||
+                    jobLeadMap[sid] ||
+                    'L1';
+                const parentLabel = withLeadCode(stripLeadName(par.ItemName) || String(par.ItemName).trim(), lc);
+
+                ['Base Price', 'Optional'].forEach((optName) => {
+                    const { price, updatedAt } = getDivisionPrice(sid, optName);
+                    if (price > 0 || optName === 'Base Price') {
+                        const dName = optName === 'Base Price' ? parentLabel : `${parentLabel} (${optName})`;
+                        pushLine(dName, price, updatedAt, 0);
+                    }
+                });
+
+                flatList.forEach((job) => {
+                    const jid = String(jobIdOf(job));
+                    if (!isStrictDescendantOf(jid, sid)) return;
+                    ['Base Price', 'Optional'].forEach((optName) => {
+                        const key = `${jid}|${optName}`;
+                        if (emittedDescendantLine.has(key)) return;
+                        const { price, updatedAt } = getDivisionPrice(jid, optName);
+                        if (price > 0 || optName === 'Base Price') {
+                            emittedDescendantLine.add(key);
+                            const jobRec = jobMap[jid];
+                            const childNm =
+                                stripLeadName(jobRec?.ItemName) || String(jobRec?.ItemName || '').trim();
+                            const dName = optName === 'Base Price' ? childNm : `${childNm} (${optName})`;
+                            const lvl = Math.max(1, Number(job.level || 0));
+                            pushLine(dName, price, updatedAt, lvl);
+                        }
+                    });
+                });
+            });
+        } else {
+            const rootsWithExternalOwnjobHeader = new Set();
+            const leadHeaderExternalsAvailable =
+                hasLeadAnchors &&
+                (enquiryCustomerNames.length > 0 ||
+                    externalCustomers.some((c) => isExternalPricingCustomer(c)));
+            if (leadHeaderExternalsAvailable) {
+                visualRoots.forEach((root) => {
+                    const rid = String(jobIdOf(root));
+                    if (!visibleJobs.has(rid)) return;
+                    const leadCodeR = jobLeadMap[rid] || 'L1';
+                    const suffixR = `(${String(leadCodeR).toUpperCase()})`;
+                    const namesForLead = finalCustomers.filter((c) =>
+                        String(c).trim().toUpperCase().endsWith(suffixR)
+                    );
+                    const headerName = namesForLead.length
+                        ? namesForLead.join(', ')
+                        : enquiryCustomerNames.length > 0
+                          ? enquiryCustomerNames.map((c) => withLeadCode(c, leadCodeR)).join(', ')
+                          : externalCustomers
+                                .filter((c) => isExternalPricingCustomer(c))
+                                .map((c) => withLeadCode(c, leadCodeR))
+                                .join(', ');
+                    if (!String(headerName || '').trim()) return;
+                    ['Base Price', 'Optional'].forEach((optName) => {
+                        const { price, updatedAt } = getDivisionPrice(jobIdOf(root), optName);
+                        if (price > 0 || optName === 'Base Price') {
+                            const dName = optName === 'Base Price' ? headerName : `${headerName} (${optName})`;
+                            pushLine(dName, price, updatedAt, 0);
+                        }
+                    });
+                    rootsWithExternalOwnjobHeader.add(rid);
+                });
+            }
+
+            flatList.forEach((job) => {
+                const jid = jobIdOf(job);
+                const targetOptionNames = ['Base Price', 'Optional'];
+
+                targetOptionNames.forEach((optName) => {
+                    const { price, updatedAt, customerName } = getDivisionPrice(jid, optName);
+
+                    if (price > 0 || optName === 'Base Price') {
+                        const jobRec = jid != null ? jobMap[String(jid)] : null;
+                        if (
+                            rootsWithExternalOwnjobHeader.has(String(jid)) &&
+                            jobRec &&
+                            isRootEnquiryForJob(jobRec)
+                        ) {
+                            return;
+                        }
+
+                        const displayCode = jobLeadMap[String(jid)] || 'L1';
+                        const jobLabel = buildSubjobPriceDisplayLabel(jobRec, job, displayCode, customerName);
+                        const displayName = optName === 'Base Price' ? jobLabel : `${jobLabel} (${optName})`;
+
+                        pushLine(displayName, price, updatedAt, Number(job.level || 0));
+                    }
+                });
+            });
+        }
+
+        /** Pending/search list: structured JSON for "Customer Name & Total Price" + nested "Individual & Subjob Base prices". */
+        const collectSubtreeJobIds = (rootIdStr) => {
+            const out = [];
+            const seen = new Set();
+            const walk = (idStr) => {
+                if (!idStr || seen.has(idStr) || !visibleJobs.has(idStr)) return;
+                seen.add(idStr);
+                out.push(idStr);
+                const kids = childrenMap[idStr] || [];
+                for (const c of kids) {
+                    const cid = jobIdOf(c);
+                    if (cid != null) walk(String(cid));
+                }
+            };
+            walk(rootIdStr);
+            return out;
+        };
+
+        const buildJobPriceTreeNode = (jidStr, visited, depth) => {
+            if (!jidStr || visited.has(jidStr) || !visibleJobs.has(jidStr)) return null;
+            visited.add(jidStr);
+            const job = jobMap[jidStr];
+            if (!job) return null;
+            const { price, updatedAt, customerName, updatedBy } = getDivisionPrice(jidStr, 'Base Price');
+            const displayCode = jobLeadMap[jidStr] || 'L1';
+            const flatJob = { ...job, level: depth };
+            const displayLineLabel = buildSubjobPriceDisplayLabel(job, flatJob, displayCode, customerName);
+            const kids = (childrenMap[jidStr] || []).slice().sort((a, b) => (jobIdOf(a) || 0) - (jobIdOf(b) || 0));
+            const children = [];
+            for (const c of kids) {
+                const cid = String(jobIdOf(c));
+                const ch = buildJobPriceTreeNode(cid, visited, depth + 1);
+                if (ch) children.push(ch);
+            }
+            return {
+                jobId: jidStr,
+                label: displayLineLabel,
+                price,
+                hasPrice: price > 0,
+                updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+                pricedBy: updatedBy || null,
+                children,
+            };
+        };
+
+        const pricingListCustomerTotals = [];
+        const pricingJobForest = [];
+        const leadHdrAvail =
+            enquiryCustomerNames.length > 0 ||
+            externalCustomers.some((c) => isExternalPricingCustomer(c));
+
+        /**
+         * Subjob-only users: list JSON must never include parent/lead rows in jobForest (strict).
+         * Roots are minimal anchor EnquiryFor rows (user's subjob anchors), not visual enquiry roots.
+         */
+        const pricingListForestRoots = subjobOnlySummary
+            ? (() => {
+                  const rawIds = anchorsAsSubjobs
+                      .map((j) => String(jobIdOf(j)))
+                      .filter((id) => id && visibleJobs.has(id));
+                  const unique = [...new Set(rawIds)];
+                  const minimalAnchorIds = unique.filter(
+                      (id) => !unique.some((other) => other !== id && isStrictDescendantOf(id, other))
+                  );
+                  return minimalAnchorIds
+                      .map((id) => jobMap[id])
+                      .filter(Boolean)
+                      .sort((a, b) => (jobIdOf(a) || 0) - (jobIdOf(b) || 0));
+              })()
+            : visualRoots
+                  .filter((r) => visibleJobs.has(String(jobIdOf(r))))
+                  .sort((a, b) => (jobIdOf(a) || 0) - (jobIdOf(b) || 0));
+
+        for (const root of pricingListForestRoots) {
+            const rid = String(jobIdOf(root));
+            const leadCodeR = jobLeadMap[rid] || 'L1';
+            const suffixR = `(${String(leadCodeR).toUpperCase()})`;
+            let headerLabel = '';
+            if (leadHdrAvail) {
+                const namesForLead = finalCustomers.filter((c) =>
+                    String(c).trim().toUpperCase().endsWith(suffixR)
+                );
+                headerLabel = namesForLead.length
+                    ? namesForLead.join(', ')
+                    : enquiryCustomerNames.length > 0
+                      ? enquiryCustomerNames.map((c) => withLeadCode(c, leadCodeR)).join(', ')
+                      : externalCustomers
+                            .filter((c) => isExternalPricingCustomer(c))
+                            .map((c) => withLeadCode(c, leadCodeR))
+                            .join(', ');
+            }
+            if (!String(headerLabel || '').trim()) {
+                const base = stripLeadName(root.ItemName) || String(root.ItemName || '').trim();
+                headerLabel = withLeadCode(base, leadCodeR);
+            }
+            const subtreeIds = collectSubtreeJobIds(rid);
+            const ownBase = getDivisionPrice(rid, 'Base Price');
+            const ownJobBasePriceEntered = ownBase.price > 0;
+            let sum = 0;
+            let maxAt = null;
+            if (ownJobBasePriceEntered) {
+                for (const jid of subtreeIds) {
+                    const { price, updatedAt } = getDivisionPrice(jid, 'Base Price');
+                    if (price > 0) sum += price;
+                    if (updatedAt && (!maxAt || new Date(updatedAt) > new Date(maxAt))) maxAt = updatedAt;
+                }
+            }
+            pricingListCustomerTotals.push({
+                label: headerLabel,
+                total: ownJobBasePriceEntered ? sum : 0,
+                updatedAt: ownJobBasePriceEntered && maxAt ? new Date(maxAt).toISOString() : null,
+            });
+            const treeNode = buildJobPriceTreeNode(rid, new Set(), 0);
+            if (treeNode) pricingJobForest.push(treeNode);
+        }
+
+        let pricingListDisplayJson = '';
+        try {
+            pricingListDisplayJson = JSON.stringify({
+                customerTotals: pricingListCustomerTotals,
+                jobForest: pricingJobForest,
+            });
+        } catch {
+            pricingListDisplayJson = '';
+        }
+
+        /**
+         * Pending list: `hasPendingItems` uses only `pendingFromVisibleJobsBase` OR `pendingStrictBaseMissing`
+         * (not display-line text — avoids false positives). Option classification uses synthetic rows from
+         * `EnquiryPricingValues` only, not `EnquiryPricingOptions`. `pendingFromDisplayLines` is still computed
+         * for non-pending search mode / logs; lines ending in `(Optional)` are ignored there.
+         */
+        const lineShowsNotUpdated = (item) => {
             const parts = String(item).split('|');
-            return (parts[1] || '').trim() === 'Not Updated';
+            if ((parts[1] || '').trim() !== 'Not Updated') return false;
+            const label = String(parts[0] || '');
+            if (/\(optional\)\s*$/i.test(label)) return false;
+            return true;
+        };
+        const linesForPendingCheck =
+            displayItems.length > 0 ? displayItems : displayItemsRaw;
+        const pendingFromDisplayLines = linesForPendingCheck.some(lineShowsNotUpdated);
+        /**
+         * Lead roots (e.g. Civil) often have **no** own `EnquiryPricingValues` row while children (HVAC/BMS)
+         * are priced. For **other** divisions we skip requiring a root row so pending clears. For the **logged-in
+         * user's department anchors** (e.g. Civil engineer on Civil root), we still require a strict base row
+         * on that root so "Civil not updated" stays on Pending Pricing.
+         */
+        const jobIsRootLeadWithVisibleChildren = (jobRec) => {
+            const jid = jobIdOf(jobRec);
+            if (jid == null) return false;
+            const pid = jobRec.ParentID ?? jobRec.parentID;
+            const isRoot = pid == null || String(pid) === '0' || pid === 0 || pid === '0';
+            if (!isRoot) return false;
+            const kids = childrenMap[String(jid)] || [];
+            return kids.some((c) => {
+                const cid = jobIdOf(c);
+                return cid != null && visibleJobs.has(String(cid));
+            });
+        };
+
+        const deptAnchorsForPending =
+            pendingOnly && !isAdmin && (userDepartment || '').trim()
+                ? getDepartmentPricingAnchors(enqJobs, userDepartment)
+                : [];
+        const deptAnchorIdSetForPending = new Set(
+            deptAnchorsForPending.map((j) => String(jobIdOf(j))).filter((id) => id && id !== 'undefined')
+        );
+
+        const skipRootLeadBaseCheckForPending = (jobRec) => {
+            if (!jobIsRootLeadWithVisibleChildren(jobRec)) return false;
+            const jidStr = String(jobIdOf(jobRec));
+            if (deptAnchorIdSetForPending.has(jidStr)) return false;
+            return true;
+        };
+
+        const pendingFromVisibleJobsBase = flatList.some((job) => {
+            if (skipRootLeadBaseCheckForPending(job)) return false;
+            const jid = jobIdOf(job);
+            if (jid == null || !visibleJobs.has(String(jid))) return false;
+            const { price } = getDivisionPrice(jid, 'Base Price');
+            return price <= 0.01;
         });
+        /**
+         * Strict base check for Pending list: use anchor jobs (CC / department from `getPricingAnchorJobs`)
+         * plus **department anchors** when the user has Master.Department. CC-only `anchorCandidates` can omit
+         * the HVAC row while another division is priced; union fixes that. Do not require `visibleJobs` —
+         * `visibleJobs` can shrink to one division after hierarchy filters so a sibling job never gets scanned.
+         */
+        const jobsForStrictPendingCheck = (() => {
+            const byId = new Map();
+            const add = (arr) => {
+                for (const j of arr) {
+                    const id = jobIdOf(j);
+                    if (id != null) byId.set(String(id), j);
+                }
+            };
+            add(anchorCandidates);
+            add(deptAnchorsForPending);
+            if (byId.size > 0) return [...byId.values()];
+            return enqJobs.filter((j) => visibleJobs.has(String(jobIdOf(j))));
+        })();
+        const pendingStrictBaseMissing =
+            pendingOnly &&
+            jobsForStrictPendingCheck.some(
+                (jobRec) =>
+                    jobIdOf(jobRec) != null &&
+                    !skipRootLeadBaseCheckForPending(jobRec) &&
+                    !strictHasPositiveBaseForJob(jobRec)
+            );
+        hasPendingItems = pendingOnly
+            ? pendingFromVisibleJobsBase || pendingStrictBaseMissing
+            : pendingFromDisplayLines || pendingFromVisibleJobsBase || pendingStrictBaseMissing;
 
         if (hasPendingItems) {
             console.log(`[Pricing] Enquiry ${enq.RequestNo} - ⚠️ PENDING: At least one visible internal/external pricing line is Not Updated.`);
@@ -698,8 +1298,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         // Filter for Pending View
         // Show ONLY if there are pending items in user's division
         if (pendingOnly && !hasPendingItems) {
-            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out - all prices entered for user's division (Status: ${enq.Status})`);
-            logToFile(`Enquiry ${enq.RequestNo} filtered out - all prices entered for user's division (Status: ${enq.Status})`);
+            console.log(`[Pricing] Enquiry ${enq.RequestNo} filtered out — no pending base-price gaps for this user’s scope.`);
+            logToFile(`Enquiry ${enq.RequestNo} filtered out — no pending base-price gaps for this user’s scope.`);
             return null;
         }
 
@@ -722,11 +1322,14 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             pricedBy = pricedRows[0].by;
         }
 
+        const subJobPriceLines = displayItems.length > 0 ? displayItems : displayItemsRaw;
+
         return {
             ...enq,
             CustomerName: fullCustomerName,
-            SubJobPrices: displayItems.join(';;'),
+            SubJobPrices: subJobPriceLines.join(';;'),
             PricedBy: pricedBy || null,
+            PricingListDisplayJson: pricingListDisplayJson || null,
         };
     }).filter(Boolean);
 }
@@ -1240,6 +1843,32 @@ router.get('/:requestNo', async (req, res) => {
             console.error('Error fetching extra customers:', err);
         }
 
+        /** Loaded before customers/options so tabs + grid metadata never read `EnquiryPricingOptions`. */
+        let values = [];
+        try {
+            const valuesResult = await sql.query`
+                SELECT
+                    ID,
+                    RequestNo,
+                    OptionID,
+                    EnquiryForItem,
+                    EnquiryForID,
+                    Price,
+                    UpdatedBy,
+                    UpdatedAt,
+                    CustomerName,
+                    LeadJobName,
+                    PriceOption
+                FROM EnquiryPricingValues
+                WHERE RequestNo = ${requestNo}
+            `;
+            values = (valuesResult.recordset || []).map(normalizePricingValueRow);
+            console.log('Pricing API: Found', values.length, 'values (total)');
+        } catch (err) {
+            console.error('Error querying EnquiryPricingValues:', err);
+            throw err;
+        }
+
         // Identify Lead Job (First item)
         const leadJobItem = jobs.length > 0 ? jobs[0].ItemName : null;
 
@@ -1254,8 +1883,7 @@ router.get('/:requestNo', async (req, res) => {
             }
         }
 
-        // Get list of customers from DB (for tabs). When EnquiryCustomer has rows, use those full names only —
-        // same as Enquiry module (one row = one customer; avoids comma-split fragments in EnquiryPricingOptions).
+        // Customer tabs: EnquiryCustomer rows when present; otherwise distinct names from EnquiryPricingValues only.
         let customers = [];
         try {
             if (extraCustomers.length > 0) {
@@ -1270,13 +1898,16 @@ router.get('/:requestNo', async (req, res) => {
                     }
                 });
             } else {
-                const customerResult = await sql.query`
-                    SELECT DISTINCT CustomerName 
-                    FROM EnquiryPricingOptions 
-                    WHERE RequestNo = ${requestNo} 
-                    AND CustomerName IS NOT NULL
-                `;
-                customers = customerResult.recordset.map(row => row.CustomerName);
+                const seen = new Set();
+                for (const v of values) {
+                    const n = String(v.CustomerName ?? v.customerName ?? '').trim();
+                    if (!n) continue;
+                    const k = n.toLowerCase();
+                    if (!seen.has(k)) {
+                        seen.add(k);
+                        customers.push(n);
+                    }
+                }
             }
         } catch (err) {
             console.error('Error fetching customers:', err);
@@ -1434,57 +2065,13 @@ router.get('/:requestNo', async (req, res) => {
             }
         }
 
-        // Get pricing options (ALL customers)
         let options = [];
         try {
-            const optionsResult = await sql.query`
-                SELECT ID, OptionName, SortOrder, ItemName, CustomerName, LeadJobName
-                FROM EnquiryPricingOptions 
-                WHERE RequestNo = ${requestNo}
-                ORDER BY SortOrder ASC, ID ASC
-            `;
-            options = optionsResult.recordset;
-
-            // Deduplicate Options (Backend Fix)
-            // Sometimes joins or legacy data cause duplicates.
-            const seenOptions = new Set();
-            options = options.filter(o => {
-                const key = `${o.OptionName}|${o.ItemName}|${o.CustomerName}|${o.LeadJobName}`;
-                if (seenOptions.has(key)) return false;
-                seenOptions.add(key);
-                return true;
-            });
-
-            console.log('Pricing API: Found', options.length, 'options (unique)');
+            options = buildDetailPricingOptionsFromValuesRows(values);
+            console.log('Pricing API: Found', options.length, 'options (from EnquiryPricingValues only)');
         } catch (err) {
-            console.error('Error querying EnquiryPricingOptions:', err);
-            throw err;
-        }
-
-        // Get pricing values (ALL customers)
-        let values = [];
-        try {
-            const valuesResult = await sql.query`
-                SELECT
-                    ID,
-                    RequestNo,
-                    OptionID,
-                    EnquiryForItem,
-                    EnquiryForID,
-                    Price,
-                    UpdatedBy,
-                    UpdatedAt,
-                    CustomerName,
-                    LeadJobName,
-                    PriceOption
-                FROM EnquiryPricingValues
-                WHERE RequestNo = ${requestNo}
-            `;
-            values = (valuesResult.recordset || []).map(normalizePricingValueRow);
-            console.log('Pricing API: Found', values.length, 'values (total)');
-        } catch (err) {
-            console.error('Error querying EnquiryPricingValues:', err);
-            throw err;
+            console.error('Error building pricing options from values:', err);
+            options = [];
         }
 
         // Quote module: optional scoped rows (own job vs subjob) — same rules as documented SQL
@@ -1615,9 +2202,20 @@ router.get('/:requestNo', async (req, res) => {
 
             visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
             visibleJobIds = allVisibleIds; // ID Set
-            // UPDATE: User can only edit explicitly assigned jobs. 
-            // Descendants are visible but READ-ONLY (Step 852)
+            // Default: user edits jobs they are assigned to.
             const allEditableIds = new Set([...selfJobIds]);
+            // Pricing: if the user is assigned to a lead root (ParentID 0), they may edit every
+            // division/subjob under that lead (same branch). Fixes read-only sibling rows (e.g. BMS vs HVAC)
+            // where descendants were visible but delete/trash was hidden for non-listed names.
+            const jobByIdForEdit = new Map(jobs.map((j) => [j.ID, j]));
+            const leadRootIdsAmongAssigned = selfJobIds.filter((jid) => {
+                const j = jobByIdForEdit.get(jid);
+                return j && (!j.ParentID || j.ParentID === 0 || j.ParentID === '0');
+            });
+            if (leadRootIdsAmongAssigned.length > 0) {
+                const branchDescendantIds = getAllDescendantIds(leadRootIdsAmongAssigned, jobs);
+                branchDescendantIds.forEach((id) => allEditableIds.add(id));
+            }
             editableJobIds = allEditableIds;
             editableJobs = jobs.filter(j => allEditableIds.has(j.ID)).map(j => j.ItemName);
 

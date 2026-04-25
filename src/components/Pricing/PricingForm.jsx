@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, FileSpreadsheet, X } from 'lucide-react';
+import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, ChevronLeft, FileSpreadsheet, X } from 'lucide-react';
 import { format } from 'date-fns';
-import { useAuth, getStoredLoginEmail } from '../../context/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 import DateInput from '../Enquiry/DateInput';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -18,6 +18,58 @@ const nid = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
 };
+
+/** All job IDs under a lead root (inclusive), for the selected lead branch. */
+function getPricingLeadSubtreeIds(rootId, allJobs) {
+    const rootN = nid(rootId);
+    if (rootN == null || !Array.isArray(allJobs)) return new Set();
+    const set = new Set([rootN]);
+    let changed = true;
+    while (changed) {
+        changed = false;
+        allJobs.forEach((j) => {
+            const pid = nid(j.parentId);
+            const jid = nid(j.id);
+            if (pid != null && jid != null && set.has(pid) && !set.has(jid)) {
+                set.add(jid);
+                changed = true;
+            }
+        });
+    }
+    return set;
+}
+
+/**
+ * Single job row the user may edit (own department under this lead).
+ * Lead owner → selected lead id; subjob user → shallowest assigned job under that lead.
+ */
+function resolveOwnJobAnchorId({ jobs, selectedLeadId, myJobs, canEditAll }) {
+    if (canEditAll || !Array.isArray(jobs) || !jobs.length || !selectedLeadId) return null;
+    const validIds = getPricingLeadSubtreeIds(selectedLeadId, jobs);
+    if (!validIds.size) return null;
+    const myJobsArr = Array.isArray(myJobs) ? myJobs : [];
+    const editableInLeadTree = jobs.filter((j) => {
+        const jid = nid(j.id);
+        return jid != null && validIds.has(jid) && myJobsArr.includes(j.itemName);
+    });
+    if (!editableInLeadTree.length) return null;
+    if (editableInLeadTree.some((j) => String(j.id) === String(selectedLeadId))) {
+        return selectedLeadId;
+    }
+    const depthFromSelectedRoot = (job) => {
+        let d = 0;
+        let cur = job;
+        const rootN = nid(selectedLeadId);
+        while (cur && nid(cur.id) !== rootN) {
+            d += 1;
+            const pid = nid(cur.parentId);
+            cur = pid != null ? jobs.find((p) => nid(p.id) === pid) : null;
+        }
+        return d;
+    };
+    editableInLeadTree.sort((a, b) => depthFromSelectedRoot(a) - depthFromSelectedRoot(b));
+    return editableInLeadTree[0].id;
+}
 
 /** Root passes UI "lead" naming when any sibling uses L-prefixed display names — backend may use leadJobCode only */
 const rootPassesLeadNaming = (j, anyRootHasLPrefixInName) => {
@@ -59,13 +111,276 @@ const jobKey = (id) => {
     return n != null ? String(n) : `k:${String(id)}`;
 };
 
+/** One row from getEnquiryPricingList `SubJobPrices` (`label|price|isoDate|level` joined by `;;`). */
+function parseSubJobPriceRow(s, index) {
+    const parts = String(s).split('|');
+    return {
+        key: `p-${index}`,
+        name: parts[0] ?? '',
+        rawPrice: parts[1] ?? '',
+        rawDate: parts[2] ?? '',
+        level: parseInt(parts[3], 10) || 0,
+    };
+}
+
+/**
+ * Pending / search list: "Customer Name & Total Price" vs "Individual & Subjob Base prices".
+ * When any row is indented (level > 0), level-0 lines are treated as customer/total headers and deeper lines as subjob detail.
+ * When all rows are level 0 (legacy flat list), show everything in the first column only.
+ */
+function splitSubJobPricesForListColumns(subJobPricesStr) {
+    const rows = (subJobPricesStr || '')
+        .split(';;')
+        .filter(Boolean)
+        .map(parseSubJobPriceRow);
+    const hasIndented = rows.some((r) => r.level > 0);
+    return {
+        customerAndTotalRows: hasIndented ? rows.filter((r) => r.level === 0) : rows,
+        individualRows: hasIndented ? rows.filter((r) => r.level > 0) : [],
+    };
+}
+
+function tryParsePricingListDisplay(enq) {
+    const raw = enq?.PricingListDisplayJson ?? enq?.pricingListDisplayJson;
+    if (!raw || typeof raw !== 'string') return null;
+    try {
+        const o = JSON.parse(raw);
+        if (!o || !Array.isArray(o.customerTotals) || !Array.isArray(o.jobForest)) return null;
+        return o;
+    } catch {
+        return null;
+    }
+}
+
+function PricingListCustomerTotalsFromJson({ items, priceFixedDecimals }) {
+    if (!items || items.length === 0) {
+        return <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>;
+    }
+    const rows = items.map((it, i) => {
+        const total = Number(it.total);
+        const has = Number.isFinite(total) && total > 0;
+        let displayPrice = '';
+        if (has) {
+            displayPrice =
+                priceFixedDecimals != null
+                    ? total.toLocaleString('en-US', {
+                          minimumFractionDigits: priceFixedDecimals,
+                          maximumFractionDigits: priceFixedDecimals,
+                      })
+                    : total.toLocaleString(undefined, { minimumFractionDigits: 2 });
+        }
+        let displayDate = '';
+        if (it.updatedAt) {
+            try {
+                displayDate = format(new Date(it.updatedAt), 'dd-MMM-yy hh:mm a');
+            } catch (e) {
+                console.error('Date parse error:', e);
+            }
+        }
+        return (
+            <div
+                key={`ct-${i}`}
+                style={{
+                    fontSize: '11px',
+                    marginBottom: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    flexWrap: 'nowrap',
+                    whiteSpace: 'nowrap',
+                    minWidth: 'max-content',
+                }}
+            >
+                <span style={{ fontWeight: '600', color: '#475569', flexShrink: 0 }}>{String(it.label || '').trim()}:</span>
+                <span
+                    style={{
+                        color: has ? '#166534' : '#94a3b8',
+                        marginLeft: '4px',
+                        fontStyle: has ? 'normal' : 'italic',
+                        background: has ? '#dcfce7' : '#f1f5f9',
+                        padding: '1px 6px',
+                        borderRadius: '4px',
+                        fontSize: '10px',
+                        flexShrink: 0,
+                    }}
+                >
+                    {has ? `BD ${displayPrice}` : 'Not Updated'}
+                </span>
+                {has && displayDate && (
+                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px', flexShrink: 0 }}>({displayDate})</span>
+                )}
+            </div>
+        );
+    });
+    return <>{rows}</>;
+}
+
+function PricingListJobForestFromJson({ nodes, priceFixedDecimals }) {
+    if (!nodes || nodes.length === 0) {
+        return <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>;
+    }
+
+    const formatAmt = (n) => {
+        const num = Number(n);
+        if (!Number.isFinite(num)) return '';
+        return priceFixedDecimals != null
+            ? num.toLocaleString('en-US', {
+                  minimumFractionDigits: priceFixedDecimals,
+                  maximumFractionDigits: priceFixedDecimals,
+              })
+            : num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+    };
+
+    const renderNode = (node, depth) => {
+        const has = node.hasPrice && Number(node.price) > 0;
+        let displayDate = '';
+        if (node.updatedAt) {
+            try {
+                displayDate = format(new Date(node.updatedAt), 'dd-MMM-yy hh:mm a');
+            } catch (e) {
+                console.error('Date parse error:', e);
+            }
+        }
+        const by = String(node.pricedBy ?? node.updatedBy ?? '').trim();
+        const kids = Array.isArray(node.children) ? node.children : [];
+        return (
+            <div key={String(node.jobId)} style={{ marginBottom: '4px' }}>
+                <div
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        flexWrap: 'nowrap',
+                        marginLeft: depth * 16,
+                        fontSize: '11px',
+                        whiteSpace: 'nowrap',
+                        minWidth: 'max-content',
+                    }}
+                >
+                    {depth > 0 && (
+                        <span style={{ color: '#94a3b8', marginRight: '2px', fontSize: '10px', flexShrink: 0 }}>→</span>
+                    )}
+                    <span style={{ fontWeight: depth === 0 ? '600' : '500', color: '#475569', flexShrink: 0 }}>
+                        {String(node.label || '').trim()}:
+                    </span>
+                    <span
+                        style={{
+                            color: has ? '#166534' : '#94a3b8',
+                            marginLeft: '4px',
+                            fontStyle: has ? 'normal' : 'italic',
+                            background: has ? '#dcfce7' : '#f1f5f9',
+                            padding: '1px 6px',
+                            borderRadius: '4px',
+                            fontSize: '10px',
+                            flexShrink: 0,
+                        }}
+                    >
+                        {has ? `BD ${formatAmt(node.price)}` : 'Not Updated'}
+                    </span>
+                    {has && displayDate && (
+                        <span
+                            style={{
+                                marginLeft: '6px',
+                                color: '#94a3b8',
+                                fontSize: '10px',
+                                whiteSpace: 'nowrap',
+                                flexShrink: 0,
+                            }}
+                        >
+                            ({displayDate})
+                            {by ? (
+                                <span style={{ color: '#800000', marginLeft: '6px', fontWeight: '500' }}>{by}</span>
+                            ) : null}
+                        </span>
+                    )}
+                </div>
+                {kids.length > 0 ? <div style={{ marginTop: '2px' }}>{kids.map((ch) => renderNode(ch, depth + 1))}</div> : null}
+            </div>
+        );
+    };
+
+    return <>{nodes.map((n) => renderNode(n, 0))}</>;
+}
+
+function PricingListSubJobPriceLines({ rows, priceFixedDecimals }) {
+    if (!rows || rows.length === 0) {
+        return <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>;
+    }
+    const lines = rows.map((row, i) => {
+        const { name, rawPrice, rawDate, level } = row;
+        const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
+
+        let displayPrice = rawPrice;
+        if (isUpdated) {
+            const num = parseFloat(rawPrice);
+            if (!isNaN(num)) {
+                displayPrice =
+                    priceFixedDecimals != null
+                        ? num.toLocaleString('en-US', {
+                              minimumFractionDigits: priceFixedDecimals,
+                              maximumFractionDigits: priceFixedDecimals,
+                          })
+                        : num.toLocaleString(undefined, { minimumFractionDigits: 2 });
+            }
+        }
+
+        let displayDate = '';
+        if (rawDate) {
+            try {
+                displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
+            } catch (e) {
+                console.error('Date parse error:', e);
+            }
+        }
+
+        return (
+            <div
+                key={row.key || `p-${i}`}
+                style={{
+                    fontSize: '11px',
+                    marginBottom: '4px',
+                    whiteSpace: 'nowrap',
+                    marginLeft: `${level * 20}px`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    flexWrap: 'nowrap',
+                    minWidth: 'max-content',
+                }}
+            >
+                {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px', flexShrink: 0 }}>↳</span>}
+                <span style={{ fontWeight: '600', color: '#475569', flexShrink: 0 }}>{name}:</span>
+                <span
+                    style={{
+                        color: isUpdated ? '#166534' : '#94a3b8',
+                        marginLeft: '4px',
+                        fontStyle: isUpdated ? 'normal' : 'italic',
+                        background: isUpdated ? '#dcfce7' : '#f1f5f9',
+                        padding: '1px 6px',
+                        borderRadius: '4px',
+                        fontSize: '10px',
+                        flexShrink: 0,
+                    }}
+                >
+                    {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
+                </span>
+                {isUpdated && displayDate && (
+                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px', flexShrink: 0 }}>({displayDate})</span>
+                )}
+            </div>
+        );
+    });
+    return <>{lines}</>;
+}
+
 const PricingForm = () => {
     const { currentUser } = useAuth();
 
-    /** Same email as login page stores in localStorage (`currentUserEmail`), then session user — required for /api/pricing/* userEmail. */
+    /**
+     * Email sent as `userEmail` on /api/pricing/* — same source as the header (session `currentUser`),
+     * not `localStorage` `currentUserEmail`, so pending list matches what the user sees top-right.
+     */
     const resolvePricingUserEmail = useCallback(() => {
-        const fromLogin = getStoredLoginEmail();
-        if (fromLogin) return fromLogin;
         return (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim();
     }, [currentUser?.EmailId, currentUser?.email, currentUser?.MailId]);
 
@@ -83,6 +398,9 @@ const PricingForm = () => {
     const [searchResults, setSearchResults] = useState([]);
     const [searching, setSearching] = useState(false);
     const [pendingRequests, setPendingRequests] = useState([]); // Pending List State
+    /** Start true so first paint does not flash "No pending items" before the initial fetch runs. */
+    const [pendingListLoading, setPendingListLoading] = useState(true);
+    const [pendingListError, setPendingListError] = useState(null);
     const [pendingSortConfig, setPendingSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
     const searchRef = useRef(null);
 
@@ -104,6 +422,8 @@ const PricingForm = () => {
         const saved = localStorage.getItem('pricing_selectedLeadId');
         return saved ? parseInt(saved) : null;
     });
+    /** True after opening an enquiry from Pending / Search — list UI is hidden so the grid is its own screen. */
+    const [pricingEditorStandalone, setPricingEditorStandalone] = useState(false);
 
     // --- SHARED HELPERS (Step 4522) ---
     const findLeadJobName = (jobOrItemName) => {
@@ -140,17 +460,56 @@ const PricingForm = () => {
     // Debounce timer
     const debounceRef = useRef(null);
 
-    const refreshPendingRequests = useCallback(() => {
+    const refreshPendingRequests = useCallback(async () => {
         const userEmail = resolvePricingUserEmail();
+        setPendingListError(null);
         if (!userEmail) {
-            console.warn('[Pricing] No login email for pending list — log in again or check localStorage key currentUserEmail');
+            console.warn('[Pricing] No session email for pending list — currentUser.EmailId/email is empty; sign in again.');
+            setPendingRequests([]);
+            setPendingListError('No email on your session profile. Sign in again so pending pricing can load.');
+            setPendingListLoading(false);
             return;
         }
-        fetch(`${API_BASE}/api/pricing/list/pending?userEmail=${encodeURIComponent(userEmail)}`)
-            .then(res => res.json())
-            .then(data => setPendingRequests(Array.isArray(data) ? data : []))
-            .catch(err => console.error('Error fetching pending requests:', err));
+        setPendingListLoading(true);
+        try {
+            const res = await fetch(`${API_BASE}/api/pricing/list/pending?userEmail=${encodeURIComponent(userEmail)}`);
+            let data = null;
+            try {
+                data = await res.json();
+            } catch {
+                data = null;
+            }
+            if (!res.ok) {
+                setPendingRequests([]);
+                const msg =
+                    data && typeof data.error === 'string'
+                        ? data.error
+                        : `Could not load pending pricing (${res.status}).`;
+                setPendingListError(msg);
+                return;
+            }
+            setPendingRequests(Array.isArray(data) ? data : []);
+        } catch (err) {
+            console.error('Error fetching pending requests:', err);
+            setPendingRequests([]);
+            setPendingListError('Network error while loading pending pricing.');
+        } finally {
+            setPendingListLoading(false);
+        }
     }, [resolvePricingUserEmail]);
+
+    const closePricingEditor = useCallback(() => {
+        setPricingEditorStandalone(false);
+        setPricingData(null);
+        setSelectedEnquiry(null);
+        setSelectedLeadId(null);
+        try {
+            localStorage.removeItem('pricing_selectedLeadId');
+        } catch {
+            /* ignore */
+        }
+        refreshPendingRequests();
+    }, [refreshPendingRequests]);
 
     useEffect(() => {
         const handleClickOutside = (e) => {
@@ -215,6 +574,7 @@ const PricingForm = () => {
 
     const handlePricingListSearch = async () => {
         if (pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH) return;
+        setPricingEditorStandalone(false);
         const q = pricingListSearchCriteria.trim();
         const df = (pricingListDateFrom || '').trim();
         const dt = (pricingListDateTo || '').trim();
@@ -259,6 +619,7 @@ const PricingForm = () => {
     };
 
     const handlePricingListClear = () => {
+        setPricingEditorStandalone(false);
         setPricingListSearchCriteria('');
         setPricingListDateFrom('');
         setPricingListDateTo('');
@@ -277,7 +638,8 @@ const PricingForm = () => {
     };
 
     // Load pricing for selected enquiry
-    const loadPricing = async (requestNo, customerName = null, preserveValues = null) => {
+    const loadPricing = async (requestNo, customerName = null, preserveValues = null, loadOptions = null) => {
+        const ignoreExistingLeadSelection = loadOptions?.ignoreExistingLeadSelection === true;
         setLoading(true);
         setSelectedEnquiry(requestNo);
 
@@ -398,25 +760,24 @@ const PricingForm = () => {
                     return current.itemName;
                 };
 
-                // 1. Collect all unique (ItemName, OptionName, LeadJobName) tuples from existing options
-                // This ensures that if "Option-1" exists for BMS in one customer, it is propagated to all customers.
-                // 1. Collect all unique Option Names used anywhere in this Enquiry (Across all branches)
-                const allUniqueNames = new Set();
-                if (data.options) {
-                    data.options.forEach(o => {
-                        allUniqueNames.add(o.name);
-                    });
-                }
-
-                // 2. Build the full set of (ItemName, OptionName, LeadJobName) that SHOULD exist
+                // Build expected (ItemName, OptionName) pairs per job from DB rows for that job only (+ Base Price).
+                // A global union of every option name onto every job made deletes ineffective: deleting "38250" for
+                // HVAC re-created it on reload because "38250" still existed for BMS in allUniqueNames.
                 const uniqueOptions = [];
                 const seenUo = new Set();
 
                 if (data.jobs) {
                     data.jobs.forEach(j => {
                         const ljName = findLeadJobName(j);
-                        const names = new Set(allUniqueNames);
-                        names.add('Base Price'); // Ensure Base Price always exists
+                        const names = new Set(['Base Price']);
+                        if (data.options) {
+                            data.options.forEach((o) => {
+                                if (!o || !o.name) return;
+                                if (o.itemName && sameEnquiryItemName(o.itemName, j.itemName)) {
+                                    names.add(o.name);
+                                }
+                            });
+                        }
 
                         names.forEach(name => {
                             const key = `${j.itemName}|${name}|${ljName}`;
@@ -864,10 +1225,32 @@ const PricingForm = () => {
                         });
                     });
                 }
+
+                // Drop value keys whose OptionID no longer exists (e.g. after DELETE); else `...prev` keeps stale cells.
+                const validPricingOptionIds = new Set(
+                    (data.options || []).map((o) => String(o.id)).filter((id) => id && id !== 'undefined')
+                );
+                const stripStaleValueKeys = (src = {}) =>
+                    Object.fromEntries(
+                        Object.entries(src).filter(([key]) => {
+                            if (String(key).startsWith('simulated')) return true;
+                            const optPart = String(key).split('_')[0];
+                            if (!optPart) return true;
+                            return validPricingOptionIds.has(optPart);
+                        })
+                    );
+
                 if (preserveValues) {
-                    setValues(prev => ({ ...initialValues, ...prev, ...preserveValues }));
+                    setValues((prev) => ({
+                        ...initialValues,
+                        ...stripStaleValueKeys(prev),
+                        ...preserveValues,
+                    }));
                 } else {
-                    setValues(prev => ({ ...initialValues, ...prev }));
+                    setValues((prev) => ({
+                        ...initialValues,
+                        ...stripStaleValueKeys(prev),
+                    }));
                 }
 
                 // Auto-Select First VISIBLE Lead Job
@@ -897,15 +1280,20 @@ const PricingForm = () => {
                         const myRoot = roots.find(r => myJobs.includes(r.itemName));
                         const targetRoot = myRoot || roots[0];
 
-                        const currentLeadValid = selectedLeadId && roots.some(r => Number(r.id) === Number(selectedLeadId));
+                        // Opening a new enquiry from the list calls setSelectedLeadId(null) then loadPricing in the same
+                        // tick; the closure still sees the *previous* enquiry's lead id. If that id exists in the new
+                        // roots we would wrongly "maintain" and skip auto-select. ignoreExistingLeadSelection skips
+                        // reuse of the stale closure value for this load only.
+                        const leadIdForAuto = ignoreExistingLeadSelection ? null : selectedLeadId;
+                        const currentLeadValid = leadIdForAuto && roots.some(r => Number(r.id) === Number(leadIdForAuto));
 
                         // Only auto-select if not already set or invalid (Step 865)
-                        if (!selectedLeadId || !currentLeadValid) {
+                        if (!leadIdForAuto || !currentLeadValid) {
                             console.log('Lead Job Auto-selection:', targetRoot.itemName, targetRoot.id);
                             setSelectedLeadId(targetRoot.id);
                         } else {
                             // Maintain existing selection but log it for stability check
-                            console.log('Maintaining current Lead Job selection:', selectedLeadId);
+                            console.log('Maintaining current Lead Job selection:', leadIdForAuto);
                         }
                     }
                 }
@@ -915,6 +1303,20 @@ const PricingForm = () => {
         } finally {
             setLoading(false);
         }
+    };
+
+    /** Open enquiry grid on its own screen (hide pending/search lists until Back / Close). */
+    const openPricingEditorForEnquiry = (requestNo) => {
+        setPricingEditorStandalone(true);
+        setPricingData(null);
+        setSelectedEnquiry(null);
+        setSelectedLeadId(null);
+        try {
+            localStorage.removeItem('pricing_selectedLeadId');
+        } catch {
+            /* ignore */
+        }
+        void loadPricing(requestNo, null, null, { ignoreExistingLeadSelection: true });
     };
 
     // Add new option row
@@ -948,6 +1350,18 @@ const PricingForm = () => {
             const currentLjName = currentActiveLeadJob ? currentActiveLeadJob.itemName : null;
             return !currentLjName || findLeadJobName(j) === currentLjName;
         });
+
+        if (!pricingData.access?.canEditAll) {
+            const anchorId = resolveOwnJobAnchorId({
+                jobs: pricingData.jobs,
+                selectedLeadId,
+                myJobs: pricingData.access?.editableJobs || [],
+                canEditAll: false,
+            });
+            if (anchorId != null && targetJob && nid(targetJob.id) !== nid(anchorId)) {
+                return;
+            }
+        }
 
         if (targetJob && targetJob.parentId && targetJob.parentId !== '0' && targetJob.parentId !== 0) {
             const parent = (pricingData.jobs || []).find(p => p.id === targetJob.parentId);
@@ -1001,44 +1415,80 @@ const PricingForm = () => {
     const deleteOption = async (optionId) => {
         if (!window.confirm('Delete this option row?')) return;
 
-        // Find matched options across all customers to ensure it stays deleted (Step 1912)
-        const optToDelete = (pricingData.options || []).find(o => o.id === optionId);
-        if (!optToDelete) return;
+        // API / React may use string vs number IDs — strict === misses the row and delete silently no-ops.
+        const optToDelete = (pricingData.options || []).find((o) => String(o.id) === String(optionId));
+        if (!optToDelete) {
+            console.warn('[Pricing deleteOption] No option row for id', optionId);
+            return;
+        }
+
+        const nameNorm = (optToDelete.name || '').trim().toLowerCase();
+        if (nameNorm === 'base price') {
+            return;
+        }
+
+        if (!pricingData.access?.canEditAll) {
+            const anchorId = resolveOwnJobAnchorId({
+                jobs: pricingData.jobs,
+                selectedLeadId,
+                myJobs: pricingData.access?.editableJobs || [],
+                canEditAll: false,
+            });
+            if (anchorId != null) {
+                const jobMatch = (pricingData.jobs || []).find((j) =>
+                    sameEnquiryItemName(optToDelete.itemName, j.itemName)
+                );
+                if (jobMatch && nid(jobMatch.id) !== nid(anchorId)) {
+                    return;
+                }
+            }
+        }
 
         // Special Rule: Default options like 'Base Price' or 'Price' are usually kept,
         // but user-added named options should be removed globally to prevent auto-sync from bringing them back.
-        const isDefault = ['Price', 'Optional', 'Base Price'].includes(optToDelete.name);
+        const isDefault = ['price', 'optional', 'base price'].includes(nameNorm);
 
-        let idsToDelete = [optionId];
+        let idsToDelete = [optToDelete.id];
         if (!isDefault) {
             // Find all matching options (Same Name Case-Insensitive & Trimmed, same ItemName context)
-            const matches = (pricingData.options || []).filter(o =>
-                o.name && o.name.trim().toLowerCase() === optToDelete.name.trim().toLowerCase() &&
-                o.itemName && o.itemName.trim().toLowerCase() === optToDelete.itemName.trim().toLowerCase()
+            const matches = (pricingData.options || []).filter(
+                (o) =>
+                    o.name &&
+                    o.name.trim().toLowerCase() === nameNorm &&
+                    o.itemName &&
+                    o.itemName.trim().toLowerCase() === (optToDelete.itemName || '').trim().toLowerCase()
             );
             // Ensure unique IDs to avoid multiple DELETE requests for same record (Step 932)
-            idsToDelete = Array.from(new Set(matches.map(m => m.id)));
-            console.log(`Bulk Delete: Found ${idsToDelete.length} unique matching rows for "${optToDelete.name}" (trimmed) across all branches/tabs for ${optToDelete.itemName}`);
+            idsToDelete = Array.from(new Set(matches.map((m) => m.id)));
+            console.log(
+                `Bulk Delete: Found ${idsToDelete.length} unique matching rows for "${optToDelete.name}" (trimmed) across all branches/tabs for ${optToDelete.itemName}`
+            );
         }
+
+        const idsToDeleteSet = new Set(idsToDelete.map((id) => String(id)));
 
         try {
             const currentValues = { ...values }; // Capture current state
-            console.log(`Bulk Delete: Initiating delete for IDs: [${idsToDelete.join(', ')}]`);
+            console.log(`Bulk Delete: Initiating delete for IDs: [${[...idsToDeleteSet].join(', ')}]`);
             // Deleted all linked IDs in parallel with verification
-            const results = await Promise.all(idsToDelete.map(id =>
-                fetch(`${API_BASE}/api/pricing/option/${id}`, { method: 'DELETE' })
-                    .then(r => ({ id, ok: r.ok, status: r.status }))
-            ));
+            const results = await Promise.all(
+                [...idsToDeleteSet].map((id) =>
+                    fetch(`${API_BASE}/api/pricing/option/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => ({
+                        id,
+                        ok: r.ok,
+                        status: r.status,
+                    }))
+                )
+            );
 
             console.log('Delete Results:', results);
 
-            const allOk = results.every(res => res.ok);
+            const allOk = results.every((res) => res.ok);
             if (allOk) {
                 // Remove the deleted option's values from currentValues to prevent stale keys
                 const cleanedValues = Object.keys(currentValues).reduce((acc, key) => {
-                    const parts = key.split('_');
-                    const kOptId = parseInt(parts[0]);
-                    if (!idsToDelete.includes(kOptId)) {
+                    const kOptId = String(key).split('_')[0];
+                    if (String(key).startsWith('simulated') || !idsToDeleteSet.has(kOptId)) {
                         acc[key] = currentValues[key];
                     }
                     return acc;
@@ -1084,6 +1534,12 @@ const PricingForm = () => {
         const requestNo = pricingData.enquiry.requestNo;
         const userName = currentUser?.name || currentUser?.FullName || 'Unknown';
         const editableJobs = pricingData.access.editableJobs || []; // Contains Names
+        const ownJobAnchorIdForSave = resolveOwnJobAnchorId({
+            jobs: pricingData.jobs,
+            selectedLeadId,
+            myJobs: editableJobs,
+            canEditAll: !!pricingData.access?.canEditAll,
+        });
 
         // Determine all keys that have data (State + DB)
         const allKeys = new Set([
@@ -1102,6 +1558,13 @@ const PricingForm = () => {
                 const jobId = parseInt(parts[parts.length - 1]);
                 const job = pricingData.jobs.find(j => j.id === jobId);
                 if (!job) continue;
+                if (
+                    !pricingData.access.canEditAll &&
+                    ownJobAnchorIdForSave != null &&
+                    nid(job.id) !== nid(ownJobAnchorIdForSave)
+                ) {
+                    continue;
+                }
 
                 const currentActiveLeadJob = pricingData.jobs.find(j => j.id == selectedLeadId);
                 const leadJobName = currentActiveLeadJob ? currentActiveLeadJob.itemName : null;
@@ -1197,6 +1660,15 @@ const PricingForm = () => {
 
             // Permission Check (based on Job Name still)
             if (!editableJobs.includes(job.itemName)) {
+                if (debugSaveAll) debugSaveAll.skipped.notEditable++;
+                continue;
+            }
+            // Non-admins: only the resolved own-job anchor may be persisted (subjobs are view-only in UI).
+            if (
+                !pricingData.access.canEditAll &&
+                ownJobAnchorIdForSave != null &&
+                nid(job.id) !== nid(ownJobAnchorIdForSave)
+            ) {
                 if (debugSaveAll) debugSaveAll.skipped.notEditable++;
                 continue;
             }
@@ -1687,17 +2159,15 @@ const PricingForm = () => {
                 return isExternal || isInternalParent;
             }
 
-            // ENHANCED LOGIC
+            // ENHANCED LOGIC (customer tab labels)
+            // 1) Own job is the selected lead job → tabs are external enquiry customers only (main + extra), not internal job/parent names.
+            // 2) Own job is a subjob under that lead → tabs are parent job name(s) only (parentCustomers); see else branch.
             if (amIRootInTree) {
-                // If user is a Lead Job in this tree, they can see External Customers and their Parents (if they also own Subjobs in this tree)
-                if (externalCustomers.includes(cleanC)) return true;
-                if (parentCustomers.has(cleanC)) return true;
-                return false;
-            } else {
-                // If user is strictly a Sub-Job user in this tree, they ONLY see their parent(s)
-                if (parentCustomers.has(cleanC)) return true;
-                return false;
+                return externalCustomers.includes(cleanC);
             }
+            // Sub-job user in this lead’s tree: parent job tab(s) only (already tracked in parentCustomers).
+            if (parentCustomers.has(cleanC)) return true;
+            return false;
         });
     }, [pricingData, selectedLeadId, pricingData?.access?.editableJobs]); // Added editableJobs to ensure refresh on permission change
 
@@ -1872,10 +2342,82 @@ const PricingForm = () => {
         return results;
     }, [pricingData, selectedCustomer, selectedLeadId]);
 
+    /** Full-height list shell so wide tables scroll horizontally at the bottom of the viewport, not under a short tbody. */
+    const listFillsViewport =
+        !pricingEditorStandalone &&
+        !pricingData &&
+        ((pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && searchResults.length > 0) ||
+            (pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0));
+
     return (
-        <div style={{ padding: '20px', background: '#f5f7fa', minHeight: 'calc(100vh - 80px)' }}>
+        <div
+            style={{
+                padding: '20px',
+                background: '#f5f7fa',
+                minHeight: 'calc(100vh - 80px)',
+                ...(listFillsViewport
+                    ? {
+                          height: 'calc(100vh - 80px)',
+                          boxSizing: 'border-box',
+                          display: 'flex',
+                          flexDirection: 'column',
+                      }
+                    : {}),
+                ...(pricingEditorStandalone
+                    ? {
+                          boxSizing: 'border-box',
+                          display: 'flex',
+                          flexDirection: 'column',
+                      }
+                    : {}),
+            }}
+        >
+            {pricingEditorStandalone && (
+                <div
+                    style={{
+                        marginBottom: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        flexShrink: 0,
+                    }}
+                >
+                    <button
+                        type="button"
+                        onClick={closePricingEditor}
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '8px 14px',
+                            fontSize: '13px',
+                            fontWeight: '600',
+                            color: '#1e40af',
+                            background: '#fff',
+                            border: '1px solid #cbd5e1',
+                            borderRadius: '8px',
+                            cursor: 'pointer',
+                            boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
+                        }}
+                    >
+                        <ChevronLeft size={18} aria-hidden />
+                        Back to pricing list
+                    </button>
+                </div>
+            )}
+
+            {!pricingEditorStandalone && (
+            <>
             {/* List filters (same pattern as Quote: category, criteria, enquiry dates, Search / Clear) */}
-            <div style={{ background: 'white', padding: '16px 20px', borderRadius: '8px', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+            <div
+                style={{
+                    background: 'white',
+                    padding: '16px 20px',
+                    borderRadius: '8px',
+                    marginBottom: '20px',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                    ...(listFillsViewport ? { flexShrink: 0 } : {}),
+                }}
+            >
                 <div
                     ref={searchRef}
                     style={{
@@ -1904,10 +2446,15 @@ const PricingForm = () => {
                             value={pricingListCategory}
                             onChange={(e) => {
                                 const v = e.target.value;
+                                setPricingEditorStandalone(false);
                                 setPricingListCategory(v);
                                 if (v === PRICING_LIST_CATEGORY.PENDING) {
                                     setSearchResults([]);
                                     setPricingSearchAttempted(false);
+                                    // Otherwise the list stays hidden behind `!pricingData` and the main area looks blank.
+                                    setPricingData(null);
+                                    setSelectedEnquiry(null);
+                                    refreshPendingRequests();
                                 }
                             }}
                             style={{
@@ -2092,7 +2639,18 @@ const PricingForm = () => {
 
             {/* Searching Indicator */}
             {searching && (
-                <div style={{ background: 'white', padding: '20px', borderRadius: '8px', textAlign: 'center', color: '#64748b', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+                <div
+                    style={{
+                        background: 'white',
+                        padding: '20px',
+                        borderRadius: '8px',
+                        textAlign: 'center',
+                        color: '#64748b',
+                        marginBottom: '20px',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                        ...(listFillsViewport ? { flexShrink: 0 } : {}),
+                    }}
+                >
                     Searching for enquiries...
                 </div>
             )}
@@ -2100,14 +2658,31 @@ const PricingForm = () => {
             {/* Search Results Table */}
             {
                 pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && searchResults.length > 0 && !pricingData && (
-                    <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
-                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div
+                        style={{
+                            background: 'white',
+                            borderRadius: '8px',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                            overflow: 'hidden',
+                            marginBottom: listFillsViewport ? 0 : '20px',
+                            ...(listFillsViewport
+                                ? {
+                                      flex: 1,
+                                      minHeight: 0,
+                                      display: 'flex',
+                                      flexDirection: 'column',
+                                  }
+                                : {}),
+                        }}
+                    >
+                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                             <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <Search size={16} /> Search Results ({searchResults.length})
                             </h3>
                             <button
                                 type="button"
                                 onClick={() => {
+                                    setPricingEditorStandalone(false);
                                     setSearchResults([]);
                                     setPricingListCategory(PRICING_LIST_CATEGORY.PENDING);
                                     setPricingSearchAttempted(false);
@@ -2117,97 +2692,85 @@ const PricingForm = () => {
                                 Close Results
                             </button>
                         </div>
-                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <div
+                            style={{
+                                flex: listFillsViewport ? 1 : undefined,
+                                minHeight: listFillsViewport ? 0 : undefined,
+                                maxHeight: listFillsViewport ? undefined : 'calc(100vh - 260px)',
+                                overflowY: 'auto',
+                                overflowX: 'auto',
+                                WebkitOverflowScrolling: 'touch',
+                            }}
+                        >
+                            <table
+                                style={{
+                                    width: 'max-content',
+                                    minWidth: '100%',
+                                    borderCollapse: 'collapse',
+                                    tableLayout: 'auto',
+                                }}
+                            >
                                 <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
                                     <tr>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '80px' }}>Enquiry No.</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Project Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '280px' }}>Customer Name & Prices (Base Price)</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Client Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0' }}>Consultant Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', width: '120px' }}>Enquiry Date</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Enquiry No.</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Project Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Customer Name & Total Price</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Individual & Subjob Base prices</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Client Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Consultant Name</th>
+                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Enquiry Date</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {searchResults.map((enq, idx) => (
+                                    {searchResults.map((enq, idx) => {
+                                        const structured = tryParsePricingListDisplay(enq);
+                                        const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
+                                        return (
                                         <tr
                                             key={enq.RequestNo || idx}
                                             style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
                                             onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
                                             onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                            onClick={() => loadPricing(enq.RequestNo)}
+                                            onClick={() => openPricingEditorForEnquiry(enq.RequestNo)}
                                         >
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '280px' }}>
-                                                {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
-                                                    const parts = s.split('|');
-                                                    const name = parts[0];
-                                                    const rawPrice = parts[1];
-                                                    const rawDate = parts[2];
-                                                    const rawLevel = parts[3];
-
-                                                    const level = parseInt(rawLevel) || 0;
-                                                    const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
-
-                                                    let displayPrice = rawPrice;
-                                                    if (isUpdated) {
-                                                        const num = parseFloat(rawPrice);
-                                                        if (!isNaN(num)) displayPrice = num.toLocaleString(undefined, { minimumFractionDigits: 2 });
-                                                    }
-
-                                                    let displayDate = '';
-                                                    if (rawDate) {
-                                                        try {
-                                                            displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
-                                                        } catch (e) {
-                                                            console.error('Date parse error:', e);
-                                                        }
-                                                    }
-
-                                                    return (
-                                                        <div key={`p-${i}`} style={{
-                                                            fontSize: '11px',
-                                                            marginBottom: '4px',
-                                                            marginLeft: `${level * 20}px`,
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            gap: '4px',
-                                                            whiteSpace: 'nowrap'
-                                                        }}>
-                                                            {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
-                                                            <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
-                                                            <span style={{
-                                                                color: isUpdated ? '#166534' : '#94a3b8',
-                                                                marginLeft: '4px',
-                                                                fontStyle: isUpdated ? 'normal' : 'italic',
-                                                                background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                                                                padding: '1px 6px',
-                                                                borderRadius: '4px',
-                                                                fontSize: '10px'
-                                                            }}>
-                                                                {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
-                                                            </span>
-                                                            {isUpdated && displayDate && (
-                                                                <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
-                                                                    ({displayDate})
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                                {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>}
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.RequestNo}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap', width: '1%' }}>
+                                                {structured ? (
+                                                    <PricingListCustomerTotalsFromJson
+                                                        items={structured.customerTotals}
+                                                        priceFixedDecimals={null}
+                                                    />
+                                                ) : enq.SubJobPrices ? (
+                                                    <PricingListSubJobPriceLines
+                                                        rows={priceSplit.customerAndTotalRows}
+                                                        priceFixedDecimals={null}
+                                                    />
+                                                ) : (
+                                                    <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>
+                                                )}
                                             </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
-                                                {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap', width: '1%' }}>
+                                                {structured ? (
+                                                    <PricingListJobForestFromJson
+                                                        nodes={structured.jobForest}
+                                                        priceFixedDecimals={null}
+                                                    />
+                                                ) : enq.SubJobPrices ? (
+                                                    <PricingListSubJobPriceLines
+                                                        rows={priceSplit.individualRows}
+                                                        priceFixedDecimals={null}
+                                                    />
+                                                ) : (
+                                                    <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>
+                                                )}
                                             </td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
+                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
                                         </tr>
-                                    ))}
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -2215,9 +2778,26 @@ const PricingForm = () => {
                 )
             }
 
+            {/* Pending list status (always visible in Pending Pricing — avoids blank screen on API errors / zero rows) */}
+            {pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingListLoading && (
+                <div style={{ background: 'white', padding: '24px', borderRadius: '8px', textAlign: 'center', color: '#64748b', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+                    Loading pending pricing…
+                </div>
+            )}
+            {pricingListCategory === PRICING_LIST_CATEGORY.PENDING && !pendingListLoading && pendingListError && (
+                <div style={{ background: '#fef2f2', padding: '20px', borderRadius: '8px', marginBottom: '20px', border: '1px solid #fecaca', color: '#991b1b', fontSize: '13px' }}>
+                    {pendingListError}
+                </div>
+            )}
+            {pricingListCategory === PRICING_LIST_CATEGORY.PENDING && !pendingListLoading && !pendingListError && pendingRequests.length === 0 && (
+                <div style={{ background: 'white', padding: '32px', borderRadius: '8px', textAlign: 'center', color: '#64748b', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', fontSize: '13px' }}>
+                    No pending pricing items for your account. Enquiries appear here when at least one visible base price line is still <strong>Not Updated</strong>.
+                </div>
+            )}
+
             {/* Pending Requests List */}
             {
-                pricingListCategory === PRICING_LIST_CATEGORY.PENDING && !pricingData && pendingRequests.length > 0 && (() => {
+                pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0 && (() => {
                     // --- Sort Logic ---
                     const sortedPending = [...pendingRequests].sort((a, b) => {
                         const { field, direction } = pendingSortConfig;
@@ -2263,107 +2843,123 @@ const PricingForm = () => {
                     };
 
                     return (
-                        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', marginBottom: '20px' }}>
-                            <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div
+                            style={{
+                                background: 'white',
+                                borderRadius: '8px',
+                                boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                                overflow: 'hidden',
+                                marginBottom: listFillsViewport ? 0 : '20px',
+                                ...(listFillsViewport
+                                    ? {
+                                          flex: 1,
+                                          minHeight: 0,
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                      }
+                                    : {}),
+                            }}
+                        >
+                            <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                                 <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     <FileText size={16} /> Pending Updates ({pendingRequests.length})
                                 </h3>
                                 <span style={{ fontSize: '12px', color: '#64748b' }}>
-                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer & Prices' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer & Total Price' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
                                 </span>
                             </div>
                             {/* Make the pending list fill the viewport height (instead of a fixed 400px). */}
-                            <div style={{ maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <div
+                                style={{
+                                    flex: listFillsViewport ? 1 : undefined,
+                                    minHeight: listFillsViewport ? 0 : undefined,
+                                    maxHeight: listFillsViewport ? undefined : 'calc(100vh - 260px)',
+                                    overflowY: 'auto',
+                                    overflowX: 'auto',
+                                    WebkitOverflowScrolling: 'touch',
+                                }}
+                            >
+                                <table
+                                    style={{
+                                        width: 'max-content',
+                                        minWidth: '100%',
+                                        borderCollapse: 'collapse',
+                                        tableLayout: 'auto',
+                                    }}
+                                >
                                     <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
                                         <tr>
-                                            <SortableHeader field="RequestNo" label="Enquiry No." style={{ width: '80px' }} />
+                                            <SortableHeader field="RequestNo" label="Enquiry No." />
                                             <SortableHeader field="ProjectName" label="Project Name" />
-                                            <SortableHeader field="CustomerName" label="Customer Name & Prices (Base Price)" style={{ minWidth: '280px' }} />
+                                            <SortableHeader field="CustomerName" label="Customer Name & Total Price" />
+                                            <th
+                                                style={{
+                                                    padding: '10px 16px',
+                                                    textAlign: 'left',
+                                                    fontSize: '12px',
+                                                    fontWeight: '600',
+                                                    color: '#64748b',
+                                                    borderBottom: '1px solid #e2e8f0',
+                                                    whiteSpace: 'nowrap',
+                                                }}
+                                            >
+                                                Individual & Subjob Base prices
+                                            </th>
                                             <SortableHeader field="ClientName" label="Client Name" />
                                             <SortableHeader field="ConsultantName" label="Consultant Name" />
-                                            <SortableHeader field="DueDate" label="Due Date" style={{ width: '120px' }} />
-                                            <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', minWidth: '120px' }}>Priced by</th>
+                                            <SortableHeader field="DueDate" label="Due Date" />
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {sortedPending.map((enq, idx) => (
+                                        {sortedPending.map((enq, idx) => {
+                                            const structured = tryParsePricingListDisplay(enq);
+                                            const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
+                                            return (
                                             <tr
                                                 key={enq.RequestNo || idx}
                                                 style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
                                                 onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
                                                 onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                                onClick={() => loadPricing(enq.RequestNo)}
+                                                onClick={() => openPricingEditorForEnquiry(enq.RequestNo)}
                                             >
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>{enq.RequestNo}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ProjectName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '280px' }}>
-                                                    {enq.SubJobPrices && enq.SubJobPrices.split(';;').filter(Boolean).map((s, i) => {
-                                                        const parts = s.split('|');
-                                                        const name = parts[0];
-                                                        const rawPrice = parts[1];
-                                                        const rawDate = parts[2];
-                                                        const rawLevel = parts[3];
-
-                                                        const level = parseInt(rawLevel) || 0;
-                                                        const isUpdated = rawPrice && rawPrice !== 'Not Updated' && parseFloat(rawPrice) > 0;
-
-                                                        let displayPrice = rawPrice;
-                                                        if (isUpdated) {
-                                                            const num = parseFloat(rawPrice);
-                                                            if (!isNaN(num)) displayPrice = num.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-                                                        }
-
-                                                        let displayDate = '';
-                                                        if (rawDate) {
-                                                            try {
-                                                                displayDate = format(new Date(rawDate), 'dd-MMM-yy hh:mm a');
-                                                            } catch (e) {
-                                                                console.error('Date parse error:', e);
-                                                            }
-                                                        }
-
-                                                        return (
-                                                            <div key={`p-${i}`} style={{
-                                                                fontSize: '11px',
-                                                                marginBottom: '4px',
-                                                                whiteSpace: 'nowrap',
-                                                                marginLeft: `${level * 20}px`,
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                gap: '4px'
-                                                            }}>
-                                                                {level > 0 && <span style={{ color: '#94a3b8', marginRight: '2px' }}>↳</span>}
-                                                                <span style={{ fontWeight: '600', color: '#475569' }}>{name}:</span>
-                                                                <span style={{
-                                                                    color: isUpdated ? '#166534' : '#94a3b8',
-                                                                    marginLeft: '4px',
-                                                                    fontStyle: isUpdated ? 'normal' : 'italic',
-                                                                    background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                                                                    padding: '1px 6px',
-                                                                    borderRadius: '4px',
-                                                                    fontSize: '10px'
-                                                                }}>
-                                                                    {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
-                                                                </span>
-                                                                {isUpdated && displayDate && (
-                                                                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px' }}>
-                                                                        ({displayDate})
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    })}
-                                                    {(!enq.SubJobPrices) && <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>}
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.RequestNo}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap', width: '1%' }}>
+                                                    {structured ? (
+                                                        <PricingListCustomerTotalsFromJson
+                                                            items={structured.customerTotals}
+                                                            priceFixedDecimals={3}
+                                                        />
+                                                    ) : enq.SubJobPrices ? (
+                                                        <PricingListSubJobPriceLines
+                                                            rows={priceSplit.customerAndTotalRows}
+                                                            priceFixedDecimals={3}
+                                                        />
+                                                    ) : (
+                                                        <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No assigned jobs</span>
+                                                    )}
                                                 </td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ClientName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top' }}>{enq.ConsultantName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '12px', color: '#334155', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
-                                                    {(String(enq.PricedBy ?? enq.pricedBy ?? '').trim()) || '—'}
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap', width: '1%' }}>
+                                                    {structured ? (
+                                                        <PricingListJobForestFromJson
+                                                            nodes={structured.jobForest}
+                                                            priceFixedDecimals={3}
+                                                        />
+                                                    ) : enq.SubJobPrices ? (
+                                                        <PricingListSubJobPriceLines
+                                                            rows={priceSplit.individualRows}
+                                                            priceFixedDecimals={3}
+                                                        />
+                                                    ) : (
+                                                        <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>
+                                                    )}
                                                 </td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
+                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
                                             </tr>
-                                        ))}
+                                            );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>
@@ -2386,6 +2982,8 @@ const PricingForm = () => {
                     </div>
                 )
             }
+            </>
+            )}
 
             {/* Loading */}
             {
@@ -2399,7 +2997,15 @@ const PricingForm = () => {
             {/* Pricing Grid */}
             {
                 pricingData && !loading && (
-                    <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden' }}>
+                    <div
+                        style={{
+                            background: 'white',
+                            borderRadius: '8px',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                            overflow: 'hidden',
+                            ...(pricingEditorStandalone ? { flex: 1, minHeight: 0 } : {}),
+                        }}
+                    >
                         {/* Enquiry Info Header */}
                         <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <div>
@@ -2446,8 +3052,10 @@ const PricingForm = () => {
                                     );
                                 })()}
                                 <button
-                                    onClick={() => { setPricingData(null); setSelectedEnquiry(null); refreshPendingRequests(); }}
+                                    type="button"
+                                    onClick={closePricingEditor}
                                     style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
+                                    aria-label="Close pricing editor"
                                 >
                                     <X size={20} />
                                 </button>
@@ -2590,31 +3198,14 @@ const PricingForm = () => {
                                                 // Grouping Logic: Keyed by Job ID
                                                 const groupMap = {}; // { jobId: { job, options: [] } }
 
-                                                // LEAD JOB FILTERING LOGIC
-                                                const getFullScope = (rootId, all) => {
-                                                    const rootN = nid(rootId);
-                                                    if (rootN == null) return new Set();
-                                                    const set = new Set([rootN]);
-                                                    let changed = true;
-                                                    while (changed) {
-                                                        changed = false;
-                                                        all.forEach(j => {
-                                                            const pid = nid(j.parentId);
-                                                            const jid = nid(j.id);
-                                                            if (pid != null && jid != null && set.has(pid) && !set.has(jid)) {
-                                                                set.add(jid);
-                                                                changed = true;
-                                                            }
-                                                        });
-                                                    }
-                                                    return set;
-                                                };
+                                                // LEAD JOB FILTERING LOGIC (subtree ids: module helper getPricingLeadSubtreeIds)
 
                                                 let targetJobs = visibleJobs;
+                                                /** Jobs under the selected lead root (used for scope + anchor). */
+                                                let validIds = null;
                                                 if (selectedLeadId && pricingData && pricingData.jobs) {
                                                     // EXPANDED: Include ALL descendants (L1, L2, L3...)
-
-                                                    const validIds = getFullScope(selectedLeadId, pricingData.jobs);
+                                                    validIds = getPricingLeadSubtreeIds(selectedLeadId, pricingData.jobs);
                                                     targetJobs = visibleJobs.filter(j => {
                                                         const jid = nid(j.id);
                                                         return jid != null && validIds.has(jid);
@@ -2632,11 +3223,10 @@ const PricingForm = () => {
 
                                                 // IMPROVED (Step 2026-03-10): Prioritize jobs within the selected branch scope to handle duplicate names
                                                 let contextJob = null;
-                                                if (selectedLeadId && pricingData && pricingData.jobs) {
-                                                    const validScopeIds = getFullScope(selectedLeadId, pricingData.jobs);
+                                                if (selectedLeadId && pricingData && pricingData.jobs && validIds) {
                                                     contextJob = pricingData.jobs.find(j => {
                                                         const jid = nid(j.id);
-                                                        return jid != null && validScopeIds.has(jid) &&
+                                                        return jid != null && validIds.has(jid) &&
                                                         (cleanTabNameSearch(j.itemName) === selectedCustomer || j.itemName === selectedCustomer);
                                                     });
                                                 }
@@ -2709,9 +3299,28 @@ const PricingForm = () => {
                                                         selectedJobForScope.parentId === 0 ||
                                                         selectedJobForScope.parentId === '0');
 
+                                                // Sub-user scope must stay inside this lead’s tree (same itemName can exist on another branch).
+                                                const rawMyScope = getMyTotalScope(myJobs);
+                                                const myScopeInLeadTree = new Set();
+                                                if (validIds && validIds.size) {
+                                                    rawMyScope.forEach((id) => {
+                                                        if (validIds.has(id)) myScopeInLeadTree.add(id);
+                                                    });
+                                                } else {
+                                                    rawMyScope.forEach((id) => myScopeInLeadTree.add(id));
+                                                }
+
                                                 const myScopeIds = (pricingData.access.canEditAll || ownJobIsSelectedLeadRoot)
-                                                    ? null // Admins, or own job is this lead root: full branch under selected lead (2a–2b; 2c N/A for root-as-own)
-                                                    : getMyTotalScope(myJobs); // Subjob under this lead: own job + descendants only; parent lead row hidden (1c)
+                                                    ? null // Admins, or lead owner: full branch under selected lead (2b)
+                                                    : myScopeInLeadTree; // Subjob under this lead: own job + descendants only; ancestors hidden (1b–1c)
+
+                                                // Single “own” row for edit/add/delete; descendants are view-only (1b, 2b).
+                                                const ownJobAnchorId = resolveOwnJobAnchorId({
+                                                    jobs: pricingData.jobs,
+                                                    selectedLeadId,
+                                                    myJobs,
+                                                    canEditAll: !!pricingData.access.canEditAll,
+                                                });
 
                                                 // Step 4: Final Filter: Intersection of LeadJobScope, TabScope, and UserScope
                                                 let contextFilteredJobs = targetJobs.filter(j => {
@@ -2973,8 +3582,10 @@ const PricingForm = () => {
                                                         groupName = code ? `${code} - ${job.itemName}` : job.itemName;
                                                     }
 
-                                                    const isExplicityEditable = pricingData.access.editableJobs.includes(job.itemName);
-                                                    const canEditSection = pricingData.access.canEditAll || isExplicityEditable;
+                                                    // Non-admins: only the resolved own-job anchor is editable; same-branch subjobs are view-only (1b, 2b).
+                                                    const canEditSection =
+                                                        pricingData.access.canEditAll ||
+                                                        (ownJobAnchorId != null && String(job.id) === String(ownJobAnchorId));
 
                                                     return (
                                                         <React.Fragment key={job.id}>
@@ -3038,14 +3649,22 @@ const PricingForm = () => {
                                                                                         cursor: canEditRow ? 'text' : 'not-allowed'
                                                                                     }}
                                                                                 />
-                                                                                {canEditRow && (
-                                                                                    <button
-                                                                                        onClick={() => deleteOption(option.id)}
-                                                                                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer' }}
-                                                                                    >
-                                                                                        <Trash2 size={16} />
-                                                                                    </button>
-                                                                                )}
+                                                                                {canEditRow &&
+                                                                                    String(option.name || '').trim().toLowerCase() !== 'base price' && (
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={() => deleteOption(option.id)}
+                                                                                            title="Delete this option"
+                                                                                            style={{
+                                                                                                background: 'none',
+                                                                                                border: 'none',
+                                                                                                color: '#ef4444',
+                                                                                                cursor: 'pointer',
+                                                                                            }}
+                                                                                        >
+                                                                                            <Trash2 size={16} />
+                                                                                        </button>
+                                                                                    )}
                                                                             </div>
                                                                         </td>
                                                                     </tr>

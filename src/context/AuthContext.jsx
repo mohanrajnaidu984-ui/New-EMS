@@ -42,13 +42,13 @@ function applyRgiAdmin(u) {
 /** Merge Master_ConcernedSE profile (by EmailId) into client user shape. Department is authoritative from DB. */
 function applyProfileMerge(base, profile) {
     if (!profile) return base;
-    /** Login page persists the exact address in `currentUserEmail` — never replace it with DB EmailId (typos / drift). */
+    /** Prefer in-session user (header / `currentUser`) over the login-page storage key so quote/pricing identity matches the UI. */
     const storedLogin = getStoredLoginEmail();
+    const fromSession = (base.email || base.EmailId || base.MailId || '').trim();
     const emailIdentity =
+        fromSession ||
         storedLogin ||
-        profile.EmailId ||
-        base.email ||
-        base.EmailId ||
+        (profile.EmailId || '').trim() ||
         '';
     return {
         ...base,

@@ -89,7 +89,9 @@ const Login = ({ onSwitchToSignup }) => {
 
             if (response.ok) {
                 console.log('Login Success! User:', data.user);
-                const loginEmail = data.user.EmailId || data.user.MailId || '';
+                /** Typed address on this screen — must drive `currentUserEmail` / pricing `userEmail` (DB EmailId can differ). */
+                const typedEmail = (formData.email || '').trim();
+                const loginEmail = typedEmail || (data.user.EmailId || data.user.MailId || '').trim();
                 login({
                     id: data.user.UserID || data.user.ID, // Fallback if ID field name varies
                     name: data.user.FullName,
@@ -154,7 +156,10 @@ const Login = ({ onSwitchToSignup }) => {
                 });
                 const loginData = await loginRes.json();
                 if (loginRes.ok) {
-                    const loginEmail = (loginData.user.EmailId || loginData.user.MailId || formData.email || '').trim();
+                    const typedEmail = (formData.email || '').trim();
+                    const loginEmail =
+                        typedEmail ||
+                        (loginData.user.EmailId || loginData.user.MailId || '').trim();
                     login({
                         id: loginData.user.UserID || loginData.user.ID,
                         name: loginData.user.FullName,

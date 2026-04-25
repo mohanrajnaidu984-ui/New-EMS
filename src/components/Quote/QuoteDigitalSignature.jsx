@@ -98,6 +98,56 @@ export function saveStampsForEnquiry(requestNo, stamps, leadJobKey = '', custome
     }
 }
 
+/** Parse stamps from EnquiryQuotes.DigitalSignaturesJson (saved revision). */
+export function parseDigitalSignaturesFromQuoteRow(quote) {
+    const raw = quote?.DigitalSignaturesJson ?? quote?.digitalSignaturesJson;
+    if (raw == null || raw === undefined || raw === '') return [];
+    try {
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!Array.isArray(arr)) return [];
+        return arr
+            .map((s, i) => ({
+                id: s.id || `db-stamp-${i}`,
+                sheetIndex: (() => {
+                    const si = Number(s.sheetIndex);
+                    return Number.isFinite(si) && si >= 1 ? si : 1;
+                })(),
+                xPct: typeof s.xPct === 'number' && Number.isFinite(s.xPct) ? s.xPct : 82,
+                yPct: typeof s.yPct === 'number' && Number.isFinite(s.yPct) ? s.yPct : 38,
+                imageDataUrl: s.imageDataUrl || '',
+                displayName: (s.displayName || '').trim(),
+                designation: (s.designation || '').trim(),
+                placedAtIso: s.placedAtIso || '',
+                verificationCode: s.verificationCode || '',
+                removableBeforeNextCommit: false,
+                inheritedFromSubJob: !!s.inheritedFromSubJob,
+            }))
+            .filter((s) => s.imageDataUrl && String(s.imageDataUrl).length > 10);
+    } catch {
+        return [];
+    }
+}
+
+/** Body field for POST/PUT /api/quotes — only real stamps (no preview-only inherited overlays). */
+export function serializeDigitalStampsForApi(stamps) {
+    const list = Array.isArray(stamps) ? stamps : [];
+    return JSON.stringify(
+        list
+            .filter((s) => s && !s.inheritedFromSubJob)
+            .map((s) => ({
+                id: s.id,
+                sheetIndex: s.sheetIndex,
+                xPct: s.xPct,
+                yPct: s.yPct,
+                imageDataUrl: s.imageDataUrl,
+                displayName: s.displayName,
+                designation: s.designation,
+                placedAtIso: s.placedAtIso,
+                verificationCode: s.verificationCode,
+            }))
+    );
+}
+
 /** Short deterministic-looking token for display (not cryptographic proof). */
 export function makeVerificationCode(userEmail, isoNow) {
     const s = `${userEmail || ''}|${isoNow}|${Math.random().toString(36).slice(2, 11)}`;
@@ -420,7 +470,8 @@ export function SignatureVaultModal({
                                                     onClick={() => {
                                                         onPlaceStamp({
                                                             imageDataUrl: item.imageDataUrl,
-                                                            sheetIndex: pageIndex,
+                                                            /** QuoteForm stamp filter uses 1-based page index. */
+                                                            sheetIndex: pageIndex + 1,
                                                             displayName: displayName ?? '',
                                                             designation: designation ?? '',
                                                         });

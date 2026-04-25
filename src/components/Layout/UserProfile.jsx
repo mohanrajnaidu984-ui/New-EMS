@@ -24,28 +24,10 @@ const UserProfile = ({ activeTab = '' }) => {
     const [placePageIndex, setPlacePageIndex] = useState(0);
     const [quotePageCount, setQuotePageCount] = useState(1);
     const dropdownRef = useRef(null);
-    const timeoutRef = useRef(null);
 
     const handleImageSave = (base64) => {
         updateProfileImage(currentUser.id, base64);
     };
-
-    const handleMouseEnter = () => {
-        if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        setDropdownOpen(true);
-    };
-
-    const handleMouseLeave = () => {
-        timeoutRef.current = setTimeout(() => {
-            setDropdownOpen(false);
-        }, 300); // 300ms delay before closing
-    };
-
-    useEffect(() => {
-        return () => {
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-        };
-    }, []);
 
     useEffect(() => {
         const handleClickOutside = (event) => {
@@ -67,8 +49,11 @@ const UserProfile = ({ activeTab = '' }) => {
         };
     }, [dropdownOpen]);
 
+    /** Session profile first (same source as Pricing `userEmail`); then login-stored fallback. */
     const displayEmail =
-        getStoredLoginEmail() || currentUser?.email || currentUser?.EmailId || '';
+        (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim()
+        || getStoredLoginEmail()
+        || '';
 
     useEffect(() => {
         if (!dropdownOpen || !displayEmail) return;
@@ -96,12 +81,7 @@ const UserProfile = ({ activeTab = '' }) => {
     const isAdmin = userRoles.includes('admin');
 
     return (
-        <div
-            ref={dropdownRef}
-            className="d-flex align-items-center position-relative"
-            onMouseEnter={handleMouseEnter}
-            onMouseLeave={handleMouseLeave}
-        >
+        <div ref={dropdownRef} className="d-flex align-items-center position-relative">
             {/* User Name & Dropdown Toggle */}
             <div
                 className="d-flex align-items-center profile-trigger"

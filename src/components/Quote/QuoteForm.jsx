@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool } from 'lucide-react';
+import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool, GripVertical } from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
 import { format, parseISO, addDays } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
@@ -18,6 +18,8 @@ import {
     loadSignatureLibrary,
     resolveDefaultSignatureImage,
     EMS_QUOTE_PLACE_STAMP_EVENT,
+    parseDigitalSignaturesFromQuoteRow,
+    serializeDigitalStampsForApi,
 } from './QuoteDigitalSignature';
 
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
@@ -30,6 +32,14 @@ const QUOTE_LIST_CATEGORY = {
     PENDING: 'pending_quote',
     SEARCH: 'search_quote',
 };
+
+/** Must match server `normalizeQuoteFormDraftUserEmail` (draft list is scoped to this user only). */
+function normalizeDraftUserEmailForApi(raw) {
+    return String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/@almcg\.com/g, '@almoayyedcg.com');
+}
 
 /** Calendar YYYY-MM-DD for <input type="date" /> from EnquiryQuotes row (avoids TZ off-by-one on ISO datetimes). */
 function quoteRowDateToInputYmd(quote) {
@@ -49,6 +59,78 @@ function quoteRowDateToInputYmd(quote) {
         return `${y}-${mo}-${da}`;
     }
     return new Date().toISOString().split('T')[0];
+}
+
+/**
+ * A4 header block for **subjob** quote tabs: every value comes from the EnquiryQuotes row (not left-panel state).
+ */
+function buildSubjobQuoteHeaderDisplayFromRow(q, usersList, preparedByOptions) {
+    if (!q || typeof q !== 'object') return null;
+    const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const email = String(q.PreparedByEmail ?? q.preparedbyemail ?? '').toLowerCase().trim();
+    let contact = '';
+    if (email && Array.isArray(usersList)) {
+        const u = usersList.find((x) => String(x.EmailId || x.email || '').toLowerCase().trim() === email);
+        if (u?.MobileNumber != null) {
+            contact = String(u.MobileNumber).trim().replace(/^tel\s*:?\s*/i, '').trim();
+        }
+    }
+    const prepName = String(q.PreparedBy ?? q.preparedby ?? '').trim();
+    if (!contact && prepName && Array.isArray(usersList)) {
+        const n = norm(prepName);
+        const fromU = usersList.find((x) => norm(x.FullName) === n);
+        if (fromU?.MobileNumber != null) {
+            contact = String(fromU.MobileNumber).trim().replace(/^tel\s*:?\s*/i, '').trim();
+        }
+    }
+    if (!contact && prepName && Array.isArray(preparedByOptions)) {
+        const n = norm(prepName);
+        const po = preparedByOptions.find(
+            (o) => norm(String(o.value || '')) === n || norm(String(o.label || '')) === n
+        );
+        const pMob = (po?.mobileNumber != null ? String(po.mobileNumber) : '').trim();
+        if (pMob) contact = pMob.replace(/^tel\s*:?\s*/i, '').trim();
+    }
+    const ymd = quoteRowDateToInputYmd(q);
+    let validityDisplay = '';
+    try {
+        const base = /^\d{4}-\d{2}-\d{2}$/.test(String(ymd).trim())
+            ? parseISO(String(ymd).trim())
+            : new Date(ymd);
+        if (!Number.isNaN(base.getTime())) {
+            validityDisplay = format(
+                addDays(base, parseInt(q.ValidityDays ?? q.validitydays ?? 30, 10)),
+                'dd-MMM-yyyy'
+            );
+        }
+    } catch {
+        validityDisplay = '';
+    }
+    const typeParts = String(q.QuoteType ?? q.quotetype ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const quoteTypeLine = typeParts.length ? typeParts.join(', ') : '—';
+    return {
+        toName: String(q.ToName ?? q.toname ?? '').trim(),
+        toAddress: String(q.ToAddress ?? q.toaddress ?? '').trim(),
+        toPhone: String(q.ToPhone ?? q.tophone ?? '').trim(),
+        toFax: String(q.ToFax ?? q.tofax ?? '').trim(),
+        toEmail: String(q.ToEmail ?? q.toemail ?? '').trim(),
+        toAttention: String(q.ToAttention ?? q.toattention ?? '').trim(),
+        preparedBy: prepName,
+        preparedByContact: contact,
+        quoteNumber: String(q.QuoteNumber ?? q.quoteNumber ?? '').trim(),
+        quoteDateYmd: ymd,
+        validityDisplay,
+        quoteTypeLine,
+        customerReference: String(
+            q.CustomerReference ?? q.customerreference ?? q.YourRef ?? q.yourref ?? ''
+        ).trim(),
+        subject: String(q.Subject ?? q.subject ?? '').trim(),
+        signatory: String(q.Signatory ?? q.signatory ?? '').trim(),
+        signatoryDesignation: String(q.SignatoryDesignation ?? q.signatorydesignation ?? '').trim(),
+    };
 }
 
 function formatQuoteYmdForDisplay(ymd) {
@@ -144,6 +226,181 @@ Should you have any further queries, please do not hesitate to contact our [desi
     billOfQuantity: `Please find the detailed Bill of Quantity below: `
 };
 
+/** Canonical section numbers baked into default clause HTML (1.x, 2.x, …). Renumber when clause order changes. */
+const CLAUSE_MAJOR_BY_LIST_KEY = {
+    showScopeOfWork: 1,
+    showBasisOfOffer: 2,
+    showExclusions: 3,
+    showPricingTerms: 4,
+    showSchedule: 5,
+    showWarranty: 6,
+    showResponsibilityMatrix: 7,
+    showTermsConditions: 8,
+    showBillOfQuantity: null,
+    showAcceptance: null,
+};
+
+function renumberClauseMajorInHtml(html, fromMajor, toMajor) {
+    if (fromMajor == null || toMajor == null || fromMajor === toMajor || html == null) return html;
+    const from = Number(fromMajor);
+    const to = Number(toMajor);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return String(html);
+    return String(html).replace(new RegExp(`(?<![0-9.])${from}\\.(?=\\d)`, 'g'), `${to}.`);
+}
+
+/** Put each N.M. / N.M.K. sub-clause on its own line in the rendered quote (HTML or plain). */
+function separateClauseSubNumberLines(html) {
+    let s = String(html || '');
+    if (!s.trim()) return s;
+    if (!/<[a-z][\s\S]*>/i.test(s)) {
+        s = s.replace(/\r?\n/g, '<br/>');
+    }
+    // "…follows:1.1." (no space) — break before first numbered sub-clause after : or ;
+    s = s.replace(/([:;])(?=(?<![0-9.])\d{1,2}\.\d{1,2}\.(?!\d))/g, '$1<br/>');
+    s = s.replace(/(\s)(?=\d{1,2}\.\d{1,2}\.\d{1,2}\.)/g, '<br/>');
+    s = s.replace(/(\s)(?=(?<![0-9.])\d{1,2}\.\d{1,2}\.(?!\d))/g, '<br/>');
+    return s;
+}
+
+/** Preview/PDF body: remap 3.x → N.x when this clause is the Nth active clause; stack sub-clauses vertically. */
+function getClauseDisplayBodyHtml(html, listKey, displayMajor) {
+    const canon = CLAUSE_MAJOR_BY_LIST_KEY[listKey];
+    let out = renumberClauseMajorInHtml(html, canon, displayMajor);
+    out = separateClauseSubNumberLines(out);
+    return out;
+}
+
+/** Stable id on the auto-built pricing summary table so `calculateSummary` can replace it without wiping user HTML. */
+const EMS_AUTO_PRICE_SUMMARY_TABLE_ID = 'ems-auto-price-summary-table';
+
+/**
+ * Replace only the auto pricing table; keep prose / pasted content after it.
+ * @param {string} prevHtml
+ * @param {string} tableFullHtml full <table>...</table> including id
+ * @param {string} proseFallback template tail (e.g. 4.1…) when there is no user tail yet
+ */
+function mergePricingTermsClauseHtml(prevHtml, tableFullHtml, proseFallback) {
+    const prev = String(prevHtml || '').trim();
+    const idAttr = EMS_AUTO_PRICE_SUMMARY_TABLE_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const idRe = new RegExp(`<table[^>]*id=["']${idAttr}["'][^>]*>[\\s\\S]*?<\\/table>\\s*`, 'i');
+    if (idRe.test(prev)) {
+        const rest = prev.replace(idRe, '').trim();
+        return `${tableFullHtml}\n${rest || String(proseFallback || '').trim()}`;
+    }
+    if (/^<table/i.test(prev)) {
+        const rest = prev.replace(/^<table[\s\S]*?<\/table>\s*/i, '').trim();
+        return `${tableFullHtml}\n${rest || String(proseFallback || '').trim()}`;
+    }
+    return `${tableFullHtml}\n${String(proseFallback || '').trim()}`;
+}
+
+/**
+ * Align clause 4.1 lump-sum prose with the auto-table total: replaces `[Amount in figures and words]` and
+ * an already-filled `shall be BD … (…)` segment (e.g. from a loaded revision) so the table and 4.1 stay in sync.
+ * @param {(n: number) => string} numberToWordsFn e.g. numberToWordsBHD
+ */
+function syncPricingTerms41LumpSumProse(html, grandTotalNum, foundPricedOptional, numberToWordsFn) {
+    const raw = String(html || '');
+    if (foundPricedOptional || grandTotalNum <= 0 || !Number.isFinite(Number(grandTotalNum))) return raw;
+    const formattedTotal = Number(grandTotalNum).toLocaleString(undefined, {
+        minimumFractionDigits: 3,
+        maximumFractionDigits: 3,
+    });
+    const words = numberToWordsFn(grandTotalNum);
+    const totalString = `BD ${formattedTotal} (${words})`;
+
+    let out = raw.replace(/\[Amount in figures and words\]/g, totalString);
+
+    const bdFigures = String.raw`BD(?:\s|&nbsp;)*[\d,]+\.\d{2,4}(?:\s|&nbsp;)*\([^)]+\)`;
+    const clause41Lump = new RegExp(
+        String.raw`(4\.1\.[\s\S]{0,1800}?\bshall be\s*)(${bdFigures})`,
+        'i'
+    );
+    if (clause41Lump.test(out)) {
+        out = out.replace(clause41Lump, `$1${totalString}`);
+    } else {
+        out = out.replace(new RegExp(String.raw`(\bshall be\s*)(${bdFigures})`, 'i'), `$1${totalString}`);
+    }
+    return out;
+}
+
+/**
+ * Same row rules as `calculateSummary` auto table — used for clause 4 sidebar preview and merged PDF/HTML body.
+ * @param {Array<{ name: string, items: Array<{ name: string, total: number }> }>} summary
+ * @param {string[]} activeJobs job group names included by pricing-summary checkboxes
+ * @param {{ jobs?: Array }} data pricing module payload
+ * @param {{ leadJobPrefix?: string }} enquiryData
+ * @returns {{ tableHtml: string, htmlGrandTotal: number }}
+ */
+function buildEmsAutoPricingTableHtml(summary, activeJobs, data, enquiryData) {
+    let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-bottom:12px;">`;
+    tableHtml +=
+        '<thead><tr style="background:#f8fafc;"><th style="padding:10px;border:1px solid #64748b;text-align:left;">Description</th><th style="padding:10px;border:1px solid #64748b;text-align:right;">Amount (BHD)</th></tr></thead>';
+    tableHtml += '<tbody>';
+
+    let htmlGrandTotal = 0;
+
+    (summary || []).forEach((grp) => {
+        if (enquiryData && enquiryData.leadJobPrefix) {
+            const prefix = enquiryData.leadJobPrefix;
+            if (!grp.name.startsWith(prefix)) {
+                let isRelatedToLead = false;
+                    if (data.jobs) {
+                        const job = data.jobs.find((j) => j.itemName === grp.name);
+                        if (job) {
+                            let currentJob = job;
+                            while (currentJob && (currentJob.parentId || currentJob.ParentID)) {
+                                const pid = currentJob.parentId || currentJob.ParentID;
+                                const parent = data.jobs.find(
+                                    (j) => String(j.id || j.ItemID || j.ID) === String(pid)
+                                );
+                                if (parent) {
+                                    if (parent.itemName && parent.itemName.startsWith(prefix)) {
+                                        isRelatedToLead = true;
+                                        break;
+                                    }
+                                    currentJob = parent;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                if (!isRelatedToLead) return;
+            }
+        }
+
+        if (grp.name && !activeJobs.includes(grp.name)) {
+            const isSubJob = data.jobs?.some((j) => j.itemName === grp.name);
+            const isLeadJob =
+                data.leadJob && (data.leadJob === grp.name || grp.name.includes(data.leadJob));
+
+            if (isLeadJob || isSubJob) return;
+        }
+
+        const cleanedName = grp.name.replace(/^(LEAD JOB |SUB JOB) \/ /, '');
+
+        tableHtml += `<tr><td colspan="2" style="padding:10px;border:1px solid #64748b;background-color:#f1f5f9;font-weight:bold;">${cleanedName}</td></tr>`;
+
+        (grp.items || []).forEach((item) => {
+            tableHtml += `<tr><td style="padding:10px;border:1px solid #64748b;padding-left:20px;">${item.name}</td><td style="padding:10px;border:1px solid #64748b;text-align:right;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+        });
+
+        (grp.items || []).forEach((item) => {
+            if (item.name === 'Base Price') {
+                htmlGrandTotal += item.total;
+            }
+        });
+    });
+
+    if (htmlGrandTotal > 0) {
+        tableHtml += `<tr style="background:#f8fafc;font-weight:700;"><td style="padding:10px;border:1px solid #64748b;text-align:right;">Grand Total (Base Price)</td><td style="padding:10px;border:1px solid #64748b;text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+    }
+    tableHtml += '</tbody></table>';
+
+    return { tableHtml, htmlGrandTotal };
+}
 
 // Global styles for pasted tables in clauses
 
@@ -196,6 +453,101 @@ const normalizeCustomerKey = (s) =>
         .toLowerCase()
         .replace(/[^a-z0-9]/g, '');
 
+/**
+ * Previous Quotes / Revisions: hide rows saved with an explicit empty signature list.
+ * NULL / missing column = legacy row → still show.
+ */
+function quoteRevisionShowsInSignedOnlyList(q) {
+    const raw = q?.DigitalSignaturesJson ?? q?.digitalSignaturesJson;
+    if (raw == null || raw === undefined) return true;
+    const s = typeof raw === 'string' ? raw.trim() : '';
+    if (s === '') return true;
+    try {
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!Array.isArray(arr)) return true;
+        if (arr.length === 0) return false;
+        return arr.some((st) => st && typeof st.imageDataUrl === 'string' && st.imageDataUrl.length > 10);
+    } catch {
+        return true;
+    }
+}
+
+/** Trailing "(L2)" on EnquiryCustomer / dropdown labels — ties external customer to a lead branch. */
+const extractTaggedLeadCodeFromCustomerLabel = (label) => {
+    const m = String(label || '').trim().match(/\(\s*(L\d+)\s*\)\s*$/i);
+    return m ? m[1].toUpperCase() : '';
+};
+
+/**
+ * Map selected customer (often typed without suffix) to L-code using enquiry customerOptions
+ * (e.g. option "Contratech S.P.C (L2)" + selection "Contratech S.P.C" → "L2").
+ */
+const resolveLeadCodeFromCustomerSelection = (selectedCustomer, customerOptions) => {
+    const tn = String(selectedCustomer || '').trim();
+    if (!tn) return '';
+    const fromDirect = extractTaggedLeadCodeFromCustomerLabel(tn);
+    if (fromDirect) return fromDirect;
+    const opts = Array.isArray(customerOptions) ? customerOptions : [];
+    const ntn = normalize(tn);
+    const ntk = normalizeCustomerKey(tn);
+    const hits = [];
+    for (const raw of opts) {
+        const o = String(raw || '').trim();
+        if (!o) continue;
+        const code = extractTaggedLeadCodeFromCustomerLabel(o);
+        if (!code) continue;
+        const base = o.replace(/\(\s*L\d+\s*\)\s*$/i, '').trim();
+        if (!base) continue;
+        if (
+            ntn === normalize(o) ||
+            ntk === normalizeCustomerKey(o) ||
+            ntn === normalize(base) ||
+            ntk === normalizeCustomerKey(base)
+        ) {
+            hits.push(code);
+        }
+    }
+    if (hits.length === 0) return '';
+    const uniq = [...new Set(hits)];
+    return uniq.length === 1 ? uniq[0] : '';
+};
+
+const extractLeadCodeFromPricingJob = (job) => {
+    if (!job) return '';
+    const c = String(job.leadJobCode || job.LeadJobCode || '').trim().toUpperCase();
+    const m1 = c.match(/^(L\d+)/);
+    if (m1) return m1[1];
+    const nm = String(job.itemName || job.ItemName || job.DivisionName || '').trim();
+    const m2 = nm.match(/^(L\d+)/i);
+    return m2 ? m2[1].toUpperCase() : '';
+};
+
+const walkUpToRootPricingJob = (jobs, start) => {
+    if (!start || !Array.isArray(jobs)) return null;
+    let cur = start;
+    for (let i = 0; i < 40 && cur; i++) {
+        const pid = cur.parentId ?? cur.ParentID;
+        if (!pid || String(pid) === '0' || pid === 0) return cur;
+        const next = jobs.find((j) => String(j.id ?? j.ItemID) === String(pid));
+        if (!next) return cur;
+        cur = next;
+    }
+    return cur;
+};
+
+const findPricingRootJobForLeadCode = (jobs, leadCodeUpper) => {
+    const m = String(leadCodeUpper || '').trim().toUpperCase().match(/^(L\d+)/);
+    if (!m || !Array.isArray(jobs)) return null;
+    const code = m[1];
+    return (
+        jobs.find((j) => {
+            const isRoot = !j.parentId || j.parentId === '0' || j.parentId === 0;
+            if (!isRoot) return false;
+            return extractLeadCodeFromPricingJob(j) === code;
+        }) || null
+    );
+};
+
 /** e.g. AAC/BMP/9-L1/1-R0 → l1 (branch segment often matches when LeadJob column is a display name). */
 const leadSegmentFromQuoteNumber = (q) => {
     const parts = String(q?.QuoteNumber || q?.quoteNumber || '').split('/');
@@ -237,6 +589,118 @@ const collapseSpacesLower = (s) =>
         .toLowerCase()
         .replace(/\s+/g, ' ')
         .trim();
+
+/**
+ * Customer options for Quote "To" before Creatable append of current value — same rules as quoteCustomerDropdownOptions
+ * (internal parent when lead ≠ own job, else EnquiryCustomer list). Used to auto-fill after search-row enquiry pick.
+ */
+function computeQuoteCustomerDropdownBaseOptions({
+    enquiryData,
+    pricingData,
+    jobsPool,
+    selectedLeadId,
+    currentUser,
+    isAdmin,
+}) {
+    if (!enquiryData) return { list: [], leadIsOwnJob: false, allJobNamesNormSet: new Set() };
+
+    const cleanJobLabel = (s) =>
+        String(s || '')
+            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+            .trim();
+
+    const pool = jobsPool || [];
+    const poolForEf = enquiryData.divisionsHierarchy?.length ? enquiryData.divisionsHierarchy : (pool.length > 0 ? pool : []);
+    const allJobNamesNormSet = new Set(poolForEf.map((n) => normalize(n.itemName || n.DivisionName || '')));
+
+    const ownjob = (currentUser?.Department || '').trim();
+    const ownjobLower = ownjob.toLowerCase();
+
+    const pricingJobs = pricingData?.jobs || [];
+
+    let selectedLeadJob = null;
+    if (selectedLeadId) {
+        selectedLeadJob =
+            poolForEf.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId)) ||
+            pricingJobs.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
+    }
+
+    if (!selectedLeadJob && enquiryData.leadJobPrefix && poolForEf.length) {
+        const pref = String(enquiryData.leadJobPrefix).trim();
+        const prefClean = cleanJobLabel(pref).toLowerCase();
+        const roots = poolForEf.filter((j) => !j.parentId || j.parentId === '0' || j.parentId === 0);
+        selectedLeadJob = roots.find((r) => {
+            const nm = String(r.itemName || r.DivisionName || r.ItemName || '').trim();
+            return normalize(nm) === normalize(pref) || cleanJobLabel(nm).toLowerCase() === prefClean;
+        });
+    }
+
+    const selectedLeadLeadJobName = (selectedLeadJob?.leadJobName ?? selectedLeadJob?.LeadJobName ?? '').trim();
+    const selectedLeadJobNameClean = cleanJobLabel(selectedLeadJob?.itemName ?? selectedLeadJob?.ItemName ?? '').toLowerCase();
+
+    const ownJobNodeInBranch = poolForEf.find((j) => {
+        if (!ownjob) return false;
+        const itemClean = cleanJobLabel(j.itemName || j.ItemName || '').toLowerCase();
+        const matchesName = itemClean === ownjobLower || itemClean.includes(ownjobLower) || ownjobLower.includes(itemClean);
+        if (!matchesName) return false;
+        if (selectedLeadLeadJobName) {
+            return (j.leadJobName ?? j.LeadJobName) === selectedLeadLeadJobName;
+        }
+        return true;
+    });
+
+    const enquiryCustomerOpts = (enquiryData.customerOptions || [])
+        .map((c) => String(c).trim())
+        .filter(Boolean)
+        .map((c) => ({ value: c, label: c, type: 'Linked' }));
+
+    const mergePricingExtrasForAdmin = () => {
+        const out = [...enquiryCustomerOpts];
+        const seen = new Set(out.map((o) => normalize(o.value)));
+        if (pricingData?.customers) {
+            pricingData.customers.forEach((c) => {
+                const k = normalize(c);
+                if (k && !seen.has(k)) {
+                    seen.add(k);
+                    out.push({ value: c, label: c, type: 'Internal Division' });
+                }
+            });
+        }
+        return out.filter((opt) => !allJobNamesNormSet.has(normalize(opt.value)));
+    };
+
+    let filteredOptions = [];
+
+    const leadIsOwnJob =
+        selectedLeadJobNameClean === ownjobLower ||
+        (ownjobLower.length > 2 &&
+            (selectedLeadJobNameClean.includes(ownjobLower) || ownjobLower.includes(selectedLeadJobNameClean)));
+
+    if (leadIsOwnJob) {
+        filteredOptions = isAdmin || pricingData?.access?.hasLeadAccess ? mergePricingExtrasForAdmin() : [...enquiryCustomerOpts];
+    } else {
+        let parentJobName = '';
+        if (ownJobNodeInBranch) {
+            const pid = ownJobNodeInBranch.parentId ?? ownJobNodeInBranch.ParentID;
+            if (pid && pid !== '0' && pid !== 0) {
+                const par = poolForEf.find((p) => String(p.id || p.ItemID || p.ID) === String(pid));
+                if (par) {
+                    parentJobName = cleanJobLabel(par.itemName || par.DivisionName || par.ItemName || '').trim();
+                }
+            }
+        }
+
+        if (parentJobName) {
+            filteredOptions = [{ value: parentJobName, label: parentJobName, type: 'Internal Division' }];
+        } else if (isAdmin || pricingData?.access?.hasLeadAccess) {
+            filteredOptions = mergePricingExtrasForAdmin();
+        } else {
+            filteredOptions = [...enquiryCustomerOpts];
+        }
+    }
+
+    return { list: filteredOptions, leadIsOwnJob, allJobNamesNormSet };
+}
 
 /** Encode each path segment so spaces / `#` / `?` in filenames (e.g. `AAC Logo.png`) load correctly via `/uploads`. */
 function encodeAppStaticPath(pathFromRoot) {
@@ -402,7 +866,13 @@ const leadJobChoiceFingerprint = (optionVal) => {
  * clean names ("Civil Project") or L-codes only. Mismatched controlled <select> values confuse
  * the DOM and can fire onChange — which was wiping the customer via handleCustomerChange(null).
  */
-const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs, leadJobPrefix) => {
+const resolveLeadJobSelectValue = (
+    visibleLeadJobs,
+    selectedLeadId,
+    pricingJobs,
+    leadJobPrefix,
+    divisionsHierarchy
+) => {
     const list = visibleLeadJobs || [];
     if (list.length === 0) return '';
     const normFull = (x) => String(x || '').trim().toLowerCase();
@@ -412,14 +882,24 @@ const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs,
         const found = pricingJobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
         if (found) {
             const name = String(found.itemName || found.DivisionName || found.ItemName || '');
-            const hit = list.find(
+            const matches = list.filter(
                 (v) =>
                     normFull(v) === normFull(name) ||
                     normClean(v) === normClean(name) ||
                     normFull(v).endsWith(`- ${normClean(name)}`) ||
                     normFull(name).endsWith(normClean(v))
             );
-            if (hit) return hit;
+            if (matches.length === 1) return matches[0];
+            if (matches.length > 1) {
+                const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, normClean(name));
+                const wantM = hNode && String(hNode.leadJobCode || hNode.LeadJobCode || '').match(/^(l\d+)/i);
+                if (wantM) {
+                    const pref = wantM[1].toLowerCase();
+                    const byL = matches.find((v) => normFull(v).startsWith(pref));
+                    if (byL) return byL;
+                }
+                return matches[0];
+            }
         }
     }
 
@@ -441,6 +921,122 @@ const resolveLeadJobSelectValue = (visibleLeadJobs, selectedLeadId, pricingJobs,
     }
     return '';
 };
+
+const stripLeadForQuoteLead = (s) => String(s || '').replace(/^L\d+\s*-\s*/i, '').trim();
+
+/** Pricing roots whose label matches the lead dropdown value (with or without "L# - " prefix). */
+function pricingRootsMatchingLeadVal(val, pricingJobs) {
+    const jobs = Array.isArray(pricingJobs) ? pricingJobs : [];
+    const raw = String(val || '').trim();
+    if (!raw) return [];
+    const valClean = stripLeadForQuoteLead(raw).toLowerCase();
+    const rawLow = raw.toLowerCase();
+    return jobs.filter((j) => {
+        const pid = j.parentId ?? j.ParentID;
+        const isRoot = !pid || pid === '0' || pid === 0 || pid === '0';
+        if (!isRoot) return false;
+        const nm = String(j.itemName || j.DivisionName || j.ItemName || '').trim();
+        const nmLow = nm.toLowerCase();
+        return nm === raw || nmLow === rawLow || stripLeadForQuoteLead(nm).toLowerCase() === valClean;
+    });
+}
+
+/**
+ * When ItemName repeats (subjob under L1 vs own lead L2), prefer the hierarchy root where
+ * stripped LeadJobName === stripped ItemName (EnquiryFor self-lead row).
+ */
+function hierarchyRootSelfLeadForCleanName(divisionsHierarchy, cleanLower) {
+    const h = Array.isArray(divisionsHierarchy) ? divisionsHierarchy : [];
+    const roots = h.filter((d) => {
+        const pid = d.parentId ?? d.ParentID;
+        const isRoot = !pid || pid === '0' || pid === 0;
+        if (!isRoot) return false;
+        const raw = String(d.itemName || d.DivisionName || '').trim();
+        return stripLeadForQuoteLead(raw).toLowerCase() === cleanLower;
+    });
+    if (roots.length <= 1) return roots[0] || null;
+    return (
+        roots.find((d) => {
+            const item = stripLeadForQuoteLead(String(d.itemName || d.DivisionName || '')).toLowerCase();
+            const lj = stripLeadForQuoteLead(String(d.leadJobName ?? d.LeadJobName ?? '')).toLowerCase();
+            return item && lj && item === lj;
+        }) || roots[0]
+    );
+}
+
+function extractLCodeUpperFromJobOrNode(jobOrNode) {
+    if (!jobOrNode) return '';
+    const c = String(jobOrNode.leadJobCode || jobOrNode.LeadJobCode || '').trim();
+    const m1 = c.match(/^(L\d+)/i);
+    if (m1) return m1[1].toUpperCase();
+    const nm = String(jobOrNode.itemName || jobOrNode.ItemName || jobOrNode.DivisionName || '').trim();
+    const m2 = nm.match(/^(L\d+)/i);
+    return m2 ? m2[1].toUpperCase() : '';
+}
+
+/** Pick the EnquiryFor / pricing root row for the lead dropdown (handles duplicate clean names). */
+function resolvePricingRootForLeadSelect(val, pricingJobs, divisionsHierarchy) {
+    const raw = String(val || '').trim();
+    if (!raw) return null;
+    const explicit = raw.match(/^(L\d+)/i);
+    const matches = pricingRootsMatchingLeadVal(raw, pricingJobs);
+    if (explicit && matches.length) {
+        const want = explicit[1].toUpperCase();
+        const byCode = matches.find((j) =>
+            String(j.leadJobCode || j.LeadJobCode || '')
+                .trim()
+                .toUpperCase()
+                .startsWith(want)
+        );
+        if (byCode) return byCode;
+    }
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+        const selfLead = matches.find((j) => {
+            const item = stripLeadForQuoteLead(String(j.itemName || j.ItemName || '')).toLowerCase();
+            const lj = stripLeadForQuoteLead(String(j.leadJobName || j.LeadJobName || '')).toLowerCase();
+            return item && lj && item === lj;
+        });
+        return selfLead || matches[0];
+    }
+    const valClean = stripLeadForQuoteLead(raw).toLowerCase();
+    const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, valClean);
+    if (!hNode) return null;
+    const hid = hNode.id ?? hNode.ItemID;
+    const jobs = Array.isArray(pricingJobs) ? pricingJobs : [];
+    const hit = hid != null && jobs.find((j) => String(j.id || j.ItemID) === String(hid));
+    return hit || hNode;
+}
+
+function resolveQuoteLeadCodePill({ selectedLeadId, selectedValue, pricingJobs, divisionsHierarchy }) {
+    const sv = String(selectedValue || '').trim();
+    const m0 = sv.match(/^(L\d+)/i);
+    if (m0) return m0[1].toUpperCase();
+    const rootPick = resolvePricingRootForLeadSelect(sv, pricingJobs, divisionsHierarchy);
+    let code = extractLCodeUpperFromJobOrNode(rootPick);
+    if (code) return code;
+    const jobs = Array.isArray(pricingJobs) ? pricingJobs : [];
+    if (selectedLeadId && jobs.length) {
+        const node = jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+        if (node) {
+            const pid = node.parentId ?? node.ParentID;
+            const isRoot = !pid || pid === '0' || pid === 0;
+            if (isRoot) {
+                code = extractLCodeUpperFromJobOrNode(node);
+                if (code) return code;
+            } else {
+                const subClean = stripLeadForQuoteLead(String(node.itemName || node.ItemName || '')).toLowerCase();
+                const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, subClean);
+                if (hNode) {
+                    const hc = String(hNode.leadJobCode || hNode.LeadJobCode || '').trim();
+                    const m1 = hc.match(/^(L\d+)/i);
+                    if (m1) return m1[1].toUpperCase();
+                }
+            }
+        }
+    }
+    return '';
+}
 
 /**
  * Canonical LeadJob for EnquiryQuotes + scoped GET: persist the root **lead job name** (EnquiryFor.LeadJobName
@@ -489,23 +1085,31 @@ function resolveRootLeadJobLabelForQuotes(jobs, selectedLeadId, enquiryLeadPrefi
 }
 
 /**
- * Same ToName string persisted on EnquiryQuotes and used in GET /by-enquiry filters (must match getQuotePayload).
+ * EnquiryQuotes.ToName for GET /by-enquiry + save payload (must match getQuotePayload).
+ * - First tab (own job): ToName = customer name dropdown (external or internal recipient).
+ * - Direct subjob tab (not first): ToName = first tab’s own-job label (EnquiryFor ItemName / tab root), not the dropdown.
  */
+function firstTabOwnJobDisplayNameForQuoteTuple(tabs, jobPool) {
+    const first = tabs && tabs[0];
+    if (!first) return '';
+    const pool = Array.isArray(jobPool) && jobPool.length ? jobPool : [];
+    if (first.realId && pool.length) {
+        const node = pool.find((j) => String(j.id || j.ItemID || j.ID) === String(first.realId));
+        const nm = (node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
+        if (nm) return stripQuoteJobPrefix(nm).trim() || nm;
+    }
+    return stripQuoteJobPrefix(String(first.label || first.name || '')).trim() || String(first.label || first.name || '').trim();
+}
+
 function resolveQuoteToNameForDbTuple(calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, jobPool) {
     const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
-    if (!tabs || tabs.length < 2) return (toName || '').trim();
-    const tn = (toName || '').trim();
-    const key = collapseSpacesLower(stripQuoteJobPrefix(tn));
-    const pool = Array.isArray(jobPool) && jobPool.length ? jobPool : [];
-    const recipientIsInternalJobName = pool.some((j) => {
-        const jn = collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || ''));
-        return jn === key && jn.length > 0;
-    });
-    if (!recipientIsInternalJobName) return tn;
-    const firstId = String(tabs[0]?.id);
-    if (String(activeQuoteTab) === firstId) return tn;
-    const parentLabel = stripQuoteJobPrefix(tabs[0]?.label || tabs[0]?.name || '').trim();
-    return parentLabel || tn;
+    if (!tabs || !tabs.length) return (toName || '').trim();
+    const firstId = String(tabs[0]?.id ?? '');
+    const isFirstTab = String(activeQuoteTab) === firstId;
+    if (tabs.length < 2 || isFirstTab) {
+        return (toName || '').trim();
+    }
+    return firstTabOwnJobDisplayNameForQuoteTuple(tabs, jobPool) || (toName || '').trim();
 }
 
 const normalizeName = normalize;
@@ -607,6 +1211,16 @@ const quoteRowId = (q) => {
     return id;
 };
 
+/** True when form quoteId + Quote Ref already match this row (avoids skipping loadQuote when registry has id but empty ref → Draft). */
+const isFormSyncedToQuoteRow = (row, formQuoteId, formQuoteNumber) => {
+    const rid = quoteRowId(row);
+    if (rid == null || String(rid) !== String(formQuoteId ?? '')) return false;
+    const rowQn = String(row?.QuoteNumber || row?.quoteNumber || '').trim();
+    const curQn = String(formQuoteNumber ?? '').trim();
+    if (!rowQn) return curQn === '';
+    return curQn === rowQn;
+};
+
 /**
  * When multiple job tabs exist, division heuristics must use the ACTIVE tab's job (e.g. BMS subjob),
  * not selectedLeadId (often the parent HVAC lead) — otherwise HVP quotes match the wrong tab.
@@ -691,7 +1305,7 @@ const tableStyles = `
     .clause-content table {
         width: 100% !important;
         border-collapse: collapse !important;
-        margin-bottom: 16px !important;
+        margin-bottom: 8px !important;
         font-size: 12px !important;
         page-break-inside: auto !important;
     }
@@ -699,7 +1313,7 @@ const tableStyles = `
         page-break-inside: avoid !important;
     }
     .clause-content table th, .clause-content table td {
-        border: 1px solid #cbd5e1 !important;
+        border: 1px solid #64748b !important;
         padding: 6px 8px !important;
         text-align: left !important;
     }
@@ -710,19 +1324,30 @@ const tableStyles = `
     .clause-content {
         white-space: pre-wrap !important;
         word-wrap: break-word !important;
+        line-height: 1.6 !important;
     }
     .clause-content p {
-        margin-bottom: 8px !important;
+        margin: 0.4em 0 !important;
+        padding: 0 !important;
+        line-height: 1.6 !important;
         white-space: normal !important;
+    }
+    .clause-content p:first-child {
+        margin-top: 0 !important;
+    }
+    .clause-content p:last-child {
+        margin-bottom: 0 !important;
     }
     .clause-content ul, .clause-content ol {
-        margin-top: 4px !important;
-        margin-bottom: 12px !important;
+        margin-top: 0.35em !important;
+        margin-bottom: 0.65em !important;
         padding-left: 24px !important;
         white-space: normal !important;
+        line-height: 1.6 !important;
     }
     .clause-content li {
-        margin-bottom: 4px !important;
+        margin-bottom: 0.2em !important;
+        line-height: 1.6 !important;
         display: list-item !important;
         list-style-position: outside !important;
     }
@@ -731,6 +1356,45 @@ const tableStyles = `
     }
     .clause-content ol {
         list-style-type: decimal !important;
+    }
+    /* Footer: screen + print + PDF — column stack (default flex is row in some print UAs). */
+    .footer-section {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+    }
+    .quote-print-page-indicator {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        text-align: right !important;
+        box-sizing: border-box !important;
+    }
+    .footer-section > hr {
+        width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        box-sizing: border-box !important;
+    }
+    .quote-print-footer-wrap {
+        display: block !important;
+        width: 50% !important;
+        max-width: 50% !important;
+        margin-left: auto !important;
+        margin-right: 0 !important;
+        box-sizing: border-box !important;
+    }
+    .quote-print-footer-company {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        text-align: right !important;
+        box-sizing: border-box !important;
     }
 `;
 
@@ -755,12 +1419,14 @@ const QUOTE_CLAUSE_DEFINITIONS = [
 const packClauseIndicesByHeights = (heights, usablePx) => {
     if (!heights?.length) return [];
     const usable = Math.max(usablePx, 240);
+    /** Small tolerance only — large fudge caused packed sheets to exceed one printed page (footer jumped to next page). */
+    const packFudgePx = Math.min(32, Math.round(usable * 0.035));
     const pages = [];
     let cur = [];
     let sum = 0;
     for (let i = 0; i < heights.length; i++) {
         const h = Math.max(heights[i] || 0, 1);
-        if (cur.length > 0 && sum + h > usable) {
+        if (cur.length > 0 && sum + h > usable + packFudgePx) {
             pages.push(cur);
             cur = [];
             sum = 0;
@@ -781,18 +1447,19 @@ const packGlobalClauseSubset = (globalIndices, heights, usablePx) => {
 };
 
 /**
- * Pull leading clauses from page i onto page i-1 when they still fit (fixes
- * leftover vertical room from rounding / conservative chrome vs greedy pack).
+ * One pass: pull leading clauses from page i onto page i-1 when combined height
+ * still fits within cap (usable + slack — slack accounts for measure vs print).
  */
-const rebalanceClausePageGroups = (groups, heights, usablePx) => {
-    if (!groups || groups.length < 2) return groups;
-    const slackPx = 36;
-    const cap = Math.max(usablePx + slackPx, 280);
+const rebalanceClausePageGroupsOnce = (groups, heights, usablePx) => {
+    if (!groups?.length) return [];
+    const slackPx = Math.min(48, Math.round(usablePx * 0.055));
+    const cap = Math.max(usablePx + slackPx, 300);
     const hAt = (idx) => Math.max(heights[idx] || 0, 1);
     const out = groups.map((g) => [...g]);
+    if (out.length < 2) return out.filter((g) => g.length > 0);
     for (let pi = 1; pi < out.length; pi++) {
         let safety = 0;
-        while (out[pi].length && safety < heights.length + 4) {
+        while (out[pi].length && safety < heights.length + 8) {
             safety += 1;
             const moveIdx = out[pi][0];
             const prev = out[pi - 1];
@@ -803,6 +1470,20 @@ const rebalanceClausePageGroups = (groups, heights, usablePx) => {
                 break;
             }
         }
+    }
+    return out.filter((g) => g.length > 0);
+};
+
+/** Multi-pass rebalance so chains (e.g. pull clause 4 onto page 2, then 5 onto page 3) can settle. */
+const rebalanceClausePageGroups = (groups, heights, usablePx) => {
+    if (!groups || groups.length < 2) return groups;
+    let out = groups.map((g) => [...g]).filter((g) => g.length > 0);
+    if (out.length < 2) return out;
+    for (let pass = 0; pass < 6; pass++) {
+        const next = rebalanceClausePageGroupsOnce(out, heights, usablePx);
+        if (clausePageGroupsEqual(next, out)) break;
+        out = next;
+        if (out.length < 2) break;
     }
     return out.filter((g) => g.length > 0);
 };
@@ -843,6 +1524,8 @@ const QuoteForm = () => {
     const [showSuggestions, setShowSuggestions] = useState(false);
     const searchRef = useRef(null);
     const debounceRef = useRef(null);
+    /** Assigned each render after `handleClear` — lets toolbar Search reset the left panel without reordering declarations. */
+    const clearLeftPanelForToolbarSearchRef = useRef(null);
 
     // Enquiry and quote data
     const [enquiryData, setEnquiryData] = useState(null);
@@ -857,6 +1540,8 @@ const QuoteForm = () => {
     const [quoteScopedForPanel, setQuoteScopedForPanel] = useState([]);
     /** When equal to scopedQuotePanelFetchKey, the scoped GET has finished for that key (panel may be []). */
     const [scopedQuotesFetchSettledKey, setScopedQuotesFetchSettledKey] = useState(null);
+    /** Increment to re-run scoped GET so Previous Quotes shows new revisions without a full page reload. */
+    const [scopedQuotePanelRefreshNonce, setScopedQuotePanelRefreshNonce] = useState(0);
     const [selectedLeadId, setSelectedLeadId] = useState(null);
     /** Last lead <select> fingerprint — avoids clearing customer when the same lead is re-applied after re-render. */
     const leadChoiceFingerprintRef = useRef('');
@@ -864,6 +1549,19 @@ const QuoteForm = () => {
     const autoSelectCustomerAfterLeadChangeRef = useRef(false);
     /** When lead changes, keep quote id/number if auto-select picks the same customer again (avoids Quote Ref → Draft). */
     const preserveQuoteOnLeadChangeRef = useRef(null);
+    /** After choosing an enquiry from search/pending results: set selectedLeadId once pricing jobs are available. */
+    const quoteRowAutoSelectLeadRef = useRef(false);
+    /** Full first lead `<option value>` (e.g. "L1 - Civil") from enquiry divisions — pairs with quoteRowAutoSelectLeadRef. */
+    const quoteRowFirstLeadDivisionFullRef = useRef('');
+    /** While true, skip external-customer "(L#)" effect so search-row "first division lead" is not overwritten. */
+    const quoteRowDivisionLeadLockRef = useRef(false);
+    /** After row enquiry pick: fill "To" from the same list as the customer dropdown (not raw customerOptions[0]). */
+    const quoteRowSyncDropdownCustomerRef = useRef(false);
+    /** When set, customer sync waits until selectedLeadId is set so internal parent (e.g. HVAC Project) resolves correctly. */
+    const quoteRowAwaitingLeadForCustomerRef = useRef(false);
+    /** After hydrating a quote form draft, block auto-load of latest saved quote (would overwrite clauses / tab snapshot). */
+    const quoteDraftHydrateSkipAutoLoadUntilRef = useRef(0);
+    const formDraftMenuWrapRef = useRef(null);
     /** Latest commitQuoteDigitalStamps — saveQuote/handleRevise are declared above this callback in the file. */
     const commitQuoteDigitalStampsRef = useRef(null);
     const [saving, setSaving] = useState(false);
@@ -945,6 +1643,8 @@ const QuoteForm = () => {
     /** dataTransfer cannot hold large data URLs — stash payload for the duration of the drag. */
     const dragSignaturePayloadRef = useRef(null);
     const sigDragActiveRef = useRef(false);
+    /** After a toolbar signature drag, browsers may emit a click — skip running place/open in that case. */
+    const sigToolbarSuppressClickRef = useRef(false);
     const signatureLibraryEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
     /** Stored default only — used for click-to-place on page 1 (same as vault “Place on page” with default image). */
     const defaultSignatureImageUrl = React.useMemo(() => {
@@ -985,6 +1685,10 @@ const QuoteForm = () => {
         acceptance: defaultClauses.acceptance,
         billOfQuantity: defaultClauses.billOfQuantity,
     });
+    const clauseContentRef = useRef(clauseContent);
+    useLayoutEffect(() => {
+        clauseContentRef.current = clauseContent;
+    }, [clauseContent]);
 
     // Quote metadata
     const [quoteNumber, setQuoteNumber] = useState('');
@@ -1040,6 +1744,10 @@ const QuoteForm = () => {
 
     // Prepared By
     const [preparedBy, setPreparedBy] = useState('');
+    /** From last EnquiryQuotes row — drives "Contact:" next to Prepared By (email match beats wrong name collisions). */
+    const [loadedQuotePreparedByEmail, setLoadedQuotePreparedByEmail] = useState('');
+    /** Subjob tab: right-hand A4 preview header reads only from this EnquiryQuotes row, not left-panel state. */
+    const [loadedEnquiryQuoteRowForPreview, setLoadedEnquiryQuoteRowForPreview] = useState(null);
     const [preparedByOptions, setPreparedByOptions] = useState([]);
     const [signatoryOptions, setSignatoryOptions] = useState([]);
     // Pricing Data
@@ -1097,6 +1805,8 @@ const QuoteForm = () => {
     const [pendingQuotes, setPendingQuotes] = useState([]); // Pending List State
     const [quoteSearchResults, setQuoteSearchResults] = useState([]);
     const [quoteSearchLoading, setQuoteSearchLoading] = useState(false);
+    /** When true with an enquiry open, right panel shows pending/search list instead of quote preview (after Search click). */
+    const [showQuoteListSummaryOverQuote, setShowQuoteListSummaryOverQuote] = useState(false);
     const [pendingQuotesSortConfig, setPendingQuotesSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
 
     const quoteListDisplayRows = React.useMemo(
@@ -1114,6 +1824,8 @@ const QuoteForm = () => {
 
     const handleQuoteListSearch = useCallback(async () => {
         if (quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH) return;
+        setShowQuoteListSummaryOverQuote(true);
+        clearLeftPanelForToolbarSearchRef.current?.();
         const userEmail = currentUser?.EmailId || currentUser?.email || '';
         const q = quoteListSearchCriteria.trim();
         const df = (quoteListDateFrom || '').trim();
@@ -1146,6 +1858,7 @@ const QuoteForm = () => {
         setQuoteListDateTo('');
         setQuoteSearchResults([]);
         setQuoteListCategory(QUOTE_LIST_CATEGORY.PENDING);
+        setShowQuoteListSummaryOverQuote(false);
         refetchPendingQuotes();
     }, [refetchPendingQuotes]);
 
@@ -1164,6 +1877,8 @@ const QuoteForm = () => {
         setQuoteDate(new Date().toISOString().split('T')[0]);
         setValidityDays(30);
         setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+        setLoadedQuotePreparedByEmail('');
+        setLoadedEnquiryQuoteRowForPreview(null);
         setSignatory('');
         setSignatoryDesignation('');
         setSubject('');
@@ -1223,15 +1938,40 @@ const QuoteForm = () => {
         // 1. Save Current Tab State
         tabStateRegistry.current[activeQuoteTab] = {
             subject, quoteDate, validityDays, customerReference,
-            signatory, signatoryDesignation, preparedBy,
-            toName, toAddress, toPhone, toEmail, toAttention,
+            signatory, signatoryDesignation, preparedBy, preparedByEmail: loadedQuotePreparedByEmail,
+            toName, toAddress, toPhone, toEmail, toFax, toAttention,
             quoteTypeList, quoteEnquiryTypeSelect,
             clauseContent, clauses, customClauses, orderedClauses,
-            quoteId, quoteNumber
+            quoteId, quoteNumber, grandTotal,
         };
 
         // 2. Load or Reset New Tab State
         const saved = tabStateRegistry.current[newTabId];
+
+        let filteredForNewTab = [];
+        try {
+            filteredForNewTab = getFilteredQuotesForPreviousQuotesTab(newTabId) || [];
+        } catch {
+            filteredForNewTab = [];
+        }
+        const latestForTab =
+            filteredForNewTab.length > 0
+                ? [...filteredForNewTab].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0]
+                : null;
+        const savedQid =
+            saved?.quoteId != null && String(saved.quoteId).trim() !== '' ? String(saved.quoteId).trim() : '';
+        const savedRowBelongsToThisTab =
+            savedQid && filteredForNewTab.some((q) => String(quoteRowId(q) ?? '') === savedQid);
+
+        const destTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(newTabId));
+        if (destTabObj?.isSubJobTab && savedRowBelongsToThisTab && savedQid) {
+            const matchedRow = filteredForNewTab.find((q) => String(quoteRowId(q) ?? '') === savedQid);
+            setLoadedEnquiryQuoteRowForPreview(matchedRow || null);
+        } else if (!destTabObj?.isSubJobTab) {
+            setLoadedEnquiryQuoteRowForPreview(null);
+        } else {
+            setLoadedEnquiryQuoteRowForPreview(null);
+        }
 
         // Preserve current customer info to carry over
         const currentCustomer = {
@@ -1246,6 +1986,9 @@ const QuoteForm = () => {
             setSignatory(saved.signatory);
             setSignatoryDesignation(saved.signatoryDesignation);
             setPreparedBy(saved.preparedBy);
+            setLoadedQuotePreparedByEmail(
+                saved && typeof saved.preparedByEmail === 'string' ? saved.preparedByEmail : ''
+            );
 
             // Recipient (customer dropdown + To fields) is one global choice for this session, not per job tab.
             // Restoring saved.toName here made HVAC/BMS tab switches snap the dropdown to the other tab's old value.
@@ -1253,7 +1996,12 @@ const QuoteForm = () => {
             setToAddress(currentCustomer.toAddress);
             setToPhone(currentCustomer.toPhone);
             setToEmail(currentCustomer.toEmail);
-            setToAttention(currentCustomer.toAttention);
+            setToAttention(
+                savedRowBelongsToThisTab && saved && 'toAttention' in saved
+                    ? saved.toAttention
+                    : currentCustomer.toAttention
+            );
+            setToFax(String(saved.toFax != null && saved.toFax !== '' ? saved.toFax : toFax || ''));
             setQuoteTypeList(Array.isArray(saved.quoteTypeList) ? [...saved.quoteTypeList] : []);
             setQuoteEnquiryTypeSelect(saved.quoteEnquiryTypeSelect || '');
 
@@ -1261,9 +2009,18 @@ const QuoteForm = () => {
             setClauses(saved.clauses);
             setCustomClauses(saved.customClauses);
             setOrderedClauses(saved.orderedClauses);
-            // selectedJobs: global defaults from pricing summary effect (paired tabs), not per-tab snapshot
-            setQuoteId(saved.quoteId);
-            setQuoteNumber(saved.quoteNumber);
+            // Only restore Quote Ref if that row still belongs to this job tab's Previous Quotes list (avoids BMP ref on HVAC tab).
+            if (savedRowBelongsToThisTab) {
+                setQuoteId(saved.quoteId);
+                setQuoteNumber(saved.quoteNumber);
+            } else {
+                setQuoteId(null);
+                setQuoteNumber('');
+                setLoadedQuotePreparedByEmail('');
+            }
+            if (saved.grandTotal != null && saved.grandTotal !== '') {
+                setGrandTotal(Number(saved.grandTotal) || 0);
+            }
         } else {
             // Reset to defaults if fresh tab
             resetFormState();
@@ -1277,6 +2034,31 @@ const QuoteForm = () => {
         }
 
         setActiveQuoteTab(newTabId);
+
+        // When this tab has no valid saved Quote Ref for this branch, pick the latest row from Previous Quotes for preview.
+        // `restoredPersistedQuote` must require the saved id to appear in this tab's filtered list — otherwise we kept
+        // another tab's BMP ref while the HVAC tab was selected (wrong right-hand preview).
+        const restoredPersistedQuote =
+            savedRowBelongsToThisTab &&
+            !!saved &&
+            saved.quoteId != null &&
+            saved.quoteId !== '' &&
+            String(saved.quoteNumber || '').trim() !== '';
+        if (!restoredPersistedQuote && latestForTab) {
+            queueMicrotask(() => {
+                try {
+                    const latestId = quoteRowId(latestForTab);
+                    if (latestId == null) return;
+                    loadQuote(latestForTab, {
+                        forActiveQuoteTab: newTabId,
+                        preserveRecipient: true,
+                        skipPreparedSignatory: true,
+                    });
+                } catch (e) {
+                    console.warn('[handleTabChange] auto-select quote for preview', e);
+                }
+            });
+        }
     };
 
     const isDescendant = useCallback((childId, ancestorId, pool = null) => {
@@ -1312,6 +2094,464 @@ const QuoteForm = () => {
         'showBillOfQuantity', 'showSchedule', 'showWarranty', 'showResponsibilityMatrix', 'showTermsConditions', 'showAcceptance'
     ]);
 
+    const [quoteFormDraftList, setQuoteFormDraftList] = useState([]);
+    const [quoteFormDraftsLoading, setQuoteFormDraftsLoading] = useState(false);
+    const [quoteFormDraftsError, setQuoteFormDraftsError] = useState(null);
+    const [formDraftPanelOpen, setFormDraftPanelOpen] = useState(false);
+
+    const fetchQuoteFormDrafts = useCallback(async () => {
+        const em = normalizeDraftUserEmailForApi(currentUser?.EmailId || currentUser?.email || '');
+        if (!em) {
+            setQuoteFormDraftList([]);
+            setQuoteFormDraftsError(null);
+            return;
+        }
+        setQuoteFormDraftsLoading(true);
+        setQuoteFormDraftsError(null);
+        try {
+            const qs = new URLSearchParams({ userEmail: em }).toString();
+            const res = await fetch(`${API_BASE}/api/quotes/form-drafts?${qs}`, { cache: 'no-store' });
+            if (!res.ok) {
+                let msg = `Could not load drafts (HTTP ${res.status}).`;
+                try {
+                    const errBody = await res.json();
+                    msg = errBody.hint || errBody.error || errBody.details || msg;
+                } catch {
+                    /* ignore */
+                }
+                setQuoteFormDraftsError(msg);
+                setQuoteFormDraftList([]);
+                return;
+            }
+            const data = await res.json();
+            const rows = (Array.isArray(data) ? data : []).map((d) => ({
+                id: d.id ?? d.Id,
+                label: d.label ?? d.Label ?? '',
+                savedAtIso: d.savedAtIso ?? d.SavedAtIso ?? '',
+            }));
+            setQuoteFormDraftList(rows);
+        } catch (e) {
+            console.warn('[QuoteForm] form-drafts fetch', e);
+            setQuoteFormDraftsError('Could not load drafts (network error).');
+            setQuoteFormDraftList([]);
+        } finally {
+            setQuoteFormDraftsLoading(false);
+        }
+    }, [currentUser?.EmailId, currentUser?.email]);
+
+    useEffect(() => {
+        void fetchQuoteFormDrafts();
+    }, [fetchQuoteFormDrafts]);
+
+    useEffect(() => {
+        if (!formDraftPanelOpen) return undefined;
+        const onDocMouseDown = (e) => {
+            if (formDraftMenuWrapRef.current && !formDraftMenuWrapRef.current.contains(e.target)) {
+                setFormDraftPanelOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDocMouseDown);
+        return () => document.removeEventListener('mousedown', onDocMouseDown);
+    }, [formDraftPanelOpen]);
+
+    const markDraftHydrateSkipAutoLoad = () => {
+        const t = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        quoteDraftHydrateSkipAutoLoadUntilRef.current = t + 5000;
+    };
+
+    const clearDraftHydrateSkipAutoLoad = () => {
+        quoteDraftHydrateSkipAutoLoadUntilRef.current = 0;
+    };
+
+    const handleSaveQuoteFormDraft = async () => {
+        const emailRaw = (currentUser?.EmailId || currentUser?.email || '').trim();
+        if (!emailRaw) {
+            alert('Sign in with a user email to store drafts.');
+            return;
+        }
+        const email = normalizeDraftUserEmailForApi(emailRaw);
+
+        tabStateRegistry.current[activeQuoteTab] = {
+            subject,
+            quoteDate,
+            validityDays,
+            customerReference,
+            signatory,
+            signatoryDesignation,
+            preparedBy,
+            preparedByEmail: loadedQuotePreparedByEmail,
+            toName,
+            toAddress,
+            toPhone,
+            toEmail,
+            toFax,
+            toAttention,
+            quoteTypeList,
+            quoteEnquiryTypeSelect,
+            clauseContent,
+            clauses,
+            customClauses,
+            orderedClauses,
+            quoteId,
+            quoteNumber,
+            grandTotal,
+        };
+
+        let registryCopy;
+        try {
+            registryCopy = JSON.parse(JSON.stringify(tabStateRegistry.current));
+        } catch {
+            alert('Could not snapshot form state.');
+            return;
+        }
+
+        Object.keys(registryCopy).forEach((k) => {
+            const row = registryCopy[k];
+            if (row && typeof row === 'object') {
+                row.quoteId = null;
+                row.quoteNumber = '';
+            }
+        });
+
+        const requestNo = String(enquiryData?.enquiry?.RequestNo || '').trim() || String(searchTerm || '').trim();
+        const headerSnapshot = {
+            searchTerm: String(searchTerm || '').trim(),
+            requestNo,
+            leadJobPrefix: String(enquiryData?.leadJobPrefix || '').trim(),
+            selectedLeadId:
+                selectedLeadId != null && String(selectedLeadId).trim() !== '' ? String(selectedLeadId) : '',
+            toName: String(toName || '').trim(),
+        };
+        const labelEnq = requestNo || '—';
+
+        const label = `${labelEnq} · ${format(new Date(), 'dd-MMM-yyyy HH:mm')}`;
+
+        let formUiSnapshot = {};
+        try {
+            formUiSnapshot = {
+                toFax: String(toFax || ''),
+                grandTotal: Number(grandTotal) || 0,
+                expandedClause: expandedClause ?? null,
+                quoteCompanyName: String(quoteCompanyName || ''),
+                quoteLogo: typeof quoteLogo === 'string' || typeof quoteLogo === 'number' ? quoteLogo : null,
+                footerDetails: footerDetails ? JSON.parse(JSON.stringify(footerDetails)) : null,
+                companyProfiles: companyProfiles?.length ? JSON.parse(JSON.stringify(companyProfiles)) : [],
+                quoteAttachments: quoteAttachments?.length ? JSON.parse(JSON.stringify(quoteAttachments)) : [],
+                newClauseTitle: String(newClauseTitle || ''),
+                isAddingClause: Boolean(isAddingClause),
+                pricingSummary: pricingSummary?.length ? JSON.parse(JSON.stringify(pricingSummary)) : [],
+                hasUserPricing: Boolean(hasUserPricing),
+                printWithHeader: Boolean(printWithHeader),
+            };
+        } catch (e) {
+            console.warn('[QuoteForm] draft formUiSnapshot', e);
+            formUiSnapshot = {
+                toFax: String(toFax || ''),
+                grandTotal: Number(grandTotal) || 0,
+                hasUserPricing: Boolean(hasUserPricing),
+                printWithHeader: Boolean(printWithHeader),
+            };
+        }
+
+        const payload = {
+            version: 2,
+            activeQuoteTab,
+            registry: registryCopy,
+            selectedJobs: Array.isArray(selectedJobs) ? [...selectedJobs] : [],
+            quoteContextScope,
+            headerSnapshot,
+            formUiSnapshot,
+        };
+
+        let requestBody;
+        try {
+            requestBody = JSON.stringify({ userEmail: email, label, payload });
+        } catch (e) {
+            console.warn('[QuoteForm] draft JSON', e);
+            alert('Could not serialize the draft (remove unusual attachments and try again).');
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API_BASE}/api/quotes/form-drafts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: requestBody,
+            });
+            if (!res.ok) {
+                let detail = '';
+                try {
+                    const errBody = await res.json();
+                    detail = errBody.hint || errBody.error || errBody.details || '';
+                } catch {
+                    detail = await res.text();
+                }
+                console.warn('[QuoteForm] draft save', res.status, detail);
+                alert(
+                    res.status === 503
+                        ? 'Draft storage is not set up on the server yet.\n\nRun on the database machine:\nnode server/migrations/run_create_quote_form_drafts.js\n\nThen refresh SSMS → Tables — you should see dbo.QuoteFormDrafts.'
+                        : `Could not save draft on the server.${detail ? `\n\n${detail}` : ''}`
+                );
+                return;
+            }
+            const savedBody = await res.json().catch(() => ({}));
+            const newRow = {
+                id: savedBody.id,
+                label: savedBody.label || label,
+                savedAtIso: savedBody.savedAtIso || new Date().toISOString(),
+            };
+            if (newRow.id) {
+                setQuoteFormDraftList((prev) =>
+                    [newRow, ...prev.filter((p) => String(p.id) !== String(newRow.id))].slice(0, 40)
+                );
+            }
+            setQuoteFormDraftsError(null);
+            await fetchQuoteFormDrafts();
+        } catch (e) {
+            console.warn('[QuoteForm] draft save', e);
+            alert('Could not save draft (network or server error).');
+            return;
+        }
+
+        alert('Draft saved. Open “Load draft…” to restore it.');
+    };
+
+    const handleDeleteQuoteFormDraft = async (e, draftId) => {
+        e?.stopPropagation?.();
+        const id = String(draftId || '').trim();
+        if (!id) return;
+        if (!globalThis.confirm?.('Delete this draft? This cannot be undone.')) return;
+        const email = normalizeDraftUserEmailForApi(currentUser?.EmailId || currentUser?.email || '');
+        if (!email) return;
+        try {
+            const qs = new URLSearchParams({ userEmail: email }).toString();
+            const res = await fetch(`${API_BASE}/api/quotes/form-drafts/${encodeURIComponent(id)}?${qs}`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                let msg = 'Could not delete draft.';
+                try {
+                    const errBody = await res.json();
+                    msg = errBody.error || msg;
+                } catch {
+                    /* ignore */
+                }
+                alert(msg);
+                return;
+            }
+            await fetchQuoteFormDrafts();
+        } catch (err) {
+            console.warn('[QuoteForm] draft delete', err);
+            alert('Could not delete draft.');
+        }
+    };
+
+    const applyDraftRegistryToUi = (registry, atIn) => {
+        let at = atIn;
+        const keys = Object.keys(registry || {});
+        if (!keys.includes(String(at))) {
+            at = keys[0] || activeQuoteTab;
+        }
+
+        let registryCopy;
+        try {
+            registryCopy = JSON.parse(JSON.stringify(registry));
+        } catch {
+            return;
+        }
+
+        tabStateRegistry.current = registryCopy;
+        setActiveQuoteTab(at);
+
+        const saved = tabStateRegistry.current[at];
+        if (saved && typeof saved === 'object') {
+            setSubject(saved.subject || '');
+            setQuoteDate(saved.quoteDate || new Date().toISOString().split('T')[0]);
+            setValidityDays(typeof saved.validityDays === 'number' ? saved.validityDays : 30);
+            setCustomerReference(saved.customerReference || '');
+            setSignatory(saved.signatory || '');
+            setSignatoryDesignation(saved.signatoryDesignation || '');
+            setPreparedBy(
+                (saved.preparedBy || '').trim() || (currentUser?.FullName || currentUser?.name || '').trim()
+            );
+            setLoadedQuotePreparedByEmail(
+                typeof saved.preparedByEmail === 'string' ? saved.preparedByEmail : ''
+            );
+            setLoadedEnquiryQuoteRowForPreview(null);
+            setToName(saved.toName || '');
+            setToAddress(saved.toAddress || '');
+            setToPhone(saved.toPhone || '');
+            setToEmail(saved.toEmail || '');
+            setToFax(saved.toFax || '');
+            setToAttention(saved.toAttention || '');
+            setQuoteTypeList(Array.isArray(saved.quoteTypeList) ? [...saved.quoteTypeList] : []);
+            setQuoteEnquiryTypeSelect(saved.quoteEnquiryTypeSelect || '');
+            setClauseContent(
+                saved.clauseContent && typeof saved.clauseContent === 'object'
+                    ? { ...defaultClauses, ...saved.clauseContent }
+                    : { ...defaultClauses }
+            );
+            setClauses(
+                saved.clauses && typeof saved.clauses === 'object'
+                    ? {
+                          showScopeOfWork: true,
+                          showBasisOfOffer: true,
+                          showExclusions: true,
+                          showPricingTerms: true,
+                          showSchedule: true,
+                          showWarranty: true,
+                          showResponsibilityMatrix: true,
+                          showTermsConditions: true,
+                          showAcceptance: true,
+                          showBillOfQuantity: true,
+                          ...saved.clauses,
+                      }
+                    : {
+                          showScopeOfWork: true,
+                          showBasisOfOffer: true,
+                          showExclusions: true,
+                          showPricingTerms: true,
+                          showSchedule: true,
+                          showWarranty: true,
+                          showResponsibilityMatrix: true,
+                          showTermsConditions: true,
+                          showAcceptance: true,
+                          showBillOfQuantity: true,
+                      }
+            );
+            setCustomClauses(Array.isArray(saved.customClauses) ? [...saved.customClauses] : []);
+            setOrderedClauses(
+                Array.isArray(saved.orderedClauses) && saved.orderedClauses.length > 0
+                    ? [...saved.orderedClauses]
+                    : [
+                          'showScopeOfWork',
+                          'showBasisOfOffer',
+                          'showExclusions',
+                          'showPricingTerms',
+                          'showBillOfQuantity',
+                          'showSchedule',
+                          'showWarranty',
+                          'showResponsibilityMatrix',
+                          'showTermsConditions',
+                          'showAcceptance',
+                      ]
+            );
+            setQuoteId(null);
+            setQuoteNumber('');
+            if (saved.grandTotal != null && saved.grandTotal !== '') {
+                setGrandTotal(Number(saved.grandTotal) || 0);
+            }
+        }
+    };
+
+    const applyFormUiSnapshotFromDraft = (snap) => {
+        if (!snap || typeof snap !== 'object') return;
+        try {
+            if (snap.toFax !== undefined) setToFax(String(snap.toFax ?? ''));
+            if (snap.grandTotal != null) setGrandTotal(Number(snap.grandTotal) || 0);
+            if ('expandedClause' in snap) setExpandedClause(snap.expandedClause ?? null);
+            if (snap.quoteCompanyName != null) setQuoteCompanyName(String(snap.quoteCompanyName));
+            if ('quoteLogo' in snap) setQuoteLogo(snap.quoteLogo ?? null);
+            if ('footerDetails' in snap) setFooterDetails(snap.footerDetails ?? null);
+            if (Array.isArray(snap.companyProfiles)) setCompanyProfiles(snap.companyProfiles);
+            if (Array.isArray(snap.quoteAttachments)) setQuoteAttachments(snap.quoteAttachments);
+            if (snap.newClauseTitle !== undefined) setNewClauseTitle(String(snap.newClauseTitle ?? ''));
+            if (typeof snap.isAddingClause === 'boolean') setIsAddingClause(snap.isAddingClause);
+            if (Array.isArray(snap.pricingSummary)) setPricingSummary(snap.pricingSummary);
+            if (typeof snap.hasUserPricing === 'boolean') setHasUserPricing(snap.hasUserPricing);
+            if (typeof snap.printWithHeader === 'boolean') setPrintWithHeader(snap.printWithHeader);
+        } catch (e) {
+            console.warn('[QuoteForm] applyFormUiSnapshotFromDraft', e);
+        }
+    };
+
+    const handleSelectQuoteFormDraft = async (draftId) => {
+        const id = String(draftId || '').trim();
+        if (!id) return;
+        const email = normalizeDraftUserEmailForApi(currentUser?.EmailId || currentUser?.email || '');
+        if (!email) {
+            alert('Sign in to load drafts.');
+            return;
+        }
+
+        let registryBackup = {};
+        try {
+            registryBackup = JSON.parse(JSON.stringify(tabStateRegistry.current));
+        } catch {
+            registryBackup = {};
+        }
+
+        let entry;
+        try {
+            const qs = new URLSearchParams({ userEmail: email }).toString();
+            const res = await fetch(`${API_BASE}/api/quotes/form-drafts/${encodeURIComponent(id)}?${qs}`, {
+                cache: 'no-store',
+            });
+            if (!res.ok) {
+                alert(res.status === 404 ? 'Draft not found.' : 'Could not load draft from the server.');
+                return;
+            }
+            entry = await res.json();
+        } catch (e) {
+            console.warn('[QuoteForm] draft fetch', e);
+            alert('Could not load draft from the server.');
+            return;
+        }
+
+        if (!entry?.payload?.registry) {
+            alert('This draft has no saved form data.');
+            return;
+        }
+
+        markDraftHydrateSkipAutoLoad();
+
+        const header = entry.payload.headerSnapshot || {};
+        const rn = String(header.requestNo || header.searchTerm || '').trim();
+        const { registry, selectedJobs: sj, quoteContextScope: qcs } = entry.payload;
+        const at = entry.payload.activeQuoteTab;
+
+        if (rn) {
+            let ok = false;
+            try {
+                ok = await handleSelectEnquiry({ RequestNo: rn, ProjectName: '' });
+            } catch (e) {
+                console.warn('[QuoteForm] draft load enquiry', e);
+            }
+            if (!ok) {
+                clearDraftHydrateSkipAutoLoad();
+                tabStateRegistry.current = registryBackup;
+                alert('Could not load enquiry for this draft. Check the enquiry number and try again.');
+                return;
+            }
+            const lp = String(header.leadJobPrefix || '').trim();
+            if (lp) {
+                setEnquiryData((prev) => (prev?.enquiry ? { ...prev, leadJobPrefix: lp } : prev));
+            }
+        }
+
+        applyDraftRegistryToUi(registry, at);
+
+        if (Array.isArray(sj)) setSelectedJobs([...sj]);
+        if (qcs !== undefined) setQuoteContextScope(qcs);
+
+        const searchDisplay = String(header.searchTerm || header.requestNo || rn || '').trim();
+        if (searchDisplay) setSearchTerm(searchDisplay);
+        const sid = header.selectedLeadId;
+        if (sid != null && String(sid).trim() !== '') {
+            const n = Number(sid);
+            setSelectedLeadId(Number.isFinite(n) && String(n) === String(sid).trim() ? n : sid);
+        } else if (!rn) {
+            setSelectedLeadId(null);
+        }
+        if (String(header.toName || '').trim()) {
+            setToName(String(header.toName).trim());
+        }
+
+        applyFormUiSnapshotFromDraft(entry.payload.formUiSnapshot);
+
+        setQuoteDigitalStamps([]);
+    };
+
     const quotePreviewLayoutRef = useRef(null);
     const clauseMeasureHostRef = useRef(null);
     const lastClausePackSigRef = useRef('');
@@ -1338,6 +2578,23 @@ const QuoteForm = () => {
             })
             .filter((c) => c && c.isChecked);
     }, [orderedClauses, clauses, customClauses, clauseContent]);
+
+    /** Checked-only serial for the left clause list (updates when order changes). */
+    const clauseSidebarSerialByIndex = React.useMemo(() => {
+        const arr = new Array(orderedClauses.length).fill(0);
+        let n = 0;
+        orderedClauses.forEach((id, i) => {
+            const isCustom = String(id).startsWith('custom_');
+            const checked = isCustom
+                ? Boolean(customClauses.find((c) => c.id === id)?.isChecked)
+                : Boolean(clauses[id]);
+            if (checked) {
+                n += 1;
+                arr[i] = n;
+            }
+        });
+        return arr;
+    }, [orderedClauses, clauses, customClauses]);
 
     /**
      * Stable key for clause packing — must NOT include pricingTerms body length: calculateSummary
@@ -1384,7 +2641,12 @@ const QuoteForm = () => {
         const measureHeights = () =>
             activeClausesList.map((_, i) => {
                 const n = host.querySelector(`[data-clause-measure-index="${i}"]`);
-                return n ? Math.round(n.getBoundingClientRect().height) : 0;
+                if (!n) return 0;
+                const rect = n.getBoundingClientRect();
+                const cs = typeof window !== 'undefined' ? window.getComputedStyle(n) : null;
+                const marginY =
+                    (cs ? parseFloat(cs.marginTop) || 0 : 0) + (cs ? parseFloat(cs.marginBottom) || 0 : 0);
+                return Math.round(rect.height + marginY);
             });
 
         const applyPack = () => {
@@ -1398,9 +2660,14 @@ const QuoteForm = () => {
                 return;
             }
             const sheetInnerMm = 297 - 15 * 2;
-            /** Sheet 2+ chrome (continuation header); added +15mm safety buffer to prevent PDF rendering overflow/overlap. */
-            const continuationChromeMm = 100 + 15; // Extremely safe buffer for vertical drift
-            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 150));
+            /**
+             * Sheet 2+ chrome (logo row + footer + print margins). Extra mm → shorter clause stacks per sheet
+             * so the browser is less likely to split one `.quote-a4-sheet` across two printed pages.
+             * Min usable height must stay below (sheetInnerMm - chrome) or Math.max() clamps and ignores extra chrome.
+             */
+            /** Reserve for logo row + footer + margins; higher = shorter clause stacks = less print split inside one sheet. */
+            const continuationChromeMm = 96;
+            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 118));
 
             const pageOne = [];
             const remaining = activeClausesList.map((_, i) => i);
@@ -1702,7 +2969,7 @@ const QuoteForm = () => {
              * Scoped to the current lead branch when resolvedLeadJobId is set.
              */
             const findOwnJobNodeForLoggedInUser = () => {
-                const userEmailNorm = (currentUser?.EmailId || currentUser?.email || '')
+                const userEmailNorm = (currentUser?.email || currentUser?.EmailId || currentUser?.MailId || '')
                     .toLowerCase()
                     .replace(/@almcg\.com/g, '@almoayyedcg.com')
                     .trim();
@@ -1765,12 +3032,13 @@ const QuoteForm = () => {
 
             const attachJobBranding = (tab, node) => {
                 if (!node) return tab;
-                return {
+                    return {
                     ...tab,
                     companyLogo: tab.companyLogo || node.companyLogo || node.CompanyLogo,
                     companyName: tab.companyName || node.companyName || node.CompanyName,
                     departmentName: tab.departmentName || node.departmentName || node.DepartmentName,
                     divisionCode: tab.divisionCode || node.divisionCode || node.DivisionCode,
+                    departmentCode: tab.departmentCode || node.departmentCode || node.DepartmentCode || node.code,
                 };
             };
 
@@ -2035,6 +3303,13 @@ const QuoteForm = () => {
         [pricingSummary]
     );
 
+    /** Clause 4 sidebar: same auto-table as PDF body; shown outside Jodit (editor often does not reflect merged table HTML). */
+    const pricingTermsAutoTablePreviewHtml = React.useMemo(() => {
+        if (!pricingSummary?.length || !pricingData) return '';
+        const { tableHtml } = buildEmsAutoPricingTableHtml(pricingSummary, selectedJobs, pricingData, enquiryData);
+        return tableHtml;
+    }, [pricingSummary, selectedJobs, selectedJobsSig, pricingData, enquiryData?.leadJobPrefix, pricingStableSig]);
+
     /** Aligns with UI fallback when calculatedTabs is empty (e.g. lead job + internal customer only). */
     const effectiveQuoteTabs = React.useMemo(() => {
         if (calculatedTabs && calculatedTabs.length > 0) return calculatedTabs;
@@ -2060,21 +3335,12 @@ const QuoteForm = () => {
         return cd;
     }, [enquiryData?.companyDetails, calculatedTabs?.length]);
 
-    /** Document preview: under multi-job tabs, show active branch + same date tail as enquiry ProjectName when present. */
+    /** Document preview: project name from EnquiryMaster.ProjectName (API: enquiry.ProjectName / projectname). */
     const quotePreviewProjectName = React.useMemo(() => {
         const enq = enquiryData?.enquiry;
         if (!enq) return '';
-        const tabs = calculatedTabs || [];
-        const fallback = String(enq.ProjectName || '').trim();
-        if (!tabs.length || tabs.length <= 1) return fallback;
-        const tab = tabs.find((t) => String(t.id) === String(activeQuoteTab));
-        const tl = String(tab?.label || tab?.name || '').trim();
-        if (!tl) return fallback;
-        const dateM = fallback.match(/\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b/);
-        const datePart = dateM ? dateM[1] : '';
-        const base = stripQuoteJobPrefix(tl).trim() || tl;
-        return datePart ? `${base} ${datePart}` : base || fallback;
-    }, [enquiryData?.enquiry?.ProjectName, calculatedTabs, activeQuoteTab]);
+        return String(enq.ProjectName ?? enq.projectname ?? '').trim();
+    }, [enquiryData?.enquiry?.ProjectName, enquiryData?.enquiry?.projectname]);
 
     /** Preview-only subject line: keep custom text; normalize generic "Proposal for …" to active tab project label. */
     const quotePreviewSubject = React.useMemo(() => {
@@ -2222,116 +3488,15 @@ const QuoteForm = () => {
     const quoteCustomerDropdownOptions = React.useMemo(() => {
         if (!enquiryData) return [];
 
-        const cleanJobLabel = (s) =>
-            String(s || '')
-                .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
-                .trim();
-
-        const poolForEf = enquiryData.divisionsHierarchy?.length ? enquiryData.divisionsHierarchy : (jobsPool.length > 0 ? jobsPool : []);
-        const allJobNamesNormSet = new Set(poolForEf.map((n) => normalize(n.itemName || n.DivisionName || '')));
-
-        // Step 1: current user’s email ID to be taken from login page stored
-        // ownjob to be derived from the current user’s email ID’s department from Master_ConcernedSE table
-        // (currentUser.Department is authoritative from DB match in AuthContext)
-        const ownjob = (currentUser?.Department || '').trim();
-        const ownjobLower = ownjob.toLowerCase();
-
-        const pricingJobs = pricingData?.jobs || [];
-        
-        // Resolve Selected Lead Job
-        let selectedLeadJob = null;
-        if (selectedLeadId) {
-            selectedLeadJob =
-                poolForEf.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId)) ||
-                pricingJobs.find((j) => String(j.id || j.ItemID || j.ID) === String(selectedLeadId));
-        }
-
-        if (!selectedLeadJob && enquiryData.leadJobPrefix && poolForEf.length) {
-            const pref = String(enquiryData.leadJobPrefix).trim();
-            const prefClean = cleanJobLabel(pref).toLowerCase();
-            const roots = poolForEf.filter((j) => !j.parentId || j.parentId === '0' || j.parentId === 0);
-            selectedLeadJob = roots.find((r) => {
-                const nm = String(r.itemName || r.DivisionName || r.ItemName || '').trim();
-                return normalize(nm) === normalize(pref) || cleanJobLabel(nm).toLowerCase() === prefClean;
-            });
-        }
-
-        const selectedLeadLeadJobName = (selectedLeadJob?.leadJobName ?? selectedLeadJob?.LeadJobName ?? '').trim();
-        const selectedLeadJobNameClean = cleanJobLabel(selectedLeadJob?.itemName ?? selectedLeadJob?.ItemName ?? '').toLowerCase();
-
-        // Find own job node in the selected branch/hierarchy
-        const ownJobNodeInBranch = poolForEf.find((j) => {
-            if (!ownjob) return false;
-            // Strict match for job name vs department
-            const itemClean = cleanJobLabel(j.itemName || j.ItemName || '').toLowerCase();
-            const matchesName = itemClean === ownjobLower || itemClean.includes(ownjobLower) || ownjobLower.includes(itemClean);
-            if (!matchesName) return false;
-            
-            // Must belong to the same lead job branch if selected
-            if (selectedLeadLeadJobName) {
-                return (j.leadJobName ?? j.LeadJobName) === selectedLeadLeadJobName;
-            }
-            return true;
+        const { list, leadIsOwnJob, allJobNamesNormSet } = computeQuoteCustomerDropdownBaseOptions({
+            enquiryData,
+            pricingData,
+            jobsPool,
+            selectedLeadId,
+            currentUser,
+            isAdmin,
         });
-
-        const enquiryCustomerOpts = (enquiryData.customerOptions || [])
-            .map((c) => String(c).trim())
-            .filter(Boolean)
-            .map((c) => ({ value: c, label: c, type: 'Linked' }));
-
-        const mergePricingExtrasForAdmin = () => {
-            const out = [...enquiryCustomerOpts];
-            const seen = new Set(out.map((o) => normalize(o.value)));
-            if (pricingData?.customers) {
-                pricingData.customers.forEach((c) => {
-                    const k = normalize(c);
-                    if (k && !seen.has(k)) {
-                        seen.add(k);
-                        out.push({ value: c, label: c, type: 'Internal Division' });
-                    }
-                });
-            }
-            return out.filter((opt) => !allJobNamesNormSet.has(normalize(opt.value)));
-        };
-
-        // Step 2 logic:
-        let filteredOptions = [];
-
-        // Check if selected lead name is same as ownjob
-        const leadIsOwnJob = selectedLeadJobNameClean === ownjobLower || 
-                           (ownjobLower.length > 2 && (selectedLeadJobNameClean.includes(ownjobLower) || ownjobLower.includes(selectedLeadJobNameClean)));
-
-        if (leadIsOwnJob) {
-            // if same as ownjob -> find external customer name from EnquiryCustomer
-            filteredOptions = isAdmin || pricingData?.access?.hasLeadAccess ? mergePricingExtrasForAdmin() : [...enquiryCustomerOpts];
-        } else {
-            // if not same as ownjob -> find the parent job of ownjob for selected enquiry and leadjobname from Enquiryfor
-            let parentJobName = '';
-            if (ownJobNodeInBranch) {
-                const pid = ownJobNodeInBranch.parentId ?? ownJobNodeInBranch.ParentID;
-                if (pid && pid !== '0' && pid !== 0) {
-                    const par = poolForEf.find((p) => String(p.id || p.ItemID || p.ID) === String(pid));
-                    if (par) {
-                        parentJobName = cleanJobLabel(par.itemName || par.DivisionName || par.ItemName || '').trim();
-                    }
-                }
-            }
-
-            if (parentJobName) {
-                filteredOptions = [
-                    { value: parentJobName, label: parentJobName, type: 'Internal Division' }
-                ];
-            } else {
-                // Fallback for Admins or if ownjob is itself a root relative to the selection
-                if (isAdmin || pricingData?.access?.hasLeadAccess) {
-                    filteredOptions = mergePricingExtrasForAdmin();
-                } else {
-                    // If we can't resolve an internal parent division for this user/lead selection,
-                    // don't leave the dropdown empty—fall back to external customers linked to the enquiry.
-                    filteredOptions = [...enquiryCustomerOpts];
-                }
-            }
-        }
+        let filteredOptions = [...list];
 
         // Preserve current toName if it matches an option or is an external append allowed by role
         const t = (toName || '').trim();
@@ -2382,8 +3547,8 @@ const QuoteForm = () => {
      * Params for GET /api/quotes/by-enquiry/:requestNo — matches EnquiryQuotes columns:
      * - RequestNo = enquiry number (path param).
      * - LeadJob = root lead job **name** (LeadJobName / ItemName), same as persisted on save — not bare L-codes.
-     * - OwnJob = first tab job (or department) vs selected subjob tab, same as saved EnquiryQuotes.OwnJob.
-     * - ToName = same rules as getQuotePayload (external customer name; internal job-as-customer uses parent tab label).
+     * - OwnJob = first tab job (or department) on own tab; selected subjob tab’s job name when a direct subjob tab is active.
+     * - ToName = customer dropdown on first tab; on a direct subjob tab = first tab’s own-job name (not the dropdown).
      */
     const scopedEnquiryQuotesParams = React.useMemo(() => {
         const tabs =
@@ -2580,7 +3745,7 @@ const QuoteForm = () => {
                 }
 
                 return true;
-            });
+            }).filter(quoteRevisionShowsInSignedOnlyList);
         },
         [
             calculatedTabs,
@@ -2612,6 +3777,7 @@ const QuoteForm = () => {
             p.ownJobName ?? '',
             p.useDepartmentForOwnJob ? '1' : '0',
             em,
+            String(scopedQuotePanelRefreshNonce),
         ].join('\x1e');
     }, [
         scopedEnquiryQuotesParams?.leadJobName,
@@ -2620,6 +3786,7 @@ const QuoteForm = () => {
         scopedEnquiryQuotesParams?.useDepartmentForOwnJob,
         currentUser?.email,
         currentUser?.EmailId,
+        scopedQuotePanelRefreshNonce,
     ]);
 
     useEffect(() => {
@@ -2813,10 +3980,10 @@ const QuoteForm = () => {
             }
             return;
         }
-        const currentQuoteTabValid = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
-        if (!currentQuoteTabValid) {
-            console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
-            setActiveQuoteTab(calculatedTabs[0].id);
+            const currentQuoteTabValid = calculatedTabs.find(t => String(t.id) === String(activeQuoteTab));
+            if (!currentQuoteTabValid) {
+                console.log('[AutoRes] Fixing Active Quote Tab:', activeQuoteTab, '->', calculatedTabs[0].id);
+                setActiveQuoteTab(calculatedTabs[0].id);
         }
     }, [calculatedTabs, activeQuoteTab]);
 
@@ -2828,8 +3995,26 @@ const QuoteForm = () => {
         if (!activeTab) return;
 
         if (import.meta.env.DEV) {
-            console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
+                console.log('[QuoteForm] Syncing Logo/Details for Tab:', activeTab.label);
         }
+
+        const tabJobForLogo =
+            activeTab?.realId != null
+                ? jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(activeTab.realId))
+                : null;
+        const hierarchyLogoNode =
+            activeTab?.realId != null && Array.isArray(enquiryData?.divisionsHierarchy)
+                ? enquiryData.divisionsHierarchy.find(
+                      (d) => String(d.id || d.ItemID || d.ID) === String(activeTab.realId)
+                  )
+                : null;
+        const logoFromActiveJob =
+            (activeTab.companyLogo && String(activeTab.companyLogo).trim()) ||
+            tabJobForLogo?.companyLogo ||
+            tabJobForLogo?.CompanyLogo ||
+            hierarchyLogoNode?.companyLogo ||
+            hierarchyLogoNode?.CompanyLogo ||
+            null;
 
         const brandingRows = enquiryData?.enquiryForBrandingRows;
         if (Array.isArray(brandingRows) && brandingRows.length > 0) {
@@ -2846,7 +4031,8 @@ const QuoteForm = () => {
                     String(mefHit.companyName || '').trim() ||
                     String(mefHit.departmentName || '').trim() ||
                     String(activeTab.label || activeTab.name || '').trim();
-                const logo = mefHit.companyLogo || null;
+                const mefLogo = (mefHit.companyLogo && String(mefHit.companyLogo).trim()) || null;
+                const logo = mefLogo || logoFromActiveJob || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || null;
                 setQuoteLogo((prev) => (prev === logo ? prev : logo));
                 setQuoteCompanyName((prev) => (prev === displayName ? prev : displayName));
                 const nextFooter = {
@@ -2879,10 +4065,7 @@ const QuoteForm = () => {
         // defaults to personalProfile + "Almoayyed Air Conditioning" (tabs like `id: self` may lack isOwnJobTab flags).
         const tabContext = multiTab;
 
-        const jobNode =
-            activeTab?.realId != null
-                ? jobsPool.find((j) => String(j.id || j.ItemID || j.ID) === String(activeTab.realId))
-                : null;
+        const jobNode = tabJobForLogo;
 
         const profiles = enquiryData?.availableProfiles || [];
 
@@ -2975,7 +4158,12 @@ const QuoteForm = () => {
             divisionProfile = null;
         }
 
-        const jobLogo = jobNode?.companyLogo || jobNode?.CompanyLogo || null;
+        const jobLogo =
+            jobNode?.companyLogo ||
+            jobNode?.CompanyLogo ||
+            hierarchyLogoNode?.companyLogo ||
+            hierarchyLogoNode?.CompanyLogo ||
+            null;
         const jobComp =
             jobNode?.companyName ||
             jobNode?.CompanyName ||
@@ -2997,9 +4185,10 @@ const QuoteForm = () => {
             // Do not fall back to enquiryLogo / personalProfile here — they are often another division (e.g. HVAC AC while Civil/CIP tab is active).
             finalLogo =
                 divisionProfile?.logo ||
-                activeTab.companyLogo ||
+                logoFromActiveJob ||
                 jobLogo ||
                 (cdSafe?.logo ?? null) ||
+                (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) ||
                 null;
             finalCompanyName =
                 divisionProfile?.name ||
@@ -3029,8 +4218,8 @@ const QuoteForm = () => {
                 activeTab.departmentName
             );
             finalLogo = preferTabBranding
-                ? activeTab.companyLogo || enquiryData?.enquiryLogo || personalProfile?.logo || null
-                : personalProfile?.logo || activeTab.companyLogo || enquiryData?.enquiryLogo || null;
+                ? logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || personalProfile?.logo || null
+                : personalProfile?.logo || logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || null;
             finalCompanyName = preferTabBranding
                 ? activeTab.companyName ||
                   activeTab.departmentName ||
@@ -3050,18 +4239,18 @@ const QuoteForm = () => {
         }
 
         if (import.meta.env.DEV) {
-            console.log('[QuoteForm]   - Locked Company:', finalCompanyName);
+                console.log('[QuoteForm]   - Locked Company:', finalCompanyName);
         }
 
         setQuoteLogo((prev) => (prev === finalLogo ? prev : finalLogo));
         setQuoteCompanyName((prev) => (prev === finalCompanyName ? prev : finalCompanyName));
 
-        if (footerSource && (footerSource.address || footerSource.phone || footerSource.email)) {
+                if (footerSource && (footerSource.address || footerSource.phone || footerSource.email)) {
             const nextFooter = {
-                name: finalCompanyName,
-                address: footerSource.address,
-                phone: footerSource.phone,
-                fax: footerSource.fax,
+                        name: finalCompanyName,
+                        address: footerSource.address,
+                        phone: footerSource.phone,
+                        fax: footerSource.fax,
                 email: footerSource.email || footerSource.CommonMailIds,
             };
             setFooterDetails((prev) => {
@@ -3079,7 +4268,7 @@ const QuoteForm = () => {
             });
         } else if (personalProfile && !tabContext) {
             setFooterDetails((prev) => (prev === personalProfile ? prev : personalProfile));
-        } else {
+                } else {
             setFooterDetails((prev) => (prev == null ? prev : null));
         }
     }, [
@@ -3092,6 +4281,7 @@ const QuoteForm = () => {
         enquiryData?.companyDetails,
         enquiryData?.enquiryLogo,
         enquiryData?.enquiryCompanyName,
+        enquiryData?.divisionsHierarchy,
     ]);
 
 
@@ -3162,6 +4352,8 @@ const QuoteForm = () => {
     const lastAttentionResolvedForRef = useRef({ req: '', to: '', pricingSig: '' });
     useEffect(() => {
         if (!toName || !enquiryData) return;
+        // Loaded revision: attention comes from loadQuote(row). Do not replace with enquiry heuristics.
+        if (quoteId != null && String(quoteId).trim() !== '') return;
 
         const req = String(enquiryData?.enquiry?.RequestNo || '');
         const pricingSig = JSON.stringify(
@@ -3236,17 +4428,112 @@ const QuoteForm = () => {
         }
 
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [toName, enquiryData, pricingData?.jobs]); // toAttention intentionally excluded — see note above
+    }, [toName, enquiryData, pricingData?.jobs, quoteId]); // toAttention intentionally excluded — see note above
 
 
 
-    // Load Pricing Data when enquiry and customer are selected
+    // Load Pricing Data when enquiry and customer are selected (bootstrap with empty customer during row-pick sync)
     useEffect(() => {
-        if (enquiryData && toName && enquiryData.enquiry?.RequestNo) {
-            console.log('[useEffect] Loading pricing data for:', enquiryData.enquiry.RequestNo, 'Customer:', toName);
-            loadPricingData(enquiryData.enquiry.RequestNo, toName);
+        const req = enquiryData?.enquiry?.RequestNo;
+        if (!req) return;
+        const cx = (toName || '').trim();
+        if (cx) {
+            console.log('[useEffect] Loading pricing data for:', req, 'Customer:', cx);
+            loadPricingData(req, cx);
+        } else if (quoteRowSyncDropdownCustomerRef.current) {
+            console.log('[useEffect] Bootstrap pricing for row enquiry (empty customer):', req);
+            loadPricingData(req, '');
         }
     }, [enquiryData, toName]);
+
+    // Pick pricing root for lead dropdown after list-row enquiry load (searchTerm / pending click).
+    useEffect(() => {
+        if (!quoteRowAutoSelectLeadRef.current) return;
+        if (!pricingData?.jobs?.length || !enquiryData?.leadJobPrefix) return;
+
+        const ed = enquiryData;
+        const full = String(quoteRowFirstLeadDivisionFullRef.current || '').trim();
+        let jobObj = null;
+        if (full) {
+            jobObj = resolvePricingRootForLeadSelect(full, pricingData.jobs, ed.divisionsHierarchy);
+        }
+        if (!jobObj) {
+            const roots = (pricingData.jobs || []).filter(
+                (j) => !j.parentId || j.parentId === '0' || j.parentId === 0 || String(j.parentId) === '0'
+            );
+            const pNorm = String(ed.leadJobPrefix || '').trim().toUpperCase();
+            jobObj =
+                roots.find((j) => {
+                    const lc = String(j.leadJobCode || j.LeadJobCode || '').trim().toUpperCase();
+                    if (lc && (lc === pNorm || lc.startsWith(pNorm) || pNorm.startsWith(lc.slice(0, 3)))) return true;
+                    const m = String(j.itemName || j.ItemName || j.DivisionName || '').match(/^(L\d+)/i);
+                    return m && m[1].toUpperCase() === pNorm;
+                }) || null;
+        }
+        if (jobObj) {
+            const id = jobObj.id ?? jobObj.ItemID;
+            if (id != null && String(id).trim() !== '') {
+                setSelectedLeadId(id);
+            }
+        } else {
+            quoteRowDivisionLeadLockRef.current = false;
+            quoteRowAwaitingLeadForCustomerRef.current = false;
+        }
+        quoteRowAutoSelectLeadRef.current = false;
+        quoteRowFirstLeadDivisionFullRef.current = '';
+    }, [pricingData, enquiryData]);
+
+    // External customer row on EnquiryCustomer often carries "(L#)"; align lead dropdown + L pill with that branch.
+    useEffect(() => {
+        if (quoteRowDivisionLeadLockRef.current) return;
+        if (!enquiryData?.enquiry?.RequestNo || !pricingData?.jobs?.length) return;
+        const tn = (toName || '').trim();
+        if (!tn) return;
+        if (isQuoteInternalCustomer(enquiryData, pricingData.jobs, tn)) return;
+
+        const leadCode = resolveLeadCodeFromCustomerSelection(tn, enquiryData.customerOptions);
+        if (!leadCode) return;
+
+        const root = findPricingRootJobForLeadCode(pricingData.jobs, leadCode);
+        if (!root) return;
+
+        const nextId = root.id ?? root.ItemID;
+        if (nextId == null || String(nextId).trim() === '') return;
+
+        let activeRootCode = '';
+        if (selectedLeadId != null && String(selectedLeadId).trim() !== '') {
+            const node = pricingData.jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+            if (node) {
+                const r = walkUpToRootPricingJob(pricingData.jobs, node);
+                activeRootCode = extractLeadCodeFromPricingJob(r);
+            }
+        }
+
+        const prefix = String(enquiryData.leadJobPrefix || '').trim().toUpperCase();
+        const prefixAligned =
+            prefix === leadCode ||
+            prefix.startsWith(`${leadCode} `) ||
+            prefix.startsWith(`${leadCode}-`);
+
+        if (activeRootCode === leadCode && prefixAligned && String(selectedLeadId) === String(nextId)) {
+            return;
+        }
+
+        setSelectedLeadId(nextId);
+        setEnquiryData((prev) => {
+            if (!prev) return prev;
+            const p = String(prev.leadJobPrefix || '').trim().toUpperCase();
+            if (p === leadCode || p.startsWith(`${leadCode} `) || p.startsWith(`${leadCode}-`)) return prev;
+            return { ...prev, leadJobPrefix: leadCode };
+        });
+    }, [
+        enquiryData?.enquiry?.RequestNo,
+        enquiryData?.customerOptions,
+        enquiryData?.leadJobPrefix,
+        toName,
+        pricingData?.jobs,
+        selectedLeadId,
+    ]);
 
     const addCustomClause = () => {
         if (!newClauseTitle.trim()) return;
@@ -3456,6 +4743,8 @@ const QuoteForm = () => {
             return;
         }
 
+        quoteRowDivisionLeadLockRef.current = false;
+
         const preserve = preserveQuoteOnLeadChangeRef.current;
         const restoringSameCustomerAfterLead =
             preserve &&
@@ -3467,8 +4756,8 @@ const QuoteForm = () => {
 
         setToName(selectedName);
         if (!restoringSameCustomerAfterLead) {
-            setQuoteId(null); // Reset ID so auto-load can kick in for new customer
-            setQuoteDate(''); // Reset date to blank for new customer selection
+        setQuoteId(null); // Reset ID so auto-load can kick in for new customer
+        setQuoteDate(''); // Reset date to blank for new customer selection
             setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
             setSignatory('');
             setSignatoryDesignation('');
@@ -3546,22 +4835,22 @@ const QuoteForm = () => {
             if (Array.isArray(extList) && extList.length > 0) {
                 setToAttention(extList[0]);
             } else if (enquiryData?.customerContacts) {
-                if (enquiryData.customerContacts[selectedName]) {
-                    setToAttention(enquiryData.customerContacts[selectedName]);
-                    console.log('[handleCustomerChange] ✓ Found via exact match:', enquiryData.customerContacts[selectedName]);
+            if (enquiryData.customerContacts[selectedName]) {
+                setToAttention(enquiryData.customerContacts[selectedName]);
+                console.log('[handleCustomerChange] ✓ Found via exact match:', enquiryData.customerContacts[selectedName]);
                 } else {
-                    const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === targetNorm);
-                    if (match) {
-                        setToAttention(enquiryData.customerContacts[match]);
-                        console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
-                    } else {
-                        const fallback = enquiryData?.enquiry?.ReceivedFrom || '';
-                        setToAttention(fallback);
-                        console.log('[handleCustomerChange] ✗ Not found, using fallback:', fallback);
-                    }
+                const match = Object.keys(enquiryData.customerContacts).find(k => normalize(k) === targetNorm);
+                if (match) {
+                    setToAttention(enquiryData.customerContacts[match]);
+                    console.log('[handleCustomerChange] ✓ Found via fuzzy match:', enquiryData.customerContacts[match]);
+                } else {
+                    const fallback = enquiryData?.enquiry?.ReceivedFrom || '';
+                    setToAttention(fallback);
+                    console.log('[handleCustomerChange] ✗ Not found, using fallback:', fallback);
                 }
-            } else {
-                setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+            }
+        } else {
+            setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
             }
         } else {
             const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, selectedName);
@@ -3652,6 +4941,57 @@ const QuoteForm = () => {
         // Pricing reload is handled by the useEffect([enquiryData, toName]) below — avoids double
         // loadPricingData (handler + effect) and duplicate customer-filter runs / dropdown flicker.
     };
+
+    // Search/pending row enquiry pick: "To" = first entry in the same list as the customer dropdown (not EnquiryCustomer row order).
+    useEffect(() => {
+        if (!quoteRowSyncDropdownCustomerRef.current) return;
+        if (!enquiryData || !pricingData?.jobs?.length) return;
+        if (
+            quoteRowAwaitingLeadForCustomerRef.current &&
+            (selectedLeadId == null || String(selectedLeadId).trim() === '')
+        ) {
+            return;
+        }
+
+        const { list } = computeQuoteCustomerDropdownBaseOptions({
+            enquiryData,
+            pricingData,
+            jobsPool,
+            selectedLeadId,
+            currentUser,
+            isAdmin,
+        });
+        const first = list[0];
+        const fallback =
+            Array.isArray(enquiryData.customerOptions) && enquiryData.customerOptions.length > 0
+                ? String(enquiryData.customerOptions[0]).trim()
+                : String(enquiryData.enquiry?.CustomerName || '')
+                      .split(',')[0]
+                      .trim() || '';
+
+        if (!first?.value?.trim() && !fallback) {
+            quoteRowSyncDropdownCustomerRef.current = false;
+            quoteRowAwaitingLeadForCustomerRef.current = false;
+            return;
+        }
+
+        quoteRowSyncDropdownCustomerRef.current = false;
+        quoteRowAwaitingLeadForCustomerRef.current = false;
+
+        if (first?.value?.trim()) {
+            handleCustomerChange(
+                {
+                    value: first.value.trim(),
+                    label: first.label || first.value,
+                    type: first.type,
+                },
+                { leadJobAutoReselect: true }
+            );
+            return;
+        }
+        handleCustomerChange({ value: fallback, label: fallback }, { leadJobAutoReselect: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- handleCustomerChange is stable enough per render; avoid dep churn
+    }, [enquiryData, pricingData, selectedLeadId, currentUser, isAdmin, jobsPool]);
 
     // After changing lead job: re-apply the same customer when preserved (so scoped quote fetch matches saved ToName);
     // otherwise auto-pick the first customer from the newly filtered list.
@@ -3984,15 +5324,15 @@ const QuoteForm = () => {
         }
 
         if (import.meta.env.DEV) {
-            console.log('[calculateSummary] START');
-            console.log('[calculateSummary] Data:', data);
-            console.log('[calculateSummary] Active Customer:', activeCustomer);
-            console.log('[calculateSummary] Selected Jobs:', currentSelectedJobs);
-            console.log('[calculateSummary] activeJobs list:', activeJobs);
-            console.log('[calculateSummary] Access:', data?.access);
-            console.log('[calculateSummary] Override Scope:', overrideScope);
-            console.log('[calculateSummary] Options count:', data.options.length);
-            console.log('[calculateSummary] Options:', data.options);
+        console.log('[calculateSummary] START');
+        console.log('[calculateSummary] Data:', data);
+        console.log('[calculateSummary] Active Customer:', activeCustomer);
+        console.log('[calculateSummary] Selected Jobs:', currentSelectedJobs);
+        console.log('[calculateSummary] activeJobs list:', activeJobs);
+        console.log('[calculateSummary] Access:', data?.access);
+        console.log('[calculateSummary] Override Scope:', overrideScope);
+        console.log('[calculateSummary] Options count:', data.options.length);
+        console.log('[calculateSummary] Options:', data.options);
         }
 
         let includedOptionCount = 0;
@@ -4123,7 +5463,7 @@ const QuoteForm = () => {
             expandBranchIdsFromSeeds([String(rootJob.id || rootJob.ItemID || rootJob.ID)]);
         }
         if (import.meta.env.DEV) {
-            console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
+        console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
         }
 
         // DEDUPLICATE OPTIONS (Step 1560 + Lead Job Fix)
@@ -4293,7 +5633,7 @@ const QuoteForm = () => {
                     if (!isAncestorOfRoot) {
                         if (import.meta.env.DEV) {
                             skipReasons.push({ name: opt.name, reason: 'branch_mismatch', leadJobName: opt.leadJobName });
-                            console.log(`[calculateSummary] Skipping unrelated branch option "${opt.name}" (leadJobName="${opt.leadJobName}")`);
+                        console.log(`[calculateSummary] Skipping unrelated branch option "${opt.name}" (leadJobName="${opt.leadJobName}")`);
                         }
                         return;
                     }
@@ -4337,7 +5677,7 @@ const QuoteForm = () => {
                     });
                 }
                 if (import.meta.env.DEV) {
-                    console.log(`[calculateSummary] Filtered out (customer mismatch):`, opt.name, 'opt:', opt.customerName, 'active:', activeCustomer);
+                console.log(`[calculateSummary] Filtered out (customer mismatch):`, opt.name, 'opt:', opt.customerName, 'active:', activeCustomer);
                 }
                 return;
             }
@@ -4406,7 +5746,7 @@ const QuoteForm = () => {
             if (!isVisible) {
                 if (import.meta.env.DEV) {
                     skipReasons.push({ name: opt.name, reason: 'not_visible' });
-                    console.log(`[calculateSummary] Filtered out (not visible):`, opt.name);
+                console.log(`[calculateSummary] Filtered out (not visible):`, opt.name);
                 }
                 return;
             }
@@ -4598,7 +5938,7 @@ const QuoteForm = () => {
                                     if (iVal && parsePrice(iVal.Price) > 0) {
                                         price = parsePrice(iVal.Price);
                                         if (import.meta.env.DEV) {
-                                            console.log(`[calculateSummary] FALLBACK MATCH for job ${job.itemName}: Found price ${price} using Option ${iOpt.id} from candidate ${candKey}`);
+                                        console.log(`[calculateSummary] FALLBACK MATCH for job ${job.itemName}: Found price ${price} using Option ${iOpt.id} from candidate ${candKey}`);
                                         }
                                         break;
                                     }
@@ -4632,7 +5972,7 @@ const QuoteForm = () => {
                                     if (iVal && parsePrice(iVal.Price) > 0) {
                                         price = parsePrice(iVal.Price);
                                         if (import.meta.env.DEV) {
-                                            console.log(`[calculateSummary] GLOBAL FALLBACK for job ${job.itemName}: Found price ${price} in bucket ${bucketKey}`);
+                                        console.log(`[calculateSummary] GLOBAL FALLBACK for job ${job.itemName}: Found price ${price} in bucket ${bucketKey}`);
                                         }
                                         break;
                                     }
@@ -4781,87 +6121,7 @@ const QuoteForm = () => {
             summary.sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        // Generate Pricing Terms Content with Table
-        let tableHtml = '<table contentEditable="false" style="width:100%; border-collapse:collapse; margin-bottom:16px;">';
-        tableHtml += '<thead><tr style="background:#f8fafc; border:1px solid #cbd5e1;"><th style="padding:10px; border:1px solid #cbd5e1; text-align:left;">Description</th><th style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Amount (BHD)</th></tr></thead>';
-        tableHtml += '<tbody>';
-
-        let htmlGrandTotal = 0;
-
-        summary.forEach(grp => {
-            // Filter 1: Check if group matches selected Lead Job Prefix (if active)
-            // Filter 1: Check if group matches selected Lead Job Prefix (if active)
-            if (enquiryData && enquiryData.leadJobPrefix) {
-                const prefix = enquiryData.leadJobPrefix;
-                // Direct match
-                if (!grp.name.startsWith(prefix)) {
-                    // Check hierarchy logic to see if this group (job) is a descendant of the selected Lead Job
-                    let isRelatedToLead = false;
-                    if (data.jobs) {
-                        const job = data.jobs.find(j => j.itemName === grp.name);
-                        if (job) {
-                            // Check ancestors
-                            let currentJob = job;
-                            while (currentJob && currentJob.parentId) {
-                                const parent = data.jobs.find(j => j.id === currentJob.parentId);
-                                if (parent) {
-                                    if (parent.itemName && parent.itemName.startsWith(prefix)) {
-                                        isRelatedToLead = true;
-                                        break;
-                                    }
-                                    currentJob = parent;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (!isRelatedToLead) return;
-                }
-            }
-
-            // Only add to Quote Table if Included
-            // Check if group name corresponds to a selected job (or is General)
-            // If grp.name is in activeJobs, we include it.
-            if (grp.name && !activeJobs.includes(grp.name)) {
-                // Check if it is a Job (Lead or Sub) that is unchecked
-                const isSubJob = data.jobs?.some(j => j.itemName === grp.name);
-                const isLeadJob = data.leadJob && (data.leadJob === grp.name || grp.name.includes(data.leadJob));
-
-                // If it is a pricing group related to a Job, and it is NOT selected, skip it.
-                if (isLeadJob || isSubJob) return;
-            }
-
-            const cleanedName = grp.name.replace(/^(LEAD JOB |SUB JOB) \/ /, '');
-
-            // Add Header for the Group
-            tableHtml += `<tr><td colspan="2" style="padding:10px; border:1px solid #cbd5e1; background-color:#f1f5f9; font-weight:bold;">${cleanedName}</td></tr>`;
-
-            // Add Detail Rows
-            grp.items.forEach(item => {
-                tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; padding-left: 20px;">${item.name}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
-            });
-
-            // INDIVIDUAL TOTALS REMOVED (Step 871 Fix)
-            /*
-            if (grp.items.length > 1) {
-                tableHtml += `<tr><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">Total ${cleanedName}</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right; font-weight:600;">BD ${grp.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
-            }
-            */
-
-            // Accumulate filtered total (Base Price Only for Grand Total)
-            grp.items.forEach(item => {
-                if (item.name === 'Base Price') {
-                    htmlGrandTotal += item.total;
-                }
-            });
-        });
-
-        if (htmlGrandTotal > 0) {
-            tableHtml += `<tr style="background:#f8fafc; font-weight:700;"><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">Grand Total (Base Price)</td><td style="padding:10px; border:1px solid #cbd5e1; text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
-        }
-        tableHtml += '</tbody></table>';
+        const { tableHtml, htmlGrandTotal } = buildEmsAutoPricingTableHtml(summary, activeJobs, data, enquiryData);
 
         // Update Pricing Terms Text with Dynamic Total
         let pricingText = defaultClauses.pricingTerms || '';
@@ -4873,7 +6133,36 @@ const QuoteForm = () => {
             pricingText = pricingText.replace('[Amount in figures and words]', totalString);
         }
 
-        const pricingTermsFull = tableHtml + pricingText;
+        let pricingTermsFull = mergePricingTermsClauseHtml(
+            clauseContentRef.current?.pricingTerms,
+            tableHtml,
+            pricingText
+        );
+        if (htmlGrandTotal > 0 && !foundPricedOptional) {
+            pricingTermsFull = syncPricingTerms41LumpSumProse(
+                pricingTermsFull,
+                htmlGrandTotal,
+                foundPricedOptional,
+                numberToWordsBHD
+            );
+        }
+
+        /** Same as sidebar "GRAND BASE PRICE TOTAL": Base Price only for jobs checked in Pricing Summary (EnquiryQuotes.TotalAmount). */
+        const grandBasePriceFromCheckedJobs =
+            !activeJobs || activeJobs.length === 0
+                ? 0
+                : summary.reduce(
+                      (sum, g) =>
+                          activeJobs.includes(g.name)
+                              ? sum +
+                                (g.items || []).reduce(
+                                    (s, i) => (i.name === 'Base Price' ? s + i.total : s),
+                                    0
+                                )
+                              : sum,
+                      0
+                  );
+
         const round6 = (n) => Number((Number(n) || 0).toFixed(6));
         let calcSig = '';
         try {
@@ -4888,7 +6177,7 @@ const QuoteForm = () => {
                     t: round6(g.total),
                     it: (g.items || []).map((it) => ({ n: it.name, t: round6(it.total) })),
                 })),
-                grand: round6(calculatedGrandTotal),
+                grand: round6(grandBasePriceFromCheckedJobs),
                 htmlGrand: round6(htmlGrandTotal),
                 hu: !!userHasEnteredPrice,
                 fpo: !!foundPricedOptional,
@@ -4905,7 +6194,7 @@ const QuoteForm = () => {
         lastQuickCalcInputRef.current = quickDigest;
 
         setHasUserPricing(userHasEnteredPrice);
-        setGrandTotal(calculatedGrandTotal);
+        setGrandTotal(grandBasePriceFromCheckedJobs);
         setHasPricedOptional(foundPricedOptional);
 
         if (import.meta.env.DEV) {
@@ -4913,9 +6202,9 @@ const QuoteForm = () => {
             console.log('[calculateSummary] included options (post filters):', includedOptionCount, 'unique option rows:', uniqueOptions.length, 'skipReasons (sample):', skipReasons.slice(0, 20));
             console.log('[calculateSummary] COMPLETE');
             console.log('[calculateSummary] Summary:', summary);
-            console.log('[calculateSummary] Grand Total:', calculatedGrandTotal);
+            console.log('[calculateSummary] Grand Total (checked Base Price):', grandBasePriceFromCheckedJobs, 'legacy calc:', calculatedGrandTotal);
             console.log('[calculateSummary] Has User Pricing:', userHasEnteredPrice);
-            console.log('[calculateSummary] Saving summary to state:', summary.length, 'groups');
+        console.log('[calculateSummary] Saving summary to state:', summary.length, 'groups');
         }
 
         setClauseContent((prev) => {
@@ -5047,8 +6336,14 @@ const QuoteForm = () => {
     };
 
 
-    /** @param opts.preserveRecipient If true (tab-driven auto-load), do not overwrite To name/address — keeps customer dropdown stable.
-     *  @param opts.skipPreparedSignatory If true (AutoLoad / programmatic sync), do not copy Prepared By from DB — use the logged-in user instead. Signatory / designation are always taken from the quote row when present so saved quotes preview correctly.
+    /**
+     * @param opts.preserveRecipient When true (all AutoLoad / sidebar / tab paths), never copy To* from the quote row —
+     *   the customer line stays the selected dropdown value. Subjob tabs also skip row To* via `isSubJobTab`.
+     * @param opts.forActiveQuoteTab When set, treat this as the active Previous Quotes tab for subjob vs parent detection.
+     *   `handleTabChange` passes this in a microtask so `loadQuote` does not see a stale `activeQuoteTab` before React commits
+     *   (was copying `ToName` from the row while still on the parent tab → wrong customer on subjob preview).
+     * @param opts.skipPreparedSignatory If true and the quote row has **no** Prepared By, default to the logged-in user
+     *   (auto-load / tab sync). When Prepared By exists on the row it is **always** shown so parent/subjob previews match the saved revision.
      */
     const loadQuote = (quote, opts = {}) => {
         if (!currentUser) {
@@ -5056,8 +6351,12 @@ const QuoteForm = () => {
             return;
         }
 
-        const preserveRecipient = opts.preserveRecipient === true;
         const skipPreparedSignatory = opts.skipPreparedSignatory === true;
+        const preserveRecipient = opts.preserveRecipient === true;
+        const effectiveQuoteTab =
+            opts.forActiveQuoteTab != null && String(opts.forActiveQuoteTab).trim() !== ''
+                ? String(opts.forActiveQuoteTab)
+                : String(activeQuoteTab ?? '');
 
         const userEmail = (currentUser.email || currentUser.EmailId || '').toLowerCase().trim();
         const preparedByEmail = (quote.PreparedByEmail || '').toLowerCase().trim();
@@ -5102,87 +6401,102 @@ const QuoteForm = () => {
             setQuoteTypeList(fromQuote.length > 0 ? fromQuote : fromEnq);
             setQuoteEnquiryTypeSelect('');
         }
-        if (!skipPreparedSignatory) {
-            setPreparedBy(quote.PreparedBy || '');
-        } else {
-            setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+        {
+            const fromRow = String(quote.PreparedBy ?? quote.preparedby ?? '').trim();
+            if (fromRow) {
+                setPreparedBy(fromRow);
+            } else if (skipPreparedSignatory) {
+                setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+            } else {
+                setPreparedBy('');
+            }
         }
         setSignatory((quote.Signatory || '').trim());
         setSignatoryDesignation((quote.SignatoryDesignation || '').trim());
 
-        if (!preserveRecipient) {
-            setToName(quote.ToName || '');
-            setToAddress(quote.ToAddress || '');
-            setToPhone(quote.ToPhone || '');
-            setToEmail(quote.ToEmail || '');
-            setToFax(quote.ToFax || '');
+        setLoadedQuotePreparedByEmail(String(quote.PreparedByEmail ?? quote.preparedbyemail ?? '').trim());
 
-            // Auto-fill missing details for internal customers if they are blank in the saved quote
-            if (!quote.ToAddress && enquiryData?.availableProfiles) {
-                const profile = enquiryData.availableProfiles.find(p =>
-                    p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === (quote.ToName || '').trim() ||
-                    (p.name && p.name.trim() === (quote.ToName || '').trim())
-                );
-                if (profile) {
-                    console.log('[loadQuote] Healing missing address from internal profile:', profile.itemName);
-                    if (!quote.ToAddress) setToAddress(profile.address || '');
-                    if (!quote.ToPhone) setToPhone(profile.phone || '');
-                    if (!quote.ToFax) setToFax(profile.fax || '');
-                    if (!quote.ToEmail) setToEmail(profile.email || '');
-                }
-            }
+        const tabAtLoadForRecipient = (calculatedTabs || []).find((t) => String(t.id) === effectiveQuoteTab);
+        const skipRecipientFromRow = !!tabAtLoadForRecipient?.isSubJobTab || preserveRecipient;
+        // Subjob tab OR preserveRecipient: "To" stays the **selected customer** (dropdown), not EnquiryQuotes.ToName (often a sibling job label).
+        if (!skipRecipientFromRow) {
+            setToName(String(quote.ToName ?? quote.toname ?? '').trim());
+            setToAddress(String(quote.ToAddress ?? quote.toaddress ?? '').trim());
+            setToPhone(String(quote.ToPhone ?? quote.tophone ?? '').trim());
+            setToEmail(String(quote.ToEmail ?? quote.toemail ?? '').trim());
+            setToFax(String(quote.ToFax ?? quote.tofax ?? '').trim());
+        }
 
-            // Set Attention Of — internal quotes: only names allowed by Master_ConcernedSE / enquiry-data map
-            const qToName = quote.ToName || '';
-            if (isQuoteInternalCustomer(enquiryData, pricingData?.jobs, qToName)) {
-                const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, qToName);
-                const allowed = Array.isArray(intAtt?.options) ? intAtt.options.filter(Boolean) : [];
-                const savedAtt = String(quote.ToAttention || '').trim();
-                if (savedAtt && allowed.some((o) => normLooseAttention(o) === normLooseAttention(savedAtt))) {
-                    setToAttention(savedAtt);
-                } else if (intAtt?.defaultAttention) {
-                    setToAttention(intAtt.defaultAttention);
-                } else if (allowed.length) {
-                    setToAttention(allowed[0]);
-                } else {
-                    setToAttention('');
-                }
-            } else if (quote.ToAttention) {
-                setToAttention(quote.ToAttention);
-            } else if (quote.ToName && enquiryData?.customerContacts) {
-                const contact = enquiryData.customerContacts[quote.ToName.trim()];
-                if (contact) {
-                    setToAttention(contact);
-                } else {
-                    setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
-                }
-            } else {
-                setToAttention(enquiryData?.enquiry?.ReceivedFrom || '');
+        // Do not merge profiles onto a persisted EnquiryQuotes row — that replaced subjob "To" block with parent HVAC profile.
+        const isPersistedEnquiryQuoteRow = quoteRowId(quote) !== undefined;
+        if (!skipRecipientFromRow && !isPersistedEnquiryQuoteRow && !quote.ToAddress && enquiryData?.availableProfiles) {
+            const profile = enquiryData.availableProfiles.find(p =>
+                p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === (quote.ToName || '').trim() ||
+                (p.name && p.name.trim() === (quote.ToName || '').trim())
+            );
+            if (profile) {
+                console.log('[loadQuote] Healing missing address from internal profile:', profile.itemName);
+                if (!quote.ToAddress) setToAddress(profile.address || '');
+                if (!quote.ToPhone) setToPhone(profile.phone || '');
+                if (!quote.ToFax) setToFax(profile.fax || '');
+                if (!quote.ToEmail) setToEmail(profile.email || '');
             }
         }
 
+        // Attention: always honour DB when non-empty (subjob quotes often use names outside the dropdown list).
+        const savedAttTrim = String(quote.ToAttention ?? quote.toattention ?? '').trim();
+        const deriveAttentionFromCustomerName = (customerishName) => {
+            const nm = String(customerishName || '').trim();
+            if (!nm) return '';
+            if (isQuoteInternalCustomer(enquiryData, pricingData?.jobs, nm)) {
+                const intAtt = resolveQuoteInternalAttentionFlexible(enquiryData, nm);
+                const allowed = Array.isArray(intAtt?.options) ? intAtt.options.filter(Boolean) : [];
+                if (intAtt?.defaultAttention) return String(intAtt.defaultAttention).trim();
+                if (allowed.length) return String(allowed[0]).trim();
+                return '';
+            }
+            if (nm && enquiryData?.customerContacts) {
+                const contact = enquiryData.customerContacts[nm.trim()];
+                if (contact) return String(contact).trim();
+            }
+            return String(enquiryData?.enquiry?.ReceivedFrom || '').trim();
+        };
+        if (savedAttTrim) {
+            setToAttention(savedAttTrim);
+        } else {
+            const qToName = quote.ToName || '';
+            const ownJob = String(quote.OwnJob || '').trim();
+            const ownNorm = ownJob ? collapseSpacesLower(stripQuoteJobPrefix(ownJob)) : '';
+            const toNorm = qToName ? collapseSpacesLower(stripQuoteJobPrefix(qToName)) : '';
+            let derived = '';
+            if (ownNorm && toNorm && ownNorm !== toNorm) {
+                derived = deriveAttentionFromCustomerName(ownJob);
+            }
+            if (!derived) derived = deriveAttentionFromCustomerName(qToName);
+            setToAttention(derived);
+        }
 
         // Header/footer: with multiple branch tabs, branding is driven by the active tab + quote ref (useEffect).
         // Applying personalProfile here overwrote Civil/CIP with the logged-in user's AC identity after every loadQuote.
         const multiTabBranch = (calculatedTabs || []).length > 1;
         if (!multiTabBranch) {
-            const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
-            const resolvedProfile = personalProfile || enquiryData?.companyDetails;
+        const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
+        const resolvedProfile = personalProfile || enquiryData?.companyDetails;
 
-            if (resolvedProfile) {
-                setFooterDetails(resolvedProfile);
-                setQuoteCompanyName(resolvedProfile.name);
-                setQuoteLogo(resolvedProfile.logo);
-            } else {
-                setFooterDetails({
-                    name: 'Almoayyed Contracting',
-                    address: 'P.O. Box 32232, Manama, Kingdom of Bahrain',
-                    phone: '(+973) 17 400 407',
-                    fax: '(+973) 17 400 396',
-                    email: 'bms@almcg.com'
-                });
-                setQuoteCompanyName('Almoayyed Contracting');
-                setQuoteLogo(null);
+        if (resolvedProfile) {
+            setFooterDetails(resolvedProfile);
+            setQuoteCompanyName(resolvedProfile.name);
+            setQuoteLogo(resolvedProfile.logo);
+        } else {
+            setFooterDetails({
+                name: 'Almoayyed Contracting',
+                address: 'P.O. Box 32232, Manama, Kingdom of Bahrain',
+                phone: '(+973) 17 400 407',
+                fax: '(+973) 17 400 396',
+                email: 'bms@almcg.com'
+            });
+            setQuoteCompanyName('Almoayyed Contracting');
+            setQuoteLogo(null);
             }
         }
 
@@ -5242,6 +6556,10 @@ const QuoteForm = () => {
         setGrandTotal(quote.TotalAmount || 0);
         setExpandedClause(null);
         setPendingFiles([]); // Clear any pending files from previous session
+        {
+            const stampsFromDb = parseDigitalSignaturesFromQuoteRow(quote);
+            setQuoteDigitalStamps(stampsFromDb);
+        }
         window.scrollTo({ top: 0, behavior: 'smooth' });
 
         // FORCE CORRECT CONTEXT FOR REVISIONS
@@ -5278,16 +6596,28 @@ const QuoteForm = () => {
         // Trigger Summary Recalculation to update the Preview HTML with corrected scope
         // This fixes "Corrupted" quotes that were saved with full pricing
         if (pricingData) {
-            const summaryToName = preserveRecipient ? (toName || quote.ToName) : quote.ToName;
+            const summaryToName = skipRecipientFromRow
+                ? String(toNameRef.current || quote.ToName || '').trim() || String(quote.ToName || '')
+                : String(quote.ToName || '');
             calculateSummary(pricingData, undefined, summaryToName, newScope);
             // Note: If pricingData is not for the correct customer, this might be slightly off provided values,
             // but structure will be correct. Usually Previous Quote Context implies same active enquiry.
+        }
+
+        const tabAtLoad = (calculatedTabs || []).find((t) => String(t.id) === effectiveQuoteTab);
+        if (tabAtLoad?.isSubJobTab) {
+            setLoadedEnquiryQuoteRowForPreview(quote);
+        } else {
+            setLoadedEnquiryQuoteRowForPreview(null);
         }
     };
 
     // Auto-load Quote or Clear Form when Active Tab Changes
     useEffect(() => {
         if (!activeQuoteTab || !calculatedTabs) return;
+        if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
+            return;
+        }
 
         // Ensure data is loaded
         if (!pricingData && !enquiryData) return;
@@ -5368,100 +6698,23 @@ const QuoteForm = () => {
             return prefix;
         })();
 
-        const tabQuotes = sourceQuotes.filter(q => {
-            // Scoped API can return quotes for multiple OwnJobs; always narrow by the active tab's job.
-            // Priority 1: OwnJob Match (The specific branch/tab this quote belongs to)
-            const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
-            const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
+        // Must match "Previous Quotes / Revisions" list logic (getFilteredQuotesForPreviousQuotesTab).
+        // When scoped GET returns [] for the new tab's tuple, `sourceQuotes` is empty but the sidebar still uses
+        // `existingQuotes` (see render: useScopedPanel = quoteScopedForPanel.length > 0). Intersecting with []
+        // made tabQuotes always empty → else branch cleared Quote Ref to Draft on every subjob tab switch.
+        const filteredForActiveTab = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
+        const tabQuotes =
+            sourceQuotes.length > 0
+                ? filteredForActiveTab.filter((q) =>
+                      sourceQuotes.some((s) => String(quoteRowId(s) ?? '') === String(quoteRowId(q) ?? ''))
+                  )
+                : filteredForActiveTab;
 
-            const isTabMatch =
-                quoteOwnJob === tabJobName ||
-                (activeTabRealId && String(q.DepartmentID) === String(activeTabRealId)) ||
-                quoteNumberDivisionMatchesTab(q, activeTabObj, calculatedTabs.length > 1);
-
-            if (!isTabMatch) return false;
-
-            // Priority 2: Customer Match (Normalized)
-            const normalizedQuoteTo = normalize(q.ToName || '');
-            const normalizedCurrentTo = normalize(toName || '');
-
-            const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
-            const curKey = normalizeCustomerKey(toName || '');
-            const qKey = normalizeCustomerKey(q.ToName || '');
-            const isCustomerKeyMatch = !!curKey && !!qKey && curKey === qKey;
-            const qJobObjByOwnJob = jobsPool.find((j) =>
-                collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')) ===
-                collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''))
-            );
-            const isSelfMatch =
-                collapseSpacesLower(stripQuoteJobPrefix(qJobObjByOwnJob?.itemName || qJobObjByOwnJob?.DivisionName || '')) ===
-                collapseSpacesLower(stripQuoteJobPrefix(toName || ''));
-
-            // Ancestor match for internal quoting
-            const isAncestorMatch = (() => {
-                const tabJob = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId));
-                if (!tabJob) return false;
-                let curr = tabJob;
-                let safety = 0;
-                let visited = new Set();
-                while (curr && (curr.parentId || curr.ParentID) && safety < 20) {
-                    const pId = String(curr.parentId || curr.ParentID);
-                    if (visited.has(pId)) break;
-                    visited.add(pId);
-                    const p = jobsPool.find(pj => String(pj.id || pj.ItemID) === pId);
-                    if (!p) break;
-                    const pNameNorm = normalize(p.itemName || '');
-                    if (pNameNorm === normalizedCurrentTo) return true;
-                    curr = p;
-                    safety++;
-                }
-                return false;
-            })();
-
-            // Scoped GET already narrowed the tuple (enquiry + lead + customer context). Persisted ToName is often
-            // the priced internal branch (e.g. "Civil Project") while the recipient dropdown shows the external customer ("BEMCO").
-            if (
-                !isExactMatch &&
-                !isCustomerKeyMatch &&
-                !isAncestorMatch &&
-                !isSelfMatch &&
-                !scopedOnly
-            ) {
-                console.log(`[AutoLoad] REJECTED: Customer mismatch. q:${normalizedQuoteTo} vs cur:${normalizedCurrentTo}`);
-                return false;
-            }
-
-            // Priority 3: Division Code verification (use job / lead context — not tab label alone)
-            const parts = q.QuoteNumber?.split('/') || [];
-            const qDivCode = parts[1]?.toUpperCase();
-            const divisionMatchContextName = divisionMatchContextForQuoteTab(
-                selectedLeadId,
-                pricingData,
-                activeTabRealId,
-                activeTabObj,
-                calculatedTabs.length,
-                jobsPool
-            );
-            const ownJobMatchesTab =
-                collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || '')) ===
-                collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
-            const isTypeMatch =
-                ownJobMatchesTab ||
-                matchDivisionCode(qDivCode, divisionMatchContextName, activeTabObj.divisionCode);
-
-            if (!isTypeMatch) {
-                console.log(`[AutoLoad] REJECTED: Type mismatch. qDiv:${qDivCode} vs context:${divisionMatchContextName}`);
-                return false;
-            }
-
-            // Authoritative: QuoteNumber division segment (e.g. BMP vs HVP) must match the active tab.
-            if (calculatedTabs.length > 1 && !quoteNumberDivisionMatchesTab(q, activeTabObj, true)) {
-                console.log(`[AutoLoad] REJECTED: Quote ref division does not match active tab: ${q.QuoteNumber}`);
-                return false;
-            }
-
-            return true;
-        });
+        /** User picked a specific revision in this tab — do not snap the preview back to tab.quoteNo / latest. */
+        const formViewingSomeTabQuote =
+            quoteId != null &&
+            String(quoteId).trim() !== '' &&
+            tabQuotes.some((q) => isFormSyncedToQuoteRow(q, quoteId, quoteNumber));
 
         // Fast path: tab.quoteNo must resolve within tab-scoped rows only (never load another tab's ref from sourceQuotes).
         if (activeTabObj.quoteNo && tabQuotes.length > 0) {
@@ -5473,7 +6726,10 @@ const QuoteForm = () => {
                 return qn === want || qn.split('-R')[0] === baseWant;
             });
             if (byNo) {
-                if (String(quoteRowId(byNo) ?? '') !== String(quoteId ?? '')) {
+                if (
+                    !isFormSyncedToQuoteRow(byNo, quoteId, quoteNumber) &&
+                    !formViewingSomeTabQuote
+                ) {
                     console.log('[AutoLoad] Loading from tab.quoteNo:', want);
                     loadQuote(byNo, { preserveRecipient: true, skipPreparedSignatory: true });
                 }
@@ -5483,11 +6739,10 @@ const QuoteForm = () => {
 
         if (tabQuotes.length > 0) {
             // Found quotes: Sort by Revision (Desc) and Load Latest
-            const sorted = tabQuotes.sort((a, b) => b.RevisionNo - a.RevisionNo);
+            const sorted = [...tabQuotes].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0));
             const latest = sorted[0];
 
-            // Only load if different (using closure's quoteId)
-            if (String(quoteRowId(latest) ?? '') !== String(quoteId ?? '')) {
+            if (!formViewingSomeTabQuote && !isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) {
                 console.log('[AutoLoad] Loading latest quote:', latest.QuoteNumber, 'for branch:', currentLeadCode);
                 loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
             }
@@ -5537,7 +6792,17 @@ const QuoteForm = () => {
                         const tb = Date.parse(b.QuoteDate || 0) || 0;
                         return tb - ta;
                     })[0];
-                    if (latestRelaxed && String(quoteRowId(latestRelaxed) ?? '') !== String(quoteId ?? '')) {
+                    const viewingFromRelaxed =
+                        quoteId != null &&
+                        String(quoteId).trim() !== '' &&
+                        relaxedByCustomerAndLead.some((q) =>
+                            isFormSyncedToQuoteRow(q, quoteId, quoteNumber)
+                        );
+                    if (
+                        latestRelaxed &&
+                        !viewingFromRelaxed &&
+                        !isFormSyncedToQuoteRow(latestRelaxed, quoteId, quoteNumber)
+                    ) {
                         console.log('[AutoLoad] Relaxed fallback loading quote:', latestRelaxed.QuoteNumber);
                         loadQuote(latestRelaxed, { preserveRecipient: true, skipPreparedSignatory: true });
                         return;
@@ -5619,12 +6884,17 @@ const QuoteForm = () => {
         pricingData,
         enquiryData,
         quoteId,
+        quoteNumber,
         jobsPool,
+        getFilteredQuotesForPreviousQuotesTab,
     ]);
 
     // Hard fallback: when scoped API rows exist (or client-matched existingQuotes), load the latest for the active tab.
     // Never keep the full unfiltered panel when the tab filter is empty — that loaded another tab's Quote Ref (e.g. BMS on HVAC).
     useEffect(() => {
+        if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
+            return;
+        }
         if (!(toName || '').trim()) return;
 
         const basePanel =
@@ -5653,26 +6923,19 @@ const QuoteForm = () => {
             !!(activeTabObj && (activeTabObj.label || activeTabObj.name)) &&
             (multiTab || !!scopeP?.useDepartmentForOwnJob);
 
-        if (narrowed) {
-            const tabJobName = collapseSpacesLower(stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || ''));
-            panel = basePanel.filter((q) => {
-                const quoteOwnJob = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
-                const ownPrefixRelaxed =
-                    quoteOwnJob &&
-                    tabJobName &&
-                    (tabJobName.startsWith(quoteOwnJob) || quoteOwnJob.startsWith(tabJobName));
-                return (
-                    quoteOwnJob === tabJobName ||
-                    ownPrefixRelaxed ||
-                    (activeTabObj.realId && String(q.DepartmentID) === String(activeTabObj.realId)) ||
-                    quoteNumberDivisionMatchesTab(q, activeTabObj, multiTab)
-                );
-            });
+        // Same narrowing as Previous Quotes list + AutoLoad (getFilteredQuotesForPreviousQuotesTab). The old
+        // OwnJob / division filter could empty the panel while the sidebar still showed a row — then `!latest`
+        // cleared Quote Ref to Draft after a successful load.
+        if (narrowed && activeTabObj) {
+            const aligned = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
+            const baseIds = new Set(
+                basePanel.map((q) => String(quoteRowId(q) ?? '')).filter((id) => id !== '' && id !== 'undefined')
+            );
+            panel = aligned.filter((q) => baseIds.has(String(quoteRowId(q) ?? '')));
         }
 
-        const currentInScope = quoteId
-            ? panel.some((q) => String(quoteRowId(q) ?? '') === String(quoteId ?? ''))
-            : false;
+        const currentInScope =
+            !!quoteId && panel.some((q) => isFormSyncedToQuoteRow(q, quoteId, quoteNumber));
         if (currentInScope) return;
 
         const latest = [...panel].sort((a, b) => {
@@ -5684,7 +6947,18 @@ const QuoteForm = () => {
         })[0];
 
         if (!latest) {
-            if (narrowed && (quoteId !== null || (quoteNumber || '').trim() !== '')) {
+            const aligned = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
+            const rescue = aligned.find((q) =>
+                basePanel.some((b) => String(quoteRowId(b) ?? '') === String(quoteRowId(q) ?? ''))
+            );
+            if (rescue && !isFormSyncedToQuoteRow(rescue, quoteId, quoteNumber)) {
+                loadQuote(rescue, { preserveRecipient: true, skipPreparedSignatory: true });
+                return;
+            }
+            const trulyNoRowForTab = !aligned.some((q) =>
+                basePanel.some((b) => String(quoteRowId(b) ?? '') === String(quoteRowId(q) ?? ''))
+            );
+            if (narrowed && trulyNoRowForTab && (quoteId !== null || (quoteNumber || '').trim() !== '')) {
                 console.log('[HardFallback] No scoped quote for active tab; clearing Quote Ref for draft preview.');
                 setQuoteId(null);
                 setQuoteNumber('');
@@ -5696,7 +6970,9 @@ const QuoteForm = () => {
             }
             return;
         }
-        loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
+        if (!isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) {
+            loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- calculatedTabs read from closure; quoteTabsFingerprint tracks meaningful tab/quoteNo changes
     }, [
         quoteScopedForPanel,
@@ -5709,12 +6985,16 @@ const QuoteForm = () => {
         scopedEnquiryQuotesParams,
         scopedQuotesFetchSettledKey,
         scopedQuotePanelFetchKey,
+        getFilteredQuotesForPreviousQuotesTab,
     ]);
 
     /** When the user switches Previous Quotes job tabs, load the latest saved quote for that tab (matches sidebar list). */
     const prevQuoteTabForAutoLoadRef = React.useRef(null);
     const lastTabAutoLoadEnquiryRef = React.useRef(null);
     useEffect(() => {
+        if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
+            return;
+        }
         const rn = enquiryData?.enquiry?.RequestNo;
         if (rn && lastTabAutoLoadEnquiryRef.current !== rn) {
             lastTabAutoLoadEnquiryRef.current = rn;
@@ -5729,14 +7009,16 @@ const QuoteForm = () => {
             return;
         }
         if (prevTab === activeQuoteTab) return;
-        prevQuoteTabForAutoLoadRef.current = activeQuoteTab;
 
         const filtered = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
+        // Scoped / by-enquiry quotes often arrive after the tab change. Do NOT advance prevQuoteTabForAutoLoadRef
+        // until we have rows — otherwise the next run sees prev === active and never loads the preview (Draft stuck).
         if (!filtered.length) return;
 
+        prevQuoteTabForAutoLoadRef.current = activeQuoteTab;
+
         const latest = [...filtered].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
-        const latestId = quoteRowId(latest);
-        if (latestId != null && String(latestId) === String(quoteId ?? '')) return;
+        if (isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) return;
 
         loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- loadQuote is defined in-component; tab-change guard uses ref
@@ -5747,6 +7029,7 @@ const QuoteForm = () => {
         calculatedTabs,
         getFilteredQuotesForPreviousQuotesTab,
         quoteId,
+        quoteNumber,
         quoteScopedForPanel,
         existingQuotes,
         quoteTabsFingerprint,
@@ -5868,7 +7151,8 @@ const QuoteForm = () => {
                         PreparedBy: preparedBy,
                         TotalAmount: grandTotal,
                         OwnJob: payload.ownJob, // CRITICAL for AutoLoad matching
-                        LeadJob: payload.leadJob  // CRITICAL for AutoLoad matching
+                        LeadJob: payload.leadJob, // CRITICAL for AutoLoad matching
+                        DigitalSignaturesJson: payload.digitalSignaturesJson,
                     }
                 ]);
 
@@ -5884,17 +7168,19 @@ const QuoteForm = () => {
                         TotalAmount: grandTotal,
                         OwnJob: payload.ownJob,
                         LeadJob: payload.leadJob,
+                        DigitalSignaturesJson: payload.digitalSignaturesJson,
                     };
                     setQuoteScopedForPanel((prev) => {
                         const idStr = String(newRevId ?? '');
                         if (!idStr || idStr === 'undefined') return prev;
-                        const withoutOldRev = prev.filter(
-                            (q) => String(quoteRowId(q) ?? '') !== String(effectiveReviseId ?? '')
-                        );
-                        if (withoutOldRev.some((q) => String(quoteRowId(q) ?? '') === idStr)) return withoutOldRev;
-                        return [...withoutOldRev, optimisticRevRow];
+                        if (prev.some((q) => String(quoteRowId(q) ?? '') === idStr)) return prev;
+                        return [...prev, optimisticRevRow];
                     });
                 }
+
+                commitQuoteDigitalStampsRef.current?.((prev) =>
+                    prev.map((s) => ({ ...s, removableBeforeNextCommit: false }))
+                );
 
                 // Note: Metadata is NOT cleared anymore to allow immediate viewing/working with the new revision.
                 // Re-calculating existing quotes will pull the latest list.
@@ -5906,6 +7192,9 @@ const QuoteForm = () => {
 
                 console.log('[handleRevise] Refreshing quotes list...');
                 const refreshed = await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+                if (scopedEnquiryQuotesParams) {
+                    setScopedQuotePanelRefreshNonce((n) => n + 1);
+                }
                 const match = Array.isArray(refreshed)
                     ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newRevId ?? ''))
                     : null;
@@ -5978,6 +7267,7 @@ const QuoteForm = () => {
 
 
     const handleSelectEnquiry = async (enq) => {
+        let enquiryLoadSucceeded = false;
         setSearchTerm(enq.RequestNo);
         setSuggestions([]);
         setShowSuggestions(false);
@@ -5990,12 +7280,20 @@ const QuoteForm = () => {
         leadChoiceFingerprintRef.current = '';
         autoSelectCustomerAfterLeadChangeRef.current = false;
         preserveQuoteOnLeadChangeRef.current = null;
+        quoteRowAutoSelectLeadRef.current = false;
+        quoteRowFirstLeadDivisionFullRef.current = '';
+        quoteRowDivisionLeadLockRef.current = false;
+        quoteRowSyncDropdownCustomerRef.current = false;
+        quoteRowAwaitingLeadForCustomerRef.current = false;
+        setShowQuoteListSummaryOverQuote(false);
         setToName('');
         setToAddress('');
         setToPhone('');
         setToEmail('');
         setToAttention('');
         setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+        setLoadedQuotePreparedByEmail('');
+        setLoadedEnquiryQuoteRowForPreview(null);
         setSignatory('');
         setSignatoryDesignation('');
         setQuoteId(null);
@@ -6015,11 +7313,7 @@ const QuoteForm = () => {
             );
             if (res.ok) {
                 const data = await res.json();
-                setEnquiryData(data);
                 fetchExistingQuotes(enq.RequestNo);
-
-                // Fetch Pricing Data (even without customer) to get initial Access Rights & Hierarchy
-                loadPricingData(enq.RequestNo, '');
 
                 setQuoteNumber(data.quoteNumber);
                 setQuoteId(null); // New quote
@@ -6051,127 +7345,128 @@ const QuoteForm = () => {
 
                 const useTabDrivenQuoteBranding = enquiryPayloadSuggestsMultiBranchTabs(data);
                 if (!useTabDrivenQuoteBranding) {
-                    if (data.companyDetails) {
-                        setQuoteCompanyName(data.companyDetails.name || 'Almoayyed Air Conditioning');
-                        setQuoteLogo(data.companyDetails.logo);
-                        setFooterDetails(data.companyDetails);
-                    }
+                if (data.companyDetails) {
+                    setQuoteCompanyName(data.companyDetails.name || 'Almoayyed Air Conditioning');
+                    setQuoteLogo(data.companyDetails.logo);
+                    setFooterDetails(data.companyDetails);
+                }
 
-                    // ---------------------------------------------------------
-                    // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
-                    // ---------------------------------------------------------
-                    let selectedProfile = null;
-                    const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
+                // ---------------------------------------------------------
+                // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
+                // ---------------------------------------------------------
+                let selectedProfile = null;
+                const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
 
-                    if (userDept && data.availableProfiles?.length > 0) {
-                        console.log(`[Profile selection] User Dept: ${userDept}. Available profiles:`, data.availableProfiles.map(p => p.itemName));
+                if (userDept && data.availableProfiles?.length > 0) {
+                    console.log(`[Profile selection] User Dept: ${userDept}. Available profiles:`, data.availableProfiles.map(p => p.itemName));
 
-                        // 1. Try to find an EXACT match for User Dept (Trimmed and Case-Insensitive)
-                        const normalizedDept = userDept.trim().toLowerCase();
-                        selectedProfile = data.availableProfiles.find(p => {
-                            const pItemName = (p.itemName || '').trim().toLowerCase();
-                            const pName = (p.name || '').trim().toLowerCase();
-                            return pItemName === normalizedDept || pName === normalizedDept;
-                        });
+                    // 1. Try to find an EXACT match for User Dept (Trimmed and Case-Insensitive)
+                    const normalizedDept = userDept.trim().toLowerCase();
+                    selectedProfile = data.availableProfiles.find(p => {
+                        const pItemName = (p.itemName || '').trim().toLowerCase();
+                        const pName = (p.name || '').trim().toLowerCase();
+                        return pItemName === normalizedDept || pName === normalizedDept;
+                    });
 
-                        // 2. Try Heuristic Matches if no exact match
-                        if (!selectedProfile) {
-                            if (userDept.toLowerCase().includes('civil')) {
-                                selectedProfile = data.availableProfiles.find(p =>
-                                    p.itemName?.toLowerCase().includes('civil') ||
-                                    p.code === 'ACC' ||
-                                    p.divisionCode === 'CVLP'
-                                );
-                            } else if (userDept.toLowerCase().includes('bms')) {
-                                selectedProfile = data.availableProfiles.find(p =>
-                                    (p.itemName && p.itemName.toLowerCase().includes('bms')) ||
-                                    p.divisionCode === 'BMS' ||
-                                    p.divisionCode === 'BMP' ||
-                                    (p.name && p.name.toLowerCase().includes('bms'))
-                                );
-                            } else if (userDept.toLowerCase().includes('hv') || userDept.toLowerCase().includes('condition')) {
-                                selectedProfile = data.availableProfiles.find(p =>
-                                    (p.itemName && (p.itemName.toLowerCase().includes('hv') || p.itemName.toLowerCase().includes('condition'))) ||
-                                    p.divisionCode === 'HVP' || p.divisionCode === 'AMM'
-                                );
-                            } else if (userDept.toLowerCase().includes('mep')) {
-                                selectedProfile = data.availableProfiles.find(p =>
-                                    p.divisionCode === 'AAC' || p.divisionCode === 'ELP' || p.divisionCode === 'PLP'
-                                );
-                            }
-                        }
-
-                        // 3. Last Resort: Any personal profile if none matched above
-                        if (!selectedProfile) {
-                            selectedProfile = data.availableProfiles.find(p => p.isPersonalProfile);
+                    // 2. Try Heuristic Matches if no exact match
+                    if (!selectedProfile) {
+                        if (userDept.toLowerCase().includes('civil')) {
+                            selectedProfile = data.availableProfiles.find(p =>
+                                p.itemName?.toLowerCase().includes('civil') ||
+                                p.code === 'ACC' ||
+                                p.divisionCode === 'CVLP'
+                            );
+                        } else if (userDept.toLowerCase().includes('bms')) {
+                            selectedProfile = data.availableProfiles.find(p =>
+                                (p.itemName && p.itemName.toLowerCase().includes('bms')) ||
+                                p.divisionCode === 'BMS' ||
+                                p.divisionCode === 'BMP' ||
+                                (p.name && p.name.toLowerCase().includes('bms'))
+                            );
+                        } else if (userDept.toLowerCase().includes('hv') || userDept.toLowerCase().includes('condition')) {
+                            selectedProfile = data.availableProfiles.find(p =>
+                                (p.itemName && (p.itemName.toLowerCase().includes('hv') || p.itemName.toLowerCase().includes('condition'))) ||
+                                p.divisionCode === 'HVP' || p.divisionCode === 'AMM'
+                            );
+                        } else if (userDept.toLowerCase().includes('mep')) {
+                            selectedProfile = data.availableProfiles.find(p =>
+                                p.divisionCode === 'AAC' || p.divisionCode === 'ELP' || p.divisionCode === 'PLP'
+                            );
                         }
                     }
 
-                    // --- MANDATORY IDENTITY OVERRIDE (Step 4488) ---
-                    const personalProfile = data.availableProfiles.find(p => p.isPersonalProfile);
-                    if (personalProfile) {
-                        selectedProfile = personalProfile;
-                        console.log(`[Profile selection] ✓ ENFORCING personal identity: ${selectedProfile.name}`);
-                    }
-
-                    if (selectedProfile) {
-                        console.log(`[Profile selection] ENFORCING user profile: "${userDept}" ->`, selectedProfile);
-                        setQuoteCompanyName(selectedProfile.name);
-                        setQuoteLogo(selectedProfile.logo);
-                        setFooterDetails(selectedProfile);
-
-                        data.companyDetails = { ...selectedProfile, isPersonalProfile: true };
-                        data.enquiryLogo = selectedProfile.logo;
-                        data.enquiryCompanyName = selectedProfile.name;
-
-                        setEnquiryData({ ...data });
-                    } else if (data.companyDetails) {
-                        setQuoteCompanyName(data.companyDetails.name);
-                        setQuoteLogo(data.companyDetails.logo);
-                        setFooterDetails(data.companyDetails);
-                        console.log(`[Profile selection] No specific user profile, using default identity: ${data.companyDetails.divisionCode}`);
+                    // 3. Last Resort: Any personal profile if none matched above
+                    if (!selectedProfile) {
+                        selectedProfile = data.availableProfiles.find(p => p.isPersonalProfile);
                     }
                 }
 
-                // 3a. Auto-Select Lead Job
+                // --- MANDATORY IDENTITY OVERRIDE (Step 4488) ---
+                const personalProfile = data.availableProfiles.find(p => p.isPersonalProfile);
+                if (personalProfile) {
+                    selectedProfile = personalProfile;
+                    console.log(`[Profile selection] ✓ ENFORCING personal identity: ${selectedProfile.name}`);
+                }
+
+                if (selectedProfile) {
+                    console.log(`[Profile selection] ENFORCING user profile: "${userDept}" ->`, selectedProfile);
+                    setQuoteCompanyName(selectedProfile.name);
+                    setQuoteLogo(selectedProfile.logo);
+                    setFooterDetails(selectedProfile);
+
+                    data.companyDetails = { ...selectedProfile, isPersonalProfile: true };
+                    data.enquiryLogo = selectedProfile.logo;
+                    data.enquiryCompanyName = selectedProfile.name;
+
+                    setEnquiryData({ ...data });
+                } else if (data.companyDetails) {
+                    setQuoteCompanyName(data.companyDetails.name);
+                    setQuoteLogo(data.companyDetails.logo);
+                    setFooterDetails(data.companyDetails);
+                    console.log(`[Profile selection] No specific user profile, using default identity: ${data.companyDetails.divisionCode}`);
+                    }
+                }
+
+                // 3a. Auto-Select Lead Job — always pick first L-job (sorted by L number) when multiple exist
                 console.log('[QuoteForm] Auto-Select Lead Job - divisions:', data.divisions);
                 console.log('[QuoteForm] Auto-Select Lead Job - divisionsHierarchy:', data.divisionsHierarchy);
 
-                // Use divisions if available, otherwise extract from divisionsHierarchy
+                let firstLeadDivisionFull = '';
                 let availableDivisions = data.divisions || [];
 
                 if (availableDivisions.length === 0 && data.divisionsHierarchy && data.divisionsHierarchy.length > 0) {
-                    // Use ALL nodes in hierarchy as potential Lead Job context
-                    availableDivisions = data.divisionsHierarchy.map(r => r.itemName || r.DivisionName);
+                    availableDivisions = data.divisionsHierarchy.map((r) => r.itemName || r.DivisionName);
                     console.log('[QuoteForm] Using all divisionsHierarchy nodes for Lead Job selection:', availableDivisions);
                 }
 
-                const leadJobs = availableDivisions.filter(d => d.trim().startsWith('L'));
-                console.log('[QuoteForm] Filtered Lead Jobs:', leadJobs);
+                const leadJobs = availableDivisions.filter((d) => String(d).trim().startsWith('L'));
+                const leadSortKey = (s) => {
+                    const m = String(s).trim().match(/^L(\d+)/i);
+                    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+                };
+                const sortedLeadJobs = [...leadJobs].sort((a, b) => leadSortKey(a) - leadSortKey(b));
+                console.log('[QuoteForm] Filtered Lead Jobs (sorted):', sortedLeadJobs);
 
-                if (leadJobs.length === 1) {
-                    // Only ONE Lead Job available - Auto Select
-                    const prefix = leadJobs[0].split('-')[0].trim();
-                    data.leadJobPrefix = prefix;
-                    console.log('[QuoteForm] Auto-selecting Single Lead Job:', prefix);
-                } else if (leadJobs.length > 1) {
-                    // Multiple Lead Jobs - Force User Selection
-                    data.leadJobPrefix = '';
-                    console.log('[QuoteForm] Multiple Lead Jobs found. User must select.');
+                if (sortedLeadJobs.length >= 1) {
+                    firstLeadDivisionFull = String(sortedLeadJobs[0]).trim();
+                    data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                    console.log('[QuoteForm] Auto-selecting first Lead Job:', data.leadJobPrefix, firstLeadDivisionFull);
                 } else {
-                    // No lead jobs found - try to use best match for current user department
-                    const userDept = (currentUser?.Department || '').toLowerCase();
-                    const bmsMatch = availableDivisions.find(d => d.toLowerCase().includes('bms'));
-                    const elecMatch = availableDivisions.find(d => d.toLowerCase().includes('electrical'));
+                    const userDeptL = (currentUser?.Department || '').toLowerCase();
+                    const bmsMatch = availableDivisions.find((d) => d.toLowerCase().includes('bms'));
+                    const elecMatch = availableDivisions.find((d) => d.toLowerCase().includes('electrical'));
 
-                    if (userDept.includes('bms') && bmsMatch) {
-                        data.leadJobPrefix = bmsMatch;
-                        console.log('[QuoteForm] Auto-selecting BMS for BMS user:', bmsMatch);
-                    } else if (userDept.includes('electrical') && elecMatch) {
-                        data.leadJobPrefix = elecMatch;
-                        console.log('[QuoteForm] Auto-selecting Electrical for Electrical user:', elecMatch);
+                    if (userDeptL.includes('bms') && bmsMatch) {
+                        firstLeadDivisionFull = String(bmsMatch).trim();
+                        data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                        console.log('[QuoteForm] Auto-selecting BMS for BMS user:', data.leadJobPrefix);
+                    } else if (userDeptL.includes('electrical') && elecMatch) {
+                        firstLeadDivisionFull = String(elecMatch).trim();
+                        data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                        console.log('[QuoteForm] Auto-selecting Electrical for Electrical user:', data.leadJobPrefix);
                     } else if (availableDivisions.length > 0) {
-                        data.leadJobPrefix = availableDivisions[0].split('-')[0].trim();
+                        firstLeadDivisionFull = String(availableDivisions[0]).trim();
+                        data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
                         console.log('[QuoteForm] Using first available division:', data.leadJobPrefix);
                     } else {
                         data.leadJobPrefix = '';
@@ -6216,84 +7511,337 @@ const QuoteForm = () => {
                     setQuoteEnquiryTypeSelect('');
                 }
 
-                // Reset Customer Selection to ensure a clean slate (User must select manually)
-                const defaultCustomer = '';
-                setToName(defaultCustomer);
+                quoteRowFirstLeadDivisionFullRef.current = firstLeadDivisionFull;
+                quoteRowAutoSelectLeadRef.current = Boolean(data.leadJobPrefix);
+                quoteRowDivisionLeadLockRef.current = Boolean(data.leadJobPrefix);
+                quoteRowSyncDropdownCustomerRef.current = true;
+                quoteRowAwaitingLeadForCustomerRef.current = Boolean(data.leadJobPrefix);
+
                 // Final Data Update to Ensure all modifications (Lead Job Logic, etc.) are reflected in State
                 setEnquiryData({ ...data });
 
-                if (defaultCustomer) {
-                    const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-                    const target = normalize(defaultCustomer);
+                // "To" customer: filled by useEffect to match quoteCustomerDropdownOptions (internal parent vs EnquiryCustomer[0])
 
-                    // Try exact match first, then robust normalized match
-                    let cust = customersList.find(c => c.CompanyName === defaultCustomer);
-                    if (!cust) {
-                        cust = customersList.find(c => normalize(c.CompanyName) === target);
-                    }
-
-                    if (cust) {
-                        // NOTE: We prioritize MASTER LIST address over enquiry data default.
-                        const addr = [cust.Address1, cust.Address2].filter(Boolean).join('\n').trim();
-                        setToAddress(addr);
-                        setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''}`.trim());
-                        setToEmail(cust.EmailId || ''); // Prioritize Master Email
-                    } else {
-                        // Customer NOT in Master List.
-                        const enqCustName = data.enquiry?.CustomerName || '';
-                        const enqCustList = enqCustName.split(',').map(c => normalize(c.trim()));
-
-                        // Check if the selected target is in the enquiry's customer list
-                        if (enqCustList.includes(target) && data.customerDetails) {
-                            const details = data.customerDetails;
-                            const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
-                            setToAddress(addr);
-                            setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
-                            setToEmail(details.EmailId || '');
-                        } else {
-                            // Even if not in master list, allow it but CLEAR details to avoid internal division leak
-                            setToAddress('');
-                            setToPhone('');
-                            setToEmail('');
-                        }
-                    }
-                } else {
-                    setToName('');
-                    setToAddress('');
-                    setToPhone('');
-                    setToEmail('');
-                    setToAttention('');
-                }
-
-                // Set Attention of (ReceivedFrom) for the default customer
-                if (defaultCustomer && data.customerContacts) {
-                    console.log('[handleSelectEnquiry] Setting Attention for default customer:', defaultCustomer);
-                    console.log('[handleSelectEnquiry] customerContacts:', data.customerContacts);
-
-                    if (data.customerContacts[defaultCustomer]) {
-                        setToAttention(data.customerContacts[defaultCustomer]);
-                        console.log('[handleSelectEnquiry] ✓ Set Attention to:', data.customerContacts[defaultCustomer]);
-                    } else {
-                        // Fallback to main enquiry ReceivedFrom if no specific contact
-                        const fallback = data.enquiry?.ReceivedFrom || '';
-                        setToAttention(fallback);
-                        console.log('[handleSelectEnquiry] ✗ Not found in customerContacts, using fallback:', fallback);
-                    }
-                }
-
-
-                // Default to enquiry customer for pricing load
-                loadPricingData(data.enquiry.RequestNo, defaultCustomer);
-
+                // Bootstrap pricing with empty customer, then sync effect applies first dropdown option (see quoteRowSyncDropdownCustomerRef)
 
                 // System defaults for Prepared By / Signatory removed per User request Step 1440
+                enquiryLoadSucceeded = true;
             }
         } catch (err) {
             console.error('Error loading enquiry data:', err);
         } finally {
             setLoading(false);
         }
+        return enquiryLoadSucceeded;
     };
+
+    const quoteListSummaryBody = React.useMemo(() => {
+        if (!quoteListDisplayRows.length) {
+            return (
+                <div
+                    style={{
+                        height: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#94a3b8',
+                        fontSize: '14px',
+                        fontStyle: 'italic',
+                        background: 'white',
+                        borderRadius: '8px',
+                        border: '1px dashed #e2e8f0',
+                    }}
+                >
+                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                        ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
+                        : 'No pending updates found. Start by entering an enquiry number above.'}
+                </div>
+            );
+        }
+        const sortedPendingQuotes = [...quoteListDisplayRows].sort((a, b) => {
+            const { field, direction } = pendingQuotesSortConfig;
+            let aVal = a[field];
+            let bVal = b[field];
+            if (field === 'DueDate' || field === 'EnquiryDate' || field === 'ListQuoteDate') {
+                aVal = aVal ? new Date(aVal).getTime() : Infinity;
+                bVal = bVal ? new Date(bVal).getTime() : Infinity;
+            } else {
+                aVal = (aVal || '').toString().toLowerCase();
+                bVal = (bVal || '').toString().toLowerCase();
+            }
+            if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+        const quoteSortField = pendingQuotesSortConfig.field;
+        const quoteSortDir = pendingQuotesSortConfig.direction;
+        const activeSortLabel =
+            quoteSortField === 'DueDate'
+                ? 'Due Date'
+                : quoteSortField === 'RequestNo'
+                  ? 'Enquiry No.'
+                  : quoteSortField === 'ProjectName'
+                    ? 'Project Name'
+                    : quoteSortField === 'ListQuoteRef'
+                      ? 'To Customer and Quote details'
+                      : quoteSortField === 'ListQuoteDate'
+                        ? 'Quote date'
+                        : quoteSortField === 'CustomerName'
+                          ? 'Customer'
+                          : quoteSortField === 'ConsultantName'
+                            ? 'Consultant Name'
+                            : quoteSortField;
+        const renderQSH = (field, label, style = {}) => {
+            const isActive = quoteSortField === field;
+            const isAsc = quoteSortDir === 'asc';
+            return (
+                <th
+                    key={field}
+                    onClick={() =>
+                        setPendingQuotesSortConfig((prev) =>
+                            prev.field === field
+                                ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                                : { field, direction: 'asc' },
+                        )
+                    }
+                    style={{
+                        padding: '10px 16px',
+                        textAlign: 'left',
+                        fontSize: '12px',
+                        fontWeight: '600',
+                        color: isActive ? '#0284c7' : '#64748b',
+                        borderBottom: '1px solid #e2e8f0',
+                        cursor: 'pointer',
+                        userSelect: 'none',
+                        whiteSpace: 'nowrap',
+                        ...style,
+                    }}
+                >
+                    {label}
+                    {isActive ? (isAsc ? ' ▲' : ' ▼') : <span style={{ color: '#cbd5e1' }}> ⇅</span>}
+                </th>
+            );
+        };
+        return (
+            <div
+                style={{
+                    background: 'white',
+                    borderRadius: '8px',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                    flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    width: '100%',
+                    margin: '0 auto',
+                    minHeight: 0,
+                }}
+            >
+                <div
+                    style={{
+                        padding: '16px 24px',
+                        borderBottom: '1px solid #e2e8f0',
+                        background: '#f8fafc',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                    }}
+                >
+                    <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <FileText size={20} className="text-blue-600" />{' '}
+                        {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                            ? `Search results (${quoteListDisplayRows.length})`
+                            : `Pending updates (${quoteListDisplayRows.length})`}
+                    </h2>
+                    <span style={{ fontSize: '12px', color: '#64748b' }}>
+                        Sorted by <strong>{activeSortLabel}</strong>{' '}
+                        {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                    </span>
+                </div>
+                <div style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', minHeight: 0 }}>
+                    <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
+                        <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                            <tr>
+                                {renderQSH('RequestNo', 'Enquiry No.', { width: '96px' })}
+                                {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
+                                {renderQSH('ListQuoteRef', 'To Customer and Quote details', { minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal' })}
+                                {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
+                                {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedPendingQuotes.map((enq, idx) => (
+                                <tr
+                                    key={
+                                        enq.QuoteListKind
+                                            ? `${enq.RequestNo}-${enq.QuoteListKind}`
+                                            : `${String(enq.RequestNo ?? 'r')}-${
+                                                  Array.isArray(enq.ListMergedPendingPvIds)
+                                                      ? enq.ListMergedPendingPvIds.join('-')
+                                                      : String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`
+                                              }`
+                                    }
+                                    style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
+                                    onMouseOver={(e) => {
+                                        e.currentTarget.style.background = '#f8fafc';
+                                    }}
+                                    onMouseOut={(e) => {
+                                        e.currentTarget.style.background = 'white';
+                                    }}
+                                    onClick={() => handleSelectEnquiry(enq)}
+                                >
+                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>
+                                        <div>{enq.RequestNo}</div>
+                                        <div
+                                            style={{
+                                                marginTop: '8px',
+                                                fontSize: '11px',
+                                                fontWeight: 700,
+                                                letterSpacing: '0.02em',
+                                                color: listQuoteRollupStatusColor(enq.ListQuoteRollupStatus),
+                                            }}
+                                        >
+                                            {formatListQuoteRollupStatusLine(enq.ListQuoteRollupStatus)}
+                                        </div>
+                                    </td>
+                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>
+                                        {enq.ProjectName || '-'}
+                                    </td>
+                                    <td
+                                        style={{
+                                            padding: '12px 16px',
+                                            fontSize: '11px',
+                                            color: '#64748b',
+                                            verticalAlign: 'top',
+                                            minWidth: 'max-content',
+                                            maxWidth: '72vw',
+                                            whiteSpace: 'normal',
+                                            wordBreak: 'break-word',
+                                        }}
+                                    >
+                                        {(() => {
+                                            const preparedBy = String(enq.ListPreparedBy ?? enq.listpreparedby ?? '').trim();
+                                            const fmtQuoteDate = (raw) => {
+                                                try {
+                                                    const d = raw ? new Date(raw) : null;
+                                                    return d && !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '—';
+                                                } catch {
+                                                    return '—';
+                                                }
+                                            };
+                                            const compactLineStyle = {
+                                                display: 'flex',
+                                                flexWrap: 'wrap',
+                                                alignItems: 'baseline',
+                                                gap: '6px',
+                                                fontSize: '11px',
+                                                lineHeight: 1.35,
+                                                color: '#334155',
+                                            };
+                                            const refDateStyle = { fontSize: '11px', color: '#475569', wordBreak: 'break-word' };
+                                            const bdStyle = {
+                                                fontSize: '11px',
+                                                fontWeight: 600,
+                                                color: '#166534',
+                                                whiteSpace: 'nowrap',
+                                                background: '#dcfce7',
+                                                padding: '2px 8px',
+                                                borderRadius: '4px',
+                                            };
+                                            const preparedByStyle = {
+                                                fontSize: '11px',
+                                                color: '#800000',
+                                                fontWeight: 500,
+                                                whiteSpace: 'normal',
+                                                wordBreak: 'break-word',
+                                            };
+
+                                            if (Array.isArray(enq.ListQuoteDetailLines) && enq.ListQuoteDetailLines.length > 0) {
+                                                const lastLi = enq.ListQuoteDetailLines.length - 1;
+                                                return enq.ListQuoteDetailLines.map((ln, li) => (
+                                                    <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 8 : 0 }}>
+                                                        <span style={refDateStyle}>{ln.textLine}</span>
+                                                        {ln.bdTotal != null && ln.bdTotal > 0 ? (
+                                                            <span style={{ ...bdStyle, fontSize: '10px' }}>
+                                                                BD{' '}
+                                                                {Number(ln.bdTotal).toLocaleString(undefined, {
+                                                                    minimumFractionDigits: 2,
+                                                                    maximumFractionDigits: 2,
+                                                                })}
+                                                            </span>
+                                                        ) : null}
+                                                        {preparedBy && li === lastLi ? <span style={preparedByStyle}>{preparedBy}</span> : null}
+                                                    </div>
+                                                ));
+                                            }
+
+                                            const toNameCell = String(enq.ListQuoteDetailToName ?? '').trim() || '—';
+                                            if (Array.isArray(enq.ListMultiLeadQuoteRefs) && enq.ListMultiLeadQuoteRefs.length > 0) {
+                                                const joined = enq.ListMultiLeadQuoteRefs
+                                                    .map((line) => `${toNameCell} (${line.quoteNumber} - ${fmtQuoteDate(line.quoteDate)})`)
+                                                    .join(' · ');
+                                                return (
+                                                    <div style={compactLineStyle}>
+                                                        <span style={refDateStyle}>{joined}</span>
+                                                        {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
+                                                            <span style={bdStyle}>
+                                                                BD{' '}
+                                                                {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, {
+                                                                    minimumFractionDigits: 2,
+                                                                    maximumFractionDigits: 2,
+                                                                })}
+                                                            </span>
+                                                        ) : null}
+                                                        {preparedBy ? <span style={preparedByStyle}>{preparedBy}</span> : null}
+                                                    </div>
+                                                );
+                                            }
+                                            if (enq.ListQuoteRef) {
+                                                return (
+                                                    <div style={compactLineStyle}>
+                                                        <span style={refDateStyle}>
+                                                            {toNameCell} ({enq.ListQuoteRef} - {fmtQuoteDate(enq.ListQuoteDate)})
+                                                        </span>
+                                                        {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
+                                                            <span style={bdStyle}>
+                                                                BD{' '}
+                                                                {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, {
+                                                                    minimumFractionDigits: 2,
+                                                                    maximumFractionDigits: 2,
+                                                                })}
+                                                            </span>
+                                                        ) : null}
+                                                        {preparedBy ? <span style={preparedByStyle}>{preparedBy}</span> : null}
+                                                    </div>
+                                                );
+                                            }
+                                            return <div style={{ color: '#94a3b8', fontSize: '12px' }}>—</div>;
+                                        })()}
+                                    </td>
+                                    <td
+                                        style={{
+                                            padding: '12px 16px',
+                                            fontSize: '13px',
+                                            color: '#dc2626',
+                                            fontWeight: '500',
+                                            verticalAlign: 'top',
+                                            minWidth: '110px',
+                                            whiteSpace: 'nowrap',
+                                        }}
+                                    >
+                                        {enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}
+                                    </td>
+                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>
+                                        {enq.ConsultantName || enq.consultantName || '-'}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        );
+    }, [quoteListDisplayRows, pendingQuotesSortConfig, quoteListCategory, handleSelectEnquiry]);
 
     // --- Attachment Functions ---
     const fetchQuoteAttachments = useCallback(async (qId) => {
@@ -6411,6 +7959,7 @@ const QuoteForm = () => {
         setQuoteLogo(null);
         setCompanyProfiles([]);
     };
+    clearLeftPanelForToolbarSearchRef.current = handleClear;
 
     // Toggle clause visibility
     const toggleClause = (clauseKey) => {
@@ -6424,6 +7973,43 @@ const QuoteForm = () => {
 
 
     const getQuotePayload = useCallback((customDivisionCode = null) => {
+        /** Session user (header / AuthContext) — same source as API userEmail; not read from login storage alone. */
+        const sessionUserEmail = (currentUser?.email || currentUser?.EmailId || currentUser?.MailId || '').trim();
+
+        /** Quote ref Dept/Div must follow the **active Previous Quotes tab job** (e.g. HVAC → HVP), not the login profile’s default division (e.g. BMS → BMP). */
+        const branchCodesFromActiveQuoteTab = (() => {
+            const tabs =
+                calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
+            if (!tabs?.length || activeQuoteTab == null || String(activeQuoteTab).trim() === '') return null;
+            const tab = tabs.find((t) => String(t.id) === String(activeQuoteTab));
+            if (!tab) return null;
+            const pool =
+                (pricingData?.jobs && pricingData.jobs.length > 0 ? pricingData.jobs : null) ||
+                jobsPool ||
+                enquiryData?.divisionsHierarchy ||
+                [];
+            let node = null;
+            if (tab.realId != null && String(tab.realId).trim() !== '') {
+                node = pool.find((j) => String(j.id || j.ItemID || j.ID) === String(tab.realId));
+            }
+            const div = String(tab.divisionCode || node?.divisionCode || node?.DivisionCode || '').trim();
+            const dep = String(
+                tab.departmentCode ||
+                    node?.departmentCode ||
+                    node?.DepartmentCode ||
+                    tab.code ||
+                    node?.code ||
+                    ''
+            ).trim();
+            // Quote ref division must come from the job row / tab, not company defaults (would re-apply login/BMS BMP).
+            if (!div) return null;
+            return {
+                divisionCode: div,
+                departmentCode:
+                    dep || String(enquiryData?.companyDetails?.departmentCode || 'AAC').trim(),
+            };
+        })();
+
         // --- LOGGED-IN USER DRIVEN CODE RESOLUTION (Step 4488 FIX) ---
         // 1. STICK TO USER'S OWN IDENTITY: Find the profile the server matched to this user's email
         let personalProfile = (enquiryData?.availableProfiles || []).find(p => p.isPersonalProfile);
@@ -6447,8 +8033,8 @@ const QuoteForm = () => {
             }
         }
 
-        // 3. Fallback: Absolute hard-override for BMS users (Requested by User)
-        if (!personalProfile && userDept.toUpperCase().includes('BMS')) {
+        // 3. Fallback: Absolute hard-override for BMS users (Requested by User) — skipped when a concrete tab job supplies codes (HVAC vs BMS).
+        if (!branchCodesFromActiveQuoteTab && !personalProfile && userDept.toUpperCase().includes('BMS')) {
             console.log('[getQuotePayload] HARD OVERRIDE: BMS user detected, forcing AAC/BMP identity');
             effectiveDivisionCode = 'BMP';
             effectiveDeptCode = 'AAC';
@@ -6464,6 +8050,10 @@ const QuoteForm = () => {
         if (customDivisionCode) {
             effectiveDivisionCode = customDivisionCode;
             identitySource = `CustomDivisionCode(${customDivisionCode})`;
+        } else if (branchCodesFromActiveQuoteTab?.divisionCode) {
+            effectiveDivisionCode = branchCodesFromActiveQuoteTab.divisionCode;
+            effectiveDeptCode = branchCodesFromActiveQuoteTab.departmentCode || effectiveDeptCode || 'AAC';
+            identitySource = 'ActiveQuoteTabJob';
         }
 
         console.log(`[getQuotePayload] Final Identity: Dept=${effectiveDeptCode}, Div=${effectiveDivisionCode} (Source: ${identitySource})`);
@@ -6534,10 +8124,10 @@ const QuoteForm = () => {
             requestNo: enquiryData.enquiry.RequestNo,
             validityDays,
             preparedBy: preparedBy,
-            preparedByEmail: currentUser?.email || currentUser?.EmailId,
+            preparedByEmail: sessionUserEmail,
             ...clauses,
             ...clauseContent,
-            totalAmount: grandTotal,
+            totalAmount: Number.isFinite(Number(grandTotal)) ? Number(grandTotal) : 0,
             customClauses,
             clauseOrder: orderedClauses,
             quoteDate,
@@ -6550,7 +8140,7 @@ const QuoteForm = () => {
                 calculatedTabs,
                 effectiveQuoteTabs,
                 activeQuoteTab,
-                toName,
+            toName,
                 jobsPool.length > 0 ? jobsPool : enquiryData?.divisionsHierarchy || []
             ),
             toAddress,
@@ -6571,9 +8161,10 @@ const QuoteForm = () => {
                 }
                 return '';
             })(),
-            status: 'Saved'
+            status: 'Saved',
+            digitalSignaturesJson: serializeDigitalStampsForApi(quoteDigitalStamps),
         };
-    }, [enquiryData, selectedJobs, pricingSummary, currentUser, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool]);
+    }, [enquiryData, selectedJobs, pricingSummary, currentUser, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
 
 
 
@@ -6698,7 +8289,8 @@ const QuoteForm = () => {
                         PreparedBy: preparedBy,
                         TotalAmount: grandTotal,
                         OwnJob: savePayload.ownJob, // CRITICAL for AutoLoad matching
-                        LeadJob: savePayload.leadJob  // CRITICAL for AutoLoad matching
+                        LeadJob: savePayload.leadJob, // CRITICAL for AutoLoad matching
+                        DigitalSignaturesJson: savePayload.digitalSignaturesJson,
                     }
                 ]);
 
@@ -6715,6 +8307,7 @@ const QuoteForm = () => {
                         TotalAmount: grandTotal,
                         OwnJob: savePayload.ownJob,
                         LeadJob: savePayload.leadJob,
+                        DigitalSignaturesJson: savePayload.digitalSignaturesJson,
                     };
                     setQuoteScopedForPanel((prev) => {
                         const idStr = String(newId ?? '');
@@ -6770,6 +8363,9 @@ const QuoteForm = () => {
                 let refreshed = null;
                 if (enquiryData) {
                     refreshed = await fetchExistingQuotes(enquiryData.enquiry.RequestNo);
+                }
+                if (scopedEnquiryQuotesParams) {
+                    setScopedQuotePanelRefreshNonce((n) => n + 1);
                 }
                 const match = Array.isArray(refreshed)
                     ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newId ?? ''))
@@ -6865,13 +8461,16 @@ const QuoteForm = () => {
             setQuoteDigitalStamps([]);
             return;
         }
+        if (quoteId != null && String(quoteId).trim() !== '') {
+            return;
+        }
         const loaded = loadStampsForEnquiry(
             digitalStampScope.requestNo,
             digitalStampScope.leadKey,
             digitalStampScope.customer
         );
         setQuoteDigitalStamps((prev) => (JSON.stringify(prev) === JSON.stringify(loaded) ? prev : loaded));
-    }, [digitalStampScope]);
+    }, [digitalStampScope, quoteId]);
 
     const commitQuoteDigitalStamps = useCallback((updater) => {
         setQuoteDigitalStamps((prev) => {
@@ -6948,7 +8547,9 @@ const QuoteForm = () => {
 
             const preview = document.getElementById('quote-preview');
             const sheets = preview ? [...preview.querySelectorAll('.quote-a4-sheet')] : [];
-            const sheetIndex = Math.max(0, sheets.indexOf(sheet));
+            const sheetIndex0 = Math.max(0, sheets.indexOf(sheet));
+            /** Stamps filter uses 1-based page index (`sheetIdx + 1`). */
+            const sheetIndex = sheetIndex0 + 1;
 
             dragSignaturePayloadRef.current = null;
             handlePlaceDigitalStamp({
@@ -6982,6 +8583,42 @@ const QuoteForm = () => {
     const handleToolbarSignatureDragEnd = useCallback(() => {
         sigDragActiveRef.current = false;
         dragSignaturePayloadRef.current = null;
+        sigToolbarSuppressClickRef.current = true;
+        window.setTimeout(() => {
+            sigToolbarSuppressClickRef.current = false;
+        }, 150);
+    }, []);
+
+    /** 0-based index of the quote sheet most visible inside the print preview scroll area (for click-to-place). */
+    const getActiveQuoteSheetIndex0Based = useCallback(() => {
+        if (typeof document === 'undefined') return 0;
+        const preview = document.getElementById('quote-preview');
+        if (!preview) return 0;
+        const sheets = [...preview.querySelectorAll('.quote-a4-sheet')];
+        if (sheets.length === 0) return 0;
+        const root = document.getElementById('quote-print-root');
+        const scroller = root || preview;
+        const rootRect = scroller.getBoundingClientRect();
+        if (!rootRect.width || !rootRect.height) return 0;
+        const cx = rootRect.left + rootRect.width * 0.5;
+        const cy = rootRect.top + rootRect.height * 0.42;
+        for (let i = 0; i < sheets.length; i++) {
+            const r = sheets[i].getBoundingClientRect();
+            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) return i;
+        }
+        let best = 0;
+        let bestArea = -1;
+        for (let i = 0; i < sheets.length; i++) {
+            const r = sheets[i].getBoundingClientRect();
+            const ix = Math.max(0, Math.min(r.right, rootRect.right) - Math.max(r.left, rootRect.left));
+            const iy = Math.max(0, Math.min(r.bottom, rootRect.bottom) - Math.max(r.top, rootRect.top));
+            const area = ix * iy;
+            if (area > bestArea) {
+                bestArea = area;
+                best = i;
+            }
+        }
+        return bestArea > 0 ? best : 0;
     }, []);
 
     const handleSignaturesToolbarPrimaryClick = useCallback(
@@ -6991,29 +8628,43 @@ const QuoteForm = () => {
                 setSignatureVaultOpen(true);
                 return;
             }
-            if (defaultSignatureImageUrl) {
-                handlePlaceDigitalStamp({
-                    imageDataUrl: defaultSignatureImageUrl,
-                    sheetIndex: 0,
-                    displayName: digitalStampUserDisplayName,
-                    designation: digitalStampUserDesignation,
-                });
+            /** Plain click: place default-or-first library image on the active sheet (no vault). */
+            if (!toolbarDragSignatureImageUrl) {
+                setSignatureVaultOpen(true);
                 return;
             }
-            setSignatureVaultOpen(true);
+            const sheet0 = getActiveQuoteSheetIndex0Based();
+            const sheetIndex = sheet0 + 1;
+            handlePlaceDigitalStamp({
+                imageDataUrl: toolbarDragSignatureImageUrl,
+                sheetIndex,
+                displayName: digitalStampUserDisplayName,
+                designation: digitalStampUserDesignation,
+            });
         },
         [
             hasUserPricing,
             enquiryData?.enquiry?.RequestNo,
-            defaultSignatureImageUrl,
+            toolbarDragSignatureImageUrl,
+            getActiveQuoteSheetIndex0Based,
             handlePlaceDigitalStamp,
             digitalStampUserDisplayName,
             digitalStampUserDesignation,
+            setSignatureVaultOpen,
         ]
+    );
+
+    const handleSignaturesToolbarControlClick = useCallback(
+        (e) => {
+            if (sigToolbarSuppressClickRef.current) return;
+            handleSignaturesToolbarPrimaryClick(e);
+        },
+        [handleSignaturesToolbarPrimaryClick]
     );
 
     const handleMoveDigitalStamp = useCallback(
         (id, xPct, yPct) => {
+            if (String(id).startsWith('inherited-')) return;
             commitQuoteDigitalStamps((prev) => prev.map((s) => (s.id === id ? { ...s, xPct, yPct } : s)));
         },
         [commitQuoteDigitalStamps]
@@ -7021,10 +8672,95 @@ const QuoteForm = () => {
 
     const handleRemoveDigitalStamp = useCallback(
         (id) => {
+            if (String(id).startsWith('inherited-')) return;
             commitQuoteDigitalStamps((prev) => prev.filter((s) => s.id !== id));
         },
         [commitQuoteDigitalStamps]
     );
+
+    /** Parent own-job tab: show this tab's stamps plus latest saved stamps from each direct subjob quote row. */
+    const quotePreviewDigitalStamps = React.useMemo(() => {
+        const base = Array.isArray(quoteDigitalStamps) ? quoteDigitalStamps : [];
+        const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : [];
+        const activeTabObj = tabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (!activeTabObj?.isOwnJobTab) return base;
+
+        const subTabs = tabs.filter((t) => t.isSubJobTab);
+        if (!subTabs.length || !enquiryData?.enquiry?.RequestNo) return base;
+
+        const requestNoNorm = String(enquiryData.enquiry.RequestNo).trim();
+        const currentToNorm = normalize(toName || '');
+        const currentToKey = normalizeCustomerKey(toName || '');
+
+        const currentLeadCodeClean = (() => {
+            if (selectedLeadId && pricingData?.jobs) {
+                const root = pricingData.jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
+                if (root) {
+                    const rCode = (root.leadJobCode || root.LeadJobCode || '').toUpperCase();
+                    if (rCode && rCode.match(/L\d+/)) return rCode.match(/L\d+/)[0];
+                    if (root.itemName?.toUpperCase().match(/L\d+/)) return root.itemName.toUpperCase().match(/L\d+/)[0];
+                }
+            }
+            const prefix = (enquiryData?.leadJobPrefix || '').toUpperCase();
+            if (prefix && prefix.match(/L\d+/)) return prefix.match(/L\d+/)[0];
+            return '';
+        })();
+
+        const merged = [...base];
+        for (const st of subTabs) {
+            const childLabel = (st.label || st.name || '').trim();
+            const childOwnNorm = collapseSpacesLower(stripQuoteJobPrefix(childLabel));
+
+            const candidates = (existingQuotes || []).filter((q) => {
+                if (String(q.RequestNo || '').trim() !== requestNoNorm) return false;
+                const qTo = normalize(q.ToName || '');
+                const qToKey = normalizeCustomerKey(q.ToName || '');
+                const toOk =
+                    (currentToNorm && qTo === currentToNorm) ||
+                    (currentToKey && qToKey && currentToKey === qToKey);
+                if (!toOk) return false;
+                const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                if (qOwn !== childOwnNorm) return false;
+                const parts = q.QuoteNumber?.split('/') || [];
+                const qLeadPart = parts[2] ? parts[2].toUpperCase() : '';
+                const qLeadCodeOnly = qLeadPart.match(/L\d+/) ? qLeadPart.match(/L\d+/)[0] : '';
+                if (qLeadCodeOnly && currentLeadCodeClean && qLeadCodeOnly !== currentLeadCodeClean) return false;
+                return true;
+            });
+
+            if (!candidates.length) continue;
+            const row = [...candidates].sort((a, b) => {
+                const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+                if (r !== 0) return r;
+                const qn = (Number(b.QuoteNo) || 0) - (Number(a.QuoteNo) || 0);
+                if (qn !== 0) return qn;
+                const ta = Date.parse(b.UpdatedAt || b.CreatedAt || 0) || 0;
+                const tb = Date.parse(a.UpdatedAt || a.CreatedAt || 0) || 0;
+                return ta - tb;
+            })[0];
+
+            const childStamps = parseDigitalSignaturesFromQuoteRow(row);
+            for (const s of childStamps) {
+                merged.push({
+                    ...s,
+                    id: `inherited-${st.id}-${s.id}`,
+                    removableBeforeNextCommit: false,
+                    inheritedFromSubJob: true,
+                });
+            }
+        }
+        return merged;
+    }, [
+        quoteDigitalStamps,
+        calculatedTabs,
+        activeQuoteTab,
+        existingQuotes,
+        enquiryData?.enquiry?.RequestNo,
+        enquiryData?.leadJobPrefix,
+        toName,
+        selectedLeadId,
+        pricingData?.jobs,
+    ]);
 
     /** Profile menu → Manage signatures → Place on page (when Quote tab is active). */
     useEffect(() => {
@@ -7033,7 +8769,8 @@ const QuoteForm = () => {
             if (!d?.imageDataUrl) return;
             handlePlaceDigitalStamp({
                 imageDataUrl: d.imageDataUrl,
-                sheetIndex: d.sheetIndex ?? 0,
+                /** Profile menu sends 0-based page index; stamp filter uses 1-based. */
+                sheetIndex: (Number.isFinite(Number(d.sheetIndex)) ? Number(d.sheetIndex) : 0) + 1,
                 displayName: digitalStampUserDisplayName,
                 designation: digitalStampUserDesignation,
             });
@@ -7074,7 +8811,7 @@ const QuoteForm = () => {
             setTimeout(() => {
                 printWindow.print();
                 printWindow.close();
-            }, 500);
+            }, 900);
         }
     }, [printWithHeader]);
 
@@ -7167,14 +8904,14 @@ const QuoteForm = () => {
             const { blob, fileName } = await fetchQuotePdfBlob();
             triggerBlobDownload(blob, fileName);
         } catch (err) {
-            console.error('PDF generation error:', err);
+                    console.error('PDF generation error:', err);
             alert(
                 `PDF download failed: ${err.message || err}\n\n` +
                     'Ensure the API server is running and Puppeteer is installed (cd server && npm install). ' +
                     'You can still use Print → Save as PDF for a vector file.'
             );
         } finally {
-            setIsUploading(false);
+                    setIsUploading(false);
         }
     };
 
@@ -7325,6 +9062,80 @@ const QuoteForm = () => {
         };
     };
 
+    /**
+     * mailto: opens the default mail app (e.g. Outlook) with subject/body. Recipient optional.
+     * Browsers cannot attach the PDF via mailto — the same click also saves the PDF to Downloads to attach in Outlook.
+     */
+    const buildMailtoHrefFromEmailModal = () => {
+        if (!emailDetails.pdfBlob) {
+            alert('The quote PDF is not available. Close this dialog and try again.');
+            return null;
+        }
+        const toRaw = (emailDetails.to || '').trim();
+        const subjectForUrl = (() => {
+            const s = sanitizeMailLine(emailDetails.subject) || 'Quotation';
+            return s.length > 200 ? `${s.slice(0, 197)}...` : s;
+        })();
+        const pdfName = (emailDetails.pdfName || 'quotation.pdf').trim();
+        const attachNote =
+            `\r\n\r\n---\r\n` +
+            `The quote PDF (${pdfName}) is also being saved to your Downloads folder — attach it in Outlook (websites cannot add attachments via mail links).`;
+        const bodyText = String(emailDetails.body || '');
+        const fullBody = bodyText.replace(/\r?\n/g, '\r\n').trimEnd() + attachNote;
+
+        const encSubject = encodeURIComponent(subjectForUrl);
+        let encBody = encodeURIComponent(fullBody);
+        const toAddr = toRaw.length > 320 ? `${toRaw.slice(0, 317)}...` : toRaw;
+        let mailtoHref = toAddr
+            ? `mailto:${encodeURIComponent(toAddr)}?subject=${encSubject}&body=${encBody}`
+            : `mailto:?subject=${encSubject}&body=${encBody}`;
+        if (mailtoHref.length > 2000) {
+            const shorterBody =
+                bodyText.replace(/\r?\n/g, '\r\n').trimEnd().slice(0, 500) +
+                '\r\n\r\n[Message truncated for mail link length limit.]' +
+                attachNote;
+            encBody = encodeURIComponent(shorterBody);
+            mailtoHref = toAddr
+                ? `mailto:${encodeURIComponent(toAddr)}?subject=${encSubject}&body=${encBody}`
+                : `mailto:?subject=${encSubject}&body=${encBody}`;
+            if (mailtoHref.length > 2000) {
+                encBody = encodeURIComponent(
+                    `Compose your message in Outlook.\r\n${attachNote}`
+                );
+                mailtoHref = toAddr
+                    ? `mailto:${encodeURIComponent(toAddr)}?subject=${encSubject}&body=${encBody}`
+                    : `mailto:?subject=${encSubject}&body=${encBody}`;
+            }
+        }
+        return mailtoHref;
+    };
+
+    const handlePreviewQuotePdf = () => {
+        if (!emailDetails.pdfBlob) {
+            alert('No PDF to preview.');
+            return;
+        }
+        try {
+            const url = URL.createObjectURL(emailDetails.pdfBlob);
+            const w = window.open(url, '_blank', 'noopener,noreferrer');
+            if (!w) {
+                URL.revokeObjectURL(url);
+                alert('Pop-up blocked. Allow pop-ups for this site to preview the PDF.');
+                return;
+            }
+            window.setTimeout(() => {
+                try {
+                    URL.revokeObjectURL(url);
+                } catch (_) {
+                    /* ignore */
+                }
+            }, 120000);
+        } catch (e) {
+            console.error('[email-quote] pdf preview', e);
+            alert('Could not open PDF preview.');
+        }
+    };
+
     const runQuoteEmailDownloads = async () => {
         setIsUploading(true);
         try {
@@ -7368,7 +9179,7 @@ const QuoteForm = () => {
             if (!payload) return;
 
             // 3. Prepare body with a nice message
-            const initialBody = `Dear Sir/Madam,\n\nPlease find attached the quotation for your kind consideration.\n\nEnquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'}\nProject: ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}\n\nShould you have any queries, feel free to contact us.\n\nBest Regards,\n${(currentUser?.FullName || currentUser?.name || '').trim()}`;
+            const initialBody = `Dear Sir/Madam,\n\nPlease find the attached quotation regarding Enquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'} for the ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}.\n\nWe have detailed the pricing, scope, and terms for your review. Should you have any questions or require further techno-commercial clarification regarding this proposal, please do not hesitate to contact us.\n\nWe look forward to the possibility of working with you on this project.\n\nBest Regards,\n${(currentUser?.FullName || currentUser?.name || '').trim()}`;
 
             setEmailDetails({
                 to: payload.toAddr || '',
@@ -7430,14 +9241,11 @@ const QuoteForm = () => {
     };
 
     const handleOpenInOutlook = () => {
-        const payload = buildQuoteEmailDraftPayload();
-        if (!payload) return;
-        
-        // Use the old mailto flow
-        setQuoteEmailDraftHref(payload.mailtoHref);
-        openMailtoFromUserClick(payload.mailtoHref);
-        
-        // Also trigger the downloads so user can manually attach
+        const href = buildMailtoHrefFromEmailModal();
+        if (!href) return;
+
+        setQuoteEmailDraftHref(href);
+        openMailtoFromUserClick(href);
         triggerBlobDownload(emailDetails.pdfBlob, emailDetails.pdfName);
         setShowEmailModal(false);
     };
@@ -7708,6 +9516,15 @@ const QuoteForm = () => {
 
     /** Prepared-by line on quote preview: mobile from Master_ConcernedSE.MobileNumber (users list / enquiry options / logged-in profile). */
     const preparedByContactFromMaster = React.useMemo(() => {
+        const rowEmail = (loadedQuotePreparedByEmail || '').toLowerCase().trim();
+        if (rowEmail && Array.isArray(usersList) && usersList.length > 0) {
+            const byEmail = usersList.find((x) => {
+                const xe = String(x.EmailId || x.email || '').toLowerCase().trim();
+                return xe && xe === rowEmail;
+            });
+            const mob = (byEmail?.MobileNumber != null ? String(byEmail.MobileNumber) : '').trim();
+            if (mob) return mob;
+        }
         const name = (preparedBy || '').trim();
         if (!name) return '';
         const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -7726,7 +9543,7 @@ const QuoteForm = () => {
             if (cMob) return cMob;
         }
         return '';
-    }, [preparedBy, usersList, preparedByOptions, currentUser]);
+    }, [loadedQuotePreparedByEmail, preparedBy, usersList, preparedByOptions, currentUser]);
 
     /** Quote preview / PDF: enquiry types as a single line (reference “Type” row). */
     const quotePreviewTypeLine = React.useMemo(() => {
@@ -7734,13 +9551,89 @@ const QuoteForm = () => {
         return parts.length ? parts.join(', ') : '—';
     }, [quoteTypeList]);
 
-    /** Prepared By sub-line: Tel … (from master / options / profile). */
-    const quotePreviewPreparedByTelLine = React.useMemo(() => {
-        const t = String(preparedByContactFromMaster || '').trim();
+    /** Prepared By contact number only (no "Tel:") for quote header "Contact:" row. */
+    const quotePreviewPreparedByContactDisplay = React.useMemo(() => {
+        let t = String(preparedByContactFromMaster || '').trim();
         if (!t) return '';
-        if (/^tel\s*:/i.test(t)) return t;
-        return `Tel: ${t}`;
+        t = t.replace(/^tel\s*:?\s*/i, '').trim();
+        return t;
     }, [preparedByContactFromMaster]);
+
+    /** Subjob tabs: A4 document header uses EnquiryQuotes row only (own-job tab uses left-panel state via memos above). */
+    const subjobQuoteA4HeaderDisplay = React.useMemo(() => {
+        const tab = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
+        if (!tab?.isSubJobTab || !loadedEnquiryQuoteRowForPreview) return null;
+        return buildSubjobQuoteHeaderDisplayFromRow(
+            loadedEnquiryQuoteRowForPreview,
+            usersList,
+            preparedByOptions
+        );
+    }, [calculatedTabs, activeQuoteTab, loadedEnquiryQuoteRowForPreview, usersList, preparedByOptions]);
+
+    /**
+     * A4 cover "To," block: own-job tab = left form (`toName` / address). Subjob + loaded revision = EnquiryQuotes row;
+     * when `OwnJob` is a different branch than row `ToName` (e.g. external customer on a BMS quote), prefer that
+     * branch’s `availableProfiles` row for preview so the right panel matches the active subjob tab.
+     */
+    const quotePreviewToBlockDisplay = React.useMemo(() => {
+        const pick = (fromRow, fromForm) => {
+            const r = String(fromRow ?? '').trim();
+            return r || String(fromForm ?? '').trim();
+        };
+        const baseForm = {
+            toName: String(toName || '').trim(),
+            toAddress: String(toAddress || ''),
+            toPhone: String(toPhone || '').trim(),
+            toFax: String(toFax || '').trim(),
+            toEmail: String(toEmail || '').trim(),
+        };
+        const sj = subjobQuoteA4HeaderDisplay;
+        const row = loadedEnquiryQuoteRowForPreview;
+        if (!sj || !row) return baseForm;
+
+        const ownJob = String(row.OwnJob ?? row.ownjob ?? '').trim();
+        const rowToName = String(sj.toName || '').trim();
+        const ownNorm = ownJob ? collapseSpacesLower(stripQuoteJobPrefix(ownJob)) : '';
+        const rowToNorm = rowToName ? collapseSpacesLower(stripQuoteJobPrefix(rowToName)) : '';
+
+        const profiles = enquiryData?.availableProfiles;
+        if (ownNorm && rowToNorm && ownNorm !== rowToNorm && Array.isArray(profiles) && profiles.length) {
+            const prof =
+                profiles.find((p) => {
+                    const pn = collapseSpacesLower(stripQuoteJobPrefix(String(p.itemName || p.name || '')));
+                    return pn && (pn === ownNorm || ownNorm.includes(pn) || pn.includes(ownNorm));
+                }) || null;
+            if (prof) {
+                const dispName =
+                    stripQuoteJobPrefix(String(prof.itemName || prof.name || '')).trim() ||
+                    String(prof.name || '').trim();
+                return {
+                    toName: dispName || pick(sj.toName, toName),
+                    toAddress: String(prof.address || '').trim() || pick(sj.toAddress, toAddress),
+                    toPhone: String(prof.phone || '').trim() || pick(sj.toPhone, toPhone),
+                    toFax: String(prof.fax || '').trim() || pick(sj.toFax, toFax),
+                    toEmail: String(prof.email || '').trim() || pick(sj.toEmail, toEmail),
+                };
+            }
+        }
+
+        return {
+            toName: pick(sj.toName, toName),
+            toAddress: pick(sj.toAddress, toAddress),
+            toPhone: pick(sj.toPhone, toPhone),
+            toFax: pick(sj.toFax, toFax),
+            toEmail: pick(sj.toEmail, toEmail),
+        };
+    }, [
+        subjobQuoteA4HeaderDisplay,
+        loadedEnquiryQuoteRowForPreview,
+        enquiryData?.availableProfiles,
+        toName,
+        toAddress,
+        toPhone,
+        toFax,
+        toEmail,
+    ]);
 
     const attentionSelectOptions = React.useMemo(() => {
         const finish = (rawList) => {
@@ -7908,6 +9801,7 @@ const QuoteForm = () => {
     useEffect(() => {
         const ed = enquiryDataRef.current;
         if (!toName?.trim() || !ed) return;
+        if (quoteId != null && String(quoteId).trim() !== '') return;
         if (!isQuoteInternalCustomer(ed, pricingData?.jobs, toName)) return;
         const allowed = attentionSelectOptions;
         if (allowed.length === 0) return;
@@ -7921,7 +9815,7 @@ const QuoteForm = () => {
             if (normLooseAttention(p) === normLooseAttention(next)) return prev;
             return next;
         });
-    }, [toName, toAttention, attentionOptionsContentSig, pricingStableSig]);
+    }, [toName, toAttention, attentionOptionsContentSig, pricingStableSig, quoteId]);
 
     // --- READ-ONLY TAB LOGIC ---
     const activeGlobalTabObj = (effectiveQuoteTabs || []).find(t => String(t.id) === String(activeQuoteTab));
@@ -7980,17 +9874,17 @@ const QuoteForm = () => {
 
                             {/* Lead Job Dropdown + code pill (match Pricing module) */}
                             <div style={{ flex: 1, minWidth: 0 }}>
-                                {(() => {
+                                    {(() => {
                                         if (!enquiryData) {
                                             return (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
                                                     <div style={{ flex: 1, position: 'relative' }}>
-                                                        <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
-                                                            <option>Select Lead Job</option>
-                                                        </select>
+                                            <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
+                                                <option>Select Lead Job</option>
+                                            </select>
                                                     </div>
                                                 </div>
-                                            );
+                                        );
                                         }
 
                                         // 1. Get all potential lead jobs (roots)
@@ -8058,7 +9952,8 @@ const QuoteForm = () => {
                                             visibleLeadJobs,
                                             selectedLeadId,
                                             pricingData?.jobs,
-                                            enquiryData.leadJobPrefix
+                                            enquiryData.leadJobPrefix,
+                                            enquiryData.divisionsHierarchy
                                         );
 
                                         if (import.meta.env.DEV) {
@@ -8075,20 +9970,12 @@ const QuoteForm = () => {
                                                 .trim()
                                                 .toLowerCase();
 
-                                        let selectedLeadCodeDisplay = '';
-                                        if (selectedLeadId && pricingData?.jobs) {
-                                            const root = pricingData.jobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
-                                            selectedLeadCodeDisplay = String(root?.leadJobCode || root?.LeadJobCode || '').trim();
-                                            if (!selectedLeadCodeDisplay && root) {
-                                                const nm = String(root.itemName || root.DivisionName || root.ItemName || '');
-                                                const m = nm.match(/^(L\d+)/i);
-                                                if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
-                                            }
-                                        }
-                                        if (!selectedLeadCodeDisplay && selectedValue) {
-                                            const m = String(selectedValue).trim().match(/^(L\d+)/i);
-                                            if (m) selectedLeadCodeDisplay = m[1].toUpperCase();
-                                        }
+                                        let selectedLeadCodeDisplay = resolveQuoteLeadCodePill({
+                                            selectedLeadId,
+                                            selectedValue,
+                                            pricingJobs: pricingData?.jobs,
+                                            divisionsHierarchy: enquiryData?.divisionsHierarchy,
+                                        });
 
                                         const labelForCode =
                                             selectedValue && String(selectedValue).trim()
@@ -8158,15 +10045,16 @@ const QuoteForm = () => {
                                         return (
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
                                                 <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
-                                                    <select
-                                                        style={{
-                                                            width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
-                                                            background: 'white', color: '#334155', fontWeight: '500',
-                                                            fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
-                                                        }}
-                                                        value={selectedValue}
-                                                        onChange={(e) => {
-                                                            const val = e.target.value;
+                                            <select
+                                                style={{
+                                                    width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
+                                                    background: 'white', color: '#334155', fontWeight: '500',
+                                                    fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
+                                                }}
+                                                value={selectedValue}
+                                                onChange={(e) => {
+                                                    quoteRowDivisionLeadLockRef.current = false;
+                                                    const val = e.target.value;
                                                             if (!val || !String(val).trim()) return;
                                                             const nextFp = leadJobChoiceFingerprint(val);
                                                             const prevFp = leadChoiceFingerprintRef.current;
@@ -8176,7 +10064,7 @@ const QuoteForm = () => {
                                                                 const tn = (toName || '').trim();
                                                                 // Never reuse another lead branch's saved quote when only ToName is re-applied.
                                                                 preserveQuoteOnLeadChangeRef.current = tn ? { toName: tn } : null;
-                                                                setQuoteId(null);
+                                                    setQuoteId(null);
                                                                 setQuoteNumber('');
                                                                 const reg = tabStateRegistry.current[activeQuoteTab];
                                                                 if (reg && typeof reg === 'object') {
@@ -8187,32 +10075,22 @@ const QuoteForm = () => {
                                                             }
                                                             leadChoiceFingerprintRef.current = nextFp || prevFp;
 
-                                                            // Find the corresponding Hub ID for strict isolation (val is full <option> string)
-                                                            const valClean = String(val || '')
-                                                                .replace(/^L\d+\s*-\s*/i, '')
-                                                                .trim()
-                                                                .toLowerCase();
-                                                            const jobObj = (pricingData?.jobs || []).find((j) => {
-                                                                const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
-                                                                if (!isRoot) return false;
-                                                                const nm = String(j.itemName || j.DivisionName || j.ItemName || '').trim();
-                                                                const nmLow = nm.toLowerCase();
-                                                                return (
-                                                                    nm === val ||
-                                                                    nmLow === String(val || '').trim().toLowerCase() ||
-                                                                    nmLow.replace(/^l\d+\s*-\s*/i, '').trim() === valClean
-                                                                );
-                                                            });
-                                                            if (jobObj) setSelectedLeadId(jobObj.id || jobObj.ItemID);
+                                                            // Match EnquiryFor root for dropdown value (duplicate clean names: L1 subjob vs L2 lead).
+                                                            const jobObj = resolvePricingRootForLeadSelect(
+                                                                val,
+                                                                pricingData?.jobs,
+                                                                enquiryData?.divisionsHierarchy
+                                                            );
+                                                    if (jobObj) setSelectedLeadId(jobObj.id || jobObj.ItemID);
 
                                                             const nextPrefixForPricing = val.match(/^L\d+/)
                                                                 ? val.split('-')[0].trim()
                                                                 : val;
-                                                            if (val.match(/^L\d+/)) {
+                                                    if (val.match(/^L\d+/)) {
                                                                 setEnquiryData(prev => ({ ...prev, leadJobPrefix: nextPrefixForPricing }));
-                                                            } else {
-                                                                setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
-                                                            }
+                                                    } else {
+                                                        setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
+                                                    }
 
                                                             const reqNo = enquiryData?.enquiry?.RequestNo;
                                                             const cx = (toNameRef.current || '').trim();
@@ -8223,18 +10101,18 @@ const QuoteForm = () => {
                                                                     })
                                                                 );
                                                             }
-                                                        }}
-                                                    >
-                                                        <option value="" disabled>Select Lead Job</option>
-                                                        {visibleLeadJobs.map(div => {
-                                                            const cleanName = div.replace(/^L\d+\s*-\s*/, '').trim();
-                                                            return <option key={div} value={div}>{cleanName}</option>;
-                                                        })}
-                                                    </select>
-                                                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
-                                                        <ChevronDown size={14} />
-                                                    </div>
-                                                </div>
+                                                }}
+                                            >
+                                                <option value="" disabled>Select Lead Job</option>
+                                                {visibleLeadJobs.map(div => {
+                                                    const cleanName = div.replace(/^L\d+\s*-\s*/, '').trim();
+                                                    return <option key={div} value={div}>{cleanName}</option>;
+                                                })}
+                                            </select>
+                                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: '#64748b' }}>
+                                        <ChevronDown size={14} />
+                                    </div>
+                                </div>
                                                 {leadCodePill}
                                             </div>
                                         );
@@ -8300,13 +10178,200 @@ const QuoteForm = () => {
                     </div>
                 </div>
 
-                {/* Action Buttons (Clear lives next to Search above) */}
-                {/* Visible ONLY when Enquiry Data, Lead Job AND Customer (toName) are selected */}
-                {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
-                    <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '6px' }}>
+                {/* Action row: Draft Save always visible; Save / Revision only when enquiry + lead + customer are set */}
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '6px', flexWrap: 'wrap' }}>
 
-                        {/* Save, Revision — PDF / Email / With Header / Print / Signatures are icon buttons on the quote filter row (next to Clear). */}
-                        <div style={{ display: 'flex', gap: '6px' }}>
+                        {/* Draft Save + load — PDF / Email / With Header / Print / Signatures are on the right panel toolbar. */}
+                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <div
+                                ref={formDraftMenuWrapRef}
+                                style={{ position: 'relative', display: 'inline-flex', alignItems: 'stretch' }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'stretch',
+                                        gap: 0,
+                                        borderRadius: '44px',
+                                        overflow: 'hidden',
+                                        border: '1px solid #cbd5e1',
+                                    }}
+                                >
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleSaveQuoteFormDraft()}
+                                        disabled={saving || !canEdit() || isEditingRestricted}
+                                        title="Save a draft of this quote form (all tabs) on the server for your account only. Does not create a saved quote."
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            padding: '6px 12px',
+                                            background: !canEdit() || isEditingRestricted ? '#f1f5f9' : '#fff',
+                                            color: !canEdit() || isEditingRestricted ? '#94a3b8' : '#334155',
+                                            border: 'none',
+                                            borderRadius: 0,
+                                            cursor: !canEdit() || isEditingRestricted ? 'not-allowed' : 'pointer',
+                                            fontWeight: '600',
+                                            fontSize: '12px',
+                                            whiteSpace: 'nowrap',
+                                        }}
+                                    >
+                                        <FileText size={14} /> Draft Save
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-expanded={formDraftPanelOpen}
+                                        aria-haspopup="listbox"
+                                        onClick={() => {
+                                            if (!normalizeDraftUserEmailForApi(currentUser?.EmailId || currentUser?.email || '')) {
+                                                alert('Sign in with a user email to list drafts.');
+                                                return;
+                                            }
+                                            setFormDraftPanelOpen((o) => !o);
+                                        }}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px',
+                                            padding: '6px 10px',
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            border: 'none',
+                                            borderLeft: '1px solid #cbd5e1',
+                                            background: '#f8fafc',
+                                            color: '#475569',
+                                            cursor: 'pointer',
+                                            outline: 'none',
+                                            whiteSpace: 'nowrap',
+                                        }}
+                                        title="Open list of your saved drafts (server). Other users cannot see them."
+                                    >
+                                        Load draft… <ChevronDown size={12} />
+                                    </button>
+                                </div>
+                                {formDraftPanelOpen && (
+                                    <div
+                                        style={{
+                                            position: 'absolute',
+                                            top: 'calc(100% + 6px)',
+                                            left: 0,
+                                            minWidth: '300px',
+                                            maxWidth: 'min(380px, 94vw)',
+                                            maxHeight: '260px',
+                                            overflowY: 'auto',
+                                            background: '#fff',
+                                            border: '1px solid #cbd5e1',
+                                            borderRadius: '8px',
+                                            boxShadow: '0 10px 28px rgba(15,23,42,0.14)',
+                                            zIndex: 80,
+                                            padding: '4px 0',
+                                        }}
+                                    >
+                                        {quoteFormDraftsError ? (
+                                            <div
+                                                style={{
+                                                    padding: '10px 12px',
+                                                    fontSize: '11px',
+                                                    color: '#b91c1c',
+                                                    lineHeight: 1.45,
+                                                    borderBottom: '1px solid #fecaca',
+                                                    background: '#fff1f2',
+                                                }}
+                                            >
+                                                {quoteFormDraftsError}
+                                            </div>
+                                        ) : null}
+                                        {quoteFormDraftsLoading ? (
+                                            <div style={{ padding: '10px 12px', fontSize: '12px', color: '#64748b' }}>
+                                                Loading drafts…
+                                            </div>
+                                        ) : !quoteFormDraftsError && quoteFormDraftList.length === 0 ? (
+                                            <div style={{ padding: '10px 12px', fontSize: '12px', color: '#64748b' }}>
+                                                No drafts saved yet.
+                                            </div>
+                                        ) : quoteFormDraftList.length > 0 ? (
+                                            quoteFormDraftList.map((d) => {
+                                                const rowId = d.id ?? d.Id;
+                                                const rowLabel = d.label ?? d.Label ?? rowId;
+                                                return (
+                                                    <div
+                                                        key={rowId}
+                                                        style={{
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '8px',
+                                                            padding: '6px 10px',
+                                                            borderBottom: '1px solid #f1f5f9',
+                                                        }}
+                                                    >
+                                                        <span
+                                                            style={{
+                                                                flex: 1,
+                                                                fontSize: '12px',
+                                                                color: '#334155',
+                                                                minWidth: 0,
+                                                                overflow: 'hidden',
+                                                                textOverflow: 'ellipsis',
+                                                            }}
+                                                            title={rowLabel}
+                                                        >
+                                                            {rowLabel}
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                void handleSelectQuoteFormDraft(rowId)
+                                                                    .catch((err) => console.warn('[QuoteForm] draft load', err))
+                                                                    .finally(() => setFormDraftPanelOpen(false));
+                                                            }}
+                                                            style={{
+                                                                fontSize: '11px',
+                                                                fontWeight: 600,
+                                                                padding: '4px 8px',
+                                                                borderRadius: '6px',
+                                                                border: '1px solid #cbd5e1',
+                                                                background: '#1e293b',
+                                                                color: '#fff',
+                                                                cursor: 'pointer',
+                                                                flexShrink: 0,
+                                                            }}
+                                                        >
+                                                            Load
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(ev) =>
+                                                                void handleDeleteQuoteFormDraft(ev, rowId)
+                                                            }
+                                                            title="Delete this draft"
+                                                            style={{
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'center',
+                                                                width: '28px',
+                                                                height: '28px',
+                                                                padding: 0,
+                                                                borderRadius: '6px',
+                                                                border: '1px solid #fecaca',
+                                                                background: '#fff1f2',
+                                                                color: '#b91c1c',
+                                                                cursor: 'pointer',
+                                                                flexShrink: 0,
+                                                            }}
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })
+                                        ) : null}
+                                    </div>
+                                )}
+                            </div>
+
+                            {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
+                            <>
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
                                 onClick={() => saveQuote()}
@@ -8374,9 +10439,10 @@ const QuoteForm = () => {
                                     <Plus size={14} /> Revision
                                 </button>
                             )}
+                            </>
+                            )}
                         </div>
                     </div>
-                )}
 
 
 
@@ -8500,30 +10566,30 @@ const QuoteForm = () => {
                                                     const normalizedCurrentTo = normalize(toName || '');
 
                                                     if (!useScopedPanel) {
-                                                        const activeTabAncestors = [];
-                                                        let currAnc = activeTabRealId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
-                                                        let ancSafety = 0;
-                                                        let ancVisited = new Set();
-                                                        while (currAnc && (currAnc.parentId || currAnc.ParentID) && (currAnc.parentId || currAnc.ParentID) !== '0' && (currAnc.parentId || currAnc.ParentID) !== 0 && ancSafety < 20) {
-                                                            const pId = String(currAnc.parentId || currAnc.ParentID);
-                                                            if (ancVisited.has(pId)) break;
-                                                            ancVisited.add(pId);
-                                                            const parent = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === pId);
-                                                            if (parent) {
-                                                                activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
-                                                                currAnc = parent;
-                                                                ancSafety++;
-                                                            } else {
-                                                                break;
-                                                            }
+                                                    const activeTabAncestors = [];
+                                                    let currAnc = activeTabRealId ? jobsPool.find(j => String(j.id || j.ItemID || j.ID) === String(activeTabRealId)) : null;
+                                                    let ancSafety = 0;
+                                                    let ancVisited = new Set();
+                                                    while (currAnc && (currAnc.parentId || currAnc.ParentID) && (currAnc.parentId || currAnc.ParentID) !== '0' && (currAnc.parentId || currAnc.ParentID) !== 0 && ancSafety < 20) {
+                                                        const pId = String(currAnc.parentId || currAnc.ParentID);
+                                                        if (ancVisited.has(pId)) break;
+                                                        ancVisited.add(pId);
+                                                        const parent = jobsPool.find(j => String(j.id || j.ItemID || j.ID) === pId);
+                                                        if (parent) {
+                                                            activeTabAncestors.push(normalize(parent.itemName || parent.ItemName || parent.DivisionName || ''));
+                                                            currAnc = parent;
+                                                            ancSafety++;
+                                                        } else {
+                                                            break;
                                                         }
+                                                    }
 
-                                                        const isExactMatch = normalizedCurrentTo && (normalizedQuoteTo === normalizedCurrentTo);
-                                                        const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
+                                                    const isExactMatch = normalizedCurrentTo && (normalizedQuoteTo === normalizedCurrentTo);
+                                                    const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
 
-                                                        if (!normalizedCurrentTo) return false;
+                                                    if (!normalizedCurrentTo) return false;
 
-                                                        if (!isExactMatch && !isAncestorMatch) return false;
+                                                    if (!isExactMatch && !isAncestorMatch) return false;
                                                     }
 
                                                     // Scoped rows: server already matched EnquiryQuotes (LeadJob + RequestNo +
@@ -8579,7 +10645,7 @@ const QuoteForm = () => {
                                                     }
 
                                                     return true;
-                                                });
+                                                }).filter(quoteRevisionShowsInSignedOnlyList);
 
                                                 // Do not inject out-of-scope loaded quotes into the list; panel must reflect scoped tuple only.
 
@@ -8603,7 +10669,12 @@ const QuoteForm = () => {
                                                         return (
                                                             <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                                                 <div
-                                                                    onClick={() => loadQuote(latest, { preserveRecipient: true })}
+                                                                    onClick={() =>
+                                                                        loadQuote(latest, {
+                                                                            preserveRecipient: true,
+                                                                            skipPreparedSignatory: true,
+                                                                        })
+                                                                    }
                                                                     style={{
                                                                         padding: '8px',
                                                                         background: String(quoteRowId(latest) ?? '') === String(quoteId ?? '') ? '#f0f9ff' : 'white',
@@ -8644,9 +10715,14 @@ const QuoteForm = () => {
 
                                                                 {/* Render History if Expanded */}
                                                                 {isExpanded && sorted.slice(1).map(rev => (
-                                                                        <div
+                                                                    <div
                                                                             key={String(quoteRowId(rev) ?? rev.QuoteNumber ?? rev.quoteNumber ?? 'rev')}
-                                                                            onClick={() => loadQuote(rev, { preserveRecipient: true })}
+                                                                            onClick={() =>
+                                                                                loadQuote(rev, {
+                                                                                    preserveRecipient: true,
+                                                                                    skipPreparedSignatory: true,
+                                                                                })
+                                                                            }
                                                                         style={{
                                                                             padding: '6px 8px',
                                                                             background: String(quoteRowId(rev) ?? '') === String(quoteId ?? '') ? '#eff6ff' : '#f8fafc',
@@ -8832,13 +10908,13 @@ const QuoteForm = () => {
                                                     ))}
                                                 </select>
                                         ) : (
-                                            <input
-                                                type="text"
-                                                value={toAttention}
-                                                onChange={(e) => setToAttention(e.target.value)}
-                                                placeholder="Contact Person..."
-                                                style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                            />
+                                        <input
+                                            type="text"
+                                            value={toAttention}
+                                            onChange={(e) => setToAttention(e.target.value)}
+                                            placeholder="Contact Person..."
+                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
+                                        />
                                         )}
                                     </div>
 
@@ -8891,7 +10967,7 @@ const QuoteForm = () => {
                                                 // Update designation if selected from list
                                                 if (newValue) {
                                                     if (newValue.designation) {
-                                                        setSignatoryDesignation(newValue.designation);
+                                                    setSignatoryDesignation(newValue.designation);
                                                     } else {
                                                         const matched = usersList.find(u => u.FullName === newValue.value);
                                                         setSignatoryDesignation(matched?.Designation || '');
@@ -9020,6 +11096,7 @@ const QuoteForm = () => {
                                         const title = isCustom ? customClause.title : standardClause.title;
                                         const isChecked = isCustom ? customClause.isChecked : clauses[id];
                                         const contentKey = isCustom ? id : standardClause.contentKey;
+                                        const sideSerial = clauseSidebarSerialByIndex[index] || 0;
 
                                         return (
                                             <div key={id} style={{ marginBottom: '8px', padding: '4px', background: isCustom ? '#fff' : 'transparent', borderBottom: '1px solid #f1f5f9' }}>
@@ -9051,7 +11128,10 @@ const QuoteForm = () => {
                                                             onChange={() => isCustom ? updateCustomClause(id, 'isChecked', !isChecked) : toggleClause(id)}
                                                             style={{ width: '16px', height: '16px' }}
                                                         />
-                                                        <span style={{ fontSize: '13px', fontWeight: '500' }}>{title}</span>
+                                                        <span style={{ fontSize: '13px', fontWeight: '500' }}>
+                                                            {sideSerial ? `${sideSerial}. ` : ''}
+                                                            {title}
+                                                        </span>
                                                     </label>
 
                                                     {isCustom && (
@@ -9065,6 +11145,56 @@ const QuoteForm = () => {
                                                     )}
                                                 </div>
 
+
+                                                {isChecked && !isCustom && contentKey === 'pricingTerms' && (
+                                                    <div style={{ marginLeft: '32px', marginTop: '10px' }}>
+                                                        <div
+                                                            style={{
+                                                                fontSize: '11px',
+                                                                fontWeight: 600,
+                                                                color: '#475569',
+                                                                marginBottom: '6px',
+                                                            }}
+                                                        >
+                                                            Latest pricing (checked jobs in Pricing Summary)
+                                                        </div>
+                                                        {pricingTermsAutoTablePreviewHtml ? (
+                                                            <div
+                                                                className="quote-pricing-terms-auto-table-preview"
+                                                                dangerouslySetInnerHTML={{
+                                                                    __html: pricingTermsAutoTablePreviewHtml,
+                                                                }}
+                                                            />
+                                                        ) : (
+                                                            <div
+                                                                style={{
+                                                                    fontSize: '11px',
+                                                                    color: '#94a3b8',
+                                                                    fontStyle: 'italic',
+                                                                    padding: '8px 0',
+                                                                }}
+                                                            >
+                                                                Load an enquiry with pricing to populate this table.
+                                                            </div>
+                                                        )}
+                                                        <style>
+                                                            {`
+                                                            .quote-pricing-terms-auto-table-preview table,
+                                                            .quote-pricing-terms-auto-table-preview td,
+                                                            .quote-pricing-terms-auto-table-preview th {
+                                                                border: 1px solid #64748b !important;
+                                                                border-collapse: collapse !important;
+                                                            }
+                                                            .quote-pricing-terms-auto-table-preview table {
+                                                                width: 100%;
+                                                                border-collapse: collapse;
+                                                                margin-bottom: 8px;
+                                                                font-size: 12px;
+                                                            }
+                                                            `}
+                                                        </style>
+                                                    </div>
+                                                )}
 
                                                 {isChecked && (
                                                     <button
@@ -9206,26 +11336,18 @@ const QuoteForm = () => {
                                 <div
                                     style={{
                                         display: 'flex',
-                                        flexWrap: 'wrap',
-                                        alignItems: 'center',
+                                        flexDirection: 'row',
+                                        flexWrap: 'nowrap',
+                                        alignItems: 'flex-end',
                                         justifyContent: 'flex-start',
-                                        gap: '10px 16px',
-                                        rowGap: '10px',
+                                        gap: '10px',
                                         width: '100%',
+                                        overflowX: 'auto',
+                                        boxSizing: 'border-box',
                                     }}
                                 >
-                                    <label
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
-                                            margin: 0,
-                                        }}
-                                    >
-                                        Category
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
                                             onChange={(e) => {
@@ -9236,7 +11358,7 @@ const QuoteForm = () => {
                                                 }
                                             }}
                                             style={{
-                                                minWidth: '148px',
+                                                minWidth: '132px',
                                                 padding: '6px 10px',
                                                 fontSize: '12px',
                                                 borderRadius: '6px',
@@ -9249,22 +11371,18 @@ const QuoteForm = () => {
                                             <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
                                             <option value={QUOTE_LIST_CATEGORY.SEARCH}>Search Quote</option>
                                         </select>
-                                    </label>
-                                    <label
+                                    </div>
+                                    <div
                                         style={{
                                             display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
-                                            margin: 0,
-                                            flex: '1 1 200px',
-                                            minWidth: '160px',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flex: '1 1 160px',
+                                            minWidth: '120px',
                                             maxWidth: '360px',
                                         }}
                                     >
-                                        Search criteria
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>
                                         <input
                                             type="text"
                                             value={quoteListSearchCriteria}
@@ -9278,12 +11396,12 @@ const QuoteForm = () => {
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                             placeholder={
                                                 quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                                    ? 'Quote details, project, enquiry no., client, consultant, prepared by…'
+                                                    ? 'Quote details, project, enquiry no., client, consultant…'
                                                     : 'Select "Search Quote" to enable'
                                             }
                                             style={{
-                                                flex: 1,
-                                                minWidth: '120px',
+                                                width: '100%',
+                                                boxSizing: 'border-box',
                                                 padding: '6px 10px',
                                                 fontSize: '12px',
                                                 borderRadius: '6px',
@@ -9294,23 +11412,20 @@ const QuoteForm = () => {
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
                                             }}
                                         />
-                                    </label>
+                                    </div>
                                     <div
                                         style={{
                                             display: 'flex',
-                                            flexWrap: 'wrap',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ whiteSpace: 'nowrap' }}>From</span>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>From</span>
                                         <div
                                             style={{
-                                                width: '128px',
+                                                width: '118px',
                                                 pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
                                             }}
                                         >
@@ -9326,10 +11441,20 @@ const QuoteForm = () => {
                                                 }}
                                             />
                                         </div>
-                                        <span style={{ whiteSpace: 'nowrap' }}>To</span>
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flexShrink: 0,
+                                            opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                        }}
+                                    >
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>To</span>
                                         <div
                                             style={{
-                                                width: '128px',
+                                                width: '118px',
                                                 pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
                                             }}
                                         >
@@ -9345,242 +11470,47 @@ const QuoteForm = () => {
                                                 }}
                                             />
                                         </div>
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
-                                            <button
-                                                type="button"
-                                                className="no-print"
-                                                onClick={handleQuoteListSearch}
-                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
-                                                style={{
-                                                    padding: '6px 14px',
-                                                    fontSize: '12px',
-                                                    fontWeight: '600',
-                                                    borderRadius: '6px',
-                                                    border: '1px solid #2563eb',
-                                                    background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
-                                                    color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
-                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
-                                                }}
-                                            >
-                                                {quoteSearchLoading ? 'Searching…' : 'Search'}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="no-print"
-                                                onClick={handleQuoteListClear}
-                                                style={{
-                                                    padding: '6px 14px',
-                                                    fontSize: '12px',
-                                                    fontWeight: '600',
-                                                    borderRadius: '6px',
-                                                    border: '1px solid #cbd5e1',
-                                                    background: '#fff',
-                                                    color: '#475569',
-                                                    cursor: 'pointer',
-                                                }}
-                                            >
-                                                Clear
-                                            </button>
-                                        </div>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '8px', flexShrink: 0 }}>
+                                        <button
+                                            type="button"
+                                            className="no-print"
+                                            onClick={handleQuoteListSearch}
+                                            disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
+                                            style={{
+                                                padding: '6px 14px',
+                                                fontSize: '12px',
+                                                fontWeight: '600',
+                                                borderRadius: '6px',
+                                                border: '1px solid #2563eb',
+                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
+                                                color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
+                                                cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                            }}
+                                        >
+                                            {quoteSearchLoading ? 'Searching…' : 'Search'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="no-print"
+                                            onClick={handleQuoteListClear}
+                                            style={{
+                                                padding: '6px 14px',
+                                                fontSize: '12px',
+                                                fontWeight: '600',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#fff',
+                                                color: '#475569',
+                                                cursor: 'pointer',
+                                            }}
+                                        >
+                                            Clear
+                                        </button>
                                     </div>
                                 </div>
                             </div>
-                            {quoteListDisplayRows.length > 0 ? (
-                                (() => {
-                                    const sortedPendingQuotes = [...quoteListDisplayRows].sort((a, b) => {
-                                        const { field, direction } = pendingQuotesSortConfig;
-                                        let aVal = a[field];
-                                        let bVal = b[field];
-                                        if (field === 'DueDate' || field === 'EnquiryDate' || field === 'ListQuoteDate') {
-                                            aVal = aVal ? new Date(aVal).getTime() : Infinity;
-                                            bVal = bVal ? new Date(bVal).getTime() : Infinity;
-                                        } else {
-                                            aVal = (aVal || '').toString().toLowerCase();
-                                            bVal = (bVal || '').toString().toLowerCase();
-                                        }
-                                        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-                                        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
-                                        return 0;
-                                    });
-                                    const quoteSortField = pendingQuotesSortConfig.field;
-                                    const quoteSortDir = pendingQuotesSortConfig.direction;
-                                    const activeSortLabel = quoteSortField === 'DueDate' ? 'Due Date'
-                                        : quoteSortField === 'RequestNo' ? 'Enquiry No.'
-                                            : quoteSortField === 'ProjectName' ? 'Project Name'
-                                                : quoteSortField === 'ListQuoteRef' ? 'Quote details'
-                                                    : quoteSortField === 'ListQuoteDate' ? 'Quote date'
-                                                        : quoteSortField === 'CustomerName' ? 'Customer'
-                                                            : quoteSortField === 'ConsultantName' ? 'Consultant Name'
-                                                                : quoteSortField === 'ListPreparedBy' ? 'Prepared by'
-                                                                    : quoteSortField;
-                                    const renderQSH = (field, label, style = {}) => {
-                                        const isActive = quoteSortField === field;
-                                        const isAsc = quoteSortDir === 'asc';
-                                        return (
-                                            <th
-                                                key={field}
-                                                onClick={() => setPendingQuotesSortConfig(prev =>
-                                                    prev.field === field
-                                                        ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
-                                                        : { field, direction: 'asc' }
-                                                )}
-                                                style={{
-                                                    padding: '10px 16px', textAlign: 'left', fontSize: '12px',
-                                                    fontWeight: '600', color: isActive ? '#0284c7' : '#64748b',
-                                                    borderBottom: '1px solid #e2e8f0', cursor: 'pointer',
-                                                    userSelect: 'none', whiteSpace: 'nowrap', ...style
-                                                }}
-                                            >
-                                                {label}{isActive ? (isAsc ? ' ▲' : ' ▼') : <span style={{ color: '#cbd5e1' }}> ⇅</span>}
-                                            </th>
-                                        );
-                                    };
-                                    return (
-                                        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', width: '100%', margin: '0 auto' }}>
-                                            <div style={{ padding: '16px 24px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                                    <FileText size={20} className="text-blue-600" />{' '}
-                                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                                        ? `Search results (${quoteListDisplayRows.length})`
-                                                        : `Pending updates (${quoteListDisplayRows.length})`}
-                                                </h2>
-                                                <span style={{ fontSize: '12px', color: '#64748b' }}>
-                                                    Sorted by <strong>{activeSortLabel}</strong> {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
-                                                </span>
-                                            </div>
-                                            <div style={{ flex: 1, overflowX: 'auto', overflowY: 'auto' }}>
-                                                <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
-                                                    <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
-                                                        <tr>
-                                                            {renderQSH('RequestNo', 'Enquiry No.', { width: '96px' })}
-                                                            {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
-                                                            {renderQSH('ListQuoteRef', 'Quote details', { minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal' })}
-                                                            {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                                                            {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
-                                                            {renderQSH('ListPreparedBy', 'Prepared by', { minWidth: '160px' })}
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {sortedPendingQuotes.map((enq, idx) => (
-                                                            <tr
-                                                                key={enq.QuoteListKind ? `${enq.RequestNo}-${enq.QuoteListKind}` : `${String(enq.RequestNo ?? 'r')}-${Array.isArray(enq.ListMergedPendingPvIds) ? enq.ListMergedPendingPvIds.join('-') : String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`}`}
-                                                                style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                                                onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                                                onMouseOut={(e) => e.currentTarget.style.background = 'white'}
-                                                                onClick={() => handleSelectEnquiry(enq)}
-                                                            >
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>
-                                                                    <div>{enq.RequestNo}</div>
-                                                                    <div
-                                                                        style={{
-                                                                            marginTop: '8px',
-                                                                            fontSize: '11px',
-                                                                            fontWeight: 700,
-                                                                            letterSpacing: '0.02em',
-                                                                            color: listQuoteRollupStatusColor(enq.ListQuoteRollupStatus),
-                                                                        }}
-                                                                    >
-                                                                        {formatListQuoteRollupStatusLine(enq.ListQuoteRollupStatus)}
-                                                                    </div>
-                                                                </td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>{enq.ProjectName || '-'}</td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '11px', color: '#64748b', verticalAlign: 'top', minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal', wordBreak: 'break-word' }}>
-                                                                    {(() => {
-                                                                        const fmtQuoteDate = (raw) => {
-                                                                            try {
-                                                                                const d = raw ? new Date(raw) : null;
-                                                                                return d && !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '—';
-                                                                            } catch {
-                                                                                return '—';
-                                                                            }
-                                                                        };
-                                                                        const compactLineStyle = {
-                                                                            display: 'flex',
-                                                                            flexWrap: 'wrap',
-                                                                            alignItems: 'baseline',
-                                                                            gap: '6px',
-                                                                            fontSize: '11px',
-                                                                            lineHeight: 1.35,
-                                                                            color: '#334155',
-                                                                        };
-                                                                        const refDateStyle = { fontSize: '11px', color: '#475569', wordBreak: 'break-word' };
-                                                                        const bdStyle = {
-                                                                            fontSize: '11px',
-                                                                            fontWeight: 600,
-                                                                            color: '#166534',
-                                                                            whiteSpace: 'nowrap',
-                                                                            background: '#dcfce7',
-                                                                            padding: '2px 8px',
-                                                                            borderRadius: '4px',
-                                                                        };
-
-                                                                        if (Array.isArray(enq.ListQuoteDetailLines) && enq.ListQuoteDetailLines.length > 0) {
-                                                                            return enq.ListQuoteDetailLines.map((ln, li) => (
-                                                                                <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 8 : 0 }}>
-                                                                                    <span style={refDateStyle}>{ln.textLine}</span>
-                                                                                    {ln.bdTotal != null && ln.bdTotal > 0 ? (
-                                                                                        <span style={{ ...bdStyle, fontSize: '10px' }}>
-                                                                                            BD {Number(ln.bdTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                                        </span>
-                                                                                    ) : null}
-                                                                                </div>
-                                                                            ));
-                                                                        }
-
-                                                                        const toName = String(enq.ListQuoteDetailToName ?? '').trim() || '—';
-                                                                        if (Array.isArray(enq.ListMultiLeadQuoteRefs) && enq.ListMultiLeadQuoteRefs.length > 0) {
-                                                                            const joined = enq.ListMultiLeadQuoteRefs
-                                                                                .map(
-                                                                                    (line) =>
-                                                                                        `${toName} (${line.quoteNumber} - ${fmtQuoteDate(line.quoteDate)})`
-                                                                                )
-                                                                                .join(' · ');
-                                                                            return (
-                                                                                <div style={compactLineStyle}>
-                                                                                    <span style={refDateStyle}>{joined}</span>
-                                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
-                                                                                        <span style={bdStyle}>
-                                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                                        </span>
-                                                                                    ) : null}
-                                                                                </div>
-                                                                            );
-                                                                        }
-                                                                        if (enq.ListQuoteRef) {
-                                                                            return (
-                                                                                <div style={compactLineStyle}>
-                                                                                    <span style={refDateStyle}>
-                                                                                        {toName} ({enq.ListQuoteRef} - {fmtQuoteDate(enq.ListQuoteDate)})
-                                                                                    </span>
-                                                                                    {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
-                                                                                        <span style={bdStyle}>
-                                                                                            BD {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                                                                        </span>
-                                                                                    ) : null}
-                                                                                </div>
-                                                                            );
-                                                                        }
-                                                                        return <div style={{ color: '#94a3b8', fontSize: '12px' }}>—</div>;
-                                                                    })()}
-                                                                </td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', minWidth: '110px', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>{enq.ConsultantName || enq.consultantName || '-'}</td>
-                                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '160px' }}>{enq.ListPreparedBy || enq.listpreparedby || '-'}</td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-                                    );
-                                })()
-                            ) : (
-                                <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '14px', fontStyle: 'italic', background: 'white', borderRadius: '8px', border: '1px dashed #e2e8f0' }}>
-                                    {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                        ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
-                                        : 'No pending updates found. Start by entering an enquiry number above.'}
-                                </div>
-                            )}
+                            {quoteListSummaryBody}
                         </div>
                     ) : (!enquiryData.leadJobPrefix || !toName?.trim()) ? (
                         <div style={{
@@ -9613,7 +11543,7 @@ const QuoteForm = () => {
                                 minHeight: 0,
                             }}
                         >
-                            {/* Sticky top bar — horizontal, left-aligned; stays under right-panel scroll */}
+                            {/* Sticky top bar — single row; labels above controls; action icons on the right */}
                             <div
                                 className="no-print"
                                 style={{
@@ -9626,8 +11556,8 @@ const QuoteForm = () => {
                                     marginTop: 0,
                                     marginBottom: '8px',
                                     padding: '8px 12px',
-                                    background: '#f8fafc',
-                                    border: '1px solid #e2e8f0',
+                                background: '#f8fafc',
+                                border: '1px solid #e2e8f0',
                                     borderTop: 'none',
                                     borderRadius: '0 0 8px 8px',
                                     boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
@@ -9636,26 +11566,18 @@ const QuoteForm = () => {
                                 <div
                                     style={{
                                         display: 'flex',
-                                        flexWrap: 'wrap',
-                                        alignItems: 'center',
+                                        flexDirection: 'row',
+                                        flexWrap: 'nowrap',
+                                        alignItems: 'flex-end',
                                         justifyContent: 'flex-start',
-                                        gap: '8px 14px',
-                                        rowGap: '8px',
+                                        gap: '10px',
                                         width: '100%',
+                                        overflowX: 'auto',
+                                        boxSizing: 'border-box',
                                     }}
                                 >
-                                    <label
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
-                                            margin: 0,
-                                        }}
-                                    >
-                                        Category
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
                                             onChange={(e) => {
@@ -9666,7 +11588,7 @@ const QuoteForm = () => {
                                                 }
                                             }}
                                             style={{
-                                                minWidth: '148px',
+                                                minWidth: '132px',
                                                 padding: '6px 10px',
                                                 fontSize: '12px',
                                                 borderRadius: '6px',
@@ -9679,22 +11601,18 @@ const QuoteForm = () => {
                                             <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
                                             <option value={QUOTE_LIST_CATEGORY.SEARCH}>Search Quote</option>
                                         </select>
-                                    </label>
-                                    <label
+                                    </div>
+                                    <div
                                         style={{
                                             display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
-                                            margin: 0,
-                                            flex: '1 1 200px',
-                                            minWidth: '160px',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flex: '1 1 160px',
+                                            minWidth: '120px',
                                             maxWidth: '360px',
                                         }}
                                     >
-                                        Search criteria
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>
                                         <input
                                             type="text"
                                             value={quoteListSearchCriteria}
@@ -9708,12 +11626,12 @@ const QuoteForm = () => {
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                             placeholder={
                                                 quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                                                    ? 'Quote details, project, enquiry no., client, consultant, prepared by…'
+                                                    ? 'Quote details, project, enquiry no., client, consultant…'
                                                     : 'Select "Search Quote" to enable'
                                             }
                                             style={{
-                                                flex: 1,
-                                                minWidth: '120px',
+                                                width: '100%',
+                                                boxSizing: 'border-box',
                                                 padding: '6px 10px',
                                                 fontSize: '12px',
                                                 borderRadius: '6px',
@@ -9724,23 +11642,20 @@ const QuoteForm = () => {
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
                                             }}
                                         />
-                                    </label>
+                                    </div>
                                     <div
                                         style={{
                                             display: 'flex',
-                                            flexWrap: 'wrap',
-                                            alignItems: 'center',
-                                            gap: '8px',
-                                            fontSize: '12px',
-                                            fontWeight: '600',
-                                            color: '#475569',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ whiteSpace: 'nowrap' }}>From</span>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>From</span>
                                         <div
                                             style={{
-                                                width: '128px',
+                                                width: '118px',
                                                 pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
                                             }}
                                         >
@@ -9756,10 +11671,20 @@ const QuoteForm = () => {
                                                 }}
                                             />
                                         </div>
-                                        <span style={{ whiteSpace: 'nowrap' }}>To</span>
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: '4px',
+                                            flexShrink: 0,
+                                            opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
+                                        }}
+                                    >
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>To</span>
                                         <div
                                             style={{
-                                                width: '128px',
+                                                width: '118px',
                                                 pointerEvents: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'auto' : 'none',
                                             }}
                                         >
@@ -9775,52 +11700,54 @@ const QuoteForm = () => {
                                                 }}
                                             />
                                         </div>
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
-                                            <button
-                                                type="button"
-                                                className="no-print"
-                                                onClick={handleQuoteListSearch}
-                                                disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
-                                                style={{
-                                                    padding: '6px 14px',
-                                                    fontSize: '12px',
-                                                    fontWeight: '600',
-                                                    borderRadius: '6px',
-                                                    border: '1px solid #2563eb',
-                                                    background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
-                                                    color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
-                                                    cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
-                                                }}
-                                            >
-                                                {quoteSearchLoading ? 'Searching…' : 'Search'}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className="no-print"
-                                                onClick={handleQuoteListClear}
-                                                style={{
-                                                    padding: '6px 14px',
-                                                    fontSize: '12px',
-                                                    fontWeight: '600',
-                                                    borderRadius: '6px',
-                                                    border: '1px solid #cbd5e1',
-                                                    background: '#fff',
-                                                    color: '#475569',
-                                                    cursor: 'pointer',
-                                                }}
-                                            >
-                                                Clear
-                                            </button>
-                                        </div>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '8px', flexShrink: 0 }}>
+                                        <button
+                                            type="button"
+                                            className="no-print"
+                                            onClick={handleQuoteListSearch}
+                                            disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
+                                            style={{
+                                                padding: '6px 14px',
+                                                fontSize: '12px',
+                                                fontWeight: '600',
+                                                borderRadius: '6px',
+                                                border: '1px solid #2563eb',
+                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
+                                                color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
+                                                cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                            }}
+                                        >
+                                            {quoteSearchLoading ? 'Searching…' : 'Search'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="no-print"
+                                            onClick={handleQuoteListClear}
+                                            style={{
+                                                padding: '6px 14px',
+                                                fontSize: '12px',
+                                                fontWeight: '600',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#fff',
+                                                color: '#475569',
+                                                cursor: 'pointer',
+                                            }}
+                                        >
+                                            Clear
+                                        </button>
                                     </div>
                                     <div
                                         className="no-print"
                                         style={{
                                             display: 'flex',
-                                            flexWrap: 'wrap',
+                                            flexWrap: 'nowrap',
                                             alignItems: 'center',
                                             gap: '6px',
                                             marginLeft: 'auto',
+                                            flexShrink: 0,
+                                            paddingBottom: '2px',
                                         }}
                                     >
                                         <button
@@ -9904,71 +11831,99 @@ const QuoteForm = () => {
                                         >
                                             <Printer size={16} />
                                         </button>
-                                        <button
-                                            type="button"
-                                            onClick={handleSignaturesToolbarPrimaryClick}
-                                            disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
-                                            draggable={
-                                                Boolean(
-                                                    hasUserPricing &&
-                                                        enquiryData?.enquiry?.RequestNo &&
-                                                        toolbarDragSignatureImageUrl
-                                                )
-                                            }
+                                        <div
+                                            className="no-print"
+                                            role="button"
+                                            tabIndex={!hasUserPricing || !enquiryData?.enquiry?.RequestNo ? -1 : 0}
+                                            aria-disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
+                                            aria-label="Signatures: click to place or open library; drag anywhere on this control onto the quote to drop"
+                                            draggable={Boolean(
+                                                hasUserPricing &&
+                                                    enquiryData?.enquiry?.RequestNo &&
+                                                    toolbarDragSignatureImageUrl
+                                            )}
                                             onDragStart={handleToolbarSignatureDragStart}
                                             onDragEnd={handleToolbarSignatureDragEnd}
+                                            onClick={handleSignaturesToolbarControlClick}
+                                            onKeyDown={(e) => {
+                                                if (e.key !== 'Enter' && e.key !== ' ') return;
+                                                e.preventDefault();
+                                                handleSignaturesToolbarControlClick(e);
+                                            }}
                                             title={
                                                 !hasUserPricing || !enquiryData?.enquiry?.RequestNo
                                                     ? 'Save the quote context to use signatures.'
-                                                    : defaultSignatureImageUrl
-                                                      ? 'Click: place default on page 1. Drag onto the quote for position/page. Shift+click: open signature library.'
-                                                      : toolbarDragSignatureImageUrl
-                                                        ? 'Click opens the library — set a default, then click Signatures to place on page 1. Or drag this button. Shift+click: library.'
-                                                        : 'Click to open the signature library. Shift+click also opens the library once you have a default.'
+                                                    : toolbarDragSignatureImageUrl
+                                                      ? 'Click: place on the page in view. Drag from anywhere on this button onto the quote for an exact position. Shift+click: signature library.'
+                                                      : 'Click: open library to add a signature. Shift+click: library.'
                                             }
-                                            aria-label="Signatures"
                                             style={{
-                                                width: '32px',
-                                                height: '32px',
-                                                display: 'flex',
+                                                display: 'inline-flex',
                                                 alignItems: 'center',
                                                 justifyContent: 'center',
-                                                color: '#475569',
-                                                background: 'white',
+                                                gap: '4px',
+                                                height: '32px',
+                                                minWidth: '44px',
+                                                padding: '0 8px',
                                                 border: '1px solid #cbd5e1',
                                                 borderRadius: '6px',
+                                                background: 'white',
+                                                color: '#475569',
+                                                opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
+                                                pointerEvents: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 'none' : 'auto',
                                                 cursor: !hasUserPricing || !enquiryData?.enquiry?.RequestNo
                                                     ? 'not-allowed'
                                                     : toolbarDragSignatureImageUrl
                                                       ? 'grab'
                                                       : 'pointer',
-                                                opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
+                                                userSelect: 'none',
+                                                boxSizing: 'border-box',
                                             }}
                                         >
-                                            <PenTool size={16} />
-                                        </button>
+                                            <PenTool size={16} aria-hidden />
+                                            {toolbarDragSignatureImageUrl &&
+                                            hasUserPricing &&
+                                            enquiryData?.enquiry?.RequestNo ? (
+                                                <GripVertical size={12} color="#94a3b8" aria-hidden />
+                                            ) : null}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            {/* Attachments column (left) + PDF preview (right). Do not wrap #quote-print-root in no-print — browser print must see the quote. */}
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    flexDirection: 'row',
-                                    flex: 1,
-                                    minHeight: 0,
-                                    gap: '16px',
-                                    alignItems: 'stretch',
-                                    width: '100%',
-                                    marginTop: 0,
-                                }}
-                            >
+                            {showQuoteListSummaryOverQuote ? (
+                                <div
+                                    style={{
+                                        flex: 1,
+                                        minHeight: 0,
+                                        marginTop: '8px',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        overflow: 'hidden',
+                                    }}
+                                >
+                                    {quoteListSummaryBody}
+                                </div>
+                            ) : (
+                                <>
+                                    {/* DOM: attachments then print root. flex row-reverse shows quote preview left and attachments on the right. */}
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'row-reverse',
+                                            flex: 1,
+                                            minHeight: 0,
+                                            gap: '16px',
+                                            alignItems: 'stretch',
+                                            width: '100%',
+                                            marginTop: 0,
+                                        }}
+                                    >
                             <div
                                 className="no-print"
                                 style={{
-                                    width: '280px',
-                                    minWidth: '220px',
-                                    maxWidth: '320px',
+                                    width: '196px',
+                                    minWidth: '154px',
+                                    maxWidth: '224px',
                                     flexShrink: 0,
                                     display: 'flex',
                                     flexDirection: 'column',
@@ -9995,25 +11950,25 @@ const QuoteForm = () => {
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => fileInputRef.current?.click()}
-                                        style={{
-                                            fontSize: '11px',
-                                            color: '#3b82f6',
-                                            background: 'white',
-                                            border: '1px solid #3b82f6',
+                                            onClick={() => fileInputRef.current?.click()}
+                                            style={{
+                                                fontSize: '11px',
+                                                color: '#3b82f6',
+                                                background: 'white',
+                                                border: '1px solid #3b82f6',
                                             padding: '4px 10px',
-                                            borderRadius: '4px',
-                                            cursor: 'pointer',
-                                            fontWeight: '600',
-                                            display: 'flex',
-                                            alignItems: 'center',
+                                                borderRadius: '4px',
+                                                cursor: 'pointer',
+                                                fontWeight: '600',
+                                                display: 'flex',
+                                                alignItems: 'center',
                                             gap: '4px',
                                             flexShrink: 0,
-                                        }}
-                                    >
-                                        <Plus size={14} /> Add Files
-                                    </button>
-                                </div>
+                                            }}
+                                        >
+                                            <Plus size={14} /> Add Files
+                                        </button>
+                                    </div>
                                 {quoteEmailDraftHref && (
                                     <div style={{ fontSize: '11px', color: '#475569', lineHeight: 1.45 }}>
                                         <div style={{ color: '#334155', marginBottom: '4px' }}>
@@ -10032,13 +11987,13 @@ const QuoteForm = () => {
                                         </div>
                                     </div>
                                 )}
-                                <input
-                                    type="file"
-                                    multiple
-                                    ref={fileInputRef}
-                                    onChange={(e) => uploadFiles(e.target.files)}
-                                    style={{ display: 'none' }}
-                                />
+                                    <input
+                                        type="file"
+                                        multiple
+                                        ref={fileInputRef}
+                                        onChange={(e) => uploadFiles(e.target.files)}
+                                        style={{ display: 'none' }}
+                                    />
 
                                 {(quoteAttachments.length > 0 || pendingFiles.length > 0) ? (
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
@@ -10185,7 +12140,7 @@ const QuoteForm = () => {
                                 data-print-with-header={printWithHeader ? '1' : '0'}
                                 style={{
                                     flex: 1,
-                                    minWidth: 0,
+                                    minWidth: '210mm',
                                     minHeight: 0,
                                     overflow: 'auto',
                                     maxWidth: '100%',
@@ -10201,12 +12156,41 @@ const QuoteForm = () => {
                                         ) : null}
                                     </div>
                                 </div>
-                                <style>{tableStyles}</style>
-                                <style>
-                                    {`
-                                    .quote-print-repeat-strip,
-                                    .quote-print-page-indicator {
+                            <style>{tableStyles}</style>
+                            <style>
+                                {`
+                                    .quote-print-repeat-strip {
                                         display: none;
+                                    }
+                                    .footer-section {
+                                        display: flex;
+                                        flex-direction: column;
+                                        align-items: stretch;
+                                        width: 100%;
+                                        max-width: 100%;
+                                        box-sizing: border-box;
+                                        break-inside: avoid;
+                                        page-break-inside: avoid;
+                                    }
+                                    .quote-print-page-indicator {
+                                        display: block;
+                                        width: 100%;
+                                        max-width: 100%;
+                                        text-align: right;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-print-footer-wrap {
+                                        width: 50%;
+                                        max-width: 50%;
+                                        margin-left: auto;
+                                        margin-right: 0;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-print-footer-company {
+                                        width: 100%;
+                                        max-width: 100%;
+                                        text-align: right;
+                                        box-sizing: border-box;
                                     }
                                     .header-section.quote-header-row {
                                         width: 100%;
@@ -10240,6 +12224,9 @@ const QuoteForm = () => {
                                         overflow-y: visible;
                                         margin: 0 auto;
                                     }
+                                    #quote-preview .quote-a4-sheet {
+                                        flex-shrink: 0;
+                                    }
                                     .quote-document-root {
                                         border: none !important;
                                         outline: none !important;
@@ -10250,7 +12237,7 @@ const QuoteForm = () => {
                                         box-sizing: border-box;
                                         width: 210mm;
                                         min-width: 210mm;
-                                        max-width: none;
+                                        max-width: 210mm;
                                         margin-left: auto;
                                         margin-right: auto;
                                         margin-bottom: 0;
@@ -10274,12 +12261,35 @@ const QuoteForm = () => {
                                         page-break-after: auto;
                                         break-after: auto;
                                     }
+                                    /* Continuation pages: avoid stretching clause stack; keep footer at sheet bottom. */
+                                    .quote-a4-sheet--continuation .quote-sheet-main-flex {
+                                        min-height: 0 !important;
+                                    }
+                                    .quote-a4-sheet--continuation .content-section {
+                                        flex: 0 1 auto !important;
+                                    }
                                     .quote-sheet-main-flex {
                                         min-width: 0;
                                         min-height: 0;
                                         height: 100%;
+                                        width: 100%;
                                         display: flex;
                                         flex-direction: column;
+                                    }
+                                    .content-section {
+                                        width: 100%;
+                                        max-width: 100%;
+                                        box-sizing: border-box;
+                                        text-align: left;
+                                    }
+                                    .quote-clause-block {
+                                        width: 100%;
+                                        max-width: 100%;
+                                        box-sizing: border-box;
+                                        text-align: left;
+                                    }
+                                    .quote-clause-block .clause-content {
+                                        text-align: left;
                                     }
                                     .quote-sheet-logo-row {
                                         flex-shrink: 0;
@@ -10288,6 +12298,7 @@ const QuoteForm = () => {
                                         width: 100%;
                                     }
                                     .quote-cover-first-page {
+                                        flex-shrink: 0;
                                         margin-bottom: 22px;
                                     }
                                     .quote-section-rule {
@@ -10297,55 +12308,98 @@ const QuoteForm = () => {
                                         height: 0;
                                         box-sizing: border-box;
                                     }
+                                    .quote-section-rule--after-header {
+                                        margin-top: 10px;
+                                        margin-bottom: 16px;
+                                    }
+                                    .quote-section-rule--before-cover-letter {
+                                        margin-top: 0;
+                                        margin-bottom: 20px;
+                                    }
+                                    .quote-cover-letter {
+                                        padding-top: 10px;
+                                    }
                                     .quote-header-quote-panel {
                                         width: 100%;
-                                        border: 1px solid #cbd5e1;
-                                        border-radius: 2px;
-                                        overflow: hidden;
+                                        border: none;
+                                        border-radius: 0;
+                                        overflow: visible;
                                         font-size: 13px;
                                         box-sizing: border-box;
                                     }
-                                    .quote-header-quote-panel-head {
+                                    .quote-header-quote-panel-body {
                                         display: flex;
-                                        justify-content: space-between;
-                                        align-items: center;
-                                        gap: 12px;
-                                        background: #e2e8f0;
-                                        padding: 8px 12px;
-                                        font-weight: 600;
-                                        color: #1e293b;
+                                        flex-direction: column;
+                                        width: 100%;
+                                        padding: 4px 0 14px 0;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-quote-panel-row--ref {
+                                        background: #e8edf4 !important;
                                         -webkit-print-color-adjust: exact;
                                         print-color-adjust: exact;
+                                        padding: 9px 0 9px 0 !important;
+                                        margin: 0 0 2px 0;
+                                        box-sizing: border-box;
                                     }
-                                    .quote-header-quote-panel-body {
+                                    .quote-header-quote-panel-row--ref .quote-header-quote-panel-label {
+                                        font-weight: 600 !important;
+                                        color: #475569 !important;
+                                    }
+                                    .quote-header-quote-panel-row--ref .quote-header-quote-panel-value {
+                                        font-weight: 700 !important;
+                                        color: #0f172a !important;
+                                    }
+                                    .quote-header-quote-panel-row {
+                                        display: flex;
+                                        flex-direction: row;
+                                        align-items: flex-start;
+                                        padding: 5px 0;
+                                        min-width: 0;
+                                        line-height: 1.38;
+                                    }
+                                    .quote-header-quote-panel-label {
+                                        flex: 0 0 34%;
+                                        max-width: 132px;
+                                        color: #000;
+                                        font-weight: 400;
+                                        padding-right: 12px;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-quote-panel-value {
+                                        flex: 1 1 auto;
+                                        min-width: 0;
+                                        color: #000;
+                                        font-weight: 400;
+                                    }
+                                    .quote-cover-page1-spacer {
+                                        flex: 1 1 auto;
+                                        min-height: 8mm;
+                                    }
+                                    .quote-cover-sign-off {
+                                        flex-shrink: 0;
                                         width: 100%;
-                                        border-collapse: collapse;
-                                        table-layout: fixed;
+                                        box-sizing: border-box;
+                                        padding-top: 4px;
                                     }
-                                    .quote-header-quote-panel-body td {
-                                        border: none;
-                                        border-bottom: 1px solid #e2e8f0;
-                                        padding: 8px 12px;
-                                        vertical-align: top;
-                                        line-height: 1.45;
-                                    }
-                                    .quote-header-quote-panel-body tr:last-child td {
-                                        border-bottom: none;
-                                    }
-                                    .quote-header-quote-panel-body td:first-child {
-                                        width: 38%;
-                                        max-width: 140px;
-                                        color: #64748b;
+                                    .quote-cover-sign-off-for {
+                                        margin: 0 0 calc(1.58em * 3) 0;
+                                        font-size: 13px;
+                                        line-height: 1.58;
+                                        color: #0f172a;
                                         font-weight: 600;
                                     }
-                                    .quote-header-quote-panel-body td:last-child {
-                                        color: #0f172a;
-                                        font-weight: 500;
-                                    }
                                     .quote-cover-signatory-line {
-                                        margin-top: 28px;
+                                        margin-top: 0;
                                         font-size: 13px;
                                         color: #0f172a;
+                                    }
+                                    .quote-cover-signatory-designation {
+                                        margin-top: 4px;
+                                        font-size: 12px;
+                                        line-height: 1.45;
+                                        color: #475569;
+                                        font-weight: 400;
                                     }
                                     .quote-cover-meta-table {
                                         width: 100%;
@@ -10393,7 +12447,7 @@ const QuoteForm = () => {
                                     }
                                     .quote-cover-letter p:last-of-type {
                                         margin-bottom: 0;
-                                        font-weight: 600;
+                                        font-weight: 400;
                                     }
                                     .quote-continuation-header {
                                         display: flex;
@@ -10431,8 +12485,8 @@ const QuoteForm = () => {
                                         [role="navigation"],
                                         button,
                                         .modal-backdrop {
-                                            display: none !important;
-                                        }
+                                        display: none !important;
+                                    }
 
                                         html, body {
                                             width: 210mm !important;
@@ -10455,10 +12509,15 @@ const QuoteForm = () => {
                                         }
 
                                         #quote-preview {
-                                            display: block !important;
+                                            display: flex !important;
+                                            flex-direction: column !important;
+                                            align-items: center !important;
                                             width: 210mm !important;
-                                            margin: 0 !important;
+                                            min-width: 210mm !important;
+                                            max-width: 210mm !important;
+                                            margin: 0 auto !important;
                                             padding: 0 !important;
+                                            background: #fff !important;
                                         }
 
                                         .quote-a4-sheet {
@@ -10466,9 +12525,13 @@ const QuoteForm = () => {
                                             grid-template-columns: minmax(0, 1fr) !important;
                                             grid-template-rows: auto minmax(0, 1fr) auto !important;
                                             width: 210mm !important;
-                                            height: 296.5mm !important; /* Slightly less than 297 to avoid overflow blank pages */
+                                            min-width: 210mm !important;
+                                            max-width: 210mm !important;
+                                            min-height: 297mm !important;
+                                            height: auto !important;
+                                            max-height: none !important;
                                             padding: 15mm !important;
-                                            margin: 0 !important;
+                                            margin: 0 auto !important;
                                             page-break-after: always !important;
                                             break-after: page !important;
                                             border: none !important;
@@ -10476,13 +12539,52 @@ const QuoteForm = () => {
                                             box-sizing: border-box !important;
                                             background: white !important;
                                             visibility: visible !important;
+                                            overflow: visible !important;
+                                        }
+
+                                        .quote-a4-sheet--continuation .quote-sheet-main-flex {
+                                            min-height: 0 !important;
+                                        }
+                                        .quote-a4-sheet--continuation .content-section {
+                                            flex: 0 1 auto !important;
                                         }
 
                                         .quote-sheet-logo-row, 
-                                        .quote-continuation-header,
-                                        .footer-section {
+                                        .quote-continuation-header {
                                             display: flex !important;
                                             visibility: visible !important;
+                                        }
+                                        .footer-section {
+                                            display: flex !important;
+                                            flex-direction: column !important;
+                                            align-items: stretch !important;
+                                            width: 100% !important;
+                                            max-width: 100% !important;
+                                            box-sizing: border-box !important;
+                                            break-inside: avoid !important;
+                                            page-break-inside: avoid !important;
+                                            visibility: visible !important;
+                                        }
+                                        .quote-print-page-indicator {
+                                            display: block !important;
+                                            width: 100% !important;
+                                            max-width: 100% !important;
+                                            text-align: right !important;
+                                            box-sizing: border-box !important;
+                                            visibility: visible !important;
+                                        }
+                                        .quote-print-footer-wrap {
+                                            width: 50% !important;
+                                            max-width: 50% !important;
+                                            margin-left: auto !important;
+                                            margin-right: 0 !important;
+                                            box-sizing: border-box !important;
+                                        }
+                                        .quote-print-footer-company {
+                                            width: 100% !important;
+                                            max-width: 100% !important;
+                                            text-align: right !important;
+                                            box-sizing: border-box !important;
                                         }
 
                                         img {
@@ -10496,21 +12598,15 @@ const QuoteForm = () => {
                                             max-height: 68px !important;
                                         }
                                         .no-print { display: none !important; }
-                                        #quote-preview { background: none !important; padding: 0 !important; width: 100% !important; margin: 0 !important; }
-                                        .quote-a4-sheet { box-shadow: none !important; margin: 0 !important; page-break-after: always; }
+                                        .quote-a4-sheet { box-shadow: none !important; }
                                         .quote-cover-meta-row-project td {
                                             -webkit-print-color-adjust: exact !important;
                                             print-color-adjust: exact !important;
                                             background: #e8edf4 !important;
                                         }
-                                        .quote-header-quote-panel-head {
-                                            -webkit-print-color-adjust: exact !important;
-                                            print-color-adjust: exact !important;
-                                            background: #e2e8f0 !important;
-                                        }
-                                    }
-                                    `}
-                                </style>
+                                }
+                            `}
+                            </style>
 
                                 <div
                                     id="quote-preview"
@@ -10525,7 +12621,7 @@ const QuoteForm = () => {
                                         width: '210mm',
                                         minWidth: '210mm',
                                         maxWidth: '210mm',
-                                        margin: '0 auto',
+                                margin: '0 auto',
                                         minHeight: 'auto',
                                         boxSizing: 'border-box',
                                         position: 'relative',
@@ -10536,26 +12632,52 @@ const QuoteForm = () => {
                                         className="quote-clause-measure-host"
                                         aria-hidden
                                     >
-                                        {activeClausesList.map((clause) => (
+                                        {activeClausesList.map((clause, clauseMeasureIdx) => (
                                             <div
                                                 key={`measure-${clause.key}`}
                                                 id={`measure-clause-${clause.key}`}
-                                                className="quote-clause-section"
-                                                style={{ width: '180mm', padding: '0', margin: '0' }}
-                                                dangerouslySetInnerHTML={{ __html: clause.content }}
-                                            />
+                                                data-clause-measure-index={clauseMeasureIdx}
+                                                className="quote-clause-block quote-clause-section"
+                                                style={{
+                                                    width: '180mm',
+                                                    maxWidth: '100%',
+                                                    marginBottom: '20px',
+                                                    boxSizing: 'border-box',
+                                                }}
+                                            >
+                                                <h3
+                                                    style={{
+                                                        fontSize: '14px',
+                                                        fontWeight: 'bold',
+                                                        marginBottom: '8px',
+                                                    }}
+                                                >
+                                                    {clauseMeasureIdx + 1}. {clause.title}
+                                                </h3>
+                                                <div
+                                                    className="clause-content"
+                                                    style={{ fontSize: '13px', lineHeight: '1.6' }}
+                                                    dangerouslySetInnerHTML={{
+                                                        __html: getClauseDisplayBodyHtml(
+                                                            clause.content,
+                                                            clause.listKey,
+                                                            clauseMeasureIdx + 1
+                                                        ),
+                                                    }}
+                                                />
+                                            </div>
                                         ))}
                                     </div>
 
                                     {sheets.map((sheet, sheetIdx) => (
                                         <div 
                                             key={`sheet-${sheetIdx}`} 
-                                            className="quote-a4-sheet"
+                                            className={`quote-a4-sheet${sheetIdx > 0 ? ' quote-a4-sheet--continuation' : ''}`}
                                             onDragOver={handleQuoteSheetSignatureDragOver}
                                             onDrop={handleQuotePreviewSignatureDrop}
                                         >
                                             {/* Repeating Header (Logo) for Print */}
-                                            <div className="quote-print-repeat-strip" aria-hidden="true" style={{ width: '100%', marginBottom: '20px' }}>
+                                            <div className="quote-sheet-logo-row" aria-hidden="true" style={{ width: '100%', marginBottom: '20px' }}>
                                                 <div style={{ textAlign: 'right', width: '100%' }}>
                                                     {quoteLogoDisplaySrc ? (
                                                         <img src={quoteLogoDisplaySrc} alt="" style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }} />
@@ -10564,153 +12686,255 @@ const QuoteForm = () => {
                                             </div>
 
                                             {/* Page Content */}
-                                            <div className="quote-sheet-main-flex" style={{ minHeight: '250mm', display: 'flex', flexDirection: 'column' }}>
+                                            <div
+                                                className="quote-sheet-main-flex"
+                                                style={{
+                                                    minHeight: sheetIdx === 0 ? '250mm' : 0,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                                }}
+                                            >
                                                 {sheetIdx === 0 && (
                                                     <div className="header-section quote-header-row" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0' }}>
                                                         <div className="quote-header-address-col" style={{ width: '50%' }}>
                                                             <div style={{ fontWeight: '600', marginBottom: '8px' }}>To,</div>
-                                                            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{toName}</div>
-                                                            <div style={{ fontSize: '13px', color: '#475569', whiteSpace: 'pre-line' }}>{toAddress}</div>
-                                                            {(toPhone || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569', marginTop: '6px' }}>Tel: {toPhone.trim()}</div>
+                                                            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>
+                                                                {quotePreviewToBlockDisplay.toName}
+                                                            </div>
+                                                            <div style={{ fontSize: '13px', color: '#475569', whiteSpace: 'pre-line' }}>
+                                                                {quotePreviewToBlockDisplay.toAddress}
+                                                            </div>
+                                                            {(quotePreviewToBlockDisplay.toPhone || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569', marginTop: '6px' }}>
+                                                                    Tel: {quotePreviewToBlockDisplay.toPhone.trim()}
+                                                                </div>
                                                             ) : null}
-                                                            {(toFax || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569' }}>Fax: {toFax.trim()}</div>
+                                                            {(quotePreviewToBlockDisplay.toFax || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569' }}>Fax: {quotePreviewToBlockDisplay.toFax.trim()}</div>
                                                             ) : null}
-                                                            {(toEmail || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569' }}>E-mail: {toEmail.trim()}</div>
+                                                            {(quotePreviewToBlockDisplay.toEmail || '').trim() ? (
+                                                                <div style={{ fontSize: '13px', color: '#475569' }}>E-mail: {quotePreviewToBlockDisplay.toEmail.trim()}</div>
                                                             ) : null}
-                                                        </div>
+                                            </div>
                                                         <div className="quote-header-quote-col" style={{ width: '45%' }}>
                                                             <div className="quote-header-quote-panel">
-                                                                <div className="quote-header-quote-panel-head">
-                                                                    <span>Quote Ref:</span>
-                                                                    <span>{String(quoteNumber || '').trim() || 'Draft'}</span>
+                                                                <div className="quote-header-quote-panel-body">
+                                                                    <div className="quote-header-quote-panel-row quote-header-quote-panel-row--ref">
+                                                                        <span className="quote-header-quote-panel-label">Quote Ref:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {String(
+                                                                                subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.quoteNumber
+                                                                                    : quoteNumber || ''
+                                                                            ).trim() || 'Draft'}
+                                                                        </span>
+                                                            </div>
+                                                                    <div className="quote-header-quote-panel-row">
+                                                                        <span className="quote-header-quote-panel-label">Date:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {subjobQuoteA4HeaderDisplay
+                                                                                ? formatQuoteYmdForDisplay(
+                                                                                      subjobQuoteA4HeaderDisplay.quoteDateYmd
+                                                                                  ) || ''
+                                                                                : formatQuoteYmdForDisplay(quoteDate) || ''}
+                                                                        </span>
+                                                </div>
+                                                                    <div className="quote-header-quote-panel-row">
+                                                                        <span className="quote-header-quote-panel-label">Prepared By:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {String(
+                                                                                subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.preparedBy
+                                                                                    : preparedBy || ''
+                                                                            ).trim() || '—'}
+                                                                        </span>
+                                            </div>
+                                                                    {subjobQuoteA4HeaderDisplay?.preparedByContact ||
+                                                                    quotePreviewPreparedByContactDisplay ? (
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">Contact:</span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {subjobQuoteA4HeaderDisplay?.preparedByContact ||
+                                                                                    quotePreviewPreparedByContactDisplay}
+                                                                            </span>
+                                        </div>
+                                                                    ) : null}
+                                                                    <div className="quote-header-quote-panel-row">
+                                                                        <span className="quote-header-quote-panel-label">Type:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {subjobQuoteA4HeaderDisplay
+                                                                                ? subjobQuoteA4HeaderDisplay.quoteTypeLine
+                                                                                : quotePreviewTypeLine}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="quote-header-quote-panel-row">
+                                                                        <span className="quote-header-quote-panel-label">Your Ref:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {String(
+                                                                                subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.customerReference
+                                                                                    : customerReference || ''
+                                                                            ).trim() || ''}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="quote-header-quote-panel-row">
+                                                                        <span className="quote-header-quote-panel-label">Validity:</span>
+                                                                        <span className="quote-header-quote-panel-value">
+                                                                            {subjobQuoteA4HeaderDisplay
+                                                                                ? subjobQuoteA4HeaderDisplay.validityDisplay || ''
+                                                                                : getValidityDate() || ''}
+                                                                        </span>
+                                                                    </div>
                                                                 </div>
-                                                                <table className="quote-header-quote-panel-body" role="presentation">
-                                                                    <tbody>
-                                                                        <tr>
-                                                                            <td>Date:</td>
-                                                                            <td>
-                                                                                {formatQuoteYmdForDisplay(quoteDate) || '—'}
-                                                                            </td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td>Prepared By:</td>
-                                                                            <td>
-                                                                                <div>{String(preparedBy || '').trim() || '—'}</div>
-                                                                                {quotePreviewPreparedByTelLine ? (
-                                                                                    <div
-                                                                                        style={{
-                                                                                            marginTop: '3px',
-                                                                                            fontSize: '12px',
-                                                                                            color: '#475569',
-                                                                                            fontWeight: 500,
-                                                                                        }}
-                                                                                    >
-                                                                                        {quotePreviewPreparedByTelLine}
-                                                                                    </div>
-                                                                                ) : null}
-                                                                            </td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td>Type:</td>
-                                                                            <td>{quotePreviewTypeLine}</td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td>Your Ref:</td>
-                                                                            <td>{String(customerReference || '').trim() || '—'}</td>
-                                                                        </tr>
-                                                                        <tr>
-                                                                            <td>Validity:</td>
-                                                                            <td>{getValidityDate() || '—'}</td>
-                                                                        </tr>
-                                                                    </tbody>
-                                                                </table>
                                                             </div>
                                                         </div>
                                                     </div>
                                                 )}
 
                                                 {sheetIdx === 0 ? (
-                                                    <hr className="quote-section-rule" aria-hidden="true" />
+                                                    <hr className="quote-section-rule quote-section-rule--after-header" aria-hidden="true" />
                                                 ) : null}
 
-                                                <div className="content-section" style={{ flex: 1 }}>
+                                                <div
+                                                    className="content-section"
+                                                    style={{
+                                                        flex: sheetIdx === 0 ? 1 : '0 1 auto',
+                                                        display: 'flex',
+                                                        flexDirection: 'column',
+                                                        minHeight: 0,
+                                                    }}
+                                                >
                                                     {sheetIdx === 0 && (
                                                         <div className="quote-cover-first-page">
                                                             <table className="quote-cover-meta-table" role="presentation">
-                                                                <tbody>
+                                            <tbody>
                                                                     <tr className="quote-cover-meta-row-project">
                                                                         <td>Project Name:</td>
                                                                         <td>{String(quotePreviewProjectName || '').trim() || '—'}</td>
-                                                                    </tr>
-                                                                    <tr>
+                                                </tr>
+                                                <tr>
                                                                         <td>Subject:</td>
-                                                                        <td>{String(quotePreviewSubject || '').trim() || '—'}</td>
-                                                                    </tr>
-                                                                    <tr>
+                                                                        <td>
+                                                                            {String(
+                                                                                subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.subject ||
+                                                                                          ''
+                                                                                    : quotePreviewSubject || ''
+                                                                            ).trim() || '—'}
+                                                                        </td>
+                                                </tr>
+                                                <tr>
                                                                         <td>Attention of:</td>
-                                                                        <td>{String(toAttention || '').trim() || '—'}</td>
-                                                                    </tr>
-                                                                </tbody>
-                                                            </table>
-                                                            <hr className="quote-section-rule" aria-hidden="true" />
+                                                                        <td>
+                                                                            {String(
+                                                                                subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.toAttention
+                                                                                    : toAttention || ''
+                                                                            ).trim() || '—'}
+                                                                        </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                                            <hr className="quote-section-rule quote-section-rule--before-cover-letter" aria-hidden="true" />
                                                             <div className="quote-cover-letter">
-                                                                <p>Dear Sir/Madam,</p>
-                                                                <p>Thank you for inviting us to submit our proposal.</p>
+                                            <p>Dear Sir/Madam,</p>
                                                                 <p>
-                                                                    We have carefully examined your tender document, drawings,
-                                                                    specifications and related documents pertaining to the
-                                                                    captioned subject and are pleased to offer on behalf of{' '}
-                                                                    {quoteCoverOfferCompanyName}.
+                                                                    Thank you for providing us with this opportunity to submit our
+                                                                    offer for the below-mentioned inclusions. We have carefully
+                                                                    reviewed your requirements to ensure that our proposal aligns
+                                                                    perfectly. We are pleased to submit our quotation as per the
+                                                                    details mentioned below. It is our pleasure to serve you and we
+                                                                    assure you that our best efforts will always be made to meet your
+                                                                    needs.
                                                                 </p>
                                                                 <p>
-                                                                    We hope you will find our offer competitive and kindly revert
-                                                                    to us for any clarifications.
+                                                                    We hope you will find our offer competitive and kindly revert to
+                                                                    us for any clarifications.
                                                                 </p>
-                                                                <p>For {quoteCoverOfferCompanyName},</p>
-                                                            </div>
-                                                            <div className="quote-cover-signatory-line">
-                                                                {String(signatory || '').trim() || 'N/A'}
-                                                            </div>
+                                        </div>
                                                         </div>
                                                     )}
 
-                                                    {sheet.clauses.map((clause) => (
-                                                        <div key={clause.key} className="quote-clause-block" style={{ marginBottom: '20px' }}>
-                                                            <h3 style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: '8px' }}>{clause.title}</h3>
-                                                            <div style={{ fontSize: '13px', lineHeight: '1.6' }} dangerouslySetInnerHTML={{ __html: clause.content }} />
-                                                        </div>
-                                                    ))}
-                                                </div>
+                                                    {sheet.clauses.map((clause) => {
+                                                        const globalIdx = activeClausesList.findIndex((c) => c.listKey === clause.listKey);
+                                                        const displayMajor = globalIdx >= 0 ? globalIdx + 1 : 1;
+                                                        const bodyHtml = getClauseDisplayBodyHtml(
+                                                            clause.content,
+                                                            clause.listKey,
+                                                            displayMajor
+                                                        );
+                                                        return (
+                                                            <div key={clause.key} className="quote-clause-block" style={{ marginBottom: '20px' }}>
+                                                                <h3 style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: '8px' }}>
+                                                                    {displayMajor}. {clause.title}
+                                                                </h3>
+                                                                <div
+                                                                    className="clause-content"
+                                                                    style={{ fontSize: '13px', lineHeight: '1.6' }}
+                                                                    dangerouslySetInnerHTML={{ __html: bodyHtml }}
+                                                                />
+                                                            </div>
+                                                        );
+                                                    })}
+
+                                                    {sheetIdx === 0 ? (
+                                                        <>
+                                                            <div className="quote-cover-page1-spacer" aria-hidden="true" />
+                                                            <div className="quote-cover-sign-off">
+                                                                <p className="quote-cover-sign-off-for">For {quoteCoverOfferCompanyName},</p>
+                                                                <div className="quote-cover-signatory-line">
+                                                                    {String(
+                                                                        subjobQuoteA4HeaderDisplay
+                                                                            ? subjobQuoteA4HeaderDisplay.signatory
+                                                                            : signatory || ''
+                                                                    ).trim() || 'N/A'}
+                                                                </div>
+                                                                {String(
+                                                                    subjobQuoteA4HeaderDisplay
+                                                                        ? subjobQuoteA4HeaderDisplay.signatoryDesignation
+                                                                        : signatoryDesignation || ''
+                                                                ).trim() ? (
+                                                                    <div className="quote-cover-signatory-designation">
+                                                                        {String(
+                                                                            subjobQuoteA4HeaderDisplay
+                                                                                ? subjobQuoteA4HeaderDisplay.signatoryDesignation
+                                                                                : signatoryDesignation
+                                                                        ).trim()}
+                                                                    </div>
+                                                                ) : null}
+                                                            </div>
+                                                        </>
+                                                    ) : null}
+                                        </div>
 
                                                 <div className="footer-section" style={{ marginTop: 'auto', paddingTop: '20px' }}>
-                                                     <div className="quote-print-page-indicator" style={{ textAlign: 'right', fontSize: '11px', color: '#64748b', fontWeight: 600 }}>
+                                                     <div className="quote-print-page-indicator" style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>
                                                          Page {sheetIdx + 1} of {sheets.length}
                                                      </div>
                                                      <hr className="quote-section-rule" style={{ marginTop: '8px', marginBottom: '10px' }} aria-hidden="true" />
-                                                     <div
-                                                         style={{
-                                                             textAlign: 'right',
-                                                             fontSize: '11px',
-                                                             color: '#64748b',
-                                                         }}
-                                                     >
-                                                         <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
-                                                         <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
-                                                         <div>
-                                                             {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
-                                                             {' | '}
-                                                             Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
-                                                         </div>
-                                                         <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
-                                                     </div>
+                                                     <div className="quote-print-footer-wrap">
+                                                         <div
+                                                             className="quote-print-footer-company"
+                                                             style={{
+                                                                 fontSize: '11px',
+                                                                 color: '#64748b',
+                                                             }}
+                                                         >
+                                                             <div>{footerDetails?.name || quotePreviewEnquiryCompanyFallback?.name || 'Almoayyed Contracting'}</div>
+                                                             <div>{footerDetails?.address || quotePreviewEnquiryCompanyFallback?.address || 'P.O. Box 32232, Manama, Kingdom of Bahrain'}</div>
+                                            <div>
+                                                                 {footerDetails?.phone ? `Tel: ${footerDetails.phone}` : (quotePreviewEnquiryCompanyFallback?.phone ? `Tel: ${quotePreviewEnquiryCompanyFallback.phone}` : 'Tel: (+973) 17 400 407')}
+                                                {' | '}
+                                                                 Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
+                                            </div>
+                                                             <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
+                                        </div>
+                                    </div>
                                                 </div>
                                             </div>
 
-                                            {/* Digital Stamps */}
-                                            {quoteDigitalStamps
+                                            {/* Digital Stamps (parent tab includes subjob signatures as read-only overlays) */}
+                                            {quotePreviewDigitalStamps
                                                 .filter((s) => s.sheetIndex === sheetIdx + 1)
                                                 .map((stamp) => (
                                                     <QuoteSignatureStamp
@@ -10718,7 +12942,10 @@ const QuoteForm = () => {
                                                         stamp={stamp}
                                                         onRemove={handleRemoveDigitalStamp}
                                                         onMove={handleMoveDigitalStamp}
-                                                        allowRemove={!hasPersistedQuoteForScope || stamp.removableBeforeNextCommit === true}
+                                                        allowRemove={
+                                                            !stamp.inheritedFromSubJob &&
+                                                            stamp.removableBeforeNextCommit === true
+                                                        }
                                                     />
                                                 ))}
                                         </div>
@@ -10726,10 +12953,12 @@ const QuoteForm = () => {
                                  </div>
                             </div>
                         </div>
-                    </div>
+                                </>
+                            )}
+                        </div>
                 )}
             </div>
-        </div>
+            </div>
 
             <SignatureVaultModal
                 open={signatureVaultOpen}
@@ -10765,8 +12994,8 @@ const QuoteForm = () => {
                                             placeholder="recipient@example.com"
                                             value={emailDetails.to}
                                             onChange={(e) => setEmailDetails({ ...emailDetails, to: e.target.value })}
-                                        />
-                                    </div>
+                                                />
+                                            </div>
                                 </div>
                                 <div className="mb-4">
                                     <label className="form-label fw-bold text-muted small text-uppercase">Subject</label>
@@ -10792,23 +13021,39 @@ const QuoteForm = () => {
                                         onChange={(e) => setEmailDetails({ ...emailDetails, body: e.target.value })}
                                     ></textarea>
                                 </div>
-                                <div className="p-3 bg-light rounded-3 border d-flex align-items-center">
-                                    <div className="bg-white p-2 rounded shadow-sm me-3">
+                                <div className="p-3 bg-light rounded-3 border d-flex align-items-center flex-wrap gap-2">
+                                    <div className="bg-white p-2 rounded shadow-sm">
                                         <i className="bi bi-file-earmark-pdf-fill text-danger fs-4"></i>
                                     </div>
-                                    <div className="flex-grow-1">
-                                                 <div className="text-success small fw-bold">
-                                        <i className="bi bi-check-circle-fill me-1"></i>
-                                        Ready
+                                    <div className="flex-grow-1" style={{ minWidth: '140px' }}>
+                                        <div className="text-success small fw-bold">
+                                            <i className="bi bi-check-circle-fill me-1"></i>
+                                            Ready
+                                        </div>
+                                        {emailDetails.pdfName ? (
+                                            <div className="text-muted small text-truncate" title={emailDetails.pdfName}>
+                                                {emailDetails.pdfName}
+                                            </div>
+                                        ) : null}
                                     </div>
+                                    <button
+                                        type="button"
+                                        className="btn btn-outline-primary btn-sm ms-sm-auto"
+                                        onClick={handlePreviewQuotePdf}
+                                        disabled={!emailDetails.pdfBlob}
+                                    >
+                                        <i className="bi bi-eye me-1"></i>
+                                        Preview
+                                    </button>
                                 </div>
-                            </div>
                             </div>
                             <div className="modal-footer bg-light border-0 px-4 pb-4">
                                 <button
                                     type="button"
                                     className="btn btn-outline-secondary me-auto"
                                     onClick={handleOpenInOutlook}
+                                    disabled={emailSending}
+                                    title="Opens your mail app with subject and message. The PDF is saved to Downloads so you can attach it (browsers cannot attach files via mail links)."
                                 >
                                     <i className="bi bi-microsoft me-2"></i>
                                     Open in Outlook
@@ -10841,13 +13086,13 @@ const QuoteForm = () => {
                                          </>
                                      )}
                                  </button>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
-                    </div>
                 </div>
             )}
-    </>
-);
+                        </>
+    );
 };
 
 export default QuoteForm;

@@ -22,8 +22,12 @@ export function captureQuotePrintRootInnerHtmlForPdf(rootEl) {
     const root = rootEl || (typeof document !== 'undefined' ? document.getElementById('quote-print-root') : null);
     if (!root) return '';
     const clone = root.cloneNode(true);
-    const removeSel = ['.quote-clause-measure-host', '.quote-print-repeat-strip', '.quote-print-page-indicator', '.quote-print-footer-rule'];
-    for (const sel of removeSel) { clone.querySelectorAll(sel).forEach((n) => n.remove()); }
+    const removeSel = ['.quote-clause-measure-host', '.quote-print-footer-rule'];
+    for (const sel of removeSel) {
+        clone.querySelectorAll(sel).forEach((n) => n.remove());
+    }
+    /** Strip only the duplicate fixed-header strip outside sheets — keep per-sheet logos inside `.quote-a4-sheet`. */
+    clone.querySelectorAll(':scope > .quote-print-repeat-strip').forEach((n) => n.remove());
     return clone.innerHTML;
 }
 
@@ -56,7 +60,7 @@ function getServerPdfHeaderModeCss(printWithHeader) {
     if (!printWithHeader) {
         return `.print-logo-section, .footer-section, .quote-print-repeat-strip, .quote-print-page-indicator, .quote-print-footer-rule { display: none !important; } .page-one { min-height: auto !important; }`;
     }
-    return `.quote-print-repeat-strip, .quote-print-page-indicator, .quote-print-footer-rule { display: none !important; }`;
+    return `.quote-print-repeat-strip, .quote-print-footer-rule { display: none !important; }`;
 }
 
 /**
@@ -74,6 +78,7 @@ html[data-preview-pdf="1"] body {
     align-items: center !important;
     justify-content: flex-start !important;
     box-sizing: border-box !important;
+    min-width: 210mm !important;
 }
 html[data-preview-pdf="1"] #quote-print-root {
     background: white !important;
@@ -85,6 +90,9 @@ html[data-preview-pdf="1"] #quote-print-root {
     box-sizing: border-box !important;
 }
 html[data-preview-pdf="1"] #quote-preview {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
     gap: 0 !important;
     padding: 0 !important;
     margin: 0 auto !important;
@@ -93,6 +101,9 @@ html[data-preview-pdf="1"] #quote-preview {
     min-width: 210mm !important;
     max-width: 210mm !important;
     box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] #quote-preview .quote-a4-sheet {
+    flex-shrink: 0 !important;
 }
 html[data-preview-pdf="1"] .quote-document-root {
     width: 100% !important;
@@ -126,51 +137,58 @@ html[data-preview-pdf="1"] .quote-header-quote-col {
 }
 html[data-preview-pdf="1"] .quote-header-quote-panel {
     width: 100% !important;
-    border: 1px solid #cbd5e1 !important;
-    border-radius: 2px !important;
-    overflow: hidden !important;
+    border: none !important;
+    border-radius: 0 !important;
+    overflow: visible !important;
     font-size: 13px !important;
     box-sizing: border-box !important;
 }
-html[data-preview-pdf="1"] .quote-header-quote-panel-head {
+html[data-preview-pdf="1"] .quote-header-quote-panel-body {
     display: flex !important;
-    justify-content: space-between !important;
-    align-items: center !important;
-    gap: 12px !important;
-    background: #e2e8f0 !important;
-    padding: 8px 12px !important;
-    font-weight: 600 !important;
-    color: #1e293b !important;
+    flex-direction: column !important;
+    width: 100% !important;
+    padding: 4px 0 14px 0 !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-header-quote-panel-row--ref {
+    background: #e8edf4 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+    padding: 9px 0 9px 0 !important;
+    margin: 0 0 2px 0 !important;
     box-sizing: border-box !important;
 }
-html[data-preview-pdf="1"] .quote-header-quote-panel-body {
-    width: 100% !important;
-    border-collapse: collapse !important;
-    table-layout: fixed !important;
-    box-sizing: border-box !important;
-}
-html[data-preview-pdf="1"] .quote-header-quote-panel-body td {
-    border: none !important;
-    border-bottom: 1px solid #e2e8f0 !important;
-    padding: 8px 12px !important;
-    vertical-align: top !important;
-    line-height: 1.45 !important;
-    box-sizing: border-box !important;
-}
-html[data-preview-pdf="1"] .quote-header-quote-panel-body tr:last-child td {
-    border-bottom: none !important;
-}
-html[data-preview-pdf="1"] .quote-header-quote-panel-body td:first-child {
-    width: 38% !important;
-    max-width: 140px !important;
-    color: #64748b !important;
+html[data-preview-pdf="1"] .quote-header-quote-panel-row--ref .quote-header-quote-panel-label {
     font-weight: 600 !important;
+    color: #475569 !important;
 }
-html[data-preview-pdf="1"] .quote-header-quote-panel-body td:last-child {
+html[data-preview-pdf="1"] .quote-header-quote-panel-row--ref .quote-header-quote-panel-value {
+    font-weight: 700 !important;
     color: #0f172a !important;
-    font-weight: 500 !important;
+}
+html[data-preview-pdf="1"] .quote-header-quote-panel-row {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: flex-start !important;
+    padding: 5px 0 !important;
+    min-width: 0 !important;
+    line-height: 1.38 !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-header-quote-panel-label {
+    flex: 0 0 34% !important;
+    max-width: 132px !important;
+    color: #000 !important;
+    font-weight: 400 !important;
+    padding-right: 12px !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-header-quote-panel-value {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    color: #000 !important;
+    font-weight: 400 !important;
+    box-sizing: border-box !important;
 }
 html[data-preview-pdf="1"] .quote-section-rule {
     border: 0 !important;
@@ -178,6 +196,17 @@ html[data-preview-pdf="1"] .quote-section-rule {
     margin: 0 0 16px 0 !important;
     height: 0 !important;
     box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-section-rule--after-header {
+    margin-top: 10px !important;
+    margin-bottom: 16px !important;
+}
+html[data-preview-pdf="1"] .quote-section-rule--before-cover-letter {
+    margin-top: 0 !important;
+    margin-bottom: 20px !important;
+}
+html[data-preview-pdf="1"] .quote-cover-letter {
+    padding-top: 10px !important;
 }
 html[data-preview-pdf="1"] .quote-sheet-main-flex {
     width: 100% !important;
@@ -228,10 +257,33 @@ html[data-preview-pdf="1"] .quote-cover-meta-row-project td:last-child {
     font-weight: 700 !important;
     color: #0f172a !important;
 }
+html[data-preview-pdf="1"] .quote-cover-page1-spacer {
+    flex: 1 1 auto !important;
+    min-height: 8mm !important;
+}
+html[data-preview-pdf="1"] .quote-cover-sign-off {
+    flex-shrink: 0 !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-cover-sign-off-for {
+    margin: 0 0 calc(1.58em * 3) 0 !important;
+    font-size: 13px !important;
+    line-height: 1.58 !important;
+    color: #0f172a !important;
+    font-weight: 600 !important;
+}
 html[data-preview-pdf="1"] .quote-cover-signatory-line {
-    margin-top: 28px !important;
+    margin-top: 0 !important;
     font-size: 13px !important;
     color: #0f172a !important;
+}
+html[data-preview-pdf="1"] .quote-cover-signatory-designation {
+    margin-top: 4px !important;
+    font-size: 12px !important;
+    line-height: 1.45 !important;
+    color: #475569 !important;
+    font-weight: 400 !important;
 }
 html[data-preview-pdf="1"] .quote-cover-letter p {
     margin: 0 0 11px 0 !important;
@@ -241,11 +293,30 @@ html[data-preview-pdf="1"] .quote-cover-letter p {
 }
 html[data-preview-pdf="1"] .quote-cover-letter p:last-of-type {
     margin-bottom: 0 !important;
-    font-weight: 600 !important;
+    font-weight: 400 !important;
+}
+html[data-preview-pdf="1"] .content-section {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    text-align: left !important;
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+}
+html[data-preview-pdf="1"] .quote-clause-block {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    text-align: left !important;
+}
+html[data-preview-pdf="1"] .quote-clause-block .clause-content {
+    text-align: left !important;
 }
 html[data-preview-pdf="1"] .quote-a4-sheet {
     box-sizing: border-box !important;
     width: 210mm !important;
+    min-width: 210mm !important;
     max-width: 210mm !important;
     padding: 15mm !important;
     margin: 0 auto !important;
@@ -265,13 +336,21 @@ html[data-preview-pdf="1"] .quote-a4-sheet:last-child {
     page-break-after: auto !important;
     break-after: auto !important;
 }
+html[data-preview-pdf="1"] .quote-a4-sheet--continuation .quote-sheet-main-flex {
+    min-height: 0 !important;
+}
+html[data-preview-pdf="1"] .quote-a4-sheet--continuation .content-section {
+    flex: 0 1 auto !important;
+}
 html[data-preview-pdf="1"] .quote-sheet-main-flex {
     grid-row: 2 !important;
     display: flex !important;
     flex-direction: column !important;
+    width: 100% !important;
     min-width: 0 !important;
     min-height: 0 !important;
     height: 100% !important;
+    box-sizing: border-box !important;
 }
 html[data-preview-pdf="1"] img {
     -webkit-print-color-adjust: exact !important;
@@ -287,6 +366,130 @@ html[data-preview-pdf="1"] .clause-content table th,
 html[data-preview-pdf="1"] .clause-content table td {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+}
+html[data-preview-pdf="1"] .footer-section {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+}
+html[data-preview-pdf="1"] .quote-print-page-indicator {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    text-align: right !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-print-footer-wrap {
+    display: block !important;
+    width: 50% !important;
+    max-width: 50% !important;
+    margin-left: auto !important;
+    margin-right: 0 !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-print-footer-company {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    text-align: right !important;
+    box-sizing: border-box !important;
+}
+/**
+ * Print dialog (popup from Print button) loads hoisted @media rules from QuoteForm that used to force
+ * #quote-preview { width: 100% } and fixed sheet heights — blank or narrow pages. These rules win via
+ * higher specificity + @media print so output matches on-screen preview.
+ */
+@media print {
+    html[data-preview-pdf="1"],
+    html[data-preview-pdf="1"] body {
+        width: 210mm !important;
+        max-width: 210mm !important;
+        margin: 0 auto !important;
+        padding: 0 !important;
+        background: #fff !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+    html[data-preview-pdf="1"] #quote-print-root.print-wrapper {
+        width: 210mm !important;
+        min-width: 210mm !important;
+        max-width: 210mm !important;
+        margin: 0 auto !important;
+        padding: 0 !important;
+    }
+    html[data-preview-pdf="1"] #quote-preview {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        width: 210mm !important;
+        min-width: 210mm !important;
+        max-width: 210mm !important;
+        margin: 0 auto !important;
+        padding: 0 !important;
+        background: #fff !important;
+    }
+    html[data-preview-pdf="1"] #quote-preview .quote-a4-sheet {
+        flex-shrink: 0 !important;
+    }
+    html[data-preview-pdf="1"] .quote-a4-sheet {
+        width: 210mm !important;
+        min-width: 210mm !important;
+        max-width: 210mm !important;
+        min-height: 297mm !important;
+        height: auto !important;
+        max-height: none !important;
+        overflow: visible !important;
+        page-break-after: always !important;
+        break-after: page !important;
+        box-sizing: border-box !important;
+    }
+    html[data-preview-pdf="1"] .quote-a4-sheet:last-child {
+        page-break-after: auto !important;
+        break-after: auto !important;
+    }
+    html[data-preview-pdf="1"] .quote-a4-sheet--continuation .quote-sheet-main-flex {
+        min-height: 0 !important;
+    }
+    html[data-preview-pdf="1"] .quote-a4-sheet--continuation .content-section {
+        flex: 0 1 auto !important;
+    }
+    html[data-preview-pdf="1"] .footer-section {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+    }
+    html[data-preview-pdf="1"] .quote-print-page-indicator {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        text-align: right !important;
+        box-sizing: border-box !important;
+    }
+    html[data-preview-pdf="1"] .quote-print-footer-wrap {
+        display: block !important;
+        width: 50% !important;
+        max-width: 50% !important;
+        margin-left: auto !important;
+        margin-right: 0 !important;
+        box-sizing: border-box !important;
+    }
+    html[data-preview-pdf="1"] .quote-print-footer-company {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        text-align: right !important;
+        box-sizing: border-box !important;
+    }
 }
 `;
 

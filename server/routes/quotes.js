@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const sql = require('mssql');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
@@ -32,6 +33,43 @@ const storage = multer.diskStorage({
     }
 });
 const upload = multer({ storage: storage });
+
+/**
+ * Master_EnquiryFor resolves creator department/div — only replace OwnJob with that department when the client
+ * did not send a different job/branch name (e.g. direct subjob tab = "HVAC Project" while login dept is "Civil").
+ */
+function applyOwnJobAfterDepartmentLookup(currentOwnJob, userDept) {
+    const oj = String(currentOwnJob || '').trim();
+    const ud = String(userDept || '').trim();
+    if (!ud) return oj;
+    if (!oj || oj.toLowerCase() === ud.toLowerCase()) return ud;
+    return oj;
+}
+
+/** Align ToName filter with UI job labels ("L1 - Civil Project" vs "Civil Project"). */
+/** EnquiryQuotes.TotalAmount — use client value when present (JSON omits `undefined`, so do not treat missing as 0 on revise). */
+function resolveQuoteTotalAmountForInsert(body, existingTotal) {
+    if (!body || typeof body !== 'object' || !Object.prototype.hasOwnProperty.call(body, 'totalAmount')) {
+        const fb = Number(existingTotal);
+        return Number.isFinite(fb) ? fb : 0;
+    }
+    const n = Number(body.totalAmount);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function stripJobPrefixForQuoteMatch(s) {
+    let t = String(s || '').trim();
+    if (!t) return '';
+    if (/^sub\s*job\s*-\s*/i.test(t)) {
+        const i = t.indexOf('-');
+        return i >= 0 ? t.slice(i + 1).trim() : t;
+    }
+    if (/^L\d+\s*-\s*/i.test(t)) {
+        const i = t.indexOf('-');
+        return i >= 0 ? t.slice(i + 1).trim() : t;
+    }
+    return t;
+}
 
 // POST /api/quotes/send-email - Send quote email with attachment
 router.post('/send-email', express.json({ limit: '50mb' }), async (req, res) => {
@@ -282,6 +320,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
     try {
         const { requestNo } = req.params;
         let toName = (req.query.toName || '').toString().trim();
+        const toNameStripped = stripJobPrefixForQuoteMatch(toName) || null;
         const leadJobName = (req.query.leadJobName || '').toString().trim();
         const userEmail = (req.query.userEmail || '').toString().trim();
         const ownJobNameFromTab = (req.query.ownJobName || '').toString().trim();
@@ -335,6 +374,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         const request = new sql.Request();
         request.input('requestNo', sql.NVarChar, requestNo);
         request.input('toName', sql.NVarChar, toName || null);
+        request.input('toNameStripped', sql.NVarChar, toNameStripped);
         request.input('leadJobName', sql.NVarChar, leadJobName || null);
         request.input('ownJobName', sql.NVarChar, ownJobName || null);
 
@@ -349,10 +389,25 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                    ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
                    ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                    Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
-                   CustomClauses, ClauseOrder
+                   CustomClauses, ClauseOrder, DigitalSignaturesJson
             FROM EnquiryQuotes
             WHERE LTRIM(RTRIM(ISNULL(CAST(RequestNo AS NVARCHAR(50)), ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
-              AND (@toName IS NULL OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N'')))))
+              AND (
+                @toName IS NULL
+                OR LTRIM(RTRIM(ISNULL(CAST(@toName AS NVARCHAR(4000)), N''))) = N''
+                OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N''))))
+                OR (
+                  @toNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@toNameStripped, N''))) <> N''
+                  AND (
+                    LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N''))))
+                    OR (
+                      LEN(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) >= 5
+                      AND LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) + N'%'
+                    )
+                  )
+                )
+              )
               AND (
                 @leadJobName IS NULL
                 OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
@@ -1412,9 +1467,193 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
     }
 });
 
+/** Normalize email for QuoteFormDrafts row ownership (must match client query param). */
+function normalizeQuoteFormDraftUserEmail(raw) {
+    return String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/@almcg\.com/g, '@almoayyedcg.com');
+}
+
+/** MSSQL often reports `Invalid object name 'dbo.QuoteFormDrafts'.` — match that, not only bare table name. */
+function isMissingQuoteFormDraftsTableError(message) {
+    const m = String(message || '');
+    return /Invalid object name/i.test(m) && /QuoteFormDrafts/i.test(m);
+}
+
+// GET/POST/DELETE /api/quotes/form-drafts* — MUST be registered BEFORE `/:requestNo` or "form-drafts" is treated as a RequestNo.
+// GET /api/quotes/form-drafts — list drafts for the signed-in user only
+router.get('/form-drafts', async (req, res) => {
+    try {
+        const userEmail = normalizeQuoteFormDraftUserEmail(req.query.userEmail);
+        if (!userEmail) {
+            return res.status(400).json({ error: 'userEmail is required' });
+        }
+
+        const request = new sql.Request();
+        request.input('userEmail', sql.NVarChar(320), userEmail);
+        const result = await request.query(`
+            SELECT TOP 40
+                CONVERT(VARCHAR(36), Id) AS Id,
+                Label,
+                CONVERT(VARCHAR(33), CreatedAt, 126) AS SavedAtIso
+            FROM QuoteFormDrafts
+            WHERE LOWER(LTRIM(RTRIM(UserEmail))) = @userEmail
+            ORDER BY CreatedAt DESC
+        `);
+        const rows = (result.recordset || []).map((r) => ({
+            id: r.Id ?? r.id,
+            label: r.Label ?? r.label ?? '',
+            savedAtIso: r.SavedAtIso ?? r.savedAtIso ?? '',
+        }));
+        res.json(rows);
+    } catch (err) {
+        const msg = (err && err.message) || '';
+        if (isMissingQuoteFormDraftsTableError(msg)) {
+            console.error('[form-drafts] Table missing? Run: node server/migrations/run_create_quote_form_drafts.js', err);
+            return res.status(503).json({
+                error: 'Quote drafts storage is not initialized',
+                hint: 'Run node server/migrations/run_create_quote_form_drafts.js on the database server.',
+            });
+        }
+        console.error('[form-drafts] GET list:', err);
+        res.status(500).json({ error: 'Failed to list quote form drafts', details: msg });
+    }
+});
+
+// GET /api/quotes/form-drafts/:id — full draft JSON for one row (same user only)
+router.get('/form-drafts/:id', async (req, res) => {
+    try {
+        const userEmail = normalizeQuoteFormDraftUserEmail(req.query.userEmail);
+        if (!userEmail) {
+            return res.status(400).json({ error: 'userEmail is required' });
+        }
+        const { id } = req.params;
+        if (!id || !/^[0-9a-fA-F-]{36}$/.test(String(id).trim())) {
+            return res.status(400).json({ error: 'Invalid draft id' });
+        }
+
+        const request = new sql.Request();
+        request.input('id', sql.UniqueIdentifier, id.trim());
+        request.input('userEmail', sql.NVarChar(320), userEmail);
+        const result = await request.query(`
+            SELECT
+                CONVERT(VARCHAR(36), Id) AS Id,
+                Label,
+                CONVERT(VARCHAR(33), CreatedAt, 126) AS SavedAtIso,
+                DraftPayloadJson
+            FROM QuoteFormDrafts
+            WHERE Id = @id AND LOWER(LTRIM(RTRIM(UserEmail))) = @userEmail
+        `);
+        const row = result.recordset && result.recordset[0];
+        if (!row) {
+            return res.status(404).json({ error: 'Draft not found' });
+        }
+        let payload;
+        try {
+            payload = JSON.parse(row.DraftPayloadJson || '{}');
+        } catch (e) {
+            return res.status(500).json({ error: 'Stored draft payload is corrupt' });
+        }
+        res.json({
+            id: row.Id ?? row.id,
+            label: row.Label ?? row.label,
+            savedAtIso: row.SavedAtIso ?? row.savedAtIso,
+            payload,
+        });
+    } catch (err) {
+        console.error('[form-drafts] GET one:', err);
+        res.status(500).json({ error: 'Failed to load quote form draft', details: err.message });
+    }
+});
+
+// POST /api/quotes/form-drafts — save a new draft (per user; keeps latest 40)
+router.post('/form-drafts', express.json({ limit: '15mb' }), async (req, res) => {
+    try {
+        const userEmail = normalizeQuoteFormDraftUserEmail(req.body.userEmail);
+        if (!userEmail) {
+            return res.status(400).json({ error: 'userEmail is required' });
+        }
+        const label = String(req.body.label || 'Draft')
+            .trim()
+            .slice(0, 500);
+        const payload = req.body.payload;
+        if (!payload || typeof payload !== 'object') {
+            return res.status(400).json({ error: 'payload object is required' });
+        }
+
+        const id = crypto.randomUUID();
+        const json = JSON.stringify(payload);
+
+        const ins = new sql.Request();
+        ins.input('id', sql.UniqueIdentifier, id);
+        ins.input('userEmail', sql.NVarChar(320), userEmail);
+        ins.input('label', sql.NVarChar(500), label);
+        ins.input('json', sql.NVarChar(sql.MAX), json);
+        await ins.query(`
+            INSERT INTO QuoteFormDrafts (Id, UserEmail, Label, DraftPayloadJson)
+            VALUES (@id, @userEmail, @label, @json)
+        `);
+
+        const trimReq = new sql.Request();
+        trimReq.input('userEmail', sql.NVarChar(320), userEmail);
+        await trimReq.query(`
+            ;WITH ranked AS (
+                SELECT Id, ROW_NUMBER() OVER (ORDER BY CreatedAt DESC) AS rn
+                FROM QuoteFormDrafts
+                WHERE LOWER(LTRIM(RTRIM(UserEmail))) = @userEmail
+            )
+            DELETE FROM QuoteFormDrafts WHERE Id IN (SELECT Id FROM ranked WHERE rn > 40)
+        `);
+
+        const savedAtIso = new Date().toISOString();
+        res.json({ id, label, savedAtIso, message: 'Draft saved' });
+    } catch (err) {
+        const msg = (err && err.message) || '';
+        if (isMissingQuoteFormDraftsTableError(msg)) {
+            return res.status(503).json({
+                error: 'Quote drafts storage is not initialized',
+                hint: 'Run node server/migrations/run_create_quote_form_drafts.js',
+            });
+        }
+        console.error('[form-drafts] POST:', err);
+        res.status(500).json({ error: 'Failed to save quote form draft', details: msg });
+    }
+});
+
+// DELETE /api/quotes/form-drafts/:id — remove one draft if owned by userEmail
+router.delete('/form-drafts/:id', async (req, res) => {
+    try {
+        const userEmail = normalizeQuoteFormDraftUserEmail(req.query.userEmail);
+        if (!userEmail) {
+            return res.status(400).json({ error: 'userEmail is required' });
+        }
+        const { id } = req.params;
+        if (!id || !/^[0-9a-fA-F-]{36}$/.test(String(id).trim())) {
+            return res.status(400).json({ error: 'Invalid draft id' });
+        }
+
+        const request = new sql.Request();
+        request.input('id', sql.UniqueIdentifier, id.trim());
+        request.input('userEmail', sql.NVarChar(320), userEmail);
+        const result = await request.query(`
+            DELETE FROM QuoteFormDrafts
+            WHERE Id = @id AND LOWER(LTRIM(RTRIM(UserEmail))) = @userEmail
+        `);
+        const n = result.rowsAffected && result.rowsAffected[0] ? result.rowsAffected[0] : 0;
+        if (!n) {
+            return res.status(404).json({ error: 'Draft not found or not owned by this user' });
+        }
+        res.json({ deleted: n });
+    } catch (err) {
+        console.error('[form-drafts] DELETE:', err);
+        res.status(500).json({ error: 'Failed to delete quote form draft', details: err.message });
+    }
+});
+
 // GET /api/quotes/:requestNo - Get all quotes for an enquiry
 // IMPORTANT: This catch-all route MUST come AFTER all other GET routes with static prefixes
-//            (like /single/:id, /enquiry-data/:requestNo, /lists/metadata, /config/templates)
+//            (like /single/:id, /enquiry-data/:requestNo, /lists/metadata, /config/templates, /form-drafts)
 //            to prevent matching 'single', 'enquiry-data', etc. as requestNo values
 router.get('/:requestNo', async (req, res) => {
     try {
@@ -1484,11 +1723,16 @@ router.post('/', async (req, res) => {
             toFax = '',
             toAttention = '',
             leadJob = '',
-            ownJob = ''
+            ownJob = '',
+            digitalSignaturesJson
         } = req.body;
 
         const customClausesJson = JSON.stringify(customClauses);
         const clauseOrderJson = JSON.stringify(clauseOrder);
+        const digitalSignaturesJsonStr =
+            typeof digitalSignaturesJson === 'string'
+                ? digitalSignaturesJson
+                : JSON.stringify(Array.isArray(digitalSignaturesJson) ? digitalSignaturesJson : []);
 
         if (!requestNo) {
             return res.status(400).json({ error: 'Request number is required' });
@@ -1497,8 +1741,9 @@ router.post('/', async (req, res) => {
         let dept = departmentCode || "AAC";
         let division = divisionCode || "GEN";
         let effectiveOwnJob = (ownJob || '').trim();
+        const clientSentDivision = String(divisionCode || '').trim();
 
-        // --- BACKEND IDENTITY ENFORCEMENT (User Requirement: Use Mail ID for Codes) ---
+        // --- BACKEND IDENTITY ENFORCEMENT: email → Master_EnquiryFor for dept/div when client did not send a tab/job division (e.g. multi-branch user on HVAC tab sends HVP). ---
         if (preparedByEmail) {
             try {
                 const normalizedUser = preparedByEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
@@ -1509,11 +1754,14 @@ router.post('/', async (req, res) => {
                     const masterRes = await sql.query`SELECT * FROM Master_EnquiryFor WHERE ItemName = ${userDept}`;
                     const masterData = masterRes.recordset[0];
                     if (masterData) {
-                        console.log(`[Quote Backend] Forcing identity based on email ${preparedByEmail} -> ${userDept} (${masterData.DivisionCode})`);
-                        dept = masterData.DepartmentCode || dept;
-                        division = masterData.DivisionCode || division;
-                        // Keep OwnJob aligned with creator department to avoid cross-branch mis-mapping.
-                        effectiveOwnJob = userDept;
+                        effectiveOwnJob = applyOwnJobAfterDepartmentLookup(effectiveOwnJob, userDept);
+                        if (!clientSentDivision) {
+                            console.log(`[Quote Backend] Forcing identity based on email ${preparedByEmail} -> ${userDept} (${masterData.DivisionCode})`);
+                            dept = masterData.DepartmentCode || dept;
+                            division = masterData.DivisionCode || division;
+                        } else {
+                            console.log(`[Quote Backend] Keeping client divisionCode=${clientSentDivision} (tab job); email maps to ${userDept} / ${masterData.DivisionCode} not applied to ref)`);
+                        }
                     }
                 }
             } catch (e) { console.error('[Quote Backend] Identity lookup error:', e); }
@@ -1597,7 +1845,7 @@ router.post('/', async (req, res) => {
                 ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
-                TotalAmount, Status, CustomClauses, ClauseOrder,
+                TotalAmount, Status, CustomClauses, ClauseOrder, DigitalSignaturesJson,
                 QuoteDate, CustomerReference, YourRef, QuoteType, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention, LeadJob, OwnJob, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
@@ -1608,7 +1856,7 @@ router.post('/', async (req, res) => {
                 ${showSchedule ? 1 : 0}, ${showWarranty ? 1 : 0}, ${showResponsibilityMatrix ? 1 : 0}, ${showTermsConditions ? 1 : 0}, ${showAcceptance ? 1 : 0}, ${showBillOfQuantity ? 1 : 0},
                 ${scopeOfWork}, ${basisOfOffer}, ${exclusions}, ${pricingTerms},
                 ${schedule}, ${warranty}, ${responsibilityMatrix}, ${termsConditions}, ${acceptance}, ${billOfQuantity},
-                ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson},
+                ${totalAmount}, ${status}, ${customClausesJson}, ${clauseOrderJson}, ${digitalSignaturesJsonStr},
                 ${quoteDate ? quoteDate.split('T')[0] : null}, ${customerReference}, ${customerReference}, ${quoteType || ''}, ${subject}, ${signatory}, ${signatoryDesignation}, ${toName}, ${toAddress}, ${toPhone}, ${toEmail}, ${toFax || ''}, ${toAttention || ''}, ${leadJob || ''}, ${effectiveOwnJob}, ${now}, ${now}
             )
         `;
@@ -1653,11 +1901,18 @@ router.put('/:id', async (req, res) => {
             quoteDate, customerReference, quoteType, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention,
             preparedBy, preparedByEmail,
             leadJob,
-            ownJob
+            ownJob,
+            digitalSignaturesJson
         } = req.body;
 
         const customClausesJson = JSON.stringify(customClauses);
         const clauseOrderJson = JSON.stringify(clauseOrder);
+        const hasDigitalSignaturesPayload = Object.prototype.hasOwnProperty.call(req.body, 'digitalSignaturesJson');
+        const digitalSignaturesJsonStr = hasDigitalSignaturesPayload
+            ? typeof digitalSignaturesJson === 'string'
+                ? digitalSignaturesJson
+                : JSON.stringify(Array.isArray(digitalSignaturesJson) ? digitalSignaturesJson : [])
+            : null;
         let effectiveOwnJob = (ownJob || '').trim();
 
         if (preparedByEmail) {
@@ -1665,14 +1920,64 @@ router.put('/:id', async (req, res) => {
                 const normalizedUser = preparedByEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
                 const userRes = await sql.query`SELECT Department FROM Master_ConcernedSE WHERE EmailId = ${normalizedUser}`;
                 const userDept = userRes.recordset.length > 0 ? userRes.recordset[0].Department : null;
-                if (userDept) effectiveOwnJob = userDept;
+                if (userDept) effectiveOwnJob = applyOwnJobAfterDepartmentLookup(effectiveOwnJob, userDept);
             } catch (e) {
                 console.error('[Quote Update] Identity lookup error:', e);
             }
         }
 
         const now = new Date();
-        await sql.query`
+        if (hasDigitalSignaturesPayload) {
+            await sql.query`
+            UPDATE EnquiryQuotes SET
+        ValidityDays = ${validityDays},
+        ShowScopeOfWork = ${showScopeOfWork ? 1 : 0},
+        ShowBasisOfOffer = ${showBasisOfOffer ? 1 : 0},
+        ShowExclusions = ${showExclusions ? 1 : 0},
+        ShowPricingTerms = ${showPricingTerms ? 1 : 0},
+        ShowSchedule = ${showSchedule ? 1 : 0},
+        ShowWarranty = ${showWarranty ? 1 : 0},
+        ShowResponsibilityMatrix = ${showResponsibilityMatrix ? 1 : 0},
+        ShowTermsConditions = ${showTermsConditions ? 1 : 0},
+        ShowAcceptance = ${showAcceptance ? 1 : 0},
+        ShowBillOfQuantity = ${showBillOfQuantity ? 1 : 0},
+        ScopeOfWork = ${scopeOfWork},
+        BasisOfOffer = ${basisOfOffer},
+        Exclusions = ${exclusions},
+        PricingTerms = ${pricingTerms},
+        Schedule = ${schedule},
+        Warranty = ${warranty},
+        ResponsibilityMatrix = ${responsibilityMatrix},
+        TermsConditions = ${termsConditions},
+        Acceptance = ${acceptance},
+        BillOfQuantity = ${billOfQuantity},
+        TotalAmount = ${totalAmount},
+        Status = ${status},
+        CustomClauses = ${customClausesJson},
+        ClauseOrder = ${clauseOrderJson},
+        DigitalSignaturesJson = ${digitalSignaturesJsonStr},
+        QuoteDate = ${quoteDate ? quoteDate.split('T')[0] : null},
+        CustomerReference = ${customerReference},
+        YourRef = ${customerReference},
+        QuoteType = ${quoteType != null && quoteType !== undefined ? quoteType : ''},
+        Subject = ${subject},
+        Signatory = ${signatory},
+        SignatoryDesignation = ${signatoryDesignation},
+        ToName = ${toName},
+        ToAddress = ${toAddress},
+        ToPhone = ${toPhone},
+        ToEmail = ${toEmail},
+        ToFax = ${toFax || ''},
+        ToAttention = ${toAttention || ''},
+        PreparedBy = ${preparedBy},
+        PreparedByEmail = ${preparedByEmail},
+        LeadJob = ${leadJob || ''},
+        OwnJob = ${effectiveOwnJob},
+        UpdatedAt = ${now}
+            WHERE ID = ${id}
+        `;
+        } else {
+            await sql.query`
             UPDATE EnquiryQuotes SET
         ValidityDays = ${validityDays},
         ShowScopeOfWork = ${showScopeOfWork ? 1 : 0},
@@ -1719,6 +2024,7 @@ router.put('/:id', async (req, res) => {
         UpdatedAt = ${now}
             WHERE ID = ${id}
         `;
+        }
 
         const updated = await sql.query`SELECT ID, QuoteNumber FROM EnquiryQuotes WHERE ID = ${id} `;
         res.json({ success: true, id: updated.recordset[0].ID, quoteNumber: updated.recordset[0].QuoteNumber });
@@ -1744,7 +2050,8 @@ router.post('/:id/revise', async (req, res) => {
             totalAmount, customClauses, clauseOrder,
             quoteDate, customerReference, quoteType, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention,
             leadJob,
-            ownJob
+            ownJob,
+            digitalSignaturesJson
         } = req.body;
 
         const cleanQuoteDate = quoteDate ? quoteDate.split('T')[0] : null;
@@ -1785,7 +2092,15 @@ router.post('/:id/revise', async (req, res) => {
 
         const customClausesJson = customClauses ? JSON.stringify(customClauses) : existing.CustomClauses;
         const clauseOrderJson = clauseOrder ? JSON.stringify(clauseOrder) : existing.ClauseOrder;
-        let effectiveOwnJob = ownJob !== undefined ? ownJob : existing.OwnJob;
+        const hasReviseDigitalSignatures = Object.prototype.hasOwnProperty.call(req.body, 'digitalSignaturesJson');
+        const reviseDigitalSignaturesJsonStr = hasReviseDigitalSignatures
+            ? typeof digitalSignaturesJson === 'string'
+                ? digitalSignaturesJson
+                : JSON.stringify(Array.isArray(digitalSignaturesJson) ? digitalSignaturesJson : [])
+            : existing.DigitalSignaturesJson != null && existing.DigitalSignaturesJson !== undefined
+              ? String(existing.DigitalSignaturesJson)
+              : '[]';
+        let effectiveOwnJob = String(ownJob !== undefined && ownJob !== null ? ownJob : (existing.OwnJob || '')).trim();
 
         if (preparedByEmail || existing.PreparedByEmail) {
             try {
@@ -1793,7 +2108,7 @@ router.post('/:id/revise', async (req, res) => {
                 if (emailForIdentity) {
                     const userRes = await sql.query`SELECT Department FROM Master_ConcernedSE WHERE EmailId = ${emailForIdentity}`;
                     const userDept = userRes.recordset.length > 0 ? userRes.recordset[0].Department : null;
-                    if (userDept) effectiveOwnJob = userDept;
+                    if (userDept) effectiveOwnJob = applyOwnJobAfterDepartmentLookup(effectiveOwnJob, userDept);
                 }
             } catch (e) {
                 console.error('[Revise] Identity lookup error:', e);
@@ -1809,7 +2124,7 @@ router.post('/:id/revise', async (req, res) => {
                 ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
                 ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
                 Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
-                TotalAmount, Status, CustomClauses, ClauseOrder,
+                TotalAmount, Status, CustomClauses, ClauseOrder, DigitalSignaturesJson,
                 QuoteDate, CustomerReference, YourRef, QuoteType, Subject, Signatory, SignatoryDesignation, ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention, LeadJob, OwnJob, CreatedAt, UpdatedAt
             )
             OUTPUT INSERTED.ID, INSERTED.QuoteNumber
@@ -1836,10 +2151,11 @@ router.post('/:id/revise', async (req, res) => {
                 ${termsConditions !== undefined ? termsConditions : existing.TermsConditions}, 
                 ${acceptance !== undefined ? acceptance : existing.Acceptance}, 
                 ${billOfQuantity !== undefined ? billOfQuantity : existing.BillOfQuantity},
-                ${totalAmount !== undefined ? totalAmount : existing.TotalAmount}, 
+                ${resolveQuoteTotalAmountForInsert(req.body, existing.TotalAmount)},
                 'Saved', 
                 ${customClausesJson}, 
                 ${clauseOrderJson},
+                ${reviseDigitalSignaturesJsonStr},
                 ${cleanQuoteDate !== null ? cleanQuoteDate : (existing.QuoteDate ? existing.QuoteDate.toISOString().split('T')[0] : null)}, 
                 ${customerReference !== undefined ? customerReference : existing.CustomerReference}, 
                 ${customerReference !== undefined ? customerReference : (existing.YourRef != null ? existing.YourRef : existing.CustomerReference)}, 
@@ -1864,7 +2180,8 @@ router.post('/:id/revise', async (req, res) => {
         res.json({
             success: true,
             id: result.recordset[0].ID,
-            quoteNumber: result.recordset[0].QuoteNumber
+            quoteNumber: result.recordset[0].QuoteNumber,
+            revisionNo: newRevisionNo,
         });
 
     } catch (err) {
