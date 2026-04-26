@@ -196,7 +196,9 @@ export const DataProvider = ({ children }) => {
                     console.error('Error reading response:', e);
                 }
                 console.error('Save failed:', errorMessage);
-                alert(`Failed to save to DB: ${errorMessage}`);
+                if (!String(errorMessage).includes('already Project name is exist')) {
+                    alert(`Failed to save to DB: ${errorMessage}`);
+                }
                 return { success: false, error: errorMessage };
             }
         } catch (err) {
@@ -218,14 +220,25 @@ export const DataProvider = ({ children }) => {
                     ...prev,
                     [requestNo]: updatedEnquiry
                 }));
-            } else {
-                const errorText = await res.text();
-                console.error('Update failed:', errorText);
-                alert(`Failed to update enquiry: ${errorText}`);
+                return { success: true };
             }
+            let errorMessage = 'Failed to update enquiry';
+            try {
+                const text = await res.text();
+                try {
+                    const errorData = JSON.parse(text);
+                    errorMessage = errorData.error || errorData.message || errorMessage;
+                } catch {
+                    errorMessage = text || errorMessage;
+                }
+            } catch (e) {
+                console.error('Error reading update response:', e);
+            }
+            console.error('Update failed:', errorMessage);
+            return { success: false, error: errorMessage };
         } catch (err) {
             console.error(err);
-            alert('Server Error');
+            return { success: false, error: err.message || 'Server Error' };
         }
     };
 

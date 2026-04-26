@@ -55,11 +55,23 @@ function jsTupleLeadJobMatch(quoteLead, pvLeadName) {
     return false;
 }
 
-/** Quote ToName vs pricing CustomerName (sqlTupleCustomerMatch). */
+/**
+ * Quote ToName vs pricing / list customer label (align with `sqlTupleCustomerKey` + rollup helpers).
+ * Exact `jsNormKey` equality missed real rows (trailing ".", "W.L.L" vs "WLL", minor punctuation).
+ */
 function jsTupleCustomerMatch(quoteToName, pvCustomerName) {
-    const a = jsNormKey(jsStripCustomerLeadSuffix(quoteToName));
-    const b = jsNormKey(jsStripCustomerLeadSuffix(pvCustomerName));
-    return a === b && a.length > 0;
+    const ka = normCustomerKeyForRollup(quoteToName);
+    const kb = normCustomerKeyForRollup(pvCustomerName);
+    if (!ka || !kb) return false;
+    if (ka === kb) return true;
+    return (
+        pricingCustomerRowMatchesKeyQuote(quoteToName, kb) || pricingCustomerRowMatchesKeyQuote(pvCustomerName, ka)
+    );
+}
+
+function quoteRowToName(q) {
+    if (!q) return '';
+    return String(q.ToName ?? q.toName ?? q.TOName ?? q.toname ?? '').trim();
 }
 
 function isBasePricePricingRow(p) {
@@ -74,7 +86,7 @@ function quoteRowMatchesTuple(q, pvOwn, pvLeadName, pvCust) {
     return (
         jsTupleOwnJobMatch(q.OwnJob, pvOwn) &&
         jsTupleLeadJobMatch(q.LeadJob, pvLeadName) &&
-        jsTupleCustomerMatch(q.ToName, pvCust)
+        jsTupleCustomerMatch(quoteRowToName(q), pvCust)
     );
 }
 
@@ -99,22 +111,29 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
         seen.add(k);
         uniq.push(c);
     }
+    const customersRequired = uniq.length > 0;
+    const matchesAnyCustomer = (q) => uniq.some((c) => jsTupleCustomerMatch(quoteRowToName(q), c));
+
     const strict = quotesForReq.filter(
         (q) =>
             jsTupleOwnJobMatch(q.OwnJob, pvOwn) &&
             jsTupleLeadJobMatch(q.LeadJob, pvLeadName) &&
-            uniq.some((c) => jsTupleCustomerMatch(q.ToName, c))
+            matchesAnyCustomer(q)
     );
     let best = pickLatestQuoteRow(strict);
     if (best && String(best.QuoteNumber || '').trim()) return best;
     const loose = quotesForReq.filter(
         (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && jsTupleLeadJobMatch(q.LeadJob, pvLeadName)
     );
-    if (loose.length === 1) return pickLatestQuoteRow(loose);
+    if (loose.length === 1) {
+        const only = loose[0];
+        if (!customersRequired || matchesAnyCustomer(only)) return only;
+        return null;
+    }
     if (loose.length > 1) {
-        const narrowed = loose.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+        const narrowed = loose.filter(matchesAnyCustomer);
         if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
-        return pickLatestQuoteRow(loose);
+        return customersRequired ? null : pickLatestQuoteRow(loose);
     }
     /** LeadJob in DB is often root-only ("Civil Project"); extract L# from PV and match saved quotes. */
     if (lineLeadCode && pvOwn) {
@@ -125,8 +144,10 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
             return jsTupleLeadJobMatch(q.LeadJob, pvLeadName);
         });
         if (byL.length >= 1) {
-            const narrowed = byL.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
-            return pickLatestQuoteRow(narrowed.length ? narrowed : byL);
+            const narrowed = byL.filter(matchesAnyCustomer);
+            if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+            if (customersRequired) return null;
+            return pickLatestQuoteRow(byL);
         }
     }
     /** Quote LeadJob may be root-only ("Civil Project") while PV/pricing pvLead is another branch label — match via QuoteNumber. */
@@ -135,8 +156,10 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
             (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && quoteNumberEmbedsLeadCode(q.QuoteNumber, lineLeadCode)
         );
         if (byRef.length >= 1) {
-            const narrowed = byRef.filter((q) => !uniq.length || uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
-            return pickLatestQuoteRow(narrowed.length ? narrowed : byRef);
+            const narrowed = byRef.filter((q) => !uniq.length || matchesAnyCustomer(q));
+            if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+            if (!uniq.length) return pickLatestQuoteRow(byRef);
+            return null;
         }
     }
     /**
@@ -154,11 +177,33 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
             });
             if (pool.length) {
                 if (uniq.length) {
-                    const narrowed = pool.filter((q) => uniq.some((c) => jsTupleCustomerMatch(q.ToName, c)));
+                    const narrowed = pool.filter(matchesAnyCustomer);
                     if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+                    return null;
                 }
                 return pickLatestQuoteRow(pool);
             }
+        }
+    }
+    /**
+     * Do not fall back to a quote that only matches customer+lead: another department (e.g. HVAC) can share the same
+     * L# on a different top-level root — that quote must not satisfy this row’s `pvOwn` (e.g. Electrical).
+     */
+    if ((!best || !String(best.QuoteNumber || '').trim()) && customersRequired && uniq.length && quotesForReq.length) {
+        const wantLc = lineLeadCode ? String(lineLeadCode).trim().toUpperCase() : '';
+        const matchesLeadForLine = (q) => {
+            if (wantLc && /^L\d+$/.test(wantLc)) {
+                const lq = extractLCodeFromLeadJobName(q.LeadJob || '');
+                if (lq && lq === wantLc) return true;
+                if (quoteNumberEmbedsLeadCode(q.QuoteNumber, wantLc)) return true;
+            }
+            return pvLeadName ? jsTupleLeadJobMatch(q.LeadJob, pvLeadName) : !wantLc;
+        };
+        const fb = quotesForReq.filter(
+            (q) => matchesAnyCustomer(q) && matchesLeadForLine(q) && jsTupleOwnJobMatch(q.OwnJob, pvOwn)
+        );
+        if (fb.length >= 1) {
+            return pickLatestQuoteRow(fb);
         }
     }
     return best;
@@ -357,6 +402,159 @@ function lCodeSortKey(code) {
     return m ? Number(m[1]) : 999;
 }
 
+/** Same normalization as pricing list `normPricingCustomerKey` (strip trailing " (L2)", alnum key). */
+function normCustomerKeyForRollup(s) {
+    return String(s || '')
+        .replace(/\s*\(L\d+\)\s*$/i, '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+}
+
+function pricingCustomerRowMatchesKeyQuote(cnRaw, wantKey) {
+    if (!wantKey) return false;
+    const n = normCustomerKeyForRollup(cnRaw);
+    if (!n) return false;
+    if (n === wantKey) return true;
+    const shorter = n.length <= wantKey.length ? n : wantKey;
+    const longer = n.length <= wantKey.length ? wantKey : n;
+    if (shorter.length < 4) return false;
+    return longer.startsWith(shorter);
+}
+
+function isInternalLeadSubmittedPricingRow(pr) {
+    const cn = String(pr.CustomerName ?? pr.customerName ?? '').trim();
+    const lj = String(pr.LeadJobName ?? pr.leadJobName ?? '').trim();
+    if (!cn || !lj) return false;
+    return normCustomerKeyForRollup(cn) === normCustomerKeyForRollup(lj);
+}
+
+function pvRowMatchedJobId(pr) {
+    const mid = pr.MatchedEnquiryForId ?? pr.matchedEnquiryForId ?? pr.MatchedEnquiryForID;
+    if (mid != null && String(mid) !== '' && String(mid) !== '0') return String(mid);
+    if (pr.EnquiryForID && pr.EnquiryForID != 0 && pr.EnquiryForID != '0') return String(pr.EnquiryForID);
+    return null;
+}
+
+function getEnquiryJobsForRequestNo(enqJobs, reqStr) {
+    const r = String(reqStr ?? '').trim();
+    if (!r) return [];
+    return (enqJobs || []).filter((j) => String(j.RequestNo ?? j.requestNo ?? '').trim() === r);
+}
+
+function findEnquiryForJobByOwnName(jobs, ownRaw) {
+    const s = String(ownRaw || '').trim();
+    if (!s) return null;
+    return jobs.find((j) => jsTupleOwnJobMatch(s, j.ItemName)) || null;
+}
+
+function getEnquiryForRootJob(jobs, start) {
+    if (!start) return null;
+    const byId = (id) => jobs.find((j) => String(j.ID) === String(id) || String(j.id) === String(id));
+    let j = start;
+    const vis = new Set();
+    for (let n = 0; n < 500 && j; n++) {
+        const pid = j.ParentID ?? j.parentID ?? j.ParentId;
+        if (pid == null || pid === '' || pid === 0 || pid === '0') {
+            return j;
+        }
+        if (vis.has(String(j.ID))) return j;
+        vis.add(String(j.ID));
+        const p = byId(pid);
+        if (!p) return j;
+        j = p;
+    }
+    return j;
+}
+
+/** All EnquiryFor IDs in the tree under `root` (inclusive). */
+function getSubtreeJobIdSetForRoot(jobs, root) {
+    const out = new Set();
+    if (!root) return out;
+    out.add(String(root.ID ?? root.id));
+    let changed = true;
+    let guard = 0;
+    while (changed && guard++ < 200) {
+        changed = false;
+        for (const j of jobs) {
+            const jid = String(j.ID ?? j.id);
+            const pid = j.ParentID ?? j.parentID;
+            if (pid == null || pid === '' || pid === 0 || pid === '0') continue;
+            if (out.has(String(pid)) && !out.has(jid)) {
+                out.add(jid);
+                changed = true;
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * Keep Base Price rows whose EnquiryFor belongs to the same top-level lead root as `own`.
+ * Prevents a quote/pricing tuple for another lead root (e.g. standalone HVAC) from marking "All Quoted" for Civil→Electrical.
+ */
+function filterPriceRowsToOwnJobLeadRoot(priceRows, enqJobs, reqStr, own) {
+    const jobs = getEnquiryJobsForRequestNo(enqJobs, reqStr);
+    if (!jobs.length || !Array.isArray(priceRows) || priceRows.length === 0) return priceRows;
+    const ownJob = findEnquiryForJobByOwnName(jobs, own);
+    if (!ownJob) return priceRows;
+    const root = getEnquiryForRootJob(jobs, ownJob);
+    const sub = getSubtreeJobIdSetForRoot(jobs, root);
+    if (!sub.size) return priceRows;
+    return priceRows.filter((p) => {
+        const jid = pvRowMatchedJobId(p);
+        if (!jid) return false;
+        return sub.has(String(jid));
+    });
+}
+
+/**
+ * Own-job + subjob Base Price total for one external customer on one lead (includes internal HVAC-style rows
+ * where CustomerName = LeadJobName, same rule as pricing list).
+ */
+function sumCustomerBasePricingInLeadSubtree(pricesForReq, leadCode, customerDisplayName, subtreeJobIdSet) {
+    const wantKey = normCustomerKeyForRollup(customerDisplayName);
+    if (!wantKey || !subtreeJobIdSet || subtreeJobIdSet.size === 0) return 0;
+    const lc = String(leadCode || '').trim().toUpperCase();
+
+    const rowInSubtree = (pr) => {
+        const jid = pvRowMatchedJobId(pr);
+        return Boolean(jid && subtreeJobIdSet.has(String(jid)));
+    };
+
+    const wantLeadKeys = new Set();
+    for (const pr of pricesForReq || []) {
+        if (parseFloat(pr.Price || 0) <= 0) continue;
+        if (!isBasePricePricingRow(pr)) continue;
+        if (extractLCodeFromLeadJobName(pr.LeadJobName || '') !== lc) continue;
+        if (!rowInSubtree(pr)) continue;
+        const cn = String(pr.CustomerName ?? pr.customerName ?? '').trim();
+        if (!pricingCustomerRowMatchesKeyQuote(cn, wantKey)) continue;
+        const lk = normCustomerKeyForRollup(String(pr.LeadJobName ?? pr.leadJobName ?? '').trim());
+        if (lk) wantLeadKeys.add(lk);
+    }
+
+    let sum = 0;
+    for (const pr of pricesForReq || []) {
+        if (parseFloat(pr.Price || 0) <= 0) continue;
+        if (!isBasePricePricingRow(pr)) continue;
+        if (extractLCodeFromLeadJobName(pr.LeadJobName || '') !== lc) continue;
+        if (!rowInSubtree(pr)) continue;
+        const cn = String(pr.CustomerName ?? pr.customerName ?? '').trim();
+        if (pricingCustomerRowMatchesKeyQuote(cn, wantKey)) {
+            sum += parseFloat(pr.Price) || 0;
+            continue;
+        }
+        if (isInternalLeadSubmittedPricingRow(pr)) {
+            const lk = normCustomerKeyForRollup(String(pr.LeadJobName ?? pr.leadJobName ?? '').trim());
+            if (lk && wantLeadKeys.has(lk)) {
+                sum += parseFloat(pr.Price) || 0;
+            }
+        }
+    }
+    return sum;
+}
+
 /**
  * Job-tree + pricing context so each enquiry root (L1, L2, …) gets a stable label and LeadJobName for quote matching.
  * Parent job repeats per lead when the user's subjob sits under the same parent across leads; otherwise external customer (e.g. BEMCO on L3).
@@ -522,11 +720,29 @@ function buildListQuoteLeadContext({
     }
 
     const allLeadCodesSorted = [...new Set(allCodes)].sort((a, b) => lCodeSortKey(a) - lCodeSortKey(b));
+    /** EnquiryFor IDs under each visual root for that lead — used to roll up Base Price per external customer (own job + subjobs). */
+    const subtreeJobIdsByLeadCode = {};
+    for (const c of allLeadCodesSorted) {
+        const codeU = String(c || '').trim().toUpperCase();
+        const rootFound = (roots || []).find(
+            (r) => String(rootLabelMap[r.ID] || '').trim().toUpperCase() === codeU
+        );
+        if (!rootFound) {
+            subtreeJobIdsByLeadCode[c] = new Set();
+            continue;
+        }
+        if (filterLeadsByOwnBranch && !leadCodesWhereOwnParticipates.has(codeU)) {
+            subtreeJobIdsByLeadCode[c] = new Set();
+            continue;
+        }
+        subtreeJobIdsByLeadCode[c] = new Set(collectBranch(rootFound).map((j) => String(j.ID)));
+    }
     return {
         allLeadCodesSorted,
         leadLabelsByCode,
         pvLeadByCode,
         ownBranchLeadCodeSet: filterLeadsByOwnBranch ? leadCodesWhereOwnParticipates : null,
+        subtreeJobIdsByLeadCode,
     };
 }
 
@@ -666,7 +882,6 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
                 : displayCustomerLabelForLeadRow(g);
         const namePart =
             jsStripCustomerLeadSuffix(String(namePartRaw || '').trim()) || String(namePartRaw || '').trim();
-        const label = `${namePart} - ${code}`;
         const pvOwnRaw = String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim();
         const pvOwn =
             pvOwnRaw ||
@@ -676,40 +891,120 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
             String(g.ListQuoteDetailToName || '').trim() ||
             String(g.ListPendingCustomerName ?? g.listpendingcustomername ?? '').trim() ||
             displayCustomerLabelForLeadRow(g);
-        const customerCandidates = [
-            pvCustForMatch,
-            namePart,
-            namePartRaw,
-            String(g.CustomerName || '')
-                .split(',')
-                .map((x) => x.trim())
-                .filter(Boolean)[0] || '',
+        const splitCustomers = [
+            ...new Set(
+                String(namePartRaw || '')
+                    .split(',')
+                    .map((x) => jsStripCustomerLeadSuffix(x.trim()))
+                    .filter(Boolean)
+            ),
         ];
+        const custLineNames =
+            splitCustomers.length > 0
+                ? splitCustomers
+                : namePart && namePart !== '—'
+                  ? [namePart]
+                  : [displayCustomerLabelForLeadRow(g)];
 
-        let qt = pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, pvLead);
-        if (!qt || !String(qt.QuoteNumber || '').trim()) {
-            qt = findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLead, customerCandidates, code);
-        }
-        if ((!qt || !String(qt.QuoteNumber || '').trim()) && lineCtx && lineCtx.pvLeadByCode && lineCtx.pvLeadByCode[code]) {
-            const altLead = String(lineCtx.pvLeadByCode[code]).trim();
-            if (altLead && altLead !== pvLead) {
-                qt =
-                    pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, altLead) ||
-                    findQuoteRowForLeadLine(quotesForReq, pvOwn, altLead, customerCandidates, code);
+        const subSet =
+            lineCtx &&
+            lineCtx.subtreeJobIdsByLeadCode &&
+            lineCtx.subtreeJobIdsByLeadCode[code] instanceof Set
+                ? lineCtx.subtreeJobIdsByLeadCode[code]
+                : null;
+
+        for (const custName of custLineNames) {
+            const label = `${custName} - ${code}`;
+            /**
+             * When one L# lists several externals ("Nass, Alkomed"), each line must resolve quotes for that
+             * customer only. Passing namePartRaw / full CustomerName into candidates puts every name in `uniq`,
+             * so `matchesAnyCustomer` wrongly accepts Nass's quote for the Alkomed row.
+             */
+            const multiCustOnLead = custLineNames.length > 1;
+            const customerCandidates = multiCustOnLead
+                ? [custName]
+                : [
+                      custName,
+                      pvCustForMatch,
+                      namePart,
+                      namePartRaw,
+                      String(g.CustomerName || '')
+                          .split(',')
+                          .map((x) => x.trim())
+                          .filter(Boolean)[0] || '',
+                  ];
+
+            let qt = pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, pvLead);
+            if (
+                qt &&
+                String(qt.QuoteNumber || '').trim() &&
+                !jsTupleCustomerMatch(quoteRowToName(qt), custName)
+            ) {
+                qt = null;
             }
-        }
-        let textLine;
-        let bdTotal = null;
-        if (qt && String(qt.QuoteNumber || '').trim()) {
-            textLine = `${label} (${String(qt.QuoteNumber).trim()} - ${fmtRowDetailDate(qt.QuoteDate)})`;
-            const ta = parseFloat(qt.TotalAmount);
-            if (!Number.isNaN(ta) && ta > 0) {
-                bdTotal = ta;
+            if (
+                qt &&
+                String(qt.QuoteNumber || '').trim() &&
+                String(pvOwn || '').trim() &&
+                !jsTupleOwnJobMatch(qt.OwnJob, pvOwn)
+            ) {
+                qt = null;
             }
-        } else {
-            textLine = `${label} (Not Quoted)`;
+            if (!qt || !String(qt.QuoteNumber || '').trim()) {
+                qt = findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLead, customerCandidates, code);
+            }
+            if ((!qt || !String(qt.QuoteNumber || '').trim()) && lineCtx && lineCtx.pvLeadByCode && lineCtx.pvLeadByCode[code]) {
+                const altLead = String(lineCtx.pvLeadByCode[code]).trim();
+                if (altLead && altLead !== pvLead) {
+                    let altQt = pickQuoteRowFromMultiLeadRefs(mergedRollupRefs, code, quotesForReq, altLead);
+                    if (
+                        altQt &&
+                        String(altQt.QuoteNumber || '').trim() &&
+                        !jsTupleCustomerMatch(quoteRowToName(altQt), custName)
+                    ) {
+                        altQt = null;
+                    }
+                    if (
+                        altQt &&
+                        String(altQt.QuoteNumber || '').trim() &&
+                        String(pvOwn || '').trim() &&
+                        !jsTupleOwnJobMatch(altQt.OwnJob, pvOwn)
+                    ) {
+                        altQt = null;
+                    }
+                    qt =
+                        altQt ||
+                        findQuoteRowForLeadLine(quotesForReq, pvOwn, altLead, customerCandidates, code);
+                }
+            }
+            let textLine;
+            let bdTotal = null;
+            let preparedBy = '';
+            if (qt && String(qt.QuoteNumber || '').trim()) {
+                textLine = `${label} (${String(qt.QuoteNumber).trim()} - ${fmtRowDetailDate(qt.QuoteDate)})`;
+                const ta = parseFloat(qt.TotalAmount);
+                if (!Number.isNaN(ta) && ta > 0) {
+                    bdTotal = ta;
+                }
+                preparedBy =
+                    String(qt.PreparedBy ?? qt.preparedBy ?? '').trim() ||
+                    preparedByFromQuoteNumber(quotesForReq, req, qt.QuoteNumber);
+            } else {
+                textLine = `${label} (Not Quoted)`;
+            }
+            // Do not show a BD roll-up from pricing alone when this customer has no saved quote (avoids Nass-like amounts on Alkomed).
+            if (subSet && subSet.size && qt && String(qt.QuoteNumber || '').trim()) {
+                const rolled = sumCustomerBasePricingInLeadSubtree(pricesForReq, code, custName, subSet);
+                if (rolled > 0) {
+                    bdTotal = rolled;
+                }
+            }
+            lines.push({
+                textLine,
+                bdTotal: bdTotal != null && bdTotal > 0 ? bdTotal : null,
+                preparedBy,
+            });
         }
-        lines.push({ textLine, bdTotal: bdTotal != null && bdTotal > 0 ? bdTotal : null });
     }
     return lines;
 }
@@ -773,7 +1068,14 @@ function mergePendingRowsByRequestNo(rows, allQuotes, allPrices) {
         base.SubJobPrices = uniqueSubjobPriceSegments(group);
         base.CustomerName = [...new Set(group.map((g) => String(g.CustomerName || '').trim()).filter(Boolean))].join(', ') || base.CustomerName;
         base.ListMultiLeadQuoteRefs = mergeMultiLeadQuoteRefEntries(group);
-        const mergeLineCtx = group[0].ListQuoteLeadContext ?? null;
+        /** One `ListQuoteLeadContext` is built per pending tuple (own job). Merging HVAC + Electrical must not keep only row[0]'s branch — drop ctx so each tuple row drives its own lead lines. */
+        const distinctPendingOwns = new Set(
+            group
+                .map((g) => String(g.ListPendingOwnJobItem ?? g.listpendingownjobitem ?? '').trim().toLowerCase())
+                .filter(Boolean)
+        );
+        const mergeLineCtx =
+            distinctPendingOwns.size <= 1 ? group[0].ListQuoteLeadContext ?? null : null;
         base.ListQuoteDetailLines = buildEnquiryLeadQuoteDetailLines(req, group, allQuotes, pricesForEnq, mergeLineCtx);
         base.ListQuoteRollupStatus =
             rollupStatusFromLeadDetailLines(base.ListQuoteDetailLines) ||
@@ -813,13 +1115,13 @@ function mergePendingRowsByRequestNo(rows, allQuotes, allPrices) {
     return out;
 }
 
-function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQuotes) {
+function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQuotes, enqJobs) {
     const reqStr = String(enqRequestNo ?? '').trim();
     const own = String(pvOwn || '').trim();
     const cust = String(pvCust || '').trim();
     if (!reqStr || !own || !cust) return null;
 
-    const priceRows = (allPrices || []).filter(
+    let priceRows = (allPrices || []).filter(
         (p) =>
             String(p.RequestNo ?? '')
                 .trim() === reqStr &&
@@ -828,6 +1130,9 @@ function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQu
             jsTupleOwnJobMatch(own, p.EnquiryForItem) &&
             jsTupleCustomerMatch(cust, p.CustomerName)
     );
+    if (enqJobs && enqJobs.length) {
+        priceRows = filterPriceRowsToOwnJobLeadRoot(priceRows, enqJobs, reqStr, own);
+    }
     const leadNames = [
         ...new Set(priceRows.map((p) => String(p.LeadJobName || '').trim()).filter(Boolean)),
     ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
@@ -849,6 +1154,7 @@ function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQu
                 leadName,
                 quoteNumber: String(best.QuoteNumber).trim(),
                 quoteDate: best.QuoteDate,
+                preparedBy: String(best.PreparedBy ?? best.preparedBy ?? '').trim(),
             });
         }
     }
@@ -995,15 +1301,33 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             const roots = enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
             roots.sort((a, b) => a.ID - b.ID);
             
-            // Map each root to an L-code (L1, L2...)
+            // Map each root to an L-code: DB LeadJobCode, else parse from ItemName ("L2 - …"), else L1… fallback.
             const rootLabelMap = {};
+            const usedCodes = new Set();
             roots.forEach((r, idx) => {
-                const existing = (r.LeadJobCode || '').trim().toUpperCase();
-                if (existing && existing.match(/^L\d+$/)) {
-                    rootLabelMap[r.ID] = existing;
-                } else {
-                    rootLabelMap[r.ID] = `L${idx + 1}`;
+                let code = (r.LeadJobCode || '').trim().toUpperCase();
+                if (!code || !/^L\d+$/.test(code)) {
+                    code = extractLCodeFromLeadJobName(r.ItemName || '') || '';
                 }
+                if (!code) {
+                    let n = idx + 1;
+                    code = `L${n}`;
+                    while (usedCodes.has(code) && n < 99) {
+                        n += 1;
+                        code = `L${n}`;
+                    }
+                }
+                if (usedCodes.has(code)) {
+                    let n = 1;
+                    let alt = `L${n}`;
+                    while (usedCodes.has(alt) && n < 99) {
+                        n += 1;
+                        alt = `L${n}`;
+                    }
+                    code = alt;
+                }
+                usedCodes.add(code);
+                rootLabelMap[r.ID] = code;
             });
 
             const flatList = [];
@@ -1337,8 +1661,18 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
 
             // Latest-quote own job: sum base prices for that EnquiryFor node + all descendants (same selfPrices rules as Subjob Prices column).
             // Prefer the pending-list tuple (PV) so ref/date/summary align with the row, not another branch on the enquiry.
-            const pendingOwnItem = (enq.ListPendingOwnJobItem ?? enq.listpendingownjobitem ?? '').toString().trim();
-            const ownJobFromQuote = pendingOwnItem || (enq.ListQuoteOwnJob ?? enq.listquoteownjob ?? '').toString().trim();
+            const pendingOwnFromTuple = (enq.ListPendingOwnJobItem ?? enq.listpendingownjobitem ?? '').toString().trim();
+            const listQuoteOwnFromRow = (enq.ListQuoteOwnJob ?? enq.listquoteownjob ?? '').toString().trim();
+
+            let ownJobFromQuote = pendingOwnFromTuple;
+            if (!ownJobFromQuote) {
+                if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
+                    ownJobFromQuote = String(userDepartment).trim();
+                } else {
+                    // Admins / no department: use SQL column (latest quote on enquiry, any division).
+                    ownJobFromQuote = listQuoteOwnFromRow;
+                }
+            }
             const savedTotalRaw = enq.ListQuoteTotalAmount ?? enq.listquotetotalamount;
             const savedQuoteTotal = savedTotalRaw != null && !Number.isNaN(parseFloat(savedTotalRaw))
                 ? parseFloat(savedTotalRaw)
@@ -1387,7 +1721,7 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
                     .map((x) => x.trim())
                     .filter(Boolean)[0] ||
                 '';
-            const multiRoll = buildMultiLeadQuoteRollup(enq.RequestNo, pvOwnT, pvCustT, allPrices, allQuotes);
+            const multiRoll = buildMultiLeadQuoteRollup(enq.RequestNo, pvOwnT, pvCustT, allPrices, allQuotes, enqJobs);
 
             let listQuoteRollupStatus = null;
             let listMultiLeadQuoteRefs = null;

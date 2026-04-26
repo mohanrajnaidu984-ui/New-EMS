@@ -18,6 +18,21 @@ const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
 const { sendGeneralEmail } = require('../emailService');
 
+/**
+ * Pending list SQL keys off priced tuples vs quote existence; JS mapping (customer / lead / OwnJob matching)
+ * can show every line quoted while the row is still returned. Omit those from GET /list/pending.
+ */
+function shouldOmitFromPendingQuoteList(row) {
+    const roll = String(row.ListQuoteRollupStatus ?? row.listquoterollupstatus ?? '').trim();
+    if (roll === 'All Quoted') return true;
+    const lines = row.ListQuoteDetailLines;
+    if (Array.isArray(lines) && lines.length > 0) {
+        const anyNotQuoted = lines.some((ln) => /\(Not Quoted\)/i.test(String(ln?.textLine || '')));
+        if (!anyNotQuoted) return true;
+    }
+    return false;
+}
+
 // Configure Multer Storage for Quote Attachments
 const uploadDir = path.join(__dirname, '..', 'uploads', 'quotes');
 if (!fs.existsSync(uploadDir)) {
@@ -224,16 +239,17 @@ router.get('/list/pending', async (req, res) => {
         const { enquiries, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, '');
         if (enquiries.length > 0) {
             const finalMapped = await mapQuoteListingRows(sql, enquiries, ue, accessCtx);
-            if (finalMapped.length > 0) {
+            const pendingRows = finalMapped.filter((row) => !shouldOmitFromPendingQuoteList(row));
+            if (pendingRows.length > 0) {
                 console.log(`[API] FINAL DATA Enq 0:`, {
-                    ReqNo: finalMapped[0].RequestNo,
-                    Client: finalMapped[0].ClientName,
-                    Consultant: finalMapped[0].ConsultantName,
-                    SubJobPricesLen: finalMapped[0].SubJobPrices?.length,
+                    ReqNo: pendingRows[0].RequestNo,
+                    Client: pendingRows[0].ClientName,
+                    Consultant: pendingRows[0].ConsultantName,
+                    SubJobPricesLen: pendingRows[0].SubJobPrices?.length,
                 });
             }
-            console.log(`[API] Pending Quotes found: ${finalMapped.length}`);
-            return res.json(finalMapped);
+            console.log(`[API] Pending Quotes found: ${pendingRows.length}`);
+            return res.json(pendingRows);
         }
         return res.json([]);
     } catch (err) {

@@ -899,6 +899,38 @@ app.get('/api/enquiries', async (req, res) => {
     }
 });
 
+/** Must be registered before `/api/enquiries/:id` so `check-project-name` is not captured as an id. */
+app.get('/api/enquiries/check-project-name', async (req, res) => {
+    try {
+        const projectName = String(req.query.projectName || '').trim();
+        const excludeRequestNo = String(req.query.excludeRequestNo || '').trim();
+        if (!projectName) {
+            return res.json({ exists: false });
+        }
+        const key = projectName.toLowerCase();
+        const r = new sql.Request();
+        r.input('pnKey', sql.NVarChar, key);
+        let result;
+        if (excludeRequestNo) {
+            r.input('excludeNo', sql.NVarChar, excludeRequestNo);
+            result = await r.query(`
+                SELECT TOP 1 RequestNo FROM EnquiryMaster
+                WHERE LTRIM(RTRIM(LOWER(ProjectName))) = @pnKey AND RequestNo <> @excludeNo
+            `);
+        } else {
+            result = await r.query(`
+                SELECT TOP 1 RequestNo FROM EnquiryMaster
+                WHERE LTRIM(RTRIM(LOWER(ProjectName))) = @pnKey
+            `);
+        }
+        const row = result.recordset[0];
+        return res.json({ exists: !!row, requestNo: row ? row.RequestNo : null });
+    } catch (err) {
+        console.error('check-project-name:', err);
+        res.status(500).json({ error: 'Server Error' });
+    }
+});
+
 // Add Enquiry
 app.post('/api/enquiries', async (req, res) => {
     const logFile = path.join(__dirname, 'debug.log');
@@ -930,6 +962,21 @@ app.post('/api/enquiries', async (req, res) => {
                 message: 'Duplicate Enquiry Number',
                 error: `Enquiry number ${RequestNo} already exists. Please refresh the page to generate a new unique number.`
             });
+        }
+
+        const pnTrim = (ProjectName || '').trim();
+        if (pnTrim) {
+            const dupProj = await sql.query`
+                SELECT TOP 1 RequestNo FROM EnquiryMaster
+                WHERE LTRIM(RTRIM(LOWER(ProjectName))) = ${pnTrim.toLowerCase()}
+            `;
+            if (dupProj.recordset.length > 0) {
+                log(`Duplicate ProjectName on create: ${pnTrim}`);
+                return res.status(400).json({
+                    message: 'Duplicate Project Name',
+                    error: 'already Project name is exist',
+                });
+            }
         }
 
         transaction = new sql.Transaction();
@@ -1652,6 +1699,21 @@ app.put('/api/enquiries/:id', async (req, res) => {
     } = req.body;
 
     try {
+        const pnTrim = (ProjectName || '').trim();
+        if (pnTrim) {
+            const dupProj = await sql.query`
+                SELECT TOP 1 RequestNo FROM EnquiryMaster
+                WHERE LTRIM(RTRIM(LOWER(ProjectName))) = ${pnTrim.toLowerCase()}
+                AND RequestNo <> ${id}
+            `;
+            if (dupProj.recordset.length > 0) {
+                return res.status(400).json({
+                    message: 'Duplicate Project Name',
+                    error: 'already Project name is exist',
+                });
+            }
+        }
+
         const request = new sql.Request();
         request.input('RequestNo', sql.NVarChar, id);
         request.input('SourceOfEnquiry', sql.NVarChar, SourceOfInfo);
@@ -2550,6 +2612,7 @@ SELECT * FROM sysobjects WHERE name = 'EnquiryNotes' AND xtype = 'U'
 
     } catch (err) {
         console.error('Database Initialization Failed:', err);
+        process.exit(1);
     }
 };
 
@@ -2647,7 +2710,10 @@ app.post('/api/enquiries/notify', async (req, res) => {
     }
 });
 
-initApp();
+initApp().catch((err) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+});
 
 console.log('Starting server initialization...');
 console.log('PORT:', PORT);

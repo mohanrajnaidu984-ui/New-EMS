@@ -1017,6 +1017,34 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             if (!confirmed) return;
         }
 
+        const pnTrim = (formData.ProjectName || '').trim();
+        if (pnTrim) {
+            try {
+                const qs = new URLSearchParams({ projectName: pnTrim });
+                if (isModifyMode && formData.RequestNo) {
+                    qs.set('excludeRequestNo', String(formData.RequestNo).trim());
+                }
+                const chkRes = await fetch(`/api/enquiries/check-project-name?${qs.toString()}`);
+                if (chkRes.ok) {
+                    const chk = await chkRes.json();
+                    if (chk.exists) {
+                        setErrors({ ProjectName: 'already Project name is exist' });
+                        setTimeout(() => {
+                            if (errorSectionRef.current) {
+                                errorSectionRef.current.scrollIntoView({
+                                    behavior: 'smooth',
+                                    block: 'center',
+                                });
+                            }
+                        }, 100);
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.error('Project name duplicate check failed:', e);
+            }
+        }
+
         if (submitInFlightRef.current) return;
         submitInFlightRef.current = true;
         setIsSubmitting(true);
@@ -1048,7 +1076,16 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         try {
             if (isModifyMode) {
-                await updateEnquiry(formData.RequestNo, payload);
+                const upd = await updateEnquiry(formData.RequestNo, payload);
+                if (!upd || !upd.success) {
+                    const msg = (upd && upd.error) || 'Update failed';
+                    if (String(msg).includes('already Project name is exist')) {
+                        setErrors({ ProjectName: 'already Project name is exist' });
+                    } else {
+                        alert(msg);
+                    }
+                    return;
+                }
 
                 // Upload pending files if any
                 if (pendingFiles.length > 0) {
@@ -1059,6 +1096,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             } else {
                 // RequestNo is already generated in useEffect
                 const result = await addEnquiry(payload);
+
+                if (!result.success && result.error && result.error.includes('already Project name is exist')) {
+                    setErrors({ ProjectName: 'already Project name is exist' });
+                    return;
+                }
 
                 // If duplicate error, regenerate number and retry
                 if (!result.success && result.error && result.error.includes('already exists')) {

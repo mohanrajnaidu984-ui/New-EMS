@@ -1,5 +1,9 @@
 'use strict';
 
+/**
+ * Quoted-list SQL exposes `ListQuoteOwnJob` from the enquiry's MAX(QuoteNo) quote revision — not per-viewer.
+ * Non-admin quote search / rollups should scope by department or pending tuple in `mapQuoteListingRows.js`.
+ */
 const { resolvePricingAccessContext, normalizePricingJobName } = require('./quotePricingAccess');
 
 const quotedCustomersSub = `
