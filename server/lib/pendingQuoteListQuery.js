@@ -1,6 +1,7 @@
 'use strict';
 
 const { resolvePricingAccessContext, normalizePricingJobName } = require('./quotePricingAccess');
+const { buildEnquiryMasterDepartmentExistsSql, buildMefDepartmentNameEqualsSql } = require('./quoteListDivisionFilter');
 
 /**
  * Strip trailing " (L12)" / " (l1)" from customer / ToName so grid labels still match saved quotes.
@@ -65,7 +66,10 @@ function sqlTupleCustomerMatch(eqAlias, pvAlias = 'PV') {
  * - Step 2: No EnquiryQuotes row yet for the same RequestNo + OwnJob + LeadJob + ToName (any revision / draft counts
  *   as “quote created” per business rule). LeadJob / OwnJob use tolerant matching vs pricing labels (see sqlTuple*Match).
  */
-async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '') {
+async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '', divisionFilter = '') {
+        const divisionClause = buildEnquiryMasterDepartmentExistsSql(divisionFilter);
+        const divisionMefDeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF');
+        const divisionMef2DeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF2');
         let userEmail = rawUserEmail;
         if (userEmail) {
             userEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
@@ -124,6 +128,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 )`
                         : ''
                 }
+                ${divisionMef2DeptSql}
             )`
             : hasDeptScope
                 ? `(
@@ -131,8 +136,8 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
                     OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
-                )`
-                : `1 = 1`;
+                )${divisionMef2DeptSql}`
+                : `1 = 1${divisionMef2DeptSql}`;
 
         // Step 1 + 2: see module doc above; RequestNo is enforced by JOIN (E.RequestNo = PV via PO).
         const pvMatchesEfJobSql = `
@@ -310,6 +315,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                         MEF.ItemName LIKE N'%' + EF.ItemName + N'%'
                     )
                     AND (${mefAccessPredicate})
+                    ${divisionMefDeptSql}
                 )
                 ${assignedOnlyClause}
                 AND (
@@ -320,6 +326,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 AND ${pvMatchesEfJobSql}
                 AND ${latestPvTupleOnlySql}
                 AND ${noCompletedQuoteForSameTupleSql}
+                ${divisionClause}
                 ${extraWhereSql}
                 ORDER BY E.DueDate DESC, E.RequestNo DESC
             `;
@@ -434,6 +441,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                         EF.ItemName LIKE N'%- ' + MEF.ItemName OR
                         MEF.ItemName LIKE N'%' + EF.ItemName + N'%'
                     )
+                    ${divisionMefDeptSql}
                 )
                 AND (
                     EF.ItemName = PO.ItemName OR 
@@ -443,6 +451,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 AND ${pvMatchesEfJobSql}
                 AND ${latestPvTupleOnlySql}
                 AND ${noCompletedQuoteForSameTupleSql}
+                ${divisionClause}
                 ${extraWhereSql}
                 ORDER BY E.DueDate DESC, E.RequestNo DESC
             `;

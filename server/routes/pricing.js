@@ -56,11 +56,14 @@ const {
     jobIdOfPricing,
     normalizePricingJobName,
     getDepartmentPricingAnchors,
-    getPricingAnchorJobs,
+    getPricingAnchorJobsForDivision,
     expandVisibleJobIdsWithAncestors,
 } = require('../lib/quotePricingAccess');
 const { filterJobsByDepartment } = require('../services/hierarchyService');
-const { evaluatePendingPricingSummarySpec } = require('../lib/pendingPricingSummarySpec');
+const {
+    evaluatePendingPricingSummarySpec,
+    departmentMatchesItemName,
+} = require('../lib/pendingPricingSummarySpec');
 
 /** `yyyy-MM-dd` only — used for EnquiryDate bounds on non-pending list searches */
 function parsePricingListYmd(s) {
@@ -116,8 +119,45 @@ function buildSyntheticPricingOptionsFromValuesRows(pricesForOneEnquiry) {
 }
 
 /**
- * GET /api/pricing/:requestNo — option rows for the grid are derived only from `EnquiryPricingValues`
- * (never read `EnquiryPricingOptions`).
+ * Detail GET builds option rows from `EnquiryPricingValues` (OptionIDs in value rows). Merge in
+ * `EnquiryPricingOptions` rows with no value yet (e.g. Optional added only in EPO) so the grid lists them.
+ */
+function mergeDetailOptionsWithEnquiryPricingOptionsRows(fromValuesDetail, epoRows, fallbackLeadJobName) {
+    const fall = (fallbackLeadJobName && String(fallbackLeadJobName).trim()) || '';
+    const byId = new Map();
+    for (const o of fromValuesDetail || []) {
+        const id = o.ID != null && o.ID !== '' ? String(o.ID).trim() : '';
+        if (id) byId.set(id, o);
+    }
+    for (const row of epoRows || []) {
+        const id = row.ID != null && row.ID !== '' ? String(row.ID).trim() : '';
+        if (!id) continue;
+        if (byId.has(id)) continue;
+        let itemName = row.ItemName != null ? String(row.ItemName).trim() : '';
+        let leadJobName = row.LeadJobName != null ? String(row.LeadJobName).trim() : '';
+        if (!leadJobName && fall) leadJobName = fall;
+        byId.set(id, {
+            ID: row.ID,
+            OptionName: String(row.OptionName != null ? row.OptionName : '').trim(),
+            optionName: String(row.OptionName != null ? row.OptionName : '').trim(),
+            SortOrder: row.SortOrder != null ? row.SortOrder : 0,
+            ItemName: itemName,
+            CustomerName: row.CustomerName != null ? String(row.CustomerName).trim() : '',
+            LeadJobName: leadJobName,
+        });
+    }
+    const merged = [...byId.values()];
+    merged.sort((a, b) => {
+        const na = Number(a.ID);
+        const nb = Number(b.ID);
+        if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+        return String(a.ID).localeCompare(String(b.ID));
+    });
+    return merged;
+}
+
+/**
+ * Option rows for the grid: built from `EnquiryPricingValues`; caller merges with `EnquiryPricingOptions` (see merge above).
  */
 function buildDetailPricingOptionsFromValuesRows(valuesRows) {
     const rows = (valuesRows || []).map((v) => normalizePricingValueRow({ ...v }));
@@ -166,8 +206,14 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     if (!ctx.user) return [];
     const { isAdmin, isCcUser, normalizedEmail, userDepartment } = ctx;
 
+    const divisionRaw = opts && opts.division != null ? String(opts.division) : '';
+    const divisionTrim = divisionRaw.trim();
+
     // 2. Fetch Enquiries (SQL-scoped: CC coordinators vs assigned sales engineers only)
     const request = new sql.Request();
+    if (divisionTrim) {
+        request.input('divisionFilter', sql.NVarChar, divisionTrim);
+    }
     let baseQuery = `
         SELECT 
             E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.DueDate, E.CreatedBy, E.EnquiryDate
@@ -191,6 +237,43 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         `;
         if (isCcUser) {
             request.input('pricingCcPattern', sql.NVarChar, `%,${normalizedEmail},%`);
+            const locCc = (normalizedEmail.split('@')[0] || '').trim();
+            const dualCcPat = locCc.length >= 2;
+            if (dualCcPat) {
+                request.input('pricingCcPatternLocal', sql.NVarChar, `%,${locCc},%`);
+            }
+            const ccMefMatch = (alias) =>
+                dualCcPat
+                    ? `(
+                          N',' + REPLACE(REPLACE(ISNULL(${alias}.CCMailIds, N''), N' ', N''), N';', N',') + N',' LIKE @pricingCcPattern
+                          OR N',' + REPLACE(REPLACE(ISNULL(${alias}.CCMailIds, N''), N' ', N''), N';', N',') + N',' LIKE @pricingCcPatternLocal
+                      )`
+                    : `N',' + REPLACE(REPLACE(ISNULL(${alias}.CCMailIds, N''), N' ', N''), N';', N',') + N',' LIKE @pricingCcPattern`;
+            /**
+             * Division filter + CC: coordinators often appear on Master_EnquiryFor for “Civil Project” while
+             * instance EnquiryFor rows join a template whose CCMailIds omit them — then the old “any line CC”
+             * gate hid the enquiry. When Division is set, also allow enquiries that have that department on
+             * the enquiry if the user is CC on any master row for that same DepartmentName.
+             */
+            const ccDivisionCoordinatorSql =
+                divisionTrim
+                    ? `
+                    OR EXISTS (
+                        SELECT 1
+                        FROM dbo.EnquiryFor efCcDiv
+                        INNER JOIN dbo.Master_EnquiryFor mefCcDiv
+                            ON (efCcDiv.ItemName = mefCcDiv.ItemName OR efCcDiv.ItemName LIKE N'% - ' + mefCcDiv.ItemName)
+                        WHERE efCcDiv.RequestNo = E.RequestNo
+                          AND LTRIM(RTRIM(ISNULL(mefCcDiv.DepartmentName, N''))) = LTRIM(RTRIM(@divisionFilter))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM dbo.Master_EnquiryFor mefTpl
+                              WHERE LTRIM(RTRIM(ISNULL(mefTpl.DepartmentName, N''))) = LTRIM(RTRIM(@divisionFilter))
+                                AND ${ccMefMatch('mefTpl')}
+                          )
+                    )
+                  `
+                    : '';
             baseQuery += `
                 AND (
                     EXISTS (
@@ -198,9 +281,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                         FROM EnquiryFor ef
                         INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
                         WHERE ef.RequestNo = E.RequestNo
-                          AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE @pricingCcPattern
+                          AND ${ccMefMatch('mef')}
                     )
                     OR ${concernedSeExistsSql}
+                    ${ccDivisionCoordinatorSql}
                 )
             `;
         } else {
@@ -242,6 +326,39 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         request.input('search', sql.NVarChar, `%${searchTrim}%`);
     }
 
+    if (divisionTrim) {
+        /**
+         * Division dropdown: CC → Master_EnquiryFor.DepartmentName (CC rows); Concerned SE → Master_ConcernedSE.Department.
+         * Filtering only by Master_EnquiryFor.DepartmentName broke Pending Pricing for engineers when that label
+         * did not exactly match the master column (enquiries vanished even though their Concerned SE row matched).
+         */
+        if (!isAdmin && !isCcUser) {
+            request.input('pricingDivisionUserEmail', sql.NVarChar, normalizedEmail);
+            baseQuery += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.ConcernedSE c
+                    INNER JOIN dbo.Master_ConcernedSE m
+                        ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(c.SEName, N''))))
+                    WHERE c.RequestNo = E.RequestNo
+                      AND LOWER(LTRIM(RTRIM(ISNULL(m.EmailId, N'')))) = LOWER(LTRIM(@pricingDivisionUserEmail))
+                      AND LTRIM(RTRIM(ISNULL(m.Department, N''))) = LTRIM(RTRIM(@divisionFilter))
+                )
+            `;
+        } else {
+            baseQuery += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.EnquiryFor efDiv
+                    INNER JOIN dbo.Master_EnquiryFor mefDiv
+                        ON (efDiv.ItemName = mefDiv.ItemName OR efDiv.ItemName LIKE N'% - ' + mefDiv.ItemName)
+                    WHERE efDiv.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(ISNULL(mefDiv.DepartmentName, N''))) = LTRIM(RTRIM(@divisionFilter))
+                )
+            `;
+        }
+    }
+
     baseQuery += ` ORDER BY E.DueDate DESC, E.RequestNo DESC `;
 
     const enquiriesRes = await request.query(baseQuery);
@@ -278,7 +395,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
     const jobsRes = await sql.query(`
         SELECT 
             EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, EF.LeadJobName,
-            MEF.CommonMailIds, MEF.CCMailIds
+            MEF.CommonMailIds, MEF.CCMailIds, MEF.DepartmentName
         FROM EnquiryFor EF
         LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
         WHERE EF.RequestNo IN (${requestNosList})
@@ -360,8 +477,9 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             ctx.userFullName.toLowerCase().trim() === String(enq.CreatedBy).toLowerCase().trim();
         const isConcernedSE = concernedRequestNos.has(String(enq.RequestNo));
 
+        const effDeptList = (divisionTrim || ctx.userDepartment || '').toLowerCase().trim();
         const hierarchyScopedJobs = filterJobsByDepartment(enqJobs, {
-            userDepartment: (ctx.userDepartment || '').toLowerCase().trim(),
+            userDepartment: effDeptList,
             isAdmin,
             isCreator,
             isConcernedSE,
@@ -375,7 +493,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const normalizeName = normalizePricingJobName;
         /** Anchors from Master department / CC — before intersecting with `filterJobsByDepartment` output. */
-        const anchorCandidates = getPricingAnchorJobs(enqJobs, ctx, userEmail);
+        const anchorCandidates = getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, divisionTrim);
         let myJobs = anchorCandidates;
         if (!isAdmin) {
             if (isConcernedSE) {
@@ -384,6 +502,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 // another division still has prices, and pending would miss missing HVAC base prices.
                 // If Master.Department / CC anchors resolve to nothing (common with blank Department), use every
                 // job on the enquiry so pending can still see missing HVAC base rows.
+                myJobs = anchorCandidates.length > 0 ? [...anchorCandidates] : [...enqJobs];
+            } else if (isCcUser && divisionTrim) {
+                // CC + Division: dropdown is the own-job scope (like SE + department). Hierarchy intersection
+                // uses profile/CC line mails and often drops all anchors for coordinators listed only on master.
                 myJobs = anchorCandidates.length > 0 ? [...anchorCandidates] : [...enqJobs];
             } else {
                 myJobs = myJobs.filter((j) => hierarchyJobIdSet.has(String(jobIdOf(j))));
@@ -574,8 +696,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         };
         const jobNameSetNorm = new Set(enqJobs.map(j => normalize(j.ItemName)));
 
-        /** Strip L1 / Sub Job prefixes for display (pending summary customer column). */
-        const stripLeadName = (s) => (s || '').toString().replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+        /** Trim only — no L1-/Sub Job- stripping; names must match as stored. */
+        const stripLeadName = (s) => String(s ?? '').trim();
 
         const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
 
@@ -1795,6 +1917,50 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         const linesForPendingCheck =
             displayItems.length > 0 ? displayItems : displayItemsRaw;
         const pendingFromDisplayLines = linesForPendingCheck.some(lineShowsNotUpdated);
+        /** Division dropdown (own-job): list row label still "Not Updated" for that department on this enquiry. */
+        const labelFromDisplayLine = (item) => String(item).split('|')[0] || '';
+        /** Same fuzzy match as pending spec / department anchors — raw `includes(division)` missed labels like `L1 - EP - …` vs `Electrical Project`. */
+        const displayLineMatchesDivision = (item) =>
+            !!divisionTrim && departmentMatchesItemName(divisionTrim.trim(), labelFromDisplayLine(item));
+        const divisionScopedLineStillNotUpdated =
+            !!divisionTrim &&
+            linesForPendingCheck.some((item) => {
+                if (!lineShowsNotUpdated(item)) return false;
+                return displayLineMatchesDivision(item);
+            });
+        const parseDisplayLinePriceColumn = (parts1) => {
+            const p = String(parts1 ?? '').trim();
+            if (!p || p === 'Not Updated') return 0;
+            const n = parseFloat(String(p).replace(/,/g, ''));
+            return Number.isFinite(n) && n > 0.01 ? n : 0;
+        };
+        /**
+         * Per-department / subjob view when Division filter is set: status from display lines whose label
+         * contains that division only — independent of other lead jobs / subjobs / departments on the enquiry.
+         */
+        let divisionScopedPricingStatus = null;
+        if (divisionTrim) {
+            const div = divisionTrim.trim().toLowerCase();
+            if (div) {
+                const scoped = linesForPendingCheck.filter((item) => displayLineMatchesDivision(item));
+                const nonOptional = scoped.filter(
+                    (item) => !/\(optional\)\s*$/i.test(labelFromDisplayLine(item))
+                );
+                if (nonOptional.length > 0) {
+                    let priced = 0;
+                    let unpriced = 0;
+                    for (const item of nonOptional) {
+                        const parts = String(item).split('|');
+                        const v = parseDisplayLinePriceColumn(parts[1]);
+                        if (v > 0) priced++;
+                        else unpriced++;
+                    }
+                    if (unpriced > 0 && priced === 0) divisionScopedPricingStatus = 'None Priced';
+                    else if (unpriced > 0 && priced > 0) divisionScopedPricingStatus = 'Partial Priced';
+                    else if (unpriced === 0 && priced > 0) divisionScopedPricingStatus = 'All Priced';
+                }
+            }
+        }
         /**
          * Lead roots (e.g. Civil) often have **no** own `EnquiryPricingValues` row while children (HVAC/BMS)
          * are priced. For **other** divisions we skip requiring a root row so pending clears. For the **logged-in
@@ -1814,9 +1980,10 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             });
         };
 
+        const pendingDeptForAnchors = String(divisionTrim || userDepartment || '').trim();
         const deptAnchorsForPending =
-            pendingOnly && !isAdmin && (userDepartment || '').trim()
-                ? getDepartmentPricingAnchors(enqJobs, userDepartment)
+            pendingOnly && !isAdmin && pendingDeptForAnchors
+                ? getDepartmentPricingAnchors(enqJobs, pendingDeptForAnchors)
                 : [];
         const deptAnchorIdSetForPending = new Set(
             deptAnchorsForPending.map((j) => String(jobIdOf(j))).filter((id) => id && id !== 'undefined')
@@ -1882,22 +2049,60 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                       if (scopePendingToUserAnchorsOnly && !jobIsAnchorOrDescendantOfUserAnchor(job)) return false;
                       return !strictHasPositiveBaseForJob(job);
                   }));
+
+        /**
+         * Forest loop can set `pendingExternalCustomerDirectGap` when display inheritance shows a price but
+         * `hasDirectCustomerBaseForJobSubtree` misses (label/job-id drift). If every EnquiryCustomer already has a
+         * positive EPV Base row keyed to that customer, clear the gap so Concerned SE lists are not stuck on Pending.
+         */
+        let pendingExternalGapForLegacy = pendingExternalCustomerDirectGap;
+        if (pendingExternalGapForLegacy && pendingOnly) {
+            const ecs = allEnquiryCustomers.filter((c) => reqNoEq(c.RequestNo, enq.RequestNo));
+            if (ecs.length > 0) {
+                const everyExternalHasEpvBase = ecs.every((row) => {
+                    const nm = String(row.CustomerName ?? row.customerName ?? '').trim();
+                    if (!nm) return true;
+                    const ck = normPricingCustomerKey(nm);
+                    if (!ck) return true;
+                    return enqPrices.some((pr) => {
+                        if (!reqNoEq(pr.RequestNo, enq.RequestNo)) return false;
+                        if (parsePriceNum(pr.Price) <= 0.01) return false;
+                        if (!valueRowIsBasePrice(pr)) return false;
+                        return pricingCustomerRowMatchesKey(pr.CustomerName ?? pr.customerName, ck);
+                    });
+                });
+                if (everyExternalHasEpvBase) pendingExternalGapForLegacy = false;
+            }
+        }
+
         const legacyPending =
             pendingOnly
                 ? pendingFromVisibleJobsBase ||
                       pendingStrictBaseMissing ||
-                      pendingExternalCustomerDirectGap
+                      pendingExternalGapForLegacy
                 : pendingFromDisplayLines || pendingFromVisibleJobsBase || pendingStrictBaseMissing;
 
-        /** Concerned SE + department: internal / external Base slots (spec) for pending filter + list UI status. */
+        const anyVisiblePricingGap =
+            pendingFromDisplayLines ||
+            pendingFromVisibleJobsBase ||
+            pendingStrictBaseMissing ||
+            pendingExternalGapForLegacy;
+
+        /**
+         * Concerned SE + department: internal / external Base slots (spec). Use list **Division** filter when
+         * Master_ConcernedSE.Department is blank — otherwise SE users (e.g. bmseng4) never enter the spec branch
+         * and stay on legacy pending heuristics indefinitely.
+         */
         let userSpecPricingSummary = null;
-        if (!isAdmin && !isCcUser && String(userDepartment || '').trim()) {
+        /** Prefer list Division over profile department so CC + SE both treat the dropdown as own-job scope. */
+        const deptForSpec = String(divisionTrim || userDepartment || '').trim();
+        if (!isAdmin && deptForSpec && (!isCcUser || !!divisionTrim)) {
             userSpecPricingSummary = evaluatePendingPricingSummarySpec({
                 requestNo: enq.RequestNo,
                 enqJobs,
                 enqPrices,
                 enquiryCustomers: allEnquiryCustomers.filter((c) => reqNoEq(c.RequestNo, enq.RequestNo)),
-                userDepartment,
+                userDepartment: deptForSpec,
                 optionMap,
             });
         }
@@ -1907,17 +2112,37 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             userSpecPricingSummary.enabled &&
             (userSpecPricingSummary.internalRequired || 0) + (userSpecPricingSummary.externalRequired || 0);
 
-        if (pendingOnly && userSpecPricingSummary && userSpecPricingSummary.enabled && specSlotCount > 0) {
-            /**
-             * User spec (4c: Partial | None | All Priced) is authoritative for the pending list when it has
-             * slots. If status is "All Priced", do not OR in legacy (legacy can still be true for unrelated
-             * heuristics, e.g. `pendingExternalCustomerDirectGap`, and would keep the row stuck on Pending).
-             * @see `pendingExternalCustomerDirectGap` — display/inheritance vs “direct” row for externals.
-             */
+        /**
+         * Spec "All Priced" can ignore the division row the user cares about (e.g. Civil priced on L1 while
+         * Electrical Project still shows Not Updated). Until the selected Division / own-job line is priced,
+         * treat as pending and show Partial — not All Priced.
+         */
+        const hasDivisionLabelScope = !!divisionTrim && linesForPendingCheck.some((item) => displayLineMatchesDivision(item));
+        const contradictsSpecAllPriced =
+            !!userSpecPricingSummary?.enabled &&
+            userSpecPricingSummary.pricingSummaryStatus === 'All Priced' &&
+            (divisionTrim
+                ? hasDivisionLabelScope
+                    ? divisionScopedLineStillNotUpdated
+                    : anyVisiblePricingGap
+                : anyVisiblePricingGap);
+
+        /**
+         * Concerned SE + department: when user-spec is enabled it must control pending.
+         * Do not require `specSlotCount > 0`: if the spec returns `All Priced` with zero slots
+         * (`internalRequired`/`externalRequired` both 0), we previously fell through to `legacyPending`
+         * and left full enquiries stuck on Pending Pricing.
+         */
+        if (pendingOnly && divisionTrim && divisionScopedPricingStatus) {
+            /** Scoped status uses display labels; if it says All Priced but legacy still sees base gaps, keep the enquiry pending. */
+            hasPendingItems = divisionScopedPricingStatus !== 'All Priced' || legacyPending;
+        } else if (pendingOnly && userSpecPricingSummary && userSpecPricingSummary.enabled) {
             if (userSpecPricingSummary.pricingSummaryStatus === 'All Priced') {
-                hasPendingItems = false;
+                hasPendingItems = !!contradictsSpecAllPriced;
+            } else if (specSlotCount > 0) {
+                hasPendingItems = !!userSpecPricingSummary.showInPending;
             } else {
-                hasPendingItems = userSpecPricingSummary.showInPending;
+                hasPendingItems = legacyPending;
             }
         } else {
             hasPendingItems = legacyPending;
@@ -1968,19 +2193,28 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const subJobPriceLines = displayItems.length > 0 ? displayItems : displayItemsRaw;
 
+        let displaySpecStatus = null;
+        if (!isAdmin && userSpecPricingSummary && userSpecPricingSummary.enabled) {
+            /** List badge under enquiry no.: with Division filter, use own-job rows only (not subjob EPV). CC uses same rule when Division is set. */
+            if (divisionTrim && userSpecPricingSummary.pricingSummaryOwnJobStatus) {
+                displaySpecStatus = userSpecPricingSummary.pricingSummaryOwnJobStatus;
+            } else if (divisionTrim && divisionScopedPricingStatus) {
+                displaySpecStatus = divisionScopedPricingStatus;
+            } else if (!isCcUser) {
+                displaySpecStatus = userSpecPricingSummary.pricingSummaryStatus;
+                if (contradictsSpecAllPriced) {
+                    displaySpecStatus = divisionScopedPricingStatus || 'Partial Priced';
+                }
+            }
+        }
+
         return {
             ...enq,
             CustomerName: fullCustomerName,
             SubJobPrices: subJobPriceLines.join(';;'),
             PricedBy: pricedBy || null,
             PricingListDisplayJson: pricingListDisplayJson || null,
-            ...(!isAdmin &&
-            !isCcUser &&
-            userSpecPricingSummary &&
-            userSpecPricingSummary.enabled &&
-            (userSpecPricingSummary.internalRequired || 0) + (userSpecPricingSummary.externalRequired || 0) > 0
-                ? { UserSpecPricingSummaryStatus: userSpecPricingSummary.pricingSummaryStatus }
-                : {}),
+            ...(displaySpecStatus ? { UserSpecPricingSummaryStatus: displaySpecStatus } : {}),
         };
     }).filter(Boolean);
 }
@@ -1988,9 +2222,9 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 // GET /api/pricing/list/pending
 router.get('/list/pending', async (req, res) => {
     try {
-        const { userEmail } = req.query;
+        const { userEmail, division } = req.query;
         console.log('Pending Pricing (Helper) requested for:', userEmail);
-        const result = await getEnquiryPricingList(userEmail, null, true);
+        const result = await getEnquiryPricingList(userEmail, null, true, { division });
         res.json(result);
     } catch (err) {
         console.error('Error fetching pending pricing:', err);
@@ -1998,13 +2232,76 @@ router.get('/list/pending', async (req, res) => {
     }
 });
 
+// GET /api/pricing/list/divisions — dropdown options: CC users see distinct Master_EnquiryFor.DepartmentName (CC row); else distinct Master_ConcernedSE.Department for the login email
+router.get('/list/divisions', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        const email = (userEmail || '').trim();
+        if (!email) {
+            return res.json({ isCcUser: false, divisions: [] });
+        }
+        const ctx = await resolvePricingAccessContext(email);
+        if (!ctx.user) {
+            return res.json({ isCcUser: false, divisions: [] });
+        }
+        const { isCcUser, normalizedEmail } = ctx;
+        const request = new sql.Request();
+        request.input('em', sql.NVarChar, normalizedEmail);
+        if (isCcUser) {
+            request.input('ccPat', sql.NVarChar, `%,${normalizedEmail},%`);
+            const loc = (normalizedEmail.split('@')[0] || '').trim();
+            let dr;
+            if (loc.length >= 2) {
+                request.input('ccPatLoc', sql.NVarChar, `%,${loc},%`);
+                dr = await request.query(`
+                    SELECT DISTINCT LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) AS DivisionLabel
+                    FROM dbo.Master_EnquiryFor mef
+                    WHERE LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) <> N''
+                      AND (
+                        N',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, N''), N' ', N''), N';', N',') + N','
+                          LIKE @ccPat
+                        OR N',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, N''), N' ', N''), N';', N',') + N','
+                          LIKE @ccPatLoc
+                      )
+                    ORDER BY DivisionLabel
+                `);
+            } else {
+                dr = await request.query(`
+                    SELECT DISTINCT LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) AS DivisionLabel
+                    FROM dbo.Master_EnquiryFor mef
+                    WHERE LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) <> N''
+                      AND N',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, N''), N' ', N''), N';', N',') + N','
+                        LIKE @ccPat
+                    ORDER BY DivisionLabel
+                `);
+            }
+            const divisions = [...new Set((dr.recordset || []).map((r) => String(r.DivisionLabel || '').trim()).filter(Boolean))];
+            return res.json({ isCcUser: true, divisions });
+        }
+        const req2 = new sql.Request();
+        req2.input('em', sql.NVarChar, ctx.normalizedEmail);
+        const dr2 = await req2.query(`
+            SELECT DISTINCT LTRIM(RTRIM(ISNULL(Department, N''))) AS DivisionLabel
+            FROM dbo.Master_ConcernedSE
+            WHERE LTRIM(RTRIM(ISNULL(Department, N''))) <> N''
+              AND LOWER(LTRIM(RTRIM(ISNULL(EmailId, N'')))) = LOWER(LTRIM(@em))
+            ORDER BY DivisionLabel
+        `);
+        const divisions = [...new Set((dr2.recordset || []).map((r) => String(r.DivisionLabel || '').trim()).filter(Boolean))];
+        return res.json({ isCcUser: false, divisions });
+    } catch (err) {
+        console.error('Error fetching pricing list divisions:', err);
+        res.status(500).json({ error: 'Failed to load divisions' });
+    }
+});
+
 // GET /api/pricing/list - New Generic List with Search
 router.get('/list', async (req, res) => {
     try {
-        const { userEmail, search, pendingOnly, dateFrom, dateTo } = req.query;
-        console.log('Pricing List Search:', { search, userEmail, dateFrom, dateTo });
+        const { userEmail, search, pendingOnly, dateFrom, dateTo, division } = req.query;
+        console.log('Pricing List Search:', { search, userEmail, dateFrom, dateTo, division });
         const isPendingOnly = pendingOnly === 'true';
-        const result = await getEnquiryPricingList(userEmail, search || null, isPendingOnly, { dateFrom, dateTo });
+        const result = await getEnquiryPricingList(userEmail, search || null, isPendingOnly, { dateFrom, dateTo, division });
         res.json(result);
     } catch (err) {
         console.error('Error searching pricing list:', err);
@@ -2081,18 +2378,10 @@ router.get('/search-customers', async (req, res) => {
 });
 
 /**
- * SQL fragment: strip "L1 - " / "Sub Job - " style prefixes from EnquiryPricingValues columns (alias v).
+ * SQL fragment: normalize EnquiryPricingValues text columns (alias v) — trim only, no L-prefix stripping.
  */
 function sqlStripPricingName(col) {
-    return `LTRIM(RTRIM(
-        CASE
-            WHEN UPPER(LTRIM(v.${col})) LIKE N'SUB JOB%' AND CHARINDEX(N'-', v.${col}) > 0
-                THEN LTRIM(SUBSTRING(v.${col}, CHARINDEX(N'-', v.${col}) + 1, 4000))
-            WHEN v.${col} LIKE N'L[0-9] - %'
-                THEN LTRIM(SUBSTRING(v.${col}, CHARINDEX(N'-', v.${col}) + 1, 4000))
-            ELSE v.${col}
-        END
-    ))`;
+    return `LTRIM(RTRIM(ISNULL(v.${col}, N'')))`;
 }
 
 /**
@@ -2162,10 +2451,6 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
         // Subjobs under first tab: EnquiryForItem = each descendant subjob; CustomerName = that row's parent job (EnquiryFor).
         request.input('customerDropdown', sql.NVarChar(500), String(customerDropdown || ''));
 
-        const stripEfLabel = (s) => String(s || '')
-            .replace(/^(L\d+\s*-\s*|Sub Job\s*-\s*)/i, '')
-            .trim();
-
         let subjobPairCondSql = '1=0';
         try {
             const efRes = await sql.query`
@@ -2175,15 +2460,11 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
             `;
             const efRows = efRes.recordset || [];
             const firstTabStr = String(firstTab || '').trim();
-            const firstTabClean = stripEfLabel(firstTabStr);
 
             const ownIds = new Set(
                 efRows
-                    .filter(r =>
-                        stripEfLabel(r.ItemName) === firstTabClean ||
-                        String(r.ItemName || '').trim() === firstTabStr
-                    )
-                    .map(r => String(r.ID))
+                    .filter((r) => String(r.ItemName || '').trim() === firstTabStr)
+                    .map((r) => String(r.ID))
             );
 
             const byId = new Map(efRows.map(r => [String(r.ID), r]));
@@ -2255,10 +2536,6 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
         request.input('parentJobName', sql.NVarChar(500), String(parentJobName || ''));
         request.input('activeTab', sql.NVarChar(500), String(activeTab || ''));
 
-        const stripEfLabelSub = (s) => String(s || '')
-            .replace(/^(L\d+\s*-\s*|Sub Job\s*-\s*)/i, '')
-            .trim();
-
         // Nested rows under the selected subjob tab: EnquiryForItem = child; CustomerName = child's parent
         // (same semantics as own-job branch, but rooted at activeTab instead of first tab).
         let nestedUnderActiveTabCondSql = '1=0';
@@ -2270,13 +2547,9 @@ async function fetchQuoteScopedPricingValues(requestNo, scope) {
             `;
             const efRowsSub = efResSub.recordset || [];
             const activeTabStr = String(activeTab || '').trim();
-            const activeTabClean = stripEfLabelSub(activeTabStr);
             const byIdSub = new Map(efRowsSub.map((r) => [String(r.ID), r]));
             const activeTabIds = efRowsSub
-                .filter((r) =>
-                    stripEfLabelSub(r.ItemName) === activeTabClean ||
-                    String(r.ItemName || '').trim() === activeTabStr
-                )
+                .filter((r) => String(r.ItemName || '').trim() === activeTabStr)
                 .map((r) => String(r.ID));
 
             const nestedPairs = [];
@@ -2376,8 +2649,9 @@ router.get('/:requestNo', async (req, res) => {
     try {
         const { requestNo } = req.params;
         const userEmail = req.query.userEmail || '';
+        const sessionDivision = (req.query.division || '').toString().trim();
 
-        console.log('Pricing API: Loading pricing for', requestNo, 'user:', userEmail);
+        console.log('Pricing API: Loading pricing for', requestNo, 'user:', userEmail, 'division:', sessionDivision || '(none)');
 
         // Get enquiry details including CreatedBy
         let enquiry;
@@ -2465,8 +2739,11 @@ router.get('/:requestNo', async (req, res) => {
                 if (!detailCtx.user) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
-                if (!detailCtx.isAdmin) {
-                    const anchors = getPricingAnchorJobs(jobs, detailCtx, userEmail);
+                // Non-admins: always scope by access rules; admins: all jobs unless a Division is selected
+                const useDivision = Boolean(sessionDivision);
+                const shouldScopeJobs = !detailCtx.isAdmin || useDivision;
+                if (shouldScopeJobs) {
+                    const anchors = getPricingAnchorJobsForDivision(jobs, detailCtx, userEmail, sessionDivision);
                     if (anchors.length === 0) {
                         return res.status(403).json({ error: 'Forbidden' });
                     }
@@ -2494,7 +2771,7 @@ router.get('/:requestNo', async (req, res) => {
             console.error('Error fetching extra customers:', err);
         }
 
-        /** Loaded before customers/options so tabs + grid metadata never read `EnquiryPricingOptions`. */
+        /** Detail GET: base option rows from `EnquiryPricingValues`; merged with `EnquiryPricingOptions` so new rows without EPV yet still appear. */
         let values = [];
         try {
             const valuesResult = await sql.query`
@@ -2611,6 +2888,11 @@ router.get('/:requestNo', async (req, res) => {
                 console.error('Error getting user name:', err);
             }
 
+            // Prefer Pricing "Division" dropdown (session) for own-job/department name matching vs EnquiryFor.ItemName
+            const effectiveDeptForJobMatch = sessionDivision
+                ? String(sessionDivision).toLowerCase().trim()
+                : userDepartment;
+
             // Check if user is the creator (Lead Job owner) or Admin
             const isAdmin = userRole === 'Admin';
             if (isAdmin) {
@@ -2629,7 +2911,7 @@ router.get('/:requestNo', async (req, res) => {
 
                 let isMatch = allMails.includes(userEmail.toLowerCase()) ||
                     allMails.some(e => e.split('@')[0] === userEmailUsername) ||
-                    (userDepartment && jobNameLower.includes(userDepartment)) ||
+                    (effectiveDeptForJobMatch && jobNameLower.includes(effectiveDeptForJobMatch)) ||
                     (userFullName && allMails.some(e => e.includes(userFullName.toLowerCase())));
 
                 if (isMatch) {
@@ -2644,12 +2926,12 @@ router.get('/:requestNo', async (req, res) => {
             });
 
             // SMART SCOPE EXPANSION:
-            const cleanUserScopes = new Set(userJobItems.map(name =>
-                name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
-            ));
+            const cleanUserScopes = new Set(
+                userJobItems.map((name) => String(name || '').trim().toLowerCase())
+            );
 
             jobs.forEach(job => {
-                const cleanName = job.ItemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
+                const cleanName = String(job.ItemName || '').trim().toLowerCase();
                 if (cleanUserScopes.has(cleanName)) {
                     if (!userJobItems.includes(job.ItemName)) {
                         userJobItems.push(job.ItemName);
@@ -2660,7 +2942,7 @@ router.get('/:requestNo', async (req, res) => {
 
         // FILTER: Scope Customers based on User Role
         if (leadJobItem && jobs.length > 0) {
-            const clean = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() : '';
+            const clean = (name) => (name ? String(name).trim() : '');
             const leadJob = jobs.find(j => j.ItemName === leadJobItem);
 
             if (leadJob) {
@@ -2719,7 +3001,26 @@ router.get('/:requestNo', async (req, res) => {
         let options = [];
         try {
             options = buildDetailPricingOptionsFromValuesRows(values);
-            console.log('Pricing API: Found', options.length, 'options (from EnquiryPricingValues only)');
+            let epoRows = [];
+            try {
+                const epoRes = await sql.query`
+                    SELECT ID, RequestNo, OptionName, SortOrder, ItemName, CustomerName, LeadJobName
+                    FROM EnquiryPricingOptions
+                    WHERE RequestNo = ${requestNo}
+                `;
+                epoRows = epoRes.recordset || [];
+            } catch (epoErr) {
+                console.error('Error querying EnquiryPricingOptions for detail:', epoErr);
+            }
+            const fallbackLeadForEpo = leadJobItem || '';
+            options = mergeDetailOptionsWithEnquiryPricingOptionsRows(options, epoRows, fallbackLeadForEpo);
+            console.log(
+                'Pricing API: options after merge EPV + EnquiryPricingOptions =',
+                options.length,
+                '(epo rows',
+                epoRows.length,
+                ')'
+            );
         } catch (err) {
             console.error('Error building pricing options from values:', err);
             options = [];
@@ -2793,7 +3094,7 @@ router.get('/:requestNo', async (req, res) => {
         if (isGlobalView) {
             console.log('Pricing API: Admin Access -> View All');
             visibleJobs = jobs.map(j => j.ItemName);
-            visibleJobIds = new Set(jobs.map(j => j.ID));
+            visibleJobIds = new Set(jobs.map((j) => String(j.ID)));
         } else {
             // Standard User: View Assigned + Descendants
             // Fallback: If Creator has NO assignments, should we show everything or nothing?
@@ -2811,10 +3112,13 @@ router.get('/:requestNo', async (req, res) => {
 
                 while (queue.length > 0) {
                     const currentId = queue.pop();
-                    if (processed.has(currentId)) continue;
-                    processed.add(currentId);
+                    const curKey = String(currentId);
+                    if (processed.has(curKey)) continue;
+                    processed.add(curKey);
 
-                    const children = allJobs.filter(j => j.ParentID === currentId);
+                    const children = allJobs.filter(
+                        (j) => j.ParentID != null && String(j.ParentID) === curKey
+                    );
                     children.forEach(c => {
                         descendantIds.push(c.ID);
                         queue.push(c.ID);
@@ -2849,12 +3153,14 @@ router.get('/:requestNo', async (req, res) => {
 
             const descendantIds = getAllDescendantIds(selfJobIds, jobs);
             const ancestorIds = getAllAncestorIds(selfJobIds, jobs);
-            const allVisibleIds = new Set([...selfJobIds, ...descendantIds, ...ancestorIds]);
+            const allVisibleIds = new Set(
+                [...selfJobIds, ...descendantIds, ...ancestorIds].map((id) => String(id))
+            );
 
-            visibleJobs = jobs.filter(j => allVisibleIds.has(j.ID)).map(j => j.ItemName);
-            visibleJobIds = allVisibleIds; // ID Set
+            visibleJobs = jobs.filter((j) => allVisibleIds.has(String(j.ID))).map((j) => j.ItemName);
+            visibleJobIds = allVisibleIds; // ID Set (string keys)
             // Default: user edits jobs they are assigned to.
-            const allEditableIds = new Set([...selfJobIds]);
+            const allEditableIds = new Set(selfJobIds.map((id) => String(id)));
             // Pricing: if the user is assigned to a lead root (ParentID 0), they may edit every
             // division/subjob under that lead (same branch). Fixes read-only sibling rows (e.g. BMS vs HVAC)
             // where descendants were visible but delete/trash was hidden for non-listed names.
@@ -2865,10 +3171,10 @@ router.get('/:requestNo', async (req, res) => {
             });
             if (leadRootIdsAmongAssigned.length > 0) {
                 const branchDescendantIds = getAllDescendantIds(leadRootIdsAmongAssigned, jobs);
-                branchDescendantIds.forEach((id) => allEditableIds.add(id));
+                branchDescendantIds.forEach((id) => allEditableIds.add(String(id)));
             }
             editableJobIds = allEditableIds;
-            editableJobs = jobs.filter(j => allEditableIds.has(j.ID)).map(j => j.ItemName);
+            editableJobs = jobs.filter((j) => allEditableIds.has(String(j.ID))).map((j) => j.ItemName);
 
         }
 
@@ -2887,12 +3193,12 @@ router.get('/:requestNo', async (req, res) => {
             },
             extraCustomers: extraCustomers
                 .map(c => (c.CustomerName || '').replace(/,+$/g, '').trim()) // Normalize names
-                .filter(name => {
-                    const cleanName = name.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                .filter((name) => {
+                    const cleanName = String(name || '').trim();
                     return name && !excludedNames.has(name) && !excludedNames.has(cleanName);
                 }),
             customers: customers,
-            activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(activeCustomerName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim())))
+            activeCustomer: (activeCustomerName && (excludedNames.has(activeCustomerName) || excludedNames.has(String(activeCustomerName || '').trim())))
                 ? (customers.length > 0 ? customers[0] : '')
                 : (activeCustomerName || '').replace(/,+$/g, '').trim(),
             leadJob: leadJobItem,
@@ -2911,8 +3217,14 @@ router.get('/:requestNo', async (req, res) => {
                 divisionCode: j.DivisionCode,
                 departmentCode: j.DepartmentCode,
                 isLead: !j.ParentID || j.ParentID === 0 || j.ParentID === "0",
-                visible: typeof visibleJobIds !== 'undefined' ? visibleJobIds.has(j.ID) : visibleJobs.includes(j.ItemName),
-                editable: typeof editableJobIds !== 'undefined' ? editableJobIds.has(j.ID) : editableJobs.includes(j.ItemName)
+                visible:
+                    typeof visibleJobIds !== 'undefined'
+                        ? visibleJobIds.has(String(j.ID))
+                        : visibleJobs.includes(j.ItemName),
+                editable:
+                    typeof editableJobIds !== 'undefined'
+                        ? editableJobIds.has(String(j.ID))
+                        : editableJobs.includes(j.ItemName)
             })),
             options: options.map(o => ({
                 id: o.ID,
@@ -2925,7 +3237,7 @@ router.get('/:requestNo', async (req, res) => {
             values: values,
             quoteScopedValues: quoteScopedValues,
             scopedFromServer: scopedFromServer,
-            currentUserOwnJob: userDepartmentRaw || '',
+            currentUserOwnJob: (sessionDivision || userDepartmentRaw || '').trim(),
             access: {
                 hasLeadAccess: userHasLeadAccess,
                 visibleJobs: visibleJobs,
@@ -2951,7 +3263,8 @@ router.post('/option', async (req, res) => {
         // --- HIERARCHY RESOLUTION (Step 2026-03-09) ---
         let resolvedItemName = itemName;
         let resolvedCustomerName = customerName;
-        let resolvedLeadJobName = leadJobName;
+        /** Canonical root `ItemName` from EnquiryFor walk — must win over client `leadJobName` text. */
+        let leadJobNameFromWalk = null;
 
         try {
             const jobsResult = await sql.query`SELECT ID, ParentID, ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
@@ -2998,7 +3311,7 @@ router.post('/option', async (req, res) => {
                     visited.add(root.ID);
                     root = jobMap[root.ParentID];
                 }
-                resolvedLeadJobName = root.ItemName;
+                leadJobNameFromWalk = root.ItemName;
             }
         } catch (resolveErr) {
             console.error('Pricing Option Resolution Error:', resolveErr);
@@ -3008,7 +3321,10 @@ router.post('/option', async (req, res) => {
         const resolvedOptionName = optionName.trim();
         resolvedItemName = itemName ? itemName.trim() : (resolvedItemName ? resolvedItemName.trim() : null);
         resolvedCustomerName = resolvedCustomerName ? resolvedCustomerName.trim() : null;
-        resolvedLeadJobName = leadJobName ? leadJobName.trim() : (resolvedLeadJobName ? resolvedLeadJobName.trim() : null);
+        const resolvedLeadJobName =
+            (leadJobNameFromWalk && String(leadJobNameFromWalk).trim()) ||
+            (leadJobName && String(leadJobName).trim()) ||
+            null;
 
         // DEBUG: capture cases where CustomerName ends up NULL unexpectedly
         if (!resolvedCustomerName) {
@@ -3091,7 +3407,18 @@ router.post('/option', async (req, res) => {
 // PUT /api/pricing/value - Update a pricing cell value
 router.put('/value', async (req, res) => {
     try {
-        const { requestNo, optionId, enquiryForItem, enquiryForId, price, updatedBy, customerName, leadJobName, priceOption } = req.body;
+        const {
+            requestNo,
+            optionId,
+            enquiryForItem,
+            enquiryForId,
+            price,
+            updatedBy,
+            customerName,
+            leadJobName,
+            priceOption,
+            allowOptionalZero,
+        } = req.body;
 
         if (!requestNo || !optionId) {
             return res.status(400).json({ error: 'Missing required fields' });
@@ -3109,9 +3436,17 @@ router.put('/value', async (req, res) => {
 
         const priceValue = parseFloat(price) || 0;
 
-        // Reject negative values (Allow 0 to reset/clear price)
         if (priceValue < 0) {
             return res.status(400).json({ error: 'Price cannot be negative', skipped: true });
+        }
+
+        // Zero is not stored for Base Price or any option unless the client sends allowOptionalZero
+        // (cascade wipe of hidden child rows).
+        if (priceValue <= 0 && allowOptionalZero !== true) {
+            return res.status(400).json({
+                error: 'Zero value cannot be accepted for Base Price and option prices.',
+                skipped: true,
+            });
         }
 
         // --- HIERARCHY RESOLUTION (Step 2026-03-09) ---
@@ -3181,49 +3516,72 @@ router.put('/value', async (req, res) => {
         }
 
         // --- UPSERT LOGIC WITH RESOLVED METADATA ---
+        //
+        // IMPORTANT: When `EnquiryForID` is set, match ONLY on RequestNo + OptionID + EnquiryForID.
+        // Including CustomerName in the lookup caused INSERT-every-time when:
+        // - DB had NULL vs resolved text, trimming drift, or legacy rows before hierarchy rules
+        // → duplicate EPV rows (same job + option, different CustomerName) and “saved 1 but DB shows 0”.
+        // We UPDATE all matching rows so accidental duplicates converge to one price + resolved metadata.
 
         let existingResult;
 
         if (enquiryForId) {
-            // New strict check by ID
             existingResult = await sql.query`
                 SELECT ID FROM EnquiryPricingValues 
                 WHERE RequestNo = ${requestNo} 
                 AND OptionID = ${optionId} 
                 AND EnquiryForID = ${enquiryForId}
-                AND (CustomerName = ${resolvedCustomerName} OR (CustomerName IS NULL AND ${resolvedCustomerName || null} IS NULL))
             `;
         } else {
-            // Legacy check by Name
+            // Legacy: name-based cell (no EnquiryForID). Compare trimmed names so NULL/'' align.
+            const custTrim =
+                resolvedCustomerName != null ? String(resolvedCustomerName).trim() : '';
             existingResult = await sql.query`
                 SELECT ID FROM EnquiryPricingValues 
                 WHERE RequestNo = ${requestNo} 
                 AND OptionID = ${optionId} 
                 AND EnquiryForItem = ${resolvedItemName}
-                AND (CustomerName = ${resolvedCustomerName} OR (CustomerName IS NULL AND ${resolvedCustomerName || null} IS NULL))
+                AND LTRIM(RTRIM(ISNULL(CustomerName, N''))) = ${custTrim}
             `;
         }
 
-
         const now = new Date();
         if (existingResult.recordset.length > 0) {
-            // Update
-            const recordId = existingResult.recordset[0].ID;
-            await sql.query`
-                UPDATE EnquiryPricingValues 
-                SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = ${now},
-                    EnquiryForID = ${enquiryForId || null},
-                    EnquiryForItem = ${resolvedItemName},
-                    LeadJobName = ${resolvedLeadJobName},
-                    CustomerName = ${resolvedCustomerName},
-                    PriceOption = ${priceOption || null}
-                WHERE ID = ${recordId}
-            `;
+            if (enquiryForId) {
+                await sql.query`
+                    UPDATE EnquiryPricingValues 
+                    SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = ${now},
+                        EnquiryForID = ${enquiryForId || null},
+                        EnquiryForItem = ${resolvedItemName},
+                        LeadJobName = ${resolvedLeadJobName},
+                        CustomerName = ${resolvedCustomerName},
+                        PriceOption = ${priceOption || null}
+                    WHERE RequestNo = ${requestNo} 
+                    AND OptionID = ${optionId} 
+                    AND EnquiryForID = ${enquiryForId}
+                `;
+            } else {
+                const custTrim =
+                    resolvedCustomerName != null ? String(resolvedCustomerName).trim() : '';
+                await sql.query`
+                    UPDATE EnquiryPricingValues 
+                    SET Price = ${priceValue}, UpdatedBy = ${updatedBy}, UpdatedAt = ${now},
+                        EnquiryForID = ${enquiryForId || null},
+                        EnquiryForItem = ${resolvedItemName},
+                        LeadJobName = ${resolvedLeadJobName},
+                        CustomerName = ${resolvedCustomerName},
+                        PriceOption = ${priceOption || null}
+                    WHERE RequestNo = ${requestNo} 
+                    AND OptionID = ${optionId} 
+                    AND EnquiryForItem = ${resolvedItemName}
+                    AND LTRIM(RTRIM(ISNULL(CustomerName, N''))) = ${custTrim}
+                `;
+            }
 
             if (debugForEnquiry) {
                 logToFile(
                     `PUT /api/pricing/value UPDATE: ` +
-                    `recordId=${recordId} price=${priceValue} resolvedItem=${resolvedItemName} resolvedCustomer=${resolvedCustomerName} resolvedLead=${resolvedLeadJobName} priceOption=${priceOption}`
+                    `rows=${existingResult.recordset.length} price=${priceValue} resolvedItem=${resolvedItemName} resolvedCustomer=${resolvedCustomerName} resolvedLead=${resolvedLeadJobName} priceOption=${priceOption}`
                 );
             }
         } else {

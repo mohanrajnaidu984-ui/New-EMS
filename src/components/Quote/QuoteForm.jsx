@@ -591,8 +591,8 @@ const jobNameMatchesActiveJobsList = (jobName, activeJobs) => {
 /**
  * Customer options for Quote "To" before Creatable append of current value — same rules as quoteCustomerDropdownOptions.
  *
- * Step 1 — Own job: `Master_ConcernedSE.Department` for the logged-in user (merged into `currentUser` from
- * `/api/auth/profile` using the session email — same identity as the header).
+ * Step 1 — Own job: selected Quote **Division** dropdown when set; else `Master_ConcernedSE.Department` on
+ * `currentUser` (from `/api/auth/profile`).
  *
  * Step 2 — EnquiryFor scope + dropdown source:
  * - If selected lead (item / lead bucket) matches own job → options from `EnquiryCustomer` (`customerOptions`).
@@ -606,6 +606,7 @@ function computeQuoteCustomerDropdownBaseOptions({
     selectedLeadId,
     currentUser,
     isAdmin,
+    sessionOwnJobLabel,
 }) {
     if (!enquiryData) return { list: [], leadIsOwnJob: false, allJobNamesNormSet: new Set() };
 
@@ -618,8 +619,12 @@ function computeQuoteCustomerDropdownBaseOptions({
     const poolForEf = enquiryData.divisionsHierarchy?.length ? enquiryData.divisionsHierarchy : (pool.length > 0 ? pool : []);
     const allJobNamesNormSet = new Set(poolForEf.map((n) => normalize(n.itemName || n.DivisionName || '')));
 
-    /** Authoritative own-job label from Master_ConcernedSE (client `Department`); do not use enquiry-derived dept here. */
-    const ownjob = String(currentUser?.Department ?? currentUser?.department ?? '').trim();
+    /** Own-job label: Division dropdown when set, else profile Department (not enquiry-derived). */
+    const ownjob = String(
+        (sessionOwnJobLabel != null && String(sessionOwnJobLabel).trim() !== '')
+            ? String(sessionOwnJobLabel).trim()
+            : (currentUser?.Department ?? currentUser?.department ?? '')
+    ).trim();
     const ownjobLower = ownjob.toLowerCase();
 
     const pricingJobs = pricingData?.jobs || [];
@@ -905,10 +910,9 @@ function isQuoteInternalCustomer(enquiryData, pricingJobs, toName) {
 /** Stable key for "same lead branch" so we only clear the customer when the user actually switches lead. */
 const leadJobChoiceFingerprint = (optionVal) => {
     const s = String(optionVal || '').trim();
-    const cleaned = s.replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
     const m = s.match(/^(L\d+)/i);
     const code = m ? m[1].toUpperCase() : '';
-    return `${code}|${cleaned}`;
+    return `${code}|${s.toLowerCase()}`;
 };
 
 /**
@@ -926,22 +930,15 @@ const resolveLeadJobSelectValue = (
     const list = visibleLeadJobs || [];
     if (list.length === 0) return '';
     const normFull = (x) => String(x || '').trim().toLowerCase();
-    const normClean = (x) => String(x || '').replace(/^L\d+\s*-\s*/i, '').trim().toLowerCase();
 
     if (selectedLeadId && pricingJobs?.length) {
         const found = pricingJobs.find((j) => String(j.id || j.ItemID) === String(selectedLeadId));
         if (found) {
             const name = String(found.itemName || found.DivisionName || found.ItemName || '');
-            const matches = list.filter(
-                (v) =>
-                    normFull(v) === normFull(name) ||
-                    normClean(v) === normClean(name) ||
-                    normFull(v).endsWith(`- ${normClean(name)}`) ||
-                    normFull(name).endsWith(normClean(v))
-            );
+            const matches = list.filter((v) => normFull(v) === normFull(name));
             if (matches.length === 1) return matches[0];
             if (matches.length > 1) {
-                const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, normClean(name));
+                const hNode = hierarchyRootSelfLeadForLeadSelection(divisionsHierarchy, name);
                 const wantM = hNode && String(hNode.leadJobCode || hNode.LeadJobCode || '').match(/^(l\d+)/i);
                 if (wantM) {
                     const pref = wantM[1].toLowerCase();
@@ -958,8 +955,6 @@ const resolveLeadJobSelectValue = (
         const pl = p.toLowerCase();
         let hit = list.find((v) => normFull(v) === pl);
         if (hit) return hit;
-        hit = list.find((v) => normClean(v) === normClean(p));
-        if (hit) return hit;
         const codeMatch = pl.match(/^(l\d+)/);
         if (codeMatch) {
             const code = codeMatch[1];
@@ -972,46 +967,74 @@ const resolveLeadJobSelectValue = (
     return '';
 };
 
-const stripLeadForQuoteLead = (s) => String(s || '').replace(/^L\d+\s*-\s*/i, '').trim();
-
-/** Pricing roots whose label matches the lead dropdown value (with or without "L# - " prefix). */
+/** Pricing roots for the lead dropdown: full label match or same explicit L# as the job row (no prefix stripping). */
 function pricingRootsMatchingLeadVal(val, pricingJobs) {
     const jobs = Array.isArray(pricingJobs) ? pricingJobs : [];
     const raw = String(val || '').trim();
     if (!raw) return [];
-    const valClean = stripLeadForQuoteLead(raw).toLowerCase();
     const rawLow = raw.toLowerCase();
+    const explicit = raw.match(/^(L\d+)/i);
+    const wantL = explicit ? explicit[1].toUpperCase() : '';
     return jobs.filter((j) => {
         const pid = j.parentId ?? j.ParentID;
         const isRoot = !pid || pid === '0' || pid === 0 || pid === '0';
         if (!isRoot) return false;
         const nm = String(j.itemName || j.DivisionName || j.ItemName || '').trim();
         const nmLow = nm.toLowerCase();
-        return nm === raw || nmLow === rawLow || stripLeadForQuoteLead(nm).toLowerCase() === valClean;
+        if (nm === raw || nmLow === rawLow) return true;
+        const jL = extractLCodeUpperFromJobOrNode(j);
+        if (wantL && jL && wantL === jL) return true;
+        return false;
     });
 }
 
 /**
- * When ItemName repeats (subjob under L1 vs own lead L2), prefer the hierarchy root where
- * stripped LeadJobName === stripped ItemName (EnquiryFor self-lead row).
+ * When ItemName repeats across leads (e.g. same dept name under L1 vs L2), disambiguate with full strings
+ * and LeadJobCode — do not strip "L# - " from labels.
  */
-function hierarchyRootSelfLeadForCleanName(divisionsHierarchy, cleanLower) {
+function hierarchyRootSelfLeadForLeadSelection(divisionsHierarchy, selectedVal) {
     const h = Array.isArray(divisionsHierarchy) ? divisionsHierarchy : [];
+    const raw = String(selectedVal || '').trim();
+    const rawLow = raw.toLowerCase();
+    const explicit = raw.match(/^(L\d+)/i);
+    const wantL = explicit ? explicit[1].toUpperCase() : '';
+
     const roots = h.filter((d) => {
         const pid = d.parentId ?? d.ParentID;
         const isRoot = !pid || pid === '0' || pid === 0;
         if (!isRoot) return false;
-        const raw = String(d.itemName || d.DivisionName || '').trim();
-        return stripLeadForQuoteLead(raw).toLowerCase() === cleanLower;
+        const nm = String(d.itemName || d.DivisionName || '').trim();
+        return nm.toLowerCase() === rawLow;
     });
-    if (roots.length <= 1) return roots[0] || null;
-    return (
-        roots.find((d) => {
-            const item = stripLeadForQuoteLead(String(d.itemName || d.DivisionName || '')).toLowerCase();
-            const lj = stripLeadForQuoteLead(String(d.leadJobName ?? d.LeadJobName ?? '')).toLowerCase();
+    if (roots.length === 1) return roots[0] || null;
+    if (roots.length > 1) {
+        if (wantL) {
+            const byCode = roots.filter((d) => extractLCodeUpperFromJobOrNode(d) === wantL);
+            if (byCode.length === 1) return byCode[0];
+        }
+        const selfLead = roots.find((d) => {
+            const item = String(d.itemName || d.DivisionName || '').trim();
+            const lj = String(d.leadJobName ?? d.LeadJobName ?? '').trim();
             return item && lj && item === lj;
-        }) || roots[0]
-    );
+        });
+        return selfLead || roots[0];
+    }
+
+    const allRoots = h.filter((d) => {
+        const pid = d.parentId ?? d.ParentID;
+        return !pid || pid === '0' || pid === 0;
+    });
+    if (allRoots.length <= 1) return allRoots[0] || null;
+    if (wantL) {
+        const byCode = allRoots.filter((d) => extractLCodeUpperFromJobOrNode(d) === wantL);
+        if (byCode.length === 1) return byCode[0];
+    }
+    const selfLead = allRoots.find((d) => {
+        const item = String(d.itemName || d.DivisionName || '').trim();
+        const lj = String(d.leadJobName ?? d.LeadJobName ?? '').trim();
+        return item && lj && item === lj;
+    });
+    return selfLead || allRoots[0] || null;
 }
 
 function extractLCodeUpperFromJobOrNode(jobOrNode) {
@@ -1043,14 +1066,13 @@ function resolvePricingRootForLeadSelect(val, pricingJobs, divisionsHierarchy) {
     if (matches.length === 1) return matches[0];
     if (matches.length > 1) {
         const selfLead = matches.find((j) => {
-            const item = stripLeadForQuoteLead(String(j.itemName || j.ItemName || '')).toLowerCase();
-            const lj = stripLeadForQuoteLead(String(j.leadJobName || j.LeadJobName || '')).toLowerCase();
-            return item && lj && item === lj;
+            const item = String(j.itemName || j.ItemName || '').trim();
+            const lj = String(j.leadJobName || j.LeadJobName || '').trim();
+            return item && lj && item.toLowerCase() === lj.toLowerCase();
         });
         return selfLead || matches[0];
     }
-    const valClean = stripLeadForQuoteLead(raw).toLowerCase();
-    const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, valClean);
+    const hNode = hierarchyRootSelfLeadForLeadSelection(divisionsHierarchy, raw);
     if (!hNode) return null;
     const hid = hNode.id ?? hNode.ItemID;
     const jobs = Array.isArray(pricingJobs) ? pricingJobs : [];
@@ -1075,8 +1097,8 @@ function resolveQuoteLeadCodePill({ selectedLeadId, selectedValue, pricingJobs, 
                 code = extractLCodeUpperFromJobOrNode(node);
                 if (code) return code;
             } else {
-                const subClean = stripLeadForQuoteLead(String(node.itemName || node.ItemName || '')).toLowerCase();
-                const hNode = hierarchyRootSelfLeadForCleanName(divisionsHierarchy, subClean);
+                const subNm = String(node.itemName || node.ItemName || '').trim();
+                const hNode = hierarchyRootSelfLeadForLeadSelection(divisionsHierarchy, subNm);
                 if (hNode) {
                     const hc = String(hNode.leadJobCode || hNode.LeadJobCode || '').trim();
                     const m1 = hc.match(/^(L\d+)/i);
@@ -1609,6 +1631,14 @@ const QuoteForm = () => {
     const quoteRowSyncDropdownCustomerRef = useRef(false);
     /** When set, customer sync waits until selectedLeadId is set so internal parent (e.g. HVAC Project) resolves correctly. */
     const quoteRowAwaitingLeadForCustomerRef = useRef(false);
+    /**
+     * Lead-job dropdown updates enquiryData + clears customer in one tick; the pricing bootstrap effect would
+     * otherwise fire together with queueMicrotask(loadPricingData) and clearCustomerForLeadSwitch's own fetch —
+     * triple network calls and UI flicker. Set this ref before those state updates; the effect consumes it once.
+     */
+    const pendingPricingBootstrapRef = useRef(null);
+    /** Incremented per loadPricingData call; stale fetch responses must not overwrite state (reduces flicker). */
+    const pricingFetchGenerationRef = useRef(0);
     /** After hydrating a quote form draft, block auto-load of latest saved quote (would overwrite clauses / tab snapshot). */
     const quoteDraftHydrateSkipAutoLoadUntilRef = useRef(0);
     const formDraftMenuWrapRef = useRef(null);
@@ -1759,6 +1789,10 @@ const QuoteForm = () => {
     const [quoteListSearchCriteria, setQuoteListSearchCriteria] = useState('');
     const [quoteListDateFrom, setQuoteListDateFrom] = useState('');
     const [quoteListDateTo, setQuoteListDateTo] = useState('');
+    /** Division filter (Master_EnquiryFor.DepartmentName); options from /api/pricing/list/divisions (same rules as Pricing). */
+    const [quoteListDivisions, setQuoteListDivisions] = useState([]);
+    const [quoteListDivisionsLoading, setQuoteListDivisionsLoading] = useState(false);
+    const [quoteListDivision, setQuoteListDivision] = useState('');
     const [showEmailModal, setShowEmailModal] = useState(false);
     const [emailSending, setEmailSending] = useState(false);
     const [emailDetails, setEmailDetails] = useState({ to: '', cc: '', bcc: '', subject: '', body: '', pdfBlob: null, pdfName: '' });
@@ -1778,6 +1812,8 @@ const QuoteForm = () => {
     const [signatory, setSignatory] = useState('');
     const [signatoryDesignation, setSignatoryDesignation] = useState('');
     const [toName, setToName] = useState('');
+    /** Keeps pricing/preview panels mounted until To is restored after a lead-branch switch (covers busy/toName ordering gaps). */
+    const [leadSwitchShellHold, setLeadSwitchShellHold] = useState(false);
 
     const [toAddress, setToAddress] = useState('');
     const [toPhone, setToPhone] = useState('');
@@ -1845,6 +1881,44 @@ const QuoteForm = () => {
     }, [pricingData]);
 
     const [pricingSummary, setPricingSummary] = useState([]);
+    /** While a pricing GET is in flight, sidebar keeps last non-empty summary to avoid blank flash between lead/customer reloads. */
+    const [pricingSummaryBusy, setPricingSummaryBusy] = useState(false);
+    const lastNonEmptyPricingSummaryRef = React.useRef(null);
+
+    React.useEffect(() => {
+        if (Array.isArray(pricingSummary) && pricingSummary.length > 0) {
+            lastNonEmptyPricingSummaryRef.current = pricingSummary;
+        }
+    }, [pricingSummary]);
+
+    React.useEffect(() => {
+        lastNonEmptyPricingSummaryRef.current = null;
+    }, [enquiryData?.enquiry?.RequestNo]);
+
+    const pricingSummaryRowsForUi = React.useMemo(() => {
+        const pinned = lastNonEmptyPricingSummaryRef.current;
+        if (
+            pricingSummaryBusy &&
+            (!pricingSummary || pricingSummary.length === 0) &&
+            Array.isArray(pinned) &&
+            pinned.length > 0
+        ) {
+            return pinned;
+        }
+        return pricingSummary || [];
+    }, [pricingSummaryBusy, pricingSummary]);
+
+    /** Keeps quote preview + pricing sidebar mounted while customer is briefly cleared during lead-branch reload (avoids full-panel flash). */
+    const quotePreviewCustomerGate = React.useMemo(
+        () =>
+            !!(toName || '').trim() || pricingSummaryBusy || leadSwitchShellHold,
+        [toName, pricingSummaryBusy, leadSwitchShellHold]
+    );
+
+    React.useEffect(() => {
+        if ((toName || '').trim()) setLeadSwitchShellHold(false);
+    }, [toName]);
+
     const [grandTotal, setGrandTotal] = useState(0);
     const [hasPricedOptional, setHasPricedOptional] = useState(false);
     const [hasUserPricing, setHasUserPricing] = useState(false);
@@ -1866,11 +1940,18 @@ const QuoteForm = () => {
 
     const refetchPendingQuotes = useCallback(() => {
         const userEmail = currentUser?.EmailId || currentUser?.email || '';
-        fetch(`${API_BASE}/api/quotes/list/pending?userEmail=${encodeURIComponent(userEmail)}`)
+        if (!userEmail) {
+            setPendingQuotes([]);
+            return;
+        }
+        const divQ = quoteListDivision.trim()
+            ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
+            : '';
+        fetch(`${API_BASE}/api/quotes/list/pending?userEmail=${encodeURIComponent(userEmail)}${divQ}`)
             .then(res => res.json())
             .then(data => setPendingQuotes(data || []))
             .catch(err => console.error('Error fetching pending quotes:', err));
-    }, [currentUser]);
+    }, [currentUser, quoteListDivision]);
 
     const handleQuoteListSearch = useCallback(async () => {
         if (quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH) return;
@@ -1891,6 +1972,7 @@ const QuoteForm = () => {
             params.set('q', quoteListSearchCriteria);
             if (df) params.set('dateFrom', df);
             if (dt) params.set('dateTo', dt);
+            if (quoteListDivision.trim()) params.set('division', quoteListDivision.trim());
             const res = await fetch(`${API_BASE}/api/quotes/list/search?${params.toString()}`);
             const data = res.ok ? await res.json() : [];
             setQuoteSearchResults(Array.isArray(data) ? data : []);
@@ -1900,7 +1982,7 @@ const QuoteForm = () => {
         } finally {
             setQuoteSearchLoading(false);
         }
-    }, [quoteListCategory, quoteListSearchCriteria, quoteListDateFrom, quoteListDateTo, currentUser]);
+    }, [quoteListCategory, quoteListSearchCriteria, quoteListDateFrom, quoteListDateTo, quoteListDivision, currentUser]);
 
     const handleQuoteListClear = useCallback(() => {
         setQuoteListSearchCriteria('');
@@ -1911,6 +1993,67 @@ const QuoteForm = () => {
         setShowQuoteListSummaryOverQuote(false);
         refetchPendingQuotes();
     }, [refetchPendingQuotes]);
+
+    useEffect(() => {
+        const email = (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim();
+        if (!email) {
+            setQuoteListDivisions([]);
+            setQuoteListDivision('');
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            setQuoteListDivisionsLoading(true);
+            try {
+                const res = await fetch(
+                    `${API_BASE}/api/pricing/list/divisions?userEmail=${encodeURIComponent(email)}`
+                );
+                const data = res.ok ? await res.json() : { divisions: [], isCcUser: false };
+                if (cancelled) return;
+                const list = Array.isArray(data.divisions) ? data.divisions : [];
+                setQuoteListDivisions(list);
+                setQuoteListDivision((prev) => {
+                    if (!list.length) return '';
+                    if (prev && list.includes(prev)) return prev;
+                    return list[0];
+                });
+            } catch {
+                if (!cancelled) setQuoteListDivisions([]);
+            } finally {
+                if (!cancelled) setQuoteListDivisionsLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [currentUser?.EmailId, currentUser?.email, currentUser?.MailId]);
+
+    // Re-resolve enquiry jobs/profiles when session division changes (aligns with &division= on pricing).
+    useEffect(() => {
+        const rn = enquiryData?.enquiry?.RequestNo;
+        const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
+        if (!rn || !userEmail) return;
+        const divQ = quoteListDivision.trim()
+            ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
+            : '';
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(
+                    `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(rn)}?userEmail=${encodeURIComponent(userEmail)}${divQ}`,
+                    { cache: 'no-store' }
+                );
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                if (!cancelled) setEnquiryData(data);
+            } catch (e) {
+                console.error('[QuoteForm] enquiry-data refresh for division:', e);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [quoteListDivision]);
 
     // Tab State for unified Quote and Pricing Sections
     const [activeQuoteTab, setActiveQuoteTab] = useState('self');
@@ -2903,8 +3046,8 @@ const QuoteForm = () => {
             };
 
             // RESOLVE EFFECTIVE ROOT:
-            // 1. Determine user context
-            const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+            // 1. Determine user context (Division dropdown overrides profile Department for own-job scope)
+            const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
             const hasLeadAccess = isAdmin || ['civil', 'admin', 'bms admin'].includes(userDept) || pricingData?.access?.hasLeadAccess;
             const isSubUser = !hasLeadAccess;
 
@@ -3041,7 +3184,7 @@ const QuoteForm = () => {
                     .toLowerCase()
                     .replace(/@almcg\.com/g, '@almoayyedcg.com')
                     .trim();
-                const userDeptNorm = (currentUser?.Department || '').trim().toLowerCase();
+                const userDeptNorm = (quoteListDivision || currentUser?.Department || '').trim().toLowerCase();
                 const editableNames = (pricingData?.access?.editableJobs || []).map((n) =>
                     String(n).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
                 );
@@ -3276,7 +3419,7 @@ const QuoteForm = () => {
         // Intentionally omit pricingSummary: it updates on every calculateSummary() but tabs come from
         // jobs / hierarchy / existingQuotes only. Including it re-created this array every render and
         // re-fired AutoLoad + hard-fallback (Maximum update depth, Quote Ref stuck on Draft).
-    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser]);
+    }, [pricingData, enquiryData, usersList, isAdmin, existingQuotes, toName, matchDivisionCode, jobsPool, currentUser, quoteListDivision]);
 
     // --- PROACTIVE IDENTITY SYNC (Step 4488) ---
     // ABSOLUTE LOCK: Ensure logo and footer are ALWAYS based on current user's personal profile.
@@ -3579,6 +3722,7 @@ const QuoteForm = () => {
             selectedLeadId,
             currentUser,
             isAdmin,
+            sessionOwnJobLabel: quoteListDivision,
         });
         let filteredOptions = [...list];
 
@@ -3598,7 +3742,7 @@ const QuoteForm = () => {
         }
 
         return filteredOptions;
-    }, [enquiryData, pricingData, jobsPool, selectedLeadId, currentUser, toName, isAdmin]);
+    }, [enquiryData, pricingData, jobsPool, selectedLeadId, currentUser, toName, isAdmin, quoteListDivision]);
 
     const customerSelectValue = React.useMemo(() => {
         if (!(toName || '').trim()) return null;
@@ -3668,8 +3812,14 @@ const QuoteForm = () => {
 
         if (tabs.length === 1 || isFirstTab) {
             if (placeholderFirst) {
-                // No real first tab — server resolves OwnJob from logged-in user email → Master_ConcernedSE.Department
-                useDepartmentForOwnJob = true;
+                const divOwn = (quoteListDivision || '').trim();
+                if (divOwn) {
+                    ownJobName = divOwn;
+                    useDepartmentForOwnJob = false;
+                } else {
+                    // No real first tab — server resolves OwnJob from logged-in user email → Master_ConcernedSE.Department
+                    useDepartmentForOwnJob = true;
+                }
             } else {
                 ownJobName = firstTabJobNameForDb();
             }
@@ -3702,7 +3852,7 @@ const QuoteForm = () => {
             ownJobName: useDepartmentForOwnJob ? null : ownJobName,
             useDepartmentForOwnJob,
         };
-    }, [calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, selectedLeadId, pricingData, enquiryData?.leadJobPrefix, jobsPool, enquiryData?.divisionsHierarchy]);
+    }, [calculatedTabs, effectiveQuoteTabs, activeQuoteTab, toName, selectedLeadId, pricingData, enquiryData?.leadJobPrefix, jobsPool, enquiryData?.divisionsHierarchy, quoteListDivision]);
 
     /**
      * Same quote filtering as "Previous Quotes / Revisions" tab content (for programmatic auto-select on tab switch).
@@ -3852,7 +4002,7 @@ const QuoteForm = () => {
                 const currentLeadCodeClean = currentLeadCode.match(/L\d+/) ? currentLeadCode.match(/L\d+/)[0] : '';
                 if (qLeadCodeOnly && currentLeadCodeClean && qLeadCodeOnly !== currentLeadCodeClean) return false;
 
-                const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                 const isSubUser = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
                 if (isSubUser) {
                     const isParentCode = qDivCode === 'CVLP' || (qDivCode === 'AAC' && userDept !== 'air');
@@ -3891,6 +4041,7 @@ const QuoteForm = () => {
             currentUser,
             isAdmin,
             scopedEnquiryQuotesParams,
+            quoteListDivision,
         ]
     );
 
@@ -4568,10 +4719,20 @@ const QuoteForm = () => {
 
 
     // Load Pricing Data when enquiry and customer are selected (bootstrap with empty customer during row-pick sync)
+    // Re-fetch when Division dropdown changes so access/jobs match the session department (see &division= on loadPricingData URL).
     useEffect(() => {
         const req = enquiryData?.enquiry?.RequestNo;
         if (!req) return;
         const cx = (toName || '').trim();
+
+        const pendingOpts = pendingPricingBootstrapRef.current;
+        if (pendingOpts != null) {
+            pendingPricingBootstrapRef.current = null;
+            console.log('[useEffect] Loading pricing (lead/bootstrap options):', req, 'Customer:', cx || '(empty)', pendingOpts);
+            loadPricingData(req, cx || '', pendingOpts);
+            return;
+        }
+
         if (cx) {
             console.log('[useEffect] Loading pricing data for:', req, 'Customer:', cx);
             loadPricingData(req, cx);
@@ -4579,7 +4740,7 @@ const QuoteForm = () => {
             console.log('[useEffect] Bootstrap pricing for row enquiry (empty customer):', req);
             loadPricingData(req, '');
         }
-    }, [enquiryData, toName]);
+    }, [enquiryData, toName, quoteListDivision]);
 
     // Pick pricing root for lead dropdown after list-row enquiry load (searchTerm / pending click).
     useEffect(() => {
@@ -4712,7 +4873,7 @@ const QuoteForm = () => {
         if (!currentUser) return false;
 
         // 2. Determine generalized Lead Access (Matches calculatedTabs logic)
-        const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+        const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
         const hasLeadAccess = !!pricingData?.access?.hasLeadAccess || ['civil', 'admin', 'bms admin'].includes(userDept);
         const hasPricingScope = Array.isArray(pricingData?.access?.editableJobs) && pricingData.access.editableJobs.length > 0;
 
@@ -4860,9 +5021,7 @@ const QuoteForm = () => {
         setToPhone('');
         setToEmail('');
         setToAttention('');
-        if (enquiryData) {
-            loadPricingData(enquiryData.enquiry.RequestNo, '');
-        }
+        // Pricing reload: single path via pendingPricingBootstrapRef + useEffect (avoids duplicate fetches).
     };
 
     // New handler for CreatableSelect
@@ -4912,6 +5071,8 @@ const QuoteForm = () => {
 
         if (!selectedName) {
             preserveQuoteOnLeadChangeRef.current = null;
+            autoSelectCustomerAfterLeadChangeRef.current = false;
+            setLeadSwitchShellHold(false);
             setToAddress('');
             setToPhone('');
             setToEmail('');
@@ -5097,6 +5258,7 @@ const QuoteForm = () => {
             selectedLeadId,
             currentUser,
             isAdmin,
+            sessionOwnJobLabel: quoteListDivision,
         });
         const first = list[0];
         const fallback =
@@ -5128,7 +5290,7 @@ const QuoteForm = () => {
         }
         handleCustomerChange({ value: fallback, label: fallback }, { leadJobAutoReselect: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- handleCustomerChange is stable enough per render; avoid dep churn
-    }, [enquiryData, pricingData, selectedLeadId, currentUser, isAdmin, jobsPool]);
+    }, [enquiryData, pricingData, selectedLeadId, currentUser, isAdmin, jobsPool, quoteListDivision]);
 
     // After changing lead job: re-apply the same customer when preserved (so scoped quote fetch matches saved ToName);
     // otherwise auto-pick the first customer from the newly filtered list.
@@ -5179,16 +5341,29 @@ const QuoteForm = () => {
 
     // Helper to load pricing data (Component Level)
     const loadPricingData = async (reqNo, cxName, options = {}) => {
+        const gen = ++pricingFetchGenerationRef.current;
+        setPricingSummaryBusy(true);
         console.log('--- loadPricingData START ---');
         console.log('Req:', reqNo, 'Cx:', cxName, 'Opts:', options);
         try {
-            const url = `${API_BASE}/api/pricing/${encodeURIComponent(reqNo)}?userEmail=${encodeURIComponent(currentUser?.email || currentUser?.EmailId || '')}&customerName=${encodeURIComponent(cxName || '')}`;
+            const divQ = (quoteListDivision || '').trim()
+                ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
+                : '';
+            const url = `${API_BASE}/api/pricing/${encodeURIComponent(reqNo)}?userEmail=${encodeURIComponent(currentUser?.email || currentUser?.EmailId || '')}&customerName=${encodeURIComponent(cxName || '')}${divQ}`;
             console.log('Fetching URL:', url);
 
             console.log('[Pricing Fetch] Requesting:', url, 'ActiveCustomer:', cxName);
             const pricingRes = await fetch(url);
+            if (gen !== pricingFetchGenerationRef.current) {
+                console.log('[loadPricingData] Discarding stale response (generation mismatch after fetch)');
+                return;
+            }
             if (pricingRes.ok) {
                 const pData = await pricingRes.json();
+                if (gen !== pricingFetchGenerationRef.current) {
+                    console.log('[loadPricingData] Discarding stale response (generation mismatch after JSON)');
+                    return;
+                }
                 console.log('[Pricing Fetch] Response:', pData.jobs ? pData.jobs.length + ' jobs' : 'No jobs', 'Visible:', pData.jobs ? pData.jobs.map(j => j.itemName + ':' + j.visible) : 'N/A');
                 console.log('Pricing Data Received:', pData);
 
@@ -5349,6 +5524,8 @@ const QuoteForm = () => {
                     }));
                 }
 
+                if (gen !== pricingFetchGenerationRef.current) return;
+
                 setPricingData(pData);
 
                 // Calculate Summary
@@ -5407,18 +5584,38 @@ const QuoteForm = () => {
                 }
 
                 // We need to calculate summary based on all jobs initially
+                if (gen !== pricingFetchGenerationRef.current) return;
                 calculateSummary(pData, allJobs, cxName);
+
+                if ((cxName || '').trim()) {
+                    quoteRowDivisionLeadLockRef.current = false;
+                }
             } else {
                 console.error('Pricing API Error:', pricingRes.status);
+                if (gen === pricingFetchGenerationRef.current) {
+                    setPricingData(null);
+                    setPricingSummary([]);
+                    setHasUserPricing(false);
+                }
+            }
+        } catch (err) {
+            console.error('Error loading pricing data:', err);
+            if (gen === pricingFetchGenerationRef.current) {
                 setPricingData(null);
                 setPricingSummary([]);
                 setHasUserPricing(false);
             }
-        } catch (err) {
-            console.error('Error loading pricing data:', err);
-            setPricingData(null);
-            setPricingSummary([]);
-            setHasUserPricing(false);
+        } finally {
+            if (gen === pricingFetchGenerationRef.current) {
+                // Empty-customer bootstrap finishes before React re-applies To from auto-select; clearing busy
+                // immediately made quotePreviewCustomerGate false for a frame (layout flash).
+                const awaitingCustomerAfterLead =
+                    autoSelectCustomerAfterLeadChangeRef.current &&
+                    !(cxName || '').trim();
+                if (!awaitingCustomerAfterLead) {
+                    setPricingSummaryBusy(false);
+                }
+            }
         }
     };
 
@@ -5501,7 +5698,7 @@ const QuoteForm = () => {
             return rName === s || rName.includes(s) || s.includes(rName);
         }));
 
-        const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+        const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
         const isStrictlyLimited = userDept && !['civil', 'admin'].includes(userDept) && !isAdmin;
 
         const hasLimitedAccess = !!overrideScope || isStrictlyLimited || (!data.access?.canEditAll && !hasRootAccess && userScopes.length > 0);
@@ -6026,7 +6223,7 @@ const QuoteForm = () => {
                             activeQuoteTab,
                             hasLeadAccess: !!data.access?.hasLeadAccess,
                             editableJobNames: data.access?.editableJobs || [],
-                            userDepartment: (currentUser?.Department || currentUser?.Division || '').trim(),
+                            userDepartment: (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim(),
                             alternateOptionIds: alternateOptionIds.length ? alternateOptionIds : undefined,
                         });
                         if (epv.found) {
@@ -7490,6 +7687,7 @@ const QuoteForm = () => {
         setPendingFiles([]); // Clear queue
         leadChoiceFingerprintRef.current = '';
         autoSelectCustomerAfterLeadChangeRef.current = false;
+        setLeadSwitchShellHold(false);
         preserveQuoteOnLeadChangeRef.current = null;
         quoteRowAutoSelectLeadRef.current = false;
         quoteRowFirstLeadDivisionFullRef.current = '';
@@ -7518,9 +7716,12 @@ const QuoteForm = () => {
         quoteTabRestoreSuppressLoadQuoteUntilRef.current = 0;
 
         try {
-            const userEmail = currentUser?.EmailId || '';
+            const userEmail = currentUser?.EmailId || currentUser?.email || '';
+            const divQ = quoteListDivision.trim()
+                ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
+                : '';
             const res = await fetch(
-                `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}`,
+                `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}${divQ}`,
                 { cache: 'no-store' }
             );
             if (res.ok) {
@@ -7567,7 +7768,7 @@ const QuoteForm = () => {
                 // INTELLIGENT HEADER/FOOTER SELECTION BASED ON LOGGED-IN USER
                 // ---------------------------------------------------------
                 let selectedProfile = null;
-                const userDept = currentUser?.Department || ''; // e.g., "Civil", "MEP"
+                const userDept = (quoteListDivision || currentUser?.Department || '').trim() || ''; // Division dropdown or profile
 
                 if (userDept && data.availableProfiles?.length > 0) {
                     console.log(`[Profile selection] User Dept: ${userDept}. Available profiles:`, data.availableProfiles.map(p => p.itemName));
@@ -7664,7 +7865,7 @@ const QuoteForm = () => {
                     data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
                     console.log('[QuoteForm] Auto-selecting first Lead Job:', data.leadJobPrefix, firstLeadDivisionFull);
                 } else {
-                    const userDeptL = (currentUser?.Department || '').toLowerCase();
+                    const userDeptL = (quoteListDivision || currentUser?.Department || '').toLowerCase();
                     const bmsMatch = availableDivisions.find((d) => d.toLowerCase().includes('bms'));
                     const elecMatch = availableDivisions.find((d) => d.toLowerCase().includes('electrical'));
 
@@ -8248,7 +8449,7 @@ const QuoteForm = () => {
         let identitySource = 'Default'; // Track source for logging
 
         // 2. Fallback: Lookup by Department Name if server flag is missing but we have the name
-        const userDept = (currentUser?.Department || '').trim();
+        const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim();
         if (!personalProfile && userDept) {
             personalProfile = (enquiryData?.availableProfiles || []).find(p => {
                 const pItem = (p.itemName || '').trim().toLowerCase();
@@ -8393,7 +8594,7 @@ const QuoteForm = () => {
             status: 'Saved',
             digitalSignaturesJson: serializeDigitalStampsForApi(quoteDigitalStamps),
         };
-    }, [enquiryData, selectedJobs, pricingSummary, currentUser, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
+    }, [enquiryData, selectedJobs, pricingSummary, currentUser, quoteListDivision, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
 
 
 
@@ -10069,8 +10270,15 @@ const QuoteForm = () => {
 
                                         const uniqueLeadJobs = [...new Set(allLeadJobs)];
 
+                                        const leadJobLabelClean = (s) =>
+                                            String(s || '')
+                                                .replace(/^L\d+\s*-\s*/i, '')
+                                                .trim()
+                                                .toLowerCase();
+
                                         // 2. Filter based on user access (Pricing Data)
-                                        let visibleLeadJobs = [];
+                                        // Until pricing returns, show all enquiry lead options (empty array hid every root).
+                                        let visibleLeadJobs = uniqueLeadJobs;
                                         if (pricingData && pricingData.access) {
                                             visibleLeadJobs = uniqueLeadJobs.filter(leadJob => {
                                                 const leadJobName = leadJob.replace(/^L\d+\s*-\s*/, '').trim();
@@ -10078,16 +10286,18 @@ const QuoteForm = () => {
 
                                                 if (currentUser?.role === 'Admin' || currentUser?.Roles === 'Admin') return true;
 
-                                                const userDept = (currentUser?.Department || '').trim().toLowerCase();
+                                                const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
 
                                                 // Hard Filter: Explicitly exclude civil from non-civil and vice-versa if it's a root mismatch
                                                 if (userDept && userDept === 'civil' && !jobNameLower.includes('civil')) return false;
 
-                                                // Find the actual root job object in pricingData
+                                                // Find the actual root job object in pricingData (ItemName may be "L1 - X" or "X")
                                                 const rootJob = (pricingData.jobs || []).find(j => {
                                                     const isRoot = !j.parentId || j.parentId == '0' || j.parentId == 0;
-                                                    const name = (j.itemName || j.DivisionName || j.ItemName || '').toLowerCase();
-                                                    return isRoot && (name === jobNameLower || name === leadJob.toLowerCase());
+                                                    if (!isRoot) return false;
+                                                    const raw = (j.itemName || j.DivisionName || j.ItemName || '').trim();
+                                                    const name = leadJobLabelClean(raw);
+                                                    return name === jobNameLower || name === leadJobLabelClean(leadJob);
                                                 });
 
                                                 if (!rootJob) return false;
@@ -10217,13 +10427,17 @@ const QuoteForm = () => {
                                                 }}
                                                 value={selectedValue}
                                                 onChange={(e) => {
-                                                    quoteRowDivisionLeadLockRef.current = false;
                                                     const val = e.target.value;
                                                             if (!val || !String(val).trim()) return;
                                                             const nextFp = leadJobChoiceFingerprint(val);
                                                             const prevFp = leadChoiceFingerprintRef.current;
                                                             const didLeadChange = !!nextFp && nextFp !== prevFp;
+                                                            // True: blocks external-customer "(L#)" effect from overwriting the user's lead mid-transition.
+                                                            // False: allow that alignment when only re-selecting/normalizing the same branch.
+                                                            quoteRowDivisionLeadLockRef.current = !!didLeadChange;
                                                             if (didLeadChange) {
+                                                                setPricingSummaryBusy(true);
+                                                                setLeadSwitchShellHold(true);
                                                                 autoSelectCustomerAfterLeadChangeRef.current = true;
                                                                 const tn = (toName || '').trim();
                                                                 // Never reuse another lead branch's saved quote when only ToName is re-applied.
@@ -10250,21 +10464,15 @@ const QuoteForm = () => {
                                                             const nextPrefixForPricing = val.match(/^L\d+/)
                                                                 ? val.split('-')[0].trim()
                                                                 : val;
+                                                    pendingPricingBootstrapRef.current = {
+                                                        leadJobPrefixOverride: nextPrefixForPricing,
+                                                    };
                                                     if (val.match(/^L\d+/)) {
                                                                 setEnquiryData(prev => ({ ...prev, leadJobPrefix: nextPrefixForPricing }));
                                                     } else {
                                                         setEnquiryData(prev => ({ ...prev, leadJobPrefix: val }));
                                                     }
-
-                                                            const reqNo = enquiryData?.enquiry?.RequestNo;
-                                                            const cx = (toNameRef.current || '').trim();
-                                                            if (reqNo && cx) {
-                                                                queueMicrotask(() =>
-                                                                    loadPricingData(reqNo, cx, {
-                                                                        leadJobPrefixOverride: nextPrefixForPricing
-                                                                    })
-                                                                );
-                                                            }
+                                                    // Pricing fetch runs once in useEffect after this commit (no duplicate microtask/clearCustomer fetch).
                                                 }}
                                             >
                                                 <option value="" disabled>Select Lead Job</option>
@@ -10534,7 +10742,7 @@ const QuoteForm = () => {
                                 )}
                             </div>
 
-                            {enquiryData && enquiryData.leadJobPrefix && toName?.trim() && (
+                            {enquiryData && enquiryData.leadJobPrefix && quotePreviewCustomerGate && (
                             <>
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
@@ -10612,7 +10820,7 @@ const QuoteForm = () => {
 
 
                 {/* Scrollable Content Area: Pricing & Information */}
-                {enquiryData && enquiryData.leadJobPrefix && toName?.trim() ? (
+                {enquiryData && enquiryData.leadJobPrefix && quotePreviewCustomerGate ? (
                     <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
 
 
@@ -10784,7 +10992,7 @@ const QuoteForm = () => {
                                                     });
 
                                                 // Filter Pricing Summary — under each subjob tab, only that job subtree (not all L1 siblings).
-                                                const filteredPricing = pricingSummary.filter((grp) => {
+                                                const filteredPricing = pricingSummaryRowsForUi.filter((grp) => {
                                                     const grpNameNorm = collapseSpacesLower(stripQuoteJobPrefix(grp.name || ''));
                                                     const matchingJobs = jobsPool.filter((j) =>
                                                         collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')) === grpNameNorm
@@ -10823,7 +11031,7 @@ const QuoteForm = () => {
 
                                                     if (!isRelevant) return false;
 
-                                                    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+                                                    const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                                                     const isStrictlyLimited = userDept && !['civil', 'admin', 'bms admin'].includes(userDept) && !isAdmin;
 
                                                     if (isStrictlyLimited) {
@@ -10849,8 +11057,20 @@ const QuoteForm = () => {
 
                                                         {/* Pricing Summary (Latest Price) */}
                                                         {(filteredPricing.length > 0) && (
-                                                            <div style={{ padding: '8px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px', marginTop: '12px' }}>
-                                                                <h5 style={{ margin: '0 0 8px 0', fontSize: '11px', color: '#166534', fontWeight: '800' }}>PRICING SUMMARY (LATEST):</h5>
+                                                            <div
+                                                                style={{
+                                                                    padding: '8px',
+                                                                    background: '#f0fdf4',
+                                                                    border: '1px solid #bbf7d0',
+                                                                    borderRadius: '6px',
+                                                                    marginTop: '12px',
+                                                                    opacity: pricingSummaryBusy ? 0.68 : 1,
+                                                                    transition: 'opacity 0.15s ease-out',
+                                                                }}
+                                                            >
+                                                                <h5 style={{ margin: '0 0 8px 0', fontSize: '11px', color: '#166534', fontWeight: '800' }}>
+                                                                    PRICING SUMMARY (LATEST):{pricingSummaryBusy ? ' …' : ''}
+                                                                </h5>
                                                                 {filteredPricing.map((grp, i) => (
                                                                     <div key={i} style={{ marginBottom: '6px', paddingBottom: '4px', borderBottom: '1px dashed #e2e8f0' }}>
                                                                         <div style={{ fontSize: '11px', fontWeight: '700', color: '#166534', display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -11387,6 +11607,43 @@ const QuoteForm = () => {
                                     }}
                                 >
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Division</span>
+                                        <select
+                                            value={quoteListDivision}
+                                            onChange={(e) => {
+                                                setQuoteListDivision(e.target.value);
+                                                if (quoteListCategory === QUOTE_LIST_CATEGORY.PENDING) {
+                                                    refetchPendingQuotes();
+                                                }
+                                            }}
+                                            disabled={quoteListDivisionsLoading || !quoteListDivisions.length}
+                                            style={{
+                                                minWidth: '140px',
+                                                maxWidth: '200px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: quoteListDivisionsLoading ? '#f1f5f9' : '#fff',
+                                                color: '#334155',
+                                                cursor:
+                                                    quoteListDivisionsLoading || !quoteListDivisions.length
+                                                        ? 'not-allowed'
+                                                        : 'pointer',
+                                            }}
+                                        >
+                                            {quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
+                                                <option value="" disabled>Loading…</option>
+                                            )}
+                                            {!quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
+                                                <option value="" disabled>No divisions</option>
+                                            )}
+                                            {quoteListDivisions.map((d) => (
+                                                <option key={d} value={d}>{d}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
                                         <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
@@ -11395,6 +11652,7 @@ const QuoteForm = () => {
                                                 setQuoteListCategory(v);
                                                 if (v === QUOTE_LIST_CATEGORY.PENDING) {
                                                     setQuoteSearchResults([]);
+                                                    refetchPendingQuotes();
                                                 }
                                             }}
                                             style={{
@@ -11417,9 +11675,9 @@ const QuoteForm = () => {
                                             display: 'flex',
                                             flexDirection: 'column',
                                             gap: '4px',
-                                            flex: '1 1 160px',
-                                            minWidth: '120px',
-                                            maxWidth: '360px',
+                                            flex: '1 1 96px',
+                                            minWidth: '72px',
+                                            maxWidth: '216px',
                                         }}
                                     >
                                         <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>
@@ -11552,7 +11810,7 @@ const QuoteForm = () => {
                             </div>
                             {quoteListSummaryBody}
                         </div>
-                    ) : (!enquiryData.leadJobPrefix || !toName?.trim()) ? (
+                    ) : (!enquiryData.leadJobPrefix || !quotePreviewCustomerGate) ? (
                         <div style={{
                             height: '100%',
                             display: 'flex',
@@ -11617,6 +11875,43 @@ const QuoteForm = () => {
                                     }}
                                 >
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Division</span>
+                                        <select
+                                            value={quoteListDivision}
+                                            onChange={(e) => {
+                                                setQuoteListDivision(e.target.value);
+                                                if (quoteListCategory === QUOTE_LIST_CATEGORY.PENDING) {
+                                                    refetchPendingQuotes();
+                                                }
+                                            }}
+                                            disabled={quoteListDivisionsLoading || !quoteListDivisions.length}
+                                            style={{
+                                                minWidth: '140px',
+                                                maxWidth: '200px',
+                                                padding: '6px 10px',
+                                                fontSize: '12px',
+                                                borderRadius: '6px',
+                                                border: '1px solid #cbd5e1',
+                                                background: quoteListDivisionsLoading ? '#f1f5f9' : '#fff',
+                                                color: '#334155',
+                                                cursor:
+                                                    quoteListDivisionsLoading || !quoteListDivisions.length
+                                                        ? 'not-allowed'
+                                                        : 'pointer',
+                                            }}
+                                        >
+                                            {quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
+                                                <option value="" disabled>Loading…</option>
+                                            )}
+                                            {!quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
+                                                <option value="" disabled>No divisions</option>
+                                            )}
+                                            {quoteListDivisions.map((d) => (
+                                                <option key={d} value={d}>{d}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
                                         <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
@@ -11625,6 +11920,7 @@ const QuoteForm = () => {
                                                 setQuoteListCategory(v);
                                                 if (v === QUOTE_LIST_CATEGORY.PENDING) {
                                                     setQuoteSearchResults([]);
+                                                    refetchPendingQuotes();
                                                 }
                                             }}
                                             style={{
@@ -11647,9 +11943,9 @@ const QuoteForm = () => {
                                             display: 'flex',
                                             flexDirection: 'column',
                                             gap: '4px',
-                                            flex: '1 1 160px',
-                                            minWidth: '120px',
-                                            maxWidth: '360px',
+                                            flex: '1 1 96px',
+                                            minWidth: '72px',
+                                            maxWidth: '216px',
                                         }}
                                     >
                                         <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>

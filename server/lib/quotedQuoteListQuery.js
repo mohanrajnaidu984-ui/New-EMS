@@ -5,6 +5,7 @@
  * Non-admin quote search / rollups should scope by department or pending tuple in `mapQuoteListingRows.js`.
  */
 const { resolvePricingAccessContext, normalizePricingJobName } = require('./quotePricingAccess');
+const { buildEnquiryMasterDepartmentExistsSql, buildMefDepartmentNameEqualsSql } = require('./quoteListDivisionFilter');
 
 const quotedCustomersSub = `
                     (
@@ -67,7 +68,10 @@ const existsLatestPositiveQuoteSql = `
 /**
  * Enquiries the user can see that already have a completed quote line (latest revision TotalAmount > 0).
  */
-async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '') {
+async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '', divisionFilter = '') {
+    const divisionClause = buildEnquiryMasterDepartmentExistsSql(divisionFilter);
+    const divisionMefDeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF');
+    const divisionMef2DeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF2');
     let userEmail = rawUserEmail;
     if (userEmail) {
         userEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
@@ -124,6 +128,7 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                 )`
                         : ''
                 }
+                ${divisionMef2DeptSql}
             )`
         : hasDeptScope
             ? `(
@@ -131,8 +136,8 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + LOWER(LTRIM(RTRIM('${deptEsc}'))) + '%'
                     OR (${deptNormEsc ? `LOWER(LTRIM(RTRIM(MEF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
-                )`
-            : `1 = 1`;
+                )${divisionMef2DeptSql}`
+            : `1 = 1${divisionMef2DeptSql}`;
 
     const scopedJobIdsSelect = `
                     (
@@ -225,9 +230,10 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                     EF.ItemName LIKE '%- ' + MEF.DivisionCode OR
                     MEF.ItemName LIKE '%' + EF.ItemName + '%'
                 )
-                WHERE (${mefAccessPredicate})
+                WHERE (${mefAccessPredicate})${divisionMefDeptSql}
                 ${assignedOnlyClause}
                 AND ${existsLatestPositiveQuoteSql}
+                ${divisionClause}
                 ${extraWhereSql}
                 ORDER BY E.DueDate DESC, E.RequestNo DESC
             `;
@@ -276,6 +282,7 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                     ${scopedJobIdsAdmin}
                 FROM EnquiryMaster E
                 WHERE ${existsLatestPositiveQuoteSql}
+                ${divisionClause}
                 ${extraWhereSql}
                 ORDER BY E.DueDate DESC, E.RequestNo DESC
             `;

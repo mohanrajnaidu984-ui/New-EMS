@@ -1,6 +1,6 @@
 'use strict';
 
-const { getPricingAnchorJobs, expandVisibleJobIdsFromAnchors } = require('./quotePricingAccess');
+const { getPricingAnchorJobs, getPricingAnchorJobsForDivision, expandVisibleJobIdsFromAnchors } = require('./quotePricingAccess');
 
 function jsNormKey(s) {
     return String(s || '')
@@ -1176,8 +1176,9 @@ function buildMultiLeadQuoteRollup(enqRequestNo, pvOwn, pvCust, allPrices, allQu
 /**
  * Maps raw enquiry rows from list/pending / list/search SQL into the shape the Quote UI expects.
  */
-async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
+async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, sessionDivision = '') {
     if (!enquiries || enquiries.length === 0) return [];
+    const sessionDivTrim = (sessionDivision || '').toString().trim();
     // One UI row per pending pricing value: prefer EnquiryPricingValues.ID (same PV row can join multiple EF rows).
     // Quoted list rows have no ListPendingPvId — fall back to tuple text; then only RequestNo for legacy rows.
     const pendingTupleKey = (e) => {
@@ -1204,11 +1205,14 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
     }
 
     const userDepartment = accessCtx ? accessCtx.userDepartment : '';
+    /** When the Quote UI sends a Division dropdown value, own-job rollups and customer-column scope use it — not profile Department. */
+    const ownJobScopeDepartment = sessionDivTrim || userDepartment || '';
     const requestNos = enquiriesToMap.map(e => `'${e.RequestNo}'`).join(',');
 
     // Fetch Jobs (CCMailIds required for anchor scope — same as pricing)
         const jobsRes = await sql.query(`
-            SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode, MEF.CCMailIds AS CCMailIds
+            SELECT EF.RequestNo, EF.ID, EF.ParentID, EF.ItemName, EF.LeadJobCode,
+                   MEF.CCMailIds AS CCMailIds, MEF.DepartmentName AS DepartmentName
             FROM EnquiryFor EF
             LEFT JOIN Master_EnquiryFor MEF ON (EF.ItemName = MEF.ItemName OR EF.ItemName LIKE '% - ' + MEF.ItemName)
             WHERE EF.RequestNo IN (${requestNos})
@@ -1342,7 +1346,9 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             // Filter flatList by ScopedJobIDs â€” prefer JS anchors (aligned with pricing) when user is non-admin
             let scopedJobIDsStr = (enq.ScopedJobIDs || '').toString().split(',').map(id => id.trim()).filter(Boolean);
             if (userEmail && accessCtx && accessCtx.user && !accessCtx.isAdmin) {
-                const anchors = getPricingAnchorJobs(enqJobs, accessCtx, userEmail);
+                const anchors = sessionDivTrim
+                    ? getPricingAnchorJobsForDivision(enqJobs, accessCtx, userEmail, sessionDivTrim)
+                    : getPricingAnchorJobs(enqJobs, accessCtx, userEmail);
                 if (anchors.length > 0) {
                     const visibleIds = expandVisibleJobIdsFromAnchors(anchors, enqJobs);
                     scopedJobIDsStr = Array.from(visibleIds);
@@ -1484,9 +1490,11 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
             const finalCustomerSet = new Set();
             const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
             const anchorJobs = userEmail && accessCtx && accessCtx.user
-                ? getPricingAnchorJobs(enqJobs, accessCtx, userEmail)
+                ? (sessionDivTrim
+                    ? getPricingAnchorJobsForDivision(enqJobs, accessCtx, userEmail, sessionDivTrim)
+                    : getPricingAnchorJobs(enqJobs, accessCtx, userEmail))
                 : enqJobs.filter(j => !j.ParentID || j.ParentID == '0' || j.ParentID == 0);
-            const ownDeptClean = stripLeadPrefix(userDepartment || '');
+            const ownDeptClean = stripLeadPrefix(ownJobScopeDepartment || '');
             const ownDeptNorm = normalize(ownDeptClean);
             let hasOwnAsLeadInAnyBranch = false;
             let hasOwnAsSubjobInAnyBranch = false;
@@ -1666,7 +1674,9 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx) {
 
             let ownJobFromQuote = pendingOwnFromTuple;
             if (!ownJobFromQuote) {
-                if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
+                if (sessionDivTrim) {
+                    ownJobFromQuote = sessionDivTrim;
+                } else if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
                     ownJobFromQuote = String(userDepartment).trim();
                 } else {
                     // Admins / no department: use SQL column (latest quote on enquiry, any division).

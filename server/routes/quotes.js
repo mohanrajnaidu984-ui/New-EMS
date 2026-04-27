@@ -11,6 +11,7 @@ const {
     expandVisibleJobIdsFromAnchors,
     userHasQuotePricingEnquiryAccess,
     normalizePricingJobName,
+    jobBelongsToSessionDivision,
 } = require('../lib/quotePricingAccess');
 const mapQuoteListingRows = require('../lib/mapQuoteListingRows');
 const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
@@ -234,11 +235,12 @@ router.get('/attention-by-department', async (req, res) => {
 
 router.get('/list/pending', async (req, res) => {
     try {
-        let { userEmail } = req.query;
-        console.log(`[API] Check Pending Quotes for ${userEmail || 'All'}...`);
-        const { enquiries, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, '');
+        let { userEmail, division } = req.query;
+        const divisionTrim = (division || '').toString().trim();
+        console.log(`[API] Check Pending Quotes for ${userEmail || 'All'}... division=${divisionTrim || '(none)'}`);
+        const { enquiries, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, '', divisionTrim);
         if (enquiries.length > 0) {
-            const finalMapped = await mapQuoteListingRows(sql, enquiries, ue, accessCtx);
+            const finalMapped = await mapQuoteListingRows(sql, enquiries, ue, accessCtx, divisionTrim);
             const pendingRows = finalMapped.filter((row) => !shouldOmitFromPendingQuoteList(row));
             if (pendingRows.length > 0) {
                 console.log(`[API] FINAL DATA Enq 0:`, {
@@ -260,15 +262,21 @@ router.get('/list/pending', async (req, res) => {
 
 router.get('/list/search', async (req, res) => {
     try {
-        let { userEmail, q, dateFrom, dateTo } = req.query;
+        let { userEmail, q, dateFrom, dateTo, division } = req.query;
+        const divisionTrim = (division || '').toString().trim();
         const extra = buildQuoteListSearchExtraWhere(q || '', dateFrom || '', dateTo || '');
         if (!extra.ok) {
             return res.json([]);
         }
-        const { enquiries: pendingRaw, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, extra.sql);
-        const { enquiries: quotedRaw } = await runQuotedQuoteListQuery(sql, userEmail, extra.sql);
-        const pendingMapped = await mapQuoteListingRows(sql, pendingRaw || [], ue, accessCtx);
-        const quotedMapped = await mapQuoteListingRows(sql, quotedRaw || [], ue, accessCtx);
+        const { enquiries: pendingRaw, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(
+            sql,
+            userEmail,
+            extra.sql,
+            divisionTrim
+        );
+        const { enquiries: quotedRaw } = await runQuotedQuoteListQuery(sql, userEmail, extra.sql, divisionTrim);
+        const pendingMapped = await mapQuoteListingRows(sql, pendingRaw || [], ue, accessCtx, divisionTrim);
+        const quotedMapped = await mapQuoteListingRows(sql, quotedRaw || [], ue, accessCtx, divisionTrim);
         const byNo = new Map();
         for (const row of quotedMapped) {
             byNo.set(String(row.RequestNo), { ...row, QuoteListKind: 'quoted' });
@@ -569,9 +577,10 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
     try {
         const { requestNo } = req.params;
         const userEmail = (req.query.userEmail || '').toString().trim();
+        const sessionDivision = (req.query.division || '').toString().trim();
         if (userEmail) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-            const ok = await userHasQuotePricingEnquiryAccess(normalizedEmail, requestNo);
+            const ok = await userHasQuotePricingEnquiryAccess(normalizedEmail, requestNo, sessionDivision);
             if (!ok) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
@@ -751,6 +760,76 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
             }
             rawItems = uniqueRawItems;
             log(`Deduplicated Raw Items Count: ${rawItems.length}`);
+
+            /**
+             * Session division must NOT shrink the tree to matching rows only (that drops parent lead roots,
+             * so the Quote Lead Job dropdown showed a single child job instead of every lead root where the
+             * division participates). Expand: for each matching row, take its root and keep that full subtree.
+             */
+            if (sessionDivision && uniqueRawItems.length > 0) {
+                const matching = uniqueRawItems.filter((item) =>
+                    jobBelongsToSessionDivision(
+                        { ItemName: item.ItemName, DepartmentName: item.DepartmentName },
+                        sessionDivision
+                    )
+                );
+                if (matching.length === 0) {
+                    log(`Session division "${sessionDivision}" matched no rows — keeping full enquiry tree`);
+                    rawItems = uniqueRawItems;
+                } else {
+                    const byId = new Map();
+                    uniqueRawItems.forEach((item) => {
+                        if (item.ID != null) byId.set(String(item.ID), item);
+                    });
+                    const rootIdForItem = (item) => {
+                        let curr = item;
+                        let s = 0;
+                        while (curr && s < 50) {
+                            const pid = curr.ParentID;
+                            if (pid == null || pid === '' || pid === '0' || pid === 0) return curr.ID;
+                            const p = byId.get(String(pid));
+                            if (!p) return curr.ID;
+                            curr = p;
+                            s++;
+                        }
+                        return curr.ID;
+                    };
+                    const rootsInvolved = new Set();
+                    matching.forEach((m) => rootsInvolved.add(rootIdForItem(m)));
+
+                    const childrenByParent = new Map();
+                    uniqueRawItems.forEach((item) => {
+                        const pid = item.ParentID;
+                        if (pid == null || pid === '' || pid === '0' || pid === 0) return;
+                        const k = String(pid);
+                        if (!childrenByParent.has(k)) childrenByParent.set(k, []);
+                        childrenByParent.get(k).push(item);
+                    });
+
+                    const allowedIds = new Set();
+                    rootsInvolved.forEach((rid) => {
+                        allowedIds.add(String(rid));
+                        const queue = [rid];
+                        while (queue.length) {
+                            const id = queue.shift();
+                            const kids = childrenByParent.get(String(id)) || [];
+                            kids.forEach((ch) => {
+                                const cid = ch.ID != null ? String(ch.ID) : '';
+                                if (cid && !allowedIds.has(cid)) {
+                                    allowedIds.add(cid);
+                                    queue.push(ch.ID);
+                                }
+                            });
+                        }
+                    });
+
+                    rawItems = uniqueRawItems.filter((i) => i.ID != null && allowedIds.has(String(i.ID)));
+                    log(
+                        `After session division subtree expansion (${sessionDivision}): ${rawItems.length} items, ` +
+                            `${rootsInvolved.size} root branch(es)`
+                    );
+                }
+            }
 
             // Build unique Lead Job code map for ROOTS ONLY (to follow project structure)
             const rootsOnly = rawItems.filter(r => !r.ParentID || r.ParentID == '0' || r.ParentID == 0);

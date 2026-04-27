@@ -153,7 +153,7 @@ function enqForItemAlignsToJobItem(prItem, jobItem) {
  * @param {object[]} params.enquiryCustomers — { RequestNo, CustomerName }
  * @param {string} params.userDepartment — Master_ConcernedSE.Department
  * @param {Record<string, object>} [params.optionMap] — synthetic options from values (same as pricing.js)
- * @returns {{ enabled: boolean, showInPending?: boolean, pricingSummaryStatus?: string, internalRequired?: number, internalSatisfied?: number, externalRequired?: number, externalSatisfied?: number }}
+ * @returns {{ enabled: boolean, showInPending?: boolean, pricingSummaryStatus?: string, pricingSummaryOwnJobStatus?: string, internalRequired?: number, internalSatisfied?: number, externalRequired?: number, externalSatisfied?: number, internalOwnSatisfied?: number, externalOwnSatisfied?: number }}
  */
 function evaluatePendingPricingSummarySpec(params) {
     const { requestNo, enqJobs, enqPrices, enquiryCustomers, userDepartment, optionMap = {} } = params;
@@ -187,7 +187,23 @@ function evaluatePendingPricingSummarySpec(params) {
         );
         if (!parentCustomer) continue;
         const key = `${normPricingCustomerKey(parentCustomer)}\t${normPricingCustomerKey(leadJobName)}`;
-        internalTuples.set(key, { customerName: parentCustomer, leadJobName });
+        const jId = jobIdOf(J);
+        const pId = jobIdOf(P);
+        const prev = internalTuples.get(key);
+        const relatedJobIds = prev?.relatedJobIds ? new Set(prev.relatedJobIds) : new Set();
+        if (jId != null && jId !== '') relatedJobIds.add(String(jId));
+        if (pId != null && pId !== '') relatedJobIds.add(String(pId));
+        for (const dj of collectDescendantEnquiryForIds([J], jobs)) {
+            relatedJobIds.add(String(dj));
+        }
+        /** Base row must sit on this EnquiryFor row for list “own job” status (not satisfied by subjob EPV alone). */
+        const ownAnchorJobIdNew = String(jobIdOf(P) ?? '').trim();
+        internalTuples.set(key, {
+            customerName: parentCustomer,
+            leadJobName,
+            relatedJobIds,
+            ownAnchorJobId: trimStr(prev?.ownAnchorJobId) || ownAnchorJobIdNew,
+        });
     }
 
     const isItemEqualLeadLine = (J) => {
@@ -221,16 +237,21 @@ function evaluatePendingPricingSummarySpec(params) {
               ? anyEnquiryLeadLine
               : [];
 
-    /** 4b.ii: base rows for externals must be on a job under a lead line (HVAC, …) — not Master=PV. fields. */
-    const leadExternalScopeJobIds = collectDescendantEnquiryForIds(leadForExternal, jobs);
-
-    const externalNames = [];
-    if (leadForExternal.length > 0) {
-        for (const row of enquiryCustomers || []) {
-            if (!reqNoEq(row.RequestNo ?? row.requestNo, rn)) continue;
-            const cn = trimStr(row.CustomerName ?? row.customerName);
-            if (cn) externalNames.push(cn);
+    /** 4b.ii: externals tie to jobs under lead roots when hierarchy matches; fallback = any enquiry job id when scope is empty (EPV often valid while Item=Lead detection misses labels). */
+    let leadExternalScopeJobIds = collectDescendantEnquiryForIds(leadForExternal, jobs);
+    if (leadExternalScopeJobIds.size === 0 && jobs.length > 0) {
+        for (const j of jobs) {
+            const id = jobIdOf(j);
+            if (id != null && id !== '') leadExternalScopeJobIds.add(String(id));
         }
+    }
+
+    /** Always honour EnquiryCustomer list for this request (was gated on leadForExternal — missed AWAL/Ramada vs EPV rows). */
+    const externalNames = [];
+    for (const row of enquiryCustomers || []) {
+        if (!reqNoEq(row.RequestNo ?? row.requestNo, rn)) continue;
+        const cn = trimStr(row.CustomerName ?? row.customerName);
+        if (cn) externalNames.push(cn);
     }
     const extUnique = [...new Set(externalNames)];
 
@@ -239,12 +260,24 @@ function evaluatePendingPricingSummarySpec(params) {
     const hasInternalBase = (tuple) => {
         const wantCustKey = normPricingCustomerKey(tuple.customerName);
         const wantLead = tuple.leadJobName;
+        const related = tuple.relatedJobIds;
         for (const pr of prices) {
             if (!reqNoEq(pr.RequestNo ?? pr.requestNo, rn)) continue;
             if (parsePriceNum(pr.Price) <= 0) continue;
             if (!isBasePriceRow(pr, optionMap)) continue;
-            if (!pricingCustomerRowMatchesKey(pr.CustomerName ?? pr.customerName, wantCustKey)) continue;
-            if (!leadJobMatches(pr.LeadJobName ?? pr.leadJobName, wantLead)) continue;
+            const mid = pr.MatchedEnquiryForId ?? pr.matchedEnquiryForId;
+            const eid = pr.EnquiryForID ?? pr.enquiryForID;
+            const midS = mid != null && String(mid).trim() !== '' && String(mid) !== '0' ? String(mid) : '';
+            const eidS = eid != null && String(eid).trim() !== '' && String(eid) !== '0' ? String(eid) : '';
+            const nameMatch = pricingCustomerRowMatchesKey(pr.CustomerName ?? pr.customerName, wantCustKey);
+            const jobMatch =
+                related &&
+                related.size > 0 &&
+                ((midS && related.has(midS)) || (eidS && related.has(eidS)));
+            if (!nameMatch && !jobMatch) continue;
+            /* EPV row keyed to this EnquiryFor satisfies the slot even if CustomerName/LeadJobName text
+             * drifts (e.g. HVAC vs BMS label on the same L1/L2 branch). */
+            if (!jobMatch && !leadJobMatches(pr.LeadJobName ?? pr.leadJobName, wantLead)) continue;
             return true;
         }
         return false;
@@ -280,6 +313,55 @@ function evaluatePendingPricingSummarySpec(params) {
         return false;
     };
 
+    /** Own-job only: positive Base EPV on the department lead row itself (not descendants). */
+    const leadOwnJobIdSet = new Set(
+        (leadForExternal || [])
+            .map((j) => String(jobIdOf(j)))
+            .filter((id) => id && id !== 'undefined')
+    );
+
+    const hasInternalBaseOwnJob = (tuple) => {
+        const wantCustKey = normPricingCustomerKey(tuple.customerName);
+        const wantLead = tuple.leadJobName;
+        const anchor = trimStr(tuple.ownAnchorJobId || '');
+        if (!anchor) return false;
+        for (const pr of prices) {
+            if (!reqNoEq(pr.RequestNo ?? pr.requestNo, rn)) continue;
+            if (parsePriceNum(pr.Price) <= 0) continue;
+            if (!isBasePriceRow(pr, optionMap)) continue;
+            const mid = pr.MatchedEnquiryForId ?? pr.matchedEnquiryForId;
+            const eid = pr.EnquiryForID ?? pr.enquiryForID;
+            const midS = mid != null && String(mid).trim() !== '' && String(mid) !== '0' ? String(mid) : '';
+            const eidS = eid != null && String(eid).trim() !== '' && String(eid) !== '0' ? String(eid) : '';
+            const onOwn = (midS && midS === anchor) || (eidS && eidS === anchor);
+            if (!onOwn) continue;
+            const nameMatch = pricingCustomerRowMatchesKey(pr.CustomerName ?? pr.customerName, wantCustKey);
+            const jobMatch = onOwn;
+            if (!nameMatch && !jobMatch) continue;
+            if (!jobMatch && !leadJobMatches(pr.LeadJobName ?? pr.leadJobName, wantLead)) continue;
+            return true;
+        }
+        return false;
+    };
+
+    const hasExternalBaseOwnJob = (extDisplayName) => {
+        const wantKey = normPricingCustomerKey(extDisplayName);
+        if (!wantKey) return false;
+        for (const pr of prices) {
+            if (!reqNoEq(pr.RequestNo ?? pr.requestNo, rn)) continue;
+            if (parsePriceNum(pr.Price) <= 0) continue;
+            if (!isBasePriceRow(pr, optionMap)) continue;
+            if (!pricingCustomerRowMatchesKey(pr.CustomerName ?? pr.customerName, wantKey)) continue;
+            const mid = pr.MatchedEnquiryForId ?? pr.matchedEnquiryForId;
+            const eid = pr.EnquiryForID ?? pr.enquiryForID;
+            const midS = mid != null && String(mid).trim() !== '' && String(mid) !== '0' ? String(mid) : '';
+            const eidS = eid != null && String(eid).trim() !== '' && String(eid) !== '0' ? String(eid) : '';
+            if (midS && leadOwnJobIdSet.has(midS)) return true;
+            if (eidS && leadOwnJobIdSet.has(eidS)) return true;
+        }
+        return false;
+    };
+
     const internalList = Array.from(internalTuples.values());
     let internalSatisfied = 0;
     for (const t of internalList) {
@@ -293,16 +375,28 @@ function evaluatePendingPricingSummarySpec(params) {
     }
     const externalRequired = extUnique.length;
 
+    let internalOwnSatisfied = 0;
+    for (const t of internalList) {
+        if (hasInternalBaseOwnJob(t)) internalOwnSatisfied += 1;
+    }
+    let externalOwnSatisfied = 0;
+    for (const e of extUnique) {
+        if (hasExternalBaseOwnJob(e)) externalOwnSatisfied += 1;
+    }
+
     const totalRequired = internalRequired + externalRequired;
     if (totalRequired === 0) {
         return {
             enabled: true,
             showInPending: false,
             pricingSummaryStatus: 'All Priced',
+            pricingSummaryOwnJobStatus: 'All Priced',
             internalRequired: 0,
             internalSatisfied: 0,
             externalRequired: 0,
             externalSatisfied: 0,
+            internalOwnSatisfied: 0,
+            externalOwnSatisfied: 0,
         };
     }
 
@@ -313,14 +407,24 @@ function evaluatePendingPricingSummarySpec(params) {
     if (allSatisfied) pricingSummaryStatus = 'All Priced';
     else if (noneSatisfied) pricingSummaryStatus = 'None Priced';
 
+    const allOwnSatisfied =
+        internalOwnSatisfied === internalRequired && externalOwnSatisfied === externalRequired;
+    const noneOwnSatisfied = internalOwnSatisfied === 0 && externalOwnSatisfied === 0;
+    let pricingSummaryOwnJobStatus = 'Partial Priced';
+    if (allOwnSatisfied) pricingSummaryOwnJobStatus = 'All Priced';
+    else if (noneOwnSatisfied) pricingSummaryOwnJobStatus = 'None Priced';
+
     return {
         enabled: true,
         showInPending: !allSatisfied,
         pricingSummaryStatus,
+        pricingSummaryOwnJobStatus,
         internalRequired,
         internalSatisfied,
         externalRequired,
         externalSatisfied,
+        internalOwnSatisfied,
+        externalOwnSatisfied,
     };
 }
 
