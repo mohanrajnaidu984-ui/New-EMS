@@ -2107,10 +2107,21 @@ const QuoteForm = () => {
         setQuoteListCategory(QUOTE_LIST_CATEGORY.PENDING);
         // Clear left panel so Pricing Summary + new/draft view are visible again.
         setShowQuoteListSummaryOverQuote(false);
-        resetFormState();
+        setQuoteId(null);
+        setQuoteNumber('');
+        setLoadedEnquiryQuoteRowForPreview(null);
+        setSubject('');
+        setSignatory('');
+        setSignatoryDesignation('');
+        setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
+        setLoadedQuotePreparedByEmail('');
+        setQuoteDate(new Date().toISOString().split('T')[0]);
+        setCustomerReference(resolveEnquiryCustomerRef(enquiryData?.enquiry));
+        setQuoteTypeList([]);
+        setQuoteEnquiryTypeSelect('');
         // Pass division explicitly to avoid fetching with a stale/empty division value.
         refetchPendingQuotes(quoteListDivision);
-    }, [refetchPendingQuotes, quoteListDivision, resetFormState]);
+    }, [refetchPendingQuotes, quoteListDivision, currentUser, enquiryData?.enquiry]);
 
     useEffect(() => {
         const email = (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim();
