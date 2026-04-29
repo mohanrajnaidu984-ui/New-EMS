@@ -1682,27 +1682,36 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
              * internal inheritance the same way as `buildJobPriceTreeNode` / `buildJobPriceTreeNodeForCustomer` —
              * not a separate scan of `enqPrices` (that missed some nested / inherited rows for externals).
              */
-            const sumSubtreeBasesForListCustomer = (listHdrLabel) => {
-                const wantKey = normPricingCustomerKey(String(listHdrLabel || '').trim());
-                let sum = 0;
+            /**
+             * List column "Customer Name & Total Price":
+             * Total must be the base price of the Ownjob (root) + base prices of all subjobs in its subtree.
+             *
+             * IMPORTANT: This total must NOT depend on which list header label happens to be shown (external
+             * customer vs internal label). Customer-specific base rows are a *display* concept; the summary total
+             * is a pure subtree base-price sum.
+             */
+            /**
+             * List column "Customer Name & Total Price":
+             * The total must match what the UI shows in "Individual & Subjob Base prices".
+             *
+             * To prevent any drift (fuzzy matching, inheritance, rounding differences), compute totals
+             * directly from the same tree nodes we render for the right column.
+             */
+            const sumSubtreeBasesFromTree = (rootNode) => {
+                // Avoid float drift: store as integer "cents" (2 decimals)
+                let sumCents = 0;
                 let maxAt = null;
-                const bump = (amt, at) => {
-                    sum += amt;
-                    if (at && (!maxAt || new Date(at) > new Date(maxAt))) maxAt = at;
-                };
-                for (const jid of subtreeIds) {
-                    if (!wantKey) {
-                        const { price, updatedAt } = getDivisionPrice(jid, 'Base Price');
-                        if (parsePriceNum(price) > 0) bump(parsePriceNum(price), updatedAt);
-                    } else {
-                        const { price, updatedAt } = getDivisionPriceForCustomer(String(jid), 'Base Price', wantKey, {
-                            priceRowInSubtree,
-                            customerForestRootId: rid,
-                        });
-                        if (parsePriceNum(price) > 0) bump(parsePriceNum(price), updatedAt);
+                const walk = (n) => {
+                    if (!n) return;
+                    if (n.hasPrice && parsePriceNum(n.price) > 0.01) {
+                        sumCents += Math.round(parsePriceNum(n.price) * 100);
                     }
-                }
-                return { sum, maxAt };
+                    const at = n.updatedAt || null;
+                    if (at && (!maxAt || new Date(at) > new Date(maxAt))) maxAt = at;
+                    for (const ch of n.children || []) walk(ch);
+                };
+                walk(rootNode);
+                return { sum: sumCents / 100, maxAt };
             };
 
             let customerHeaderEntries = [];
@@ -1794,12 +1803,36 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 };
             };
 
-            const ownBase = getDivisionPrice(rid, 'Base Price');
-            const ownJobBasePriceEntered = ownBase.price > 0;
+            /**
+             * "Customer Name & Total Price" must be Ownjob (root) + sum of all its subjobs (entire subtree).
+             * Do NOT gate this on "ownjob base price entered" or "all anchors priced" — the list total should
+             * reflect the current priced values in the subtree.
+             */
+            /**
+             * Build the same base-price tree shown in the right column.
+             * - When the enquiry has multiple external headers for the same lead (customerHeaderEntries > 1),
+             *   the UI renders `jobForest` using `buildJobPriceTreeNodeForCustomer(...)`.
+             * - When it’s a single header, UI renders using `buildJobPriceTreeNode(...)`.
+             *
+             * Totals must be computed from the same node source to avoid mismatches (e.g. 36.10 vs 36.00).
+             */
+            const buildTotalTreeNodeForHeader = (headerLabel) => {
+                if (customerHeaderEntries.length > 1) {
+                    const ck = normPricingCustomerKey(headerLabel);
+                    return buildJobPriceTreeNodeForCustomer(rid, ck, headerLabel);
+                }
+                return buildJobPriceTreeNode(rid, new Set(), 0);
+            };
+
+            const firstHdrLabel = customerHeaderEntries[0] || '';
+            const firstTotalTreeNode = buildTotalTreeNodeForHeader(firstHdrLabel);
+            const ownJobBasePriceEntered =
+                !!(firstTotalTreeNode && firstTotalTreeNode.hasPrice && parsePriceNum(firstTotalTreeNode.price) > 0.01);
+
             let subtreeSum = 0;
             let subtreeMaxAt = null;
             if (ownJobBasePriceEntered && customerHeaderEntries.length <= 1) {
-                const t = sumSubtreeBasesForListCustomer(customerHeaderEntries[0] || '');
+                const t = sumSubtreeBasesFromTree(firstTotalTreeNode);
                 subtreeSum = t.sum;
                 subtreeMaxAt = t.maxAt;
             }
@@ -1813,15 +1846,14 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 });
             } else {
                 for (const label of customerHeaderEntries) {
-                    const k = normPricingCustomerKey(String(label || '').trim());
-                    const { sum: custSum, maxAt: custMax } = k
-                        ? sumSubtreeBasesForListCustomer(label)
+                    const nodeForHdr = buildTotalTreeNodeForHeader(label);
+                    const { sum: custSum, maxAt: custMax } = ownJobBasePriceEntered
+                        ? sumSubtreeBasesFromTree(nodeForHdr)
                         : { sum: 0, maxAt: null };
-                    const showCustomerTotal = customerOwnAnchorsAllPriced(label);
                     pricingListCustomerTotals.push({
                         label,
-                        total: showCustomerTotal ? custSum : 0,
-                        updatedAt: showCustomerTotal && custMax ? new Date(custMax).toISOString() : null,
+                        total: custSum,
+                        updatedAt: custMax ? new Date(custMax).toISOString() : null,
                     });
                 }
             }
@@ -2133,9 +2165,25 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
          * (`internalRequired`/`externalRequired` both 0), we previously fell through to `legacyPending`
          * and left full enquiries stuck on Pending Pricing.
          */
-        if (pendingOnly && divisionTrim && divisionScopedPricingStatus) {
-            /** Scoped status uses display labels; if it says All Priced but legacy still sees base gaps, keep the enquiry pending. */
-            hasPendingItems = divisionScopedPricingStatus !== 'All Priced' || legacyPending;
+        if (pendingOnly && divisionTrim) {
+            /**
+             * Division-filtered Pending Pricing must be an "own-job" view.
+             *
+             * IMPORTANT:
+             * - Use *ID-based* base-price presence for the division's anchor job(s), not display-line labels.
+             * - Display-line heuristics can still show "Not Updated" due to inheritance / label drift even after
+             *   the Own Job Base Price is saved, which keeps enquiries stuck in Pending.
+             */
+            const divAnchors = getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
+            if (divAnchors && divAnchors.length > 0) {
+                hasPendingItems = divAnchors.some((jobRec) => !strictHasPositiveBaseForJob(jobRec));
+            } else if (divisionScopedPricingStatus) {
+                // Fallback for unexpected data (no anchors): use the older display-line scoped status.
+                hasPendingItems = divisionScopedPricingStatus !== 'All Priced';
+            } else {
+                // Last resort: keep legacy behaviour if we cannot scope at all.
+                hasPendingItems = legacyPending;
+            }
         } else if (pendingOnly && userSpecPricingSummary && userSpecPricingSummary.enabled) {
             if (userSpecPricingSummary.pricingSummaryStatus === 'All Priced') {
                 hasPendingItems = !!contradictsSpecAllPriced;
@@ -2193,19 +2241,47 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
 
         const subJobPriceLines = displayItems.length > 0 ? displayItems : displayItemsRaw;
 
-        let displaySpecStatus = null;
-        if (!isAdmin && userSpecPricingSummary && userSpecPricingSummary.enabled) {
-            /** List badge under enquiry no.: with Division filter, use own-job rows only (not subjob EPV). CC uses same rule when Division is set. */
-            if (divisionTrim && userSpecPricingSummary.pricingSummaryOwnJobStatus) {
-                displaySpecStatus = userSpecPricingSummary.pricingSummaryOwnJobStatus;
-            } else if (divisionTrim && divisionScopedPricingStatus) {
-                displaySpecStatus = divisionScopedPricingStatus;
-            } else if (!isCcUser) {
-                displaySpecStatus = userSpecPricingSummary.pricingSummaryStatus;
-                if (contradictsSpecAllPriced) {
-                    displaySpecStatus = divisionScopedPricingStatus || 'Partial Priced';
-                }
+        /**
+         * List status under Enquiry No. must be based **only on own-job pricing**:
+         * - None Priced: none of the own jobs has Base Price
+         * - Partial Priced: at least one own job has Base Price
+         * - All Priced: all own jobs have Base Price
+         *
+         * IMPORTANT: Do not consider any subjob pricing for this badge.
+         */
+        const isRootJobRec = (j) => {
+            const pid = j.ParentID ?? j.parentID;
+            return pid == null || String(pid) === '0' || pid === 0 || pid === '0';
+        };
+        const basePositiveForJobId = (jid) =>
+            enqPrices.some((pr) => {
+                if (!reqNoEq(pr.RequestNo, enq.RequestNo)) return false;
+                const eid = pr.EnquiryForID ?? pr.enquiryForId;
+                if (eid == null || String(eid) === '' || String(eid) === '0') return false;
+                if (String(eid) !== String(jid)) return false;
+                if (!valueRowIsBasePrice(pr)) return false;
+                return parsePriceNum(pr.Price) > 0.01;
+            });
+        const ownJobCandidates = (() => {
+            if (divisionTrim) {
+                // Division dropdown: treat anchors of that division as "own jobs" for the badge.
+                return getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
             }
+            // No division filter: "own jobs" = lead roots on this enquiry.
+            return enqJobs.filter(isRootJobRec);
+        })();
+        const ownJobIds = [...new Set(ownJobCandidates.map((j) => jobIdOf(j)).filter((x) => x != null))];
+        let displaySpecStatus = null;
+        if (ownJobIds.length > 0) {
+            let priced = 0;
+            let unpriced = 0;
+            for (const jid of ownJobIds) {
+                if (basePositiveForJobId(jid)) priced += 1;
+                else unpriced += 1;
+            }
+            if (unpriced > 0 && priced === 0) displaySpecStatus = 'None Priced';
+            else if (unpriced > 0 && priced > 0) displaySpecStatus = 'Partial Priced';
+            else if (unpriced === 0 && priced > 0) displaySpecStatus = 'All Priced';
         }
 
         return {
@@ -3604,6 +3680,38 @@ router.put('/value', async (req, res) => {
     } catch (err) {
         console.error('Error updating value:', err);
         res.status(500).json({ error: 'Failed to update value' });
+    }
+});
+
+/**
+ * DELETE /api/pricing/value/base-price
+ * Delete Base Price(s) for a single grid cell.
+ *
+ * Used to allow deleting a priced job from Enquiry structure (user must delete prices first).
+ * We delete by stable business keys. OptionID may have duplicates; we delete all Base Price rows for this cell.
+ */
+router.delete('/value/base-price', async (req, res) => {
+    try {
+        const { requestNo, enquiryForId, customerName } = req.body || {};
+        if (!requestNo || enquiryForId == null || enquiryForId === '') {
+            return res.status(400).json({ error: 'Missing requestNo or enquiryForId' });
+        }
+        const cust = customerName != null ? String(customerName).trim() : '';
+        await sql.query`
+            DELETE FROM EnquiryPricingValues
+            WHERE RequestNo = ${requestNo}
+              AND EnquiryForID = ${enquiryForId}
+              AND LTRIM(RTRIM(ISNULL(PriceOption, N''))) = N'Base Price'
+              AND (
+                    ${cust} = N'' OR
+                    LTRIM(RTRIM(ISNULL(CustomerName, N''))) = ${cust} OR
+                    LTRIM(RTRIM(ISNULL(CustomerName, N''))) = N''
+                  )
+        `;
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error deleting base price:', err);
+        res.status(500).json({ error: 'Failed to delete base price' });
     }
 });
 

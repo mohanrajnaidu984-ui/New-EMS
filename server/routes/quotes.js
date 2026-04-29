@@ -239,6 +239,17 @@ router.get('/list/pending', async (req, res) => {
         const divisionTrim = (division || '').toString().trim();
         console.log(`[API] Check Pending Quotes for ${userEmail || 'All'}... division=${divisionTrim || '(none)'}`);
         const { enquiries, accessCtx, userEmail: ue } = await runPendingQuoteListQuery(sql, userEmail, '', divisionTrim);
+        if (Array.isArray(enquiries) && enquiries.length > 0) {
+            const e0 = enquiries[0];
+            console.log('[API] Pending raw row sample:', {
+                ReqNo: e0.RequestNo,
+                ProjectName: e0.ProjectName,
+                ListPendingOwnJobItem: e0.ListPendingOwnJobItem,
+                ListPendingLeadJobName: e0.ListPendingLeadJobName,
+                ListPendingCustomerName: e0.ListPendingCustomerName,
+                DivisionFilter: divisionTrim || '',
+            });
+        }
         if (enquiries.length > 0) {
             const finalMapped = await mapQuoteListingRows(sql, enquiries, ue, accessCtx, divisionTrim);
             const pendingRows = finalMapped.filter((row) => !shouldOmitFromPendingQuoteList(row));
@@ -346,8 +357,14 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         let toName = (req.query.toName || '').toString().trim();
         const toNameStripped = stripJobPrefixForQuoteMatch(toName) || null;
         const leadJobName = (req.query.leadJobName || '').toString().trim();
+        const leadJobNameStripped = stripJobPrefixForQuoteMatch(leadJobName) || null;
         const userEmail = (req.query.userEmail || '').toString().trim();
-        const ownJobNameFromTab = (req.query.ownJobName || '').toString().trim();
+        // In strict tuple mode, OwnJob can come from explicit tab ownJobName (direct subjob tab),
+        // otherwise fallback to Division dropdown resolution.
+        const ownJobNameFromTabRaw = (req.query.ownJobName || '').toString().trim();
+        const ownJobNameFromTabStripped = stripJobPrefixForQuoteMatch(ownJobNameFromTabRaw) || null;
+        const strictTuple = String(req.query.strictTuple || '').trim() === '1';
+        const division = (req.query.division || '').toString().trim(); // Master_EnquiryFor.DepartmentName
 
         if (userEmail) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
@@ -360,6 +377,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         // Scoped request: client sent at least one dimension to filter by.
         // Unfiltered list (?userEmail only): must NOT apply OwnJob from user department or every enquiry
         // would only show rows matching Master_ConcernedSE.Department — hiding Civil quotes for HVAC users, etc.
+        const ownJobNameFromTab = ownJobNameFromTabRaw;
         const hasScopedFilters = Boolean(toName || leadJobName || ownJobNameFromTab);
 
         // HARD RULE (scoped only):
@@ -368,6 +386,26 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         let ownJobName = '';
         if (ownJobNameFromTab) {
             ownJobName = ownJobNameFromTab;
+        } else if (strictTuple && division) {
+            // Strict tuple mode for Previous Quotes panel:
+            // Division dropdown is DepartmentName; resolve to the EnquiryFor.ItemName that represents that division on this enquiry.
+            // Prefer a root (ParentID null/0) row.
+            try {
+                const r = await sql.query`
+                    SELECT TOP 1 ef.ItemName
+                    FROM dbo.EnquiryFor ef
+                    INNER JOIN dbo.Master_EnquiryFor mef
+                        ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                    WHERE LTRIM(RTRIM(ef.RequestNo)) = LTRIM(RTRIM(${requestNo}))
+                      AND LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) = LTRIM(RTRIM(${division}))
+                    ORDER BY
+                        CASE WHEN ef.ParentID IS NULL OR ef.ParentID = 0 OR ef.ParentID = '0' THEN 0 ELSE 1 END,
+                        ef.ID
+                `;
+                ownJobName = (r.recordset?.[0]?.ItemName || '').toString().trim();
+            } catch (_) {
+                // fall through (ownJobName remains '')
+            }
         } else if (userEmail && hasScopedFilters) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
             const userRes = await sql.query`
@@ -391,6 +429,15 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
             }
         }
 
+        // Strict tuple MUST NOT broaden. If any dimension is missing, return empty so UI doesn't show another tuple's Quote Ref.
+        if (strictTuple) {
+            if (!String(leadJobName || '').trim()) return res.json([]);
+            if (!String(toName || '').trim()) return res.json([]);
+            // OwnJob must be available either from explicit tab ownJobName or from Division resolution.
+            if (!String(division || '').trim() && !String(ownJobNameFromTab || '').trim()) return res.json([]);
+            if (!String(ownJobName || '').trim()) return res.json([]);
+        }
+
         console.log(
             `[Quote API] Fetching quotes for RequestNo: ${requestNo}, LeadJob: "${leadJobName}", ToName: "${toName}", OwnJob(resolved): "${ownJobName}"`
         );
@@ -400,7 +447,10 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         request.input('toName', sql.NVarChar, toName || null);
         request.input('toNameStripped', sql.NVarChar, toNameStripped);
         request.input('leadJobName', sql.NVarChar, leadJobName || null);
+        request.input('leadJobNameStripped', sql.NVarChar, leadJobNameStripped);
         request.input('ownJobName', sql.NVarChar, ownJobName || null);
+        request.input('ownJobNameStripped', sql.NVarChar, ownJobNameFromTabStripped || stripJobPrefixForQuoteMatch(ownJobName) || null);
+        request.input('strictTuple', sql.Bit, strictTuple ? 1 : 0);
 
         const result = await request.query(`
             SELECT ID, QuoteNumber, QuoteDate,
@@ -426,6 +476,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                   AND (
                     LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N''))))
                     OR (
+                      @strictTuple = 0 AND
                       LEN(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) >= 5
                       AND LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) + N'%'
                     )
@@ -436,6 +487,12 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                 @leadJobName IS NULL
                 OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
                 OR (
+                  @leadJobNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))) <> N''
+                  AND LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))))
+                )
+                OR (
+                  @strictTuple = 0 AND
                   LTRIM(RTRIM(ISNULL(@leadJobName, N''))) <> N''
                   AND LEN(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) <= 6
                   AND LEFT(UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))), 1) = N'L'
@@ -451,6 +508,12 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                 @ownJobName IS NULL
                 OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N''))))
                 OR (
+                  @ownJobNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))) <> N''
+                  AND LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))))
+                )
+                OR (
+                  @strictTuple = 0 AND
                   LTRIM(RTRIM(ISNULL(@ownJobName, N''))) <> N''
                   AND LTRIM(RTRIM(ISNULL(OwnJob, N''))) <> N''
                   AND (

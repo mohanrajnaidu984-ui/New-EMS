@@ -70,6 +70,25 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
         const divisionClause = buildEnquiryMasterDepartmentExistsSql(divisionFilter);
         const divisionMefDeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF');
         const divisionMef2DeptSql = buildMefDepartmentNameEqualsSql(divisionFilter, 'MEF2');
+        const divisionTrimEsc = (divisionFilter || '').toString().trim().replace(/'/g, "''");
+        const strictPvOwnJobDivisionSql = divisionTrimEsc
+            ? `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.EnquiryFor efOwn
+                    INNER JOIN dbo.Master_EnquiryFor mefOwn
+                        ON (efOwn.ItemName = mefOwn.ItemName)
+                    WHERE efOwn.RequestNo = E.RequestNo
+                      AND (
+                            (PV.EnquiryForID IS NOT NULL AND PV.EnquiryForID <> 0 AND PV.EnquiryForID = efOwn.ID)
+                         OR (
+                                (PV.EnquiryForID IS NULL OR PV.EnquiryForID = 0)
+                            AND LTRIM(RTRIM(ISNULL(PV.EnquiryForItem, N''))) = LTRIM(RTRIM(ISNULL(efOwn.ItemName, N'')))
+                            )
+                      )
+                      AND LTRIM(RTRIM(ISNULL(mefOwn.DepartmentName, N''))) = LTRIM(RTRIM(N'${divisionTrimEsc}'))
+                )`
+            : '';
         let userEmail = rawUserEmail;
         if (userEmail) {
             userEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
@@ -84,17 +103,44 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
         const isAdmin = !!(accessCtx && accessCtx.isAdmin);
         const userDepartment = accessCtx ? accessCtx.userDepartment : '';
         const isCcUser = !!(accessCtx && accessCtx.isCcUser);
+        const isManagementDept = !!(accessCtx && accessCtx.isManagementDept);
 
         const uEsc = (userEmail || '').replace(/'/g, "''");
-        const trimmedDept = (userDepartment || '').trim();
-        const deptEsc = trimmedDept.replace(/'/g, "''");
+        const uLocalEsc = ((userEmail || '').split('@')[0] || '').trim().replace(/'/g, "''");
+        // Department scope: normal users use their Master_ConcernedSE.Department.
+        // Management users are division proxies, so DO NOT scope by Department="Management" (it would hide all real divisions).
+        let trimmedDept = (userDepartment || '').trim();
+        let deptEsc = trimmedDept.replace(/'/g, "''");
         // Match getPricingAnchorJobs: strip "L1 - " / "Sub Job - " from Department so SQL scope aligns with pricing UI.
-        const deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
-        const hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
+        let deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
+        let hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
+        if (isManagementDept) {
+            trimmedDept = '';
+            deptEsc = '';
+            deptNormEsc = '';
+            hasDeptScope = false;
+        }
+        // CRITICAL: when a Division filter is selected in the UI, pending list scoping must follow ONLY that division,
+        // not fuzzy matches to the user's own Department. Disable department-based LIKE matching in this case.
+        if (divisionFilter && divisionFilter.toString().trim()) {
+            trimmedDept = '';
+            deptEsc = '';
+            deptNormEsc = '';
+            hasDeptScope = false;
+        }
         /** CC: must be on CCMailIds AND (when we have a department) see only that department’s jobs/subjobs — same shape as non-CC scope. */
         const mefAccessPredicate = isCcUser
             ? `(
-                REPLACE(ISNULL(MEF.CCMailIds, ''), '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    // Management users are division proxies: they may not be listed in CCMailIds.
+                    // When a Division is selected, allow access based on the division filter alone.
+                    isManagementDept
+                        ? '1 = 1'
+                        : `(
+                    REPLACE(',' + REPLACE(ISNULL(MEF.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                    ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(MEF.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                )`
+                }
                 ${
                     hasDeptScope
                         ? `AND (
@@ -117,7 +163,14 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
 
         const scopedJobIdsSubquery = isCcUser
             ? `(
-                REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    isManagementDept
+                        ? '1 = 1'
+                        : `(
+                    REPLACE(',' + REPLACE(ISNULL(MEF2.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                    ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(MEF2.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                )`
+                }
                 ${
                     hasDeptScope
                         ? `AND (
@@ -324,6 +377,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                     PO.ItemName LIKE EF.ItemName + '%'
                 )
                 AND ${pvMatchesEfJobSql}
+                ${strictPvOwnJobDivisionSql}
                 AND ${latestPvTupleOnlySql}
                 AND ${noCompletedQuoteForSameTupleSql}
                 ${divisionClause}
@@ -449,6 +503,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                     PO.ItemName LIKE EF.ItemName + '%'
                 )
                 AND ${pvMatchesEfJobSql}
+                ${strictPvOwnJobDivisionSql}
                 AND ${latestPvTupleOnlySql}
                 AND ${noCompletedQuoteForSameTupleSql}
                 ${divisionClause}

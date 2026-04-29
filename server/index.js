@@ -1686,6 +1686,41 @@ app.get('/api/enquiries/:id/milestone-status', async (req, res) => {
     }
 });
 
+/**
+ * EnquiryFor pricing guard: which EnquiryFor IDs have any pricing rows?
+ * Used by UI to warn/block deletion, and by save-structure flows.
+ */
+app.get('/api/enquiries/:id/enquiryfor/priced-ids', async (req, res) => {
+    const reqNo = String(req.params.id || '').trim();
+    if (!reqNo) return res.status(400).json({ error: 'Missing RequestNo' });
+    try {
+        const r = await sql.query`
+            SELECT EnquiryForID, COUNT(1) AS Cnt
+            FROM EnquiryPricingValues
+            WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(${reqNo}))
+              AND EnquiryForID IS NOT NULL
+              AND EnquiryForID <> 0
+            GROUP BY EnquiryForID
+        `;
+        const rows = r.recordset || [];
+        const pricedById = {};
+        rows.forEach((x) => {
+            const id = x.EnquiryForID;
+            const cnt = x.Cnt;
+            if (id == null) return;
+            pricedById[String(id)] = Number(cnt) || 0;
+        });
+        res.json({
+            requestNo: reqNo,
+            pricedIds: Object.keys(pricedById).map((k) => Number(k)).filter((n) => Number.isFinite(n)),
+            pricedById,
+        });
+    } catch (err) {
+        console.error('Error priced-ids:', err);
+        res.status(500).json({ error: 'Server Error' });
+    }
+});
+
 // Update Enquiry
 app.put('/api/enquiries/:id', async (req, res) => {
     const id = req.params.id.trim();
@@ -1755,8 +1790,224 @@ app.put('/api/enquiries/:id', async (req, res) => {
             return res.status(404).json({ message: 'Enquiry not found', error: `Enquiry with Number ${id} does not exist.` });
         }
 
+        /**
+         * Update EnquiryFor structure WITHOUT rebuilding (no DELETE+INSERT).
+         * Preserves EnquiryFor.ID so EnquiryPricingValues.EnquiryForID stays valid.
+         *
+         * Incoming items are an array of objects from HierarchyBuilder:
+         * { id, itemName, parentId, leadJobCode?, leadJobName?, parentName? }
+         * - Existing DB rows: id is numeric
+         * - New rows: id is a temp string; parentId may reference another temp id (insert in same request)
+         *
+         * Behavior:
+         * - Insert new rows.
+         * - Update existing rows in-place.
+         * - Delete rows missing from payload ONLY if they have no pricing values (and no priced descendants, since descendants are missing too).
+         */
+        const updateEnquiryForStructureUpsert = async (requestNo, items) => {
+            const reqNo = String(requestNo || '').trim();
+            const payload = Array.isArray(items) ? items : [];
+
+            const parseLeadCodeAndName = (rawItem) => {
+                let name = rawItem?.itemName ?? rawItem;
+                name = String(name || '').trim();
+                let code = rawItem?.leadJobCode ?? null;
+                if (!code) {
+                    const match = name.match(/^(L\d+)\s+-\s+(.*)$/);
+                    if (match) {
+                        code = match[1];
+                        name = match[2];
+                    }
+                }
+                if (!code || !String(code).trim().toUpperCase().match(/^L\d+$/)) {
+                    code = null;
+                } else {
+                    code = String(code).trim().toUpperCase();
+                }
+                const leadName = rawItem?.leadJobName != null ? String(rawItem.leadJobName).trim() : null;
+                return { code, name, leadName };
+            };
+
+            const isNumericId = (v) => {
+                if (v == null || v === '') return false;
+                const n = Number(v);
+                return Number.isFinite(n) && String(v).trim() === String(n);
+            };
+
+            // 1) Fetch existing rows
+            const existingRes = await new sql.Request().query`
+                SELECT ID, ParentID, ItemName, LeadJobCode, LeadJobName
+                FROM EnquiryFor
+                WHERE RequestNo = ${reqNo}
+            `;
+            const existingRows = existingRes.recordset || [];
+            const existingIds = new Set(existingRows.map((r) => Number(r.ID)).filter((n) => Number.isFinite(n)));
+
+            // 2) Normalize payload items
+            const normalized = payload
+                .map((i, idx) => {
+                    if (typeof i === 'string') {
+                        const { code, name, leadName } = parseLeadCodeAndName({ itemName: i });
+                        return {
+                            tempId: `legacy-${idx}-${name.slice(0, 20)}`,
+                            id: null,
+                            itemName: name,
+                            leadJobCode: code,
+                            leadJobName: leadName,
+                            parentId: null,
+                        };
+                    }
+                    const { code, name, leadName } = parseLeadCodeAndName(i);
+                    return {
+                        tempId: String(i?.id ?? `tmp-${idx}-${Math.random().toString(36).slice(2)}`),
+                        id: isNumericId(i?.id) ? Number(i.id) : null,
+                        itemName: name,
+                        leadJobCode: code,
+                        leadJobName: leadName,
+                        parentId: i?.parentId ?? null,
+                    };
+                })
+                .filter((i) => i.itemName && String(i.itemName).trim());
+
+            const incomingExistingIds = new Set(normalized.filter((i) => i.id != null).map((i) => i.id));
+
+            // 3) Determine deletions: existing IDs missing from payload
+            const removedIds = [...existingIds].filter((eid) => !incomingExistingIds.has(eid));
+
+            // Guard: never allow deleting priced rows (or their priced descendants which are also removed)
+            if (removedIds.length > 0) {
+                const r = new sql.Request();
+                r.input('reqNo', sql.NVarChar, reqNo);
+                const params = removedIds.map((_, ix) => `@rid${ix}`);
+                removedIds.forEach((val, ix) => r.input(`rid${ix}`, sql.Int, val));
+                const priced = await r.query(
+                    `SELECT TOP 20 EnquiryForID, EnquiryForItem, LeadJobName, CustomerName, PriceOption
+                     FROM EnquiryPricingValues
+                     WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(@reqNo))
+                       AND EnquiryForID IN (${params.join(', ')})`
+                );
+                if ((priced.recordset || []).length > 0) {
+                    const hits = priced.recordset.slice(0, 10).map((p) => ({
+                        enquiryForId: p.EnquiryForID,
+                        item: p.EnquiryForItem,
+                        lead: p.LeadJobName,
+                        customer: p.CustomerName,
+                        option: p.PriceOption,
+                    }));
+                    const err = new Error('Cannot delete priced job(s). Delete the prices first.');
+                    err.statusCode = 409;
+                    err.payload = {
+                        error: 'JOB_PRICED_CANNOT_DELETE',
+                        message: 'One or more selected jobs already have pricing. Delete prices first, then delete the job.',
+                        pricedExamples: hits,
+                    };
+                    throw err;
+                }
+            }
+
+            // 4) Apply deletes
+            if (removedIds.length > 0) {
+                const delReq = new sql.Request();
+                delReq.input('reqNo', sql.NVarChar, reqNo);
+                const params = removedIds.map((_, ix) => `@did${ix}`);
+                removedIds.forEach((val, ix) => delReq.input(`did${ix}`, sql.Int, val));
+                await delReq.query(
+                    `DELETE FROM EnquiryFor WHERE RequestNo = @reqNo AND ID IN (${params.join(', ')})`
+                );
+            }
+
+            // 5) Insert new rows in parent-first order
+            const idMap = {};
+            normalized.forEach((i) => {
+                if (i.id != null) idMap[String(i.tempId)] = i.id;
+            });
+
+            const remaining = normalized.filter((i) => i.id == null);
+            let pass = 0;
+            while (remaining.length > 0 && pass < 20) {
+                const nextBatch = [];
+                let insertedThisPass = 0;
+
+                for (const item of remaining) {
+                    const parentRaw = item.parentId;
+                    let parentResolved = null;
+                    if (parentRaw == null || parentRaw === '' || parentRaw === 0 || parentRaw === '0') {
+                        parentResolved = null;
+                    } else if (isNumericId(parentRaw)) {
+                        parentResolved = Number(parentRaw);
+                    } else if (idMap[String(parentRaw)]) {
+                        parentResolved = Number(idMap[String(parentRaw)]);
+                    } else {
+                        // parent not inserted yet
+                        nextBatch.push(item);
+                        continue;
+                    }
+
+                    const r = new sql.Request();
+                    r.input('reqNo', sql.NVarChar, reqNo);
+                    r.input('code', sql.NVarChar, item.leadJobCode || null);
+                    r.input('lname', sql.NVarChar, item.leadJobName || null);
+                    r.input('val', sql.NVarChar, item.itemName);
+                    r.input('pId', sql.Int, parentResolved);
+                    const ins = await r.query(
+                        `INSERT INTO EnquiryFor (RequestNo, LeadJobCode, LeadJobName, ItemName, ParentID)
+                         VALUES (@reqNo, @code, @lname, @val, @pId);
+                         SELECT SCOPE_IDENTITY() AS id;`
+                    );
+                    const newId = ins.recordset?.[0]?.id;
+                    idMap[String(item.tempId)] = newId;
+                    item.id = Number(newId);
+                    insertedThisPass += 1;
+                }
+
+                if (insertedThisPass === 0 && nextBatch.length === remaining.length) {
+                    break;
+                }
+                remaining.length = 0;
+                nextBatch.forEach((x) => remaining.push(x));
+                pass += 1;
+            }
+
+            // 6) Update existing rows in place + set correct ParentID (for both old and newly inserted)
+            for (const item of normalized) {
+                const finalId = item.id != null ? Number(item.id) : Number(idMap[String(item.tempId)]);
+                if (!Number.isFinite(finalId)) continue;
+
+                const parentRaw = item.parentId;
+                let parentResolved = null;
+                if (parentRaw == null || parentRaw === '' || parentRaw === 0 || parentRaw === '0') {
+                    parentResolved = null;
+                } else if (isNumericId(parentRaw)) {
+                    parentResolved = Number(parentRaw);
+                } else if (idMap[String(parentRaw)]) {
+                    parentResolved = Number(idMap[String(parentRaw)]);
+                }
+
+                const u = new sql.Request();
+                u.input('reqNo', sql.NVarChar, reqNo);
+                u.input('id', sql.Int, finalId);
+                u.input('code', sql.NVarChar, item.leadJobCode || null);
+                u.input('lname', sql.NVarChar, item.leadJobName || null);
+                u.input('val', sql.NVarChar, item.itemName);
+                u.input('pId', sql.Int, parentResolved);
+                await u.query(
+                    `UPDATE EnquiryFor
+                     SET LeadJobCode = @code,
+                         LeadJobName = @lname,
+                         ItemName = @val,
+                         ParentID = @pId
+                     WHERE RequestNo = @reqNo AND ID = @id`
+                );
+            }
+        };
+
         // Helper to update related items (Delete + Insert)
         const updateRelated = async (table, col, items) => {
+            if (table === 'EnquiryFor') {
+                await updateEnquiryForStructureUpsert(id, items);
+                return;
+            }
+
             const delReq = new sql.Request();
             delReq.input('reqNo', sql.NVarChar, id);
             await delReq.query(`DELETE FROM ${table} WHERE RequestNo = @reqNo`);
@@ -1933,6 +2184,9 @@ app.put('/api/enquiries/:id', async (req, res) => {
 
         res.json({ message: 'Enquiry updated' });
     } catch (err) {
+        if (err && err.statusCode === 409 && err.payload) {
+            return res.status(409).json(err.payload);
+        }
         console.error(err);
         res.status(500).send(err.message);
     }

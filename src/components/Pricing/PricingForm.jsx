@@ -144,12 +144,25 @@ function isJobRowVisibleForSaveHiddenChildCheck(jobRec, accessVisibleJobNames) {
  * `EnquiryPricingValues.LeadJobName` is the lead under which the price was saved.
  * e.g. BMS=2 with LeadJobName=HVAC must not show on the Civil lead tree; Civil's own rows use LeadJobName=Civil.
  */
-function valueRowLeadJobMatchesView(valueLeadName, selectedLeadRootItemName) {
+function valueRowLeadJobMatchesView(valueLeadName, selectedLeadRootItemName, valueScopeLeadId, allJobs) {
     if (!selectedLeadRootItemName || !String(selectedLeadRootItemName).trim()) return true;
     if (!valueLeadName || !String(valueLeadName).trim()) return true;
-    const a = String(valueLeadName).trim().toLowerCase();
-    const b = String(selectedLeadRootItemName).trim().toLowerCase();
-    return a === b;
+
+    // Always accept exact / prefix-insensitive matches (L1 - Civil Project vs Civil Project).
+    if (sameEnquiryItemName(valueLeadName, selectedLeadRootItemName)) return true;
+
+    // EPV may store the *immediate* lead (e.g. HVAC/BMS) while UI lead root is Civil (same branch).
+    // When subtree traversal fails due to id/parent drift, allow any lead name that exists under this selected lead subtree.
+    if (valueScopeLeadId != null && Array.isArray(allJobs) && allJobs.length) {
+        const subtree = getPricingLeadSubtreeIds(valueScopeLeadId, allJobs);
+        for (const j of allJobs) {
+            const jid = nid(j.id);
+            if (jid == null || !subtree.has(jid)) continue;
+            if (sameEnquiryItemName(valueLeadName, j.itemName)) return true;
+        }
+    }
+
+    return false;
 }
 
 /** EPV row counts for this lead if the job sits under the selected root OR `LeadJobName` matches (handles hierarchy drift). */
@@ -157,7 +170,12 @@ function epvRowPassesLeadSubtreeOrLabel(valueScopeLeadId, allJobs, valueRow, lea
     if (valueScopeLeadId == null || !allJobs?.length) return true;
     const eid = valueRow.EnquiryForID ?? valueRow.enquiryForId;
     if (enquiryForIdInSelectedLeadSubtree(valueScopeLeadId, eid, allJobs)) return true;
-    return valueRowLeadJobMatchesView(valueRow.LeadJobName ?? valueRow.leadJobName, leadDisplayName);
+    return valueRowLeadJobMatchesView(
+        valueRow.LeadJobName ?? valueRow.leadJobName,
+        leadDisplayName,
+        valueScopeLeadId,
+        allJobs
+    );
 }
 
 /** Tab / EPV customer label (NBSP, multiple spaces, trim) — must match UI tabs vs DB text. */
@@ -205,11 +223,15 @@ function parsePriceFromRawValueRowsForCell(
     }
     const allowBlank = cellOpts && cellOpts.allowBlankCustomerName;
     const blankOnly = cands.find((v) => !String(v.CustomerName ?? v.customerName ?? '').trim());
+    // When a tab/customer is selected, NEVER fall back to a mismatched customer row.
+    // This prevents BEMCO values from showing under TEMCO (and vice versa).
+    if (sc && !withCust && !inferredMatch && !(allowBlank && blankOnly)) return null;
+
     let row =
         withCust ||
         inferredMatch ||
         (allowBlank ? blankOnly : null) ||
-        (cands.length === 1 ? cands[0] : null);
+        (!sc && cands.length === 1 ? cands[0] : null);
     if (!row) return null;
     const p = parseFloat(row.Price);
     return Number.isFinite(p) ? p : null;
@@ -262,9 +284,16 @@ function findPriceFromRawByEpvDimensions(
             eidRow != null &&
             enquiryForIdInSelectedLeadSubtree(valueScopeLeadId, eidRow, allJobs);
 
-        const vLead = normLeadNameForEpv(v.LeadJobName ?? v.leadJobName);
-        /* EPV often stores the *immediate* lead (e.g. HVAC) while the UI root is Civil — still same branch. */
-        if (nLead && vLead && vLead !== nLead && !rowInLeadSubtree) return false;
+        const vLead = v.LeadJobName ?? v.leadJobName;
+        /* EPV often stores the *immediate* lead (e.g. HVAC/BMS) while the UI root is Civil — still same branch. */
+        if (
+            nLead &&
+            vLead &&
+            !valueRowLeadJobMatchesView(vLead, leadDisplayName, valueScopeLeadId, allJobs) &&
+            !rowInLeadSubtree
+        ) {
+            return false;
+        }
 
         const vIt = v.EnquiryForItem ?? v.enquiryForItem ?? '';
         if (!ownJobItemName || !sameEnquiryItemName(vIt, ownJobItemName)) return false;
@@ -277,17 +306,10 @@ function findPriceFromRawByEpvDimensions(
         const vC = normalizePricingCustomerKey(v.CustomerName ?? v.customerName ?? '');
         const inferredK = inferInternalCustomerTabForValueRow(v, allJobs);
         const inferredNorm = inferredK ? normalizePricingCustomerKey(inferredK) : '';
-        const jobBindsCell =
-            jobId != null &&
-            jobId !== '' &&
-            eidRow != null &&
-            String(eidRow) === String(jobId);
 
         if (nTab) {
             const tabOk =
-                jobBindsCell ||
-                vC === nTab ||
-                inferredNorm === nTab;
+                vC === nTab || inferredNorm === nTab;
             if (!tabOk) return false;
         }
 
@@ -301,8 +323,28 @@ function findPriceFromRawByEpvDimensions(
     let pool = cands;
     if (jobId != null && jobId !== '') {
         const exact = cands.filter((v) => String(v.EnquiryForID ?? v.enquiryForId) === String(jobId));
-        if (!exact.length) return null;
-        pool = exact;
+        if (!exact.length) {
+            // Some enquiries contain duplicate `EnquiryForItem` rows (same label, different EnquiryForID).
+            // When the UI row's `jobId` doesn't match the stored EPV row's EnquiryForID, fall back to the
+            // best candidate **within this selected lead subtree** (only when we are not filtering by OptionID).
+            //
+            // This is required for simulated Base Price rows where there is no reliable OptionID key.
+            if (optionId == null || String(optionId).trim() === '') {
+                const inTree = cands.filter((v) =>
+                    enquiryForIdInSelectedLeadSubtree(
+                        valueScopeLeadId,
+                        v.EnquiryForID ?? v.enquiryForId,
+                        allJobs
+                    )
+                );
+                if (!inTree.length) return null;
+                pool = inTree;
+            } else {
+                return null;
+            }
+        } else {
+            pool = exact;
+        }
         if (pool.length > 1 && nTab) {
             const byTab = pool.filter(
                 (v) => normalizePricingCustomerKey(v.CustomerName ?? v.customerName ?? '') === nTab
@@ -316,7 +358,15 @@ function findPriceFromRawByEpvDimensions(
             else if (byInfer.length === 1) pool = byInfer;
         }
     }
+    const leadRootNorm = normLeadNameForEpv(leadDisplayName);
     pool.sort((a, b) => {
+        // Prefer LeadJobName that matches the selected lead root label (handles mixed LeadJobName values within same subtree).
+        const al = normLeadNameForEpv(a.LeadJobName ?? a.leadJobName);
+        const bl = normLeadNameForEpv(b.LeadJobName ?? b.leadJobName);
+        const aLeadScore = leadRootNorm && al === leadRootNorm ? 0 : 1;
+        const bLeadScore = leadRootNorm && bl === leadRootNorm ? 0 : 1;
+        if (aLeadScore !== bLeadScore) return aLeadScore - bLeadScore;
+
         const ta = new Date(a.UpdatedAt ?? a.updatedAt ?? 0).getTime();
         const tb = new Date(b.UpdatedAt ?? b.updatedAt ?? 0).getTime();
         return tb - ta;
@@ -871,6 +921,7 @@ const PricingForm = () => {
     const [pricingData, setPricingData] = useState(null);
     const [values, setValues] = useState({});
     const valuesRef = useRef(values);
+    const draftValuesByCustomerRef = useRef({}); // { [normalizedCustomer]: { [cellKey]: value } }
     useEffect(() => {
         valuesRef.current = values;
     }, [values]);
@@ -1191,6 +1242,8 @@ const PricingForm = () => {
     // Load pricing for selected enquiry
     const loadPricing = async (requestNo, customerName = null, preserveValues = null, loadOptions = null) => {
         const ignoreExistingLeadSelection = loadOptions?.ignoreExistingLeadSelection === true;
+        const forcePreserveZeroKeys = new Set(loadOptions?.forcePreserveZeroKeys || []);
+        const preserveSourceCustomerKey = normalizePricingCustomerKey(loadOptions?.preserveSourceCustomerKey || '');
         setLoading(true);
         setSelectedEnquiry(requestNo);
 
@@ -1783,7 +1836,7 @@ const PricingForm = () => {
                                 /* id-keyed bucket row points at a different EnquiryFor — ignore */
                             } else if (
                                 enquiryForIdInSelectedLeadSubtree(valueScopeLeadId, gr.EnquiryForID ?? jobId, data.jobs) &&
-                                valueRowLeadJobMatchesView(gr.LeadJobName, leadRootNameForValueFilter)
+                                valueRowLeadJobMatchesView(gr.LeadJobName, leadRootNameForValueFilter, valueScopeLeadId, data.jobs)
                             ) {
                                 selfPrice = parseFloat(gr.Price);
                                 hasFoundPrice = true;
@@ -2015,10 +2068,16 @@ const PricingForm = () => {
                 const mergePreserveWithoutStaleZero = (init, preserved) => {
                     const out = { ...(init || {}) };
                     if (!preserved || typeof preserved !== 'object') return out;
+                    // If preserved values come from the SAME tab we are loading, keep user-entered 0 as a draft.
+                    // The stale-zero rule is only needed to prevent cross-tab 0 leaking into another tab and wiping a real price.
+                    const activeKey = normalizePricingCustomerKey(activeCust);
+                    const allowZeroDraft = !!preserveSourceCustomerKey && preserveSourceCustomerKey === activeKey;
                     Object.entries(preserved).forEach(([k, pv]) => {
                         const iv = init && init[k];
                         const staleZero =
                             (pv === 0 || pv === '0') &&
+                            !forcePreserveZeroKeys.has(k) &&
+                            !allowZeroDraft &&
                             iv !== undefined &&
                             iv !== '' &&
                             Number(iv) > 0;
@@ -2269,6 +2328,7 @@ const PricingForm = () => {
 
         const nameNorm = (optToDelete.name || '').trim().toLowerCase();
         if (nameNorm === 'base price') {
+            alert('Use the trash icon on the Base Price row to delete Base Price values.');
             return;
         }
 
@@ -2355,6 +2415,100 @@ const PricingForm = () => {
             console.error('Error deleting option:', err);
         }
     };
+
+    // Delete Base Price value(s) for a single cell (job + active tab).
+    const deleteBasePriceForCell = async ({ enquiryForId }) => {
+        if (!pricingData?.enquiry?.requestNo) return;
+        if (enquiryForId == null) return;
+        if (!window.confirm('Delete Base Price for this job on the current tab?')) return;
+        try {
+            const jobRow = (pricingData.jobs || []).find((j) => String(j.id) === String(enquiryForId));
+            const jobItemName = String(jobRow?.itemName || '').trim();
+
+            const res = await fetch(`${API_BASE}/api/pricing/value/base-price`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    requestNo: pricingData.enquiry.requestNo,
+                    enquiryForId,
+                    customerName: selectedCustomer,
+                }),
+            });
+            if (!res.ok) {
+                const body = await res.text().catch(() => '');
+                throw new Error(`HTTP ${res.status} ${res.statusText}. ${body}`);
+            }
+
+            // Clear any cached/in-memory Base Price values for this job so UI immediately reflects deletion.
+            const keySuffix = `_${String(enquiryForId)}`;
+            const baseOptIds = new Set(
+                (pricingData.options || [])
+                    .filter((o) => String(o?.name || '').trim().toLowerCase() === 'base price')
+                    .filter((o) => !jobItemName || sameEnquiryItemName(o.itemName, jobItemName))
+                    .map((o) => String(o.id))
+            );
+
+            const zeroBaseKeys = (prev) => {
+                const next = { ...(prev || {}) };
+                // Force Base Price keys for this job to "0" so the textbox clears immediately and can't snap back.
+                Object.keys(next).forEach((k) => {
+                    if (!String(k).endsWith(keySuffix)) return;
+                    const optId = String(k).split('_')[0];
+                    if (baseOptIds.has(optId) || String(optId).startsWith('simulated_base_')) {
+                        next[k] = '0';
+                    }
+                });
+                // Also ensure keys exist for base price option ids (even if user never typed in this cell).
+                baseOptIds.forEach((oid) => {
+                    next[`${oid}_${String(enquiryForId)}`] = '0';
+                });
+                return next;
+            };
+
+            setValues((prev) => zeroBaseKeys(prev));
+            valuesRef.current = zeroBaseKeys(valuesRef.current || {});
+
+            // Reload, preserving the forced-zero keys so the UI reflects deletion immediately.
+            const forcedKeys = Array.from(baseOptIds).map((oid) => `${String(oid)}_${String(enquiryForId)}`);
+            loadPricing(pricingData.enquiry.requestNo, selectedCustomer, valuesRef.current, {
+                forcePreserveZeroKeys: forcedKeys,
+            });
+            refreshPendingRequests();
+        } catch (err) {
+            console.error('Error deleting base price:', err);
+            alert('Failed to delete Base Price: ' + (err?.message || err));
+        }
+    };
+
+    // Preserve only values that belong to a specific customer tab (prevents BEMCO edits showing on TEMCO before save).
+    const filterPreserveValuesForCustomer = React.useCallback((preserved, targetCustomer) => {
+        const src = preserved && typeof preserved === 'object' ? preserved : {};
+        const out = {};
+        const tc = normalizePricingCustomerKey(targetCustomer);
+        const optById = new Map((pricingData?.options || []).map((o) => [String(o.id), o]));
+        for (const [k, v] of Object.entries(src)) {
+            if (String(k).startsWith('simulated')) {
+                // Simulated ids now include customer key; safe to preserve.
+                out[k] = v;
+                continue;
+            }
+            const optId = String(k).split('_')[0];
+            const opt = optById.get(optId);
+            if (!opt) continue;
+            const oc = normalizePricingCustomerKey(opt.customerName || '');
+            if (tc && oc && oc === tc) {
+                out[k] = v;
+            }
+        }
+        return out;
+    }, [pricingData?.options]);
+
+    // When values change, snapshot the current tab's draft values so switching tabs keeps unsaved edits per-customer.
+    useEffect(() => {
+        const ck = normalizePricingCustomerKey(selectedCustomer);
+        if (!ck) return;
+        draftValuesByCustomerRef.current[ck] = filterPreserveValuesForCustomer(values, selectedCustomer);
+    }, [values, selectedCustomer, filterPreserveValuesForCustomer]);
 
     // Format a numeric value as ###,###,###.### (up to 3 decimal places, no trailing zeros)
     const formatPrice = (val) => {
@@ -3237,14 +3391,10 @@ const PricingForm = () => {
                         normalizePricingCustomerKey(pn) === normalizePricingCustomerKey(selCust)
                     );
                 }
-                const externals = (pricingData.enquiry?.customerName || '')
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-                return externals.some(
-                    (ex) =>
-                        normalizePricingCustomerKey(ex) === normalizePricingCustomerKey(selCust)
-                );
+                // Root job with blank CustomerName: DO NOT show on external tabs (BEMCO/TEMCO),
+                // otherwise both tabs edit the same OptionID and values mirror.
+                // External pricing must be keyed to customer-specific option rows.
+                return false;
             }
 
             // Subjob rows may store parent / grandparent internal name — show on a tab if it matches any ancestor of the option's job.
@@ -3284,12 +3434,14 @@ const PricingForm = () => {
         });
 
         // Step 3: Ensure "Base Price" row is ALWAYS present for relevant jobs
+        const custKeyForSim = normalizePricingCustomerKey(selectedCustomer);
         const leadJob = pricingData.jobs?.find(j => j.id == selectedLeadId);
         if (leadJob && selectedCustomer && !results.some(
             (o) => o.name === 'Base Price' && sameEnquiryItemName(o.itemName, leadJob.itemName)
         )) {
             results.push({
-                id: `simulated_base_lead_${leadJob.id}`,
+                // Include customer key so simulated rows don't leak values across BEMCO/TEMCO tabs.
+                id: `simulated_base_lead_${leadJob.id}_${custKeyForSim || 'tab'}`,
                 name: 'Base Price',
                 itemName: leadJob.itemName,
                 customerName: selectedCustomer,
@@ -3308,7 +3460,8 @@ const PricingForm = () => {
                 (o) => o.name === 'Base Price' && sameEnquiryItemName(o.itemName, sj.itemName)
             )) {
                 results.push({
-                    id: `simulated_base_sj_${sj.id}`,
+                    // Include customer key so simulated rows don't leak values across tabs.
+                    id: `simulated_base_sj_${sj.id}_${custKeyForSim || 'tab'}`,
                     name: 'Base Price',
                     itemName: sj.itemName,
                     customerName: selectedCustomer,
@@ -3940,7 +4093,19 @@ const PricingForm = () => {
                                             key={`${cust}-${idx}`}
                                             onClick={() => {
                                                 if (cust === selectedCustomer) return;
-                                                loadPricing(pricingData.enquiry.requestNo, cust, valuesRef.current);
+                                                // Save current tab draft
+                                                const curKey = normalizePricingCustomerKey(selectedCustomer);
+                                                if (curKey) {
+                                                    draftValuesByCustomerRef.current[curKey] =
+                                                        filterPreserveValuesForCustomer(valuesRef.current, selectedCustomer);
+                                                }
+                                                // Restore target tab draft
+                                                const nextKey = normalizePricingCustomerKey(cust);
+                                                const nextDraft =
+                                                    (nextKey && draftValuesByCustomerRef.current[nextKey]) || {};
+                                                loadPricing(pricingData.enquiry.requestNo, cust, nextDraft, {
+                                                    preserveSourceCustomerKey: cust,
+                                                });
                                             }}
                                             style={{
                                                 padding: '10px 16px',
@@ -4695,6 +4860,8 @@ const PricingForm = () => {
                                                             const lookupValue = (dataSet) => {
                                                                 // Do not bail out when EnquiryFor hierarchy disagrees with saved LeadJobName — EPV-first read below scopes by dimensions.
                                                                 // EnquiryPricingValues-first: never depend on grid OptionID / keyed bucket order (fixes wrong 0 when metadata drifts).
+                                                                // NOTE: Simulated option rows do not have a real numeric OptionID, but EPV rows do.
+                                                                // For simulated Base Price, we must NOT filter by OptionID or the UI will never find backend prices.
                                                                 const fromEpvFirst = findPriceFromRawByEpvDimensions(
                                                                     pricingData.rawEnquiryPricingValues,
                                                                     {
@@ -4705,7 +4872,7 @@ const PricingForm = () => {
                                                                         valueScopeLeadId: selectedLeadId,
                                                                         jobId: job.id,
                                                                         allJobs: pricingData.jobs,
-                                                                        optionId: opt.id,
+                                                                        optionId: opt.isSimulated ? null : opt.id,
                                                                     }
                                                                 );
                                                                 if (fromEpvFirst !== null) return fromEpvFirst;
@@ -4719,25 +4886,42 @@ const PricingForm = () => {
                                                                     ) {
                                                                         return null;
                                                                     }
-                                                                    if (valueRowLeadJobMatchesView(row.LeadJobName, selectedLeadRootName)) {
+                                                                    if (
+                                                                        valueRowLeadJobMatchesView(
+                                                                            row.LeadJobName,
+                                                                            selectedLeadRootName,
+                                                                            selectedLeadId,
+                                                                            pricingData.jobs
+                                                                        )
+                                                                    ) {
                                                                         return parseFloat(dataSet[key].Price);
                                                                     }
                                                                 }
-                                                                const fromRaw = parsePriceFromRawValueRowsForCell(
-                                                                    pricingData.rawEnquiryPricingValues,
-                                                                    job.id,
-                                                                    opt.id,
-                                                                    selectedCustomer,
-                                                                    selectedLeadRootName,
-                                                                    selectedLeadId,
-                                                                    pricingData.jobs,
-                                                                    {
-                                                                        allowBlankCustomerName: !String(
-                                                                            opt.customerName || ''
-                                                                        ).trim(),
-                                                                    }
-                                                                );
-                                                                if (fromRaw !== null) return fromRaw;
+                                                                // `parsePriceFromRawValueRowsForCell` requires OptionID; simulated options must use EPV-dimensions path above.
+                                                                if (!opt.isSimulated) {
+                                                                    const fromRaw = parsePriceFromRawValueRowsForCell(
+                                                                        pricingData.rawEnquiryPricingValues,
+                                                                        job.id,
+                                                                        opt.id,
+                                                                        selectedCustomer,
+                                                                        selectedLeadRootName,
+                                                                        selectedLeadId,
+                                                                        pricingData.jobs,
+                                                                        {
+                                                                        // Only allow blank-customer fallback on INTERNAL tabs (tabs that correspond to an EnquiryFor job itemName).
+                                                                        // Never allow it on external customer tabs like BEMCO/TEMCO, else a blank EPV row will appear on every tab.
+                                                                        allowBlankCustomerName:
+                                                                            !String(opt.customerName || '').trim() &&
+                                                                            Array.isArray(pricingData.jobs) &&
+                                                                            pricingData.jobs.some(
+                                                                                (j) =>
+                                                                                    normalizePricingCustomerKey(j.itemName) ===
+                                                                                    normalizePricingCustomerKey(selectedCustomer)
+                                                                            ),
+                                                                        }
+                                                                    );
+                                                                    if (fromRaw !== null) return fromRaw;
+                                                                }
                                                                 if (isAmbigItemName(job.itemName)) {
                                                                     return null;
                                                                 }
@@ -4810,7 +4994,14 @@ const PricingForm = () => {
                                                                         if (!enquiryForIdInSelectedLeadSubtree(selectedLeadId, irow.EnquiryForID ?? job.id, pricingData.jobs)) {
                                                                             return null;
                                                                         }
-                                                                        if (valueRowLeadJobMatchesView(irow.LeadJobName, selectedLeadRootName)) {
+                                                                        if (
+                                                                            valueRowLeadJobMatchesView(
+                                                                                irow.LeadJobName,
+                                                                                selectedLeadRootName,
+                                                                                selectedLeadId,
+                                                                                pricingData.jobs
+                                                                            )
+                                                                        ) {
                                                                             return parseFloat(irow.Price);
                                                                         }
                                                                     }
@@ -5088,12 +5279,22 @@ const PricingForm = () => {
                                                                                         justifyContent: 'center',
                                                                                     }}
                                                                                 >
-                                                                                    {canEditRow &&
-                                                                                    String(option.name || '').trim().toLowerCase() !== 'base price' ? (
+                                                                                    {canEditRow ? (
                                                                                         <button
                                                                                             type="button"
-                                                                                            onClick={() => deleteOption(option.id, job.id)}
-                                                                                            title="Delete this option"
+                                                                                            onClick={() => {
+                                                                                                const n = String(option.name || '').trim().toLowerCase();
+                                                                                                if (n === 'base price') {
+                                                                                                    deleteBasePriceForCell({ enquiryForId: job.id });
+                                                                                                } else {
+                                                                                                    deleteOption(option.id, job.id);
+                                                                                                }
+                                                                                            }}
+                                                                                            title={
+                                                                                                String(option.name || '').trim().toLowerCase() === 'base price'
+                                                                                                    ? 'Delete Base Price'
+                                                                                                    : 'Delete this option'
+                                                                                            }
                                                                                             style={{
                                                                                                 background: 'none',
                                                                                                 border: 'none',

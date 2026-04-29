@@ -26,6 +26,8 @@ import {
 console.log("QUOTE FILE LOADED");
 
 const API_BASE = '';
+/** User requested manual-only tab behavior (disable automatic tab/preview switching). */
+const DISABLE_QUOTE_TAB_AUTOMATION = true;
 
 /** Right-panel quote filter row (category drives which fields are enabled). */
 const QUOTE_LIST_CATEGORY = {
@@ -59,6 +61,85 @@ function quoteRowDateToInputYmd(quote) {
         return `${y}-${mo}-${da}`;
     }
     return new Date().toISOString().split('T')[0];
+}
+
+/**
+ * Local draft preview (Browse Previous Quotes **off**): Quote Ref shows full "Draft" when empty,
+ * otherwise replaces the trailing revision segment (-R0, -R1, …) with `-Draft`.
+ */
+function quoteNumberToDraftDisplay(quoteNumber) {
+    const s = String(quoteNumber || '').trim();
+    if (!s) return 'Draft';
+    return s.replace(/-R\d+$/i, '-Draft');
+}
+
+/** Resolve customer reference from enquiry payload shape variants (EnquiryMaster.CustomerRefNo). */
+function resolveEnquiryCustomerRef(enquiry) {
+    if (!enquiry || typeof enquiry !== 'object') return '';
+    const candidates = [
+        enquiry.CustomerRefNo,
+        enquiry.customerRefNo,
+        enquiry.CustomerReference,
+        enquiry.customerReference,
+        enquiry.YourRef,
+        enquiry.yourRef,
+    ];
+    for (const v of candidates) {
+        const s = String(v ?? '').trim();
+        if (s) return s;
+    }
+    return '';
+}
+
+/** Resolve all enquiry types selected for a request from API payload variants. */
+function resolveSelectedEnquiryTypes(payload) {
+    if (!payload || typeof payload !== 'object') return [];
+    const candidates = [
+        payload?.enquiry?.SelectedEnquiryTypes,
+        payload?.enquiry?.EnquiryTypes,
+        payload?.enquiryTypes,
+    ];
+    for (const list of candidates) {
+        if (Array.isArray(list) && list.length > 0) {
+            return [...new Set(list.map((v) => String(v || '').trim()).filter(Boolean))];
+        }
+    }
+    const fromCsv = String(payload?.enquiry?.EnquiryType || '').split(',').map((s) => s.trim()).filter(Boolean);
+    return fromCsv.length > 0 ? [...new Set(fromCsv)] : [];
+}
+
+/** Previous Quotes list: quote date beside ref (EnquiryQuotes row). */
+function formatQuoteRowListQuoteDate(q) {
+    if (!q || typeof q !== 'object') return '';
+    const ymd = q.QuoteDateYmd ?? q.quoteDateYmd;
+    if (ymd && /^\d{4}-\d{2}-\d{2}$/.test(String(ymd).trim())) {
+        try {
+            return format(parseISO(String(ymd).trim()), 'dd-MMM-yyyy');
+        } catch {
+            /* fall through */
+        }
+    }
+    const raw = q.QuoteDate ?? q.quoteDate;
+    if (raw == null || raw === '') return '';
+    try {
+        const d = raw instanceof Date ? raw : new Date(raw);
+        return !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '';
+    } catch {
+        return '';
+    }
+}
+
+/** Previous Quotes list: updated timestamp beside price. */
+function formatQuoteRowListUpdatedAt(q) {
+    if (!q || typeof q !== 'object') return '';
+    const raw = q.UpdatedAt ?? q.updatedAt ?? q.CreatedAt ?? q.createdAt;
+    if (raw == null || raw === '') return '';
+    try {
+        const d = raw instanceof Date ? raw : new Date(raw);
+        return !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yy hh:mm a') : '';
+    } catch {
+        return '';
+    }
 }
 
 /**
@@ -539,13 +620,24 @@ const matchLeadJobForQuoteScope = (rowLead, paramLead) => {
 
 const matchOwnJobForQuoteScope = (rowOwn, pOwn, useDept) => {
     if (useDept) return true;
-    const a = normalize(String(rowOwn || '').trim());
-    const b = normalize(String(pOwn || '').trim());
+    const clean = (s) =>
+        String(s || '')
+            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    const aRaw = String(rowOwn || '').trim();
+    const bRaw = String(pOwn || '').trim();
+    const a = normalize(aRaw);
+    const b = normalize(bRaw);
+    const ac = normalize(clean(aRaw));
+    const bc = normalize(clean(bRaw));
     if (!b) return true;
     if (!a) return false;
     if (a === b) return true;
+    if (ac && bc && ac === bc) return true;
     if (a.startsWith(b) || b.startsWith(a)) return true;
     if (a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
+    if (ac && bc && (ac.startsWith(bc) || bc.startsWith(ac))) return true;
     return false;
 };
 
@@ -556,11 +648,24 @@ const matchOwnJobForQuoteScope = (rowOwn, pOwn, useDept) => {
 function quoteRowMatchesEnquiryScopedParams(q, p, requestNo) {
     if (!q || !p) return false;
     if (String(q.RequestNo ?? '').trim() !== String(requestNo ?? '').trim()) return false;
+    const clean = (s) =>
+        String(s || '')
+            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
     const toRow = normalize(q.ToName || '');
     const toP = normalize(p.toName || '');
+    const toRowClean = normalize(clean(q.ToName || ''));
+    const toPClean = normalize(clean(p.toName || ''));
     const toKeyRow = normalizeCustomerKey(q.ToName || '');
     const toKeyP = normalizeCustomerKey(p.toName || '');
-    if (toRow !== toP && !(toKeyRow && toKeyP && toKeyRow === toKeyP)) return false;
+    if (
+        toRow !== toP &&
+        toRowClean !== toPClean &&
+        !(toKeyRow && toKeyP && toKeyRow === toKeyP)
+    ) {
+        return false;
+    }
     if (!matchLeadJobForQuoteScope(q.LeadJob, p.leadJobName)) return false;
     return matchOwnJobForQuoteScope(q.OwnJob, p.ownJobName || '', !!p.useDepartmentForOwnJob);
 }
@@ -1681,6 +1786,14 @@ const QuoteForm = () => {
     const lastQuickCalcInputRef = useRef('');
     const pricingSelectionTouchedRef = useRef({});
     const [expandedGroups, setExpandedGroups] = useState({}); // Track expanded revisions
+    /** Avoid flicker-to-blank on tab switch: remember last non-empty previous-quote rows per tab. */
+    const previousQuotesRowsCacheRef = useRef({});
+
+    /**
+     * When enabled: Previous Quotes tabs + revision list drive preview (backend saved quotes).
+     * When disabled: preview follows left-panel fields only; pricing summary visible; quote ref shows Draft / *-Draft.
+     */
+    const [browsePreviousQuotesRevisions, setBrowsePreviousQuotesRevisions] = useState(false);
 
     const toggleExpanded = (quoteNo) => {
         setExpandedGroups(prev => ({ ...prev, [quoteNo]: !prev[quoteNo] }));
@@ -1938,14 +2051,16 @@ const QuoteForm = () => {
         [quoteListCategory, quoteSearchResults, pendingQuotes],
     );
 
-    const refetchPendingQuotes = useCallback(() => {
+    const refetchPendingQuotes = useCallback((divisionOverride = null) => {
         const userEmail = currentUser?.EmailId || currentUser?.email || '';
         if (!userEmail) {
             setPendingQuotes([]);
             return;
         }
-        const divQ = quoteListDivision.trim()
-            ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
+        const divisionToUse =
+            divisionOverride != null ? String(divisionOverride || '').trim() : quoteListDivision.trim();
+        const divQ = divisionToUse
+            ? `&division=${encodeURIComponent(divisionToUse)}`
             : '';
         fetch(`${API_BASE}/api/quotes/list/pending?userEmail=${encodeURIComponent(userEmail)}${divQ}`)
             .then(res => res.json())
@@ -1990,9 +2105,12 @@ const QuoteForm = () => {
         setQuoteListDateTo('');
         setQuoteSearchResults([]);
         setQuoteListCategory(QUOTE_LIST_CATEGORY.PENDING);
+        // Clear left panel so Pricing Summary + new/draft view are visible again.
         setShowQuoteListSummaryOverQuote(false);
-        refetchPendingQuotes();
-    }, [refetchPendingQuotes]);
+        resetFormState();
+        // Pass division explicitly to avoid fetching with a stale/empty division value.
+        refetchPendingQuotes(quoteListDivision);
+    }, [refetchPendingQuotes, quoteListDivision, resetFormState]);
 
     useEffect(() => {
         const email = (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim();
@@ -2077,7 +2195,7 @@ const QuoteForm = () => {
         setSignatory('');
         setSignatoryDesignation('');
         setSubject('');
-        setCustomerReference('');
+        setCustomerReference(resolveEnquiryCustomerRef(enquiryData?.enquiry));
         setToName('');
         setToAddress('');
         setToPhone('');
@@ -2127,7 +2245,9 @@ const QuoteForm = () => {
         }
     }, [currentUser, enquiryData]);
 
-    const handleTabChange = (newTabId) => {
+    const handleTabChange = (newTabId, opts = {}) => {
+        const force = opts && opts.force === true;
+        if (!browsePreviousQuotesRevisions && !force) return;
         if (newTabId === activeQuoteTab) return;
 
         // 1. Save Current Tab State
@@ -2140,6 +2260,24 @@ const QuoteForm = () => {
             quoteId, quoteNumber, grandTotal,
         };
 
+        // Browse mode + direct subjob tab: do not restore/reset tab snapshot fields here.
+        // That path can clear Quote Ref/preview during scoped fetch transitions (flicker -> blank).
+        const directDestTab = (calculatedTabs || []).find((t) => String(t.id) === String(newTabId));
+        if (browsePreviousQuotesRevisions && directDestTab?.isSubJobTab) {
+            setActiveQuoteTab(newTabId);
+            // Expand matching revision group now.
+            // Right-side preview load happens in a dedicated effect after `activeQuoteTab` commits.
+            const filtered = getFilteredQuotesForPreviousQuotesTab(newTabId) || [];
+            if (filtered.length) {
+                const latest = [...filtered].sort(
+                    (a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0)
+                )[0];
+                const grp = String(latest?.QuoteNumber || '').split('-R')[0] || '';
+                if (grp) setExpandedGroups((prev) => ({ ...prev, [grp]: true }));
+            }
+            return;
+        }
+
         // 2. Load or Reset New Tab State
         const saved = tabStateRegistry.current[newTabId];
 
@@ -2149,21 +2287,22 @@ const QuoteForm = () => {
         } catch {
             filteredForNewTab = [];
         }
-        const latestForTab =
-            filteredForNewTab.length > 0
-                ? [...filteredForNewTab].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0]
-                : null;
         const savedQid =
             saved?.quoteId != null && String(saved.quoteId).trim() !== '' ? String(saved.quoteId).trim() : '';
         const savedRowBelongsToThisTab =
             savedQid && filteredForNewTab.some((q) => String(quoteRowId(q) ?? '') === savedQid);
 
         const destTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(newTabId));
-        if (destTabObj?.isSubJobTab && savedRowBelongsToThisTab && savedQid) {
+        /**
+         * Preview row handling on tab change:
+         * - Browse mode + direct subjob tab: let the dedicated subjob preview effect decide (do not clear here).
+         * - Other tabs / modes: keep previous behaviour (restore saved row if it belongs to this tab, else clear).
+         */
+        if (browsePreviousQuotesRevisions && destTabObj?.isSubJobTab) {
+            // No-op: subjob preview is managed by the effect that reacts to `activeQuoteTab`.
+        } else if (destTabObj?.isSubJobTab && savedRowBelongsToThisTab && savedQid) {
             const matchedRow = filteredForNewTab.find((q) => String(quoteRowId(q) ?? '') === savedQid);
             setLoadedEnquiryQuoteRowForPreview(matchedRow || null);
-        } else if (!destTabObj?.isSubJobTab) {
-            setLoadedEnquiryQuoteRowForPreview(null);
         } else {
             setLoadedEnquiryQuoteRowForPreview(null);
         }
@@ -2177,7 +2316,7 @@ const QuoteForm = () => {
             setSubject(saved.subject);
             setQuoteDate(saved.quoteDate);
             setValidityDays(saved.validityDays);
-            setCustomerReference(saved.customerReference);
+            setCustomerReference(saved.customerReference || resolveEnquiryCustomerRef(enquiryData?.enquiry));
             setSignatory(saved.signatory);
             setSignatoryDesignation(saved.signatoryDesignation);
             setPreparedBy(saved.preparedBy);
@@ -2247,21 +2386,7 @@ const QuoteForm = () => {
         const hasPriorTabSnapshot =
             Object.prototype.hasOwnProperty.call(tabStateRegistry.current, newTabId) &&
             tabStateRegistry.current[newTabId] != null;
-        if (!restoredPersistedQuote && latestForTab && !hasPriorTabSnapshot) {
-            queueMicrotask(() => {
-                try {
-                    const latestId = quoteRowId(latestForTab);
-                    if (latestId == null) return;
-                    loadQuote(latestForTab, {
-                        forActiveQuoteTab: newTabId,
-                        preserveRecipient: true,
-                        skipPreparedSignatory: true,
-                    });
-                } catch (e) {
-                    console.warn('[handleTabChange] auto-select quote for preview', e);
-                }
-            });
-        }
+        // Manual mode: do not auto-select latest quote on tab switch.
 
         // Skip the tab-change auto-load effect for this transition — it would call `loadQuote` and clobber the snapshot above.
         if (saved) {
@@ -3556,6 +3681,7 @@ const QuoteForm = () => {
     /** Preview-only subject line: keep custom text; normalize generic "Proposal for …" to active tab project label. */
     const quotePreviewSubject = React.useMemo(() => {
         const s = String(subject || '').trim();
+        if (!browsePreviousQuotesRevisions) return s;
         const p = String(quotePreviewProjectName || '').trim();
         if (!p) return s;
         if (!s) return `Proposal for ${p}`;
@@ -3564,7 +3690,7 @@ const QuoteForm = () => {
             return `Proposal for ${p}`;
         }
         return s;
-    }, [subject, quotePreviewProjectName, calculatedTabs]);
+    }, [subject, quotePreviewProjectName, calculatedTabs, browsePreviousQuotesRevisions]);
 
     /** Company line in the standard cover letter (first page) — same source as print footer when possible. */
     const quoteCoverOfferCompanyName = React.useMemo(() => {
@@ -3772,11 +3898,13 @@ const QuoteForm = () => {
     const getCustomerOptionLabel = React.useCallback((o) => o?.label ?? '', []);
 
     /**
-     * Params for GET /api/quotes/by-enquiry/:requestNo — matches EnquiryQuotes columns:
-     * - RequestNo = enquiry number (path param).
-     * - LeadJob = root lead job **name** (LeadJobName / ItemName), same as persisted on save — not bare L-codes.
-     * - OwnJob = first tab job (or department) on own tab; selected subjob tab’s job name when a direct subjob tab is active.
-     * - ToName = customer dropdown on first tab; on a direct subjob tab = first tab’s own-job name (not the dropdown).
+     * Params for GET /api/quotes/by-enquiry/:requestNo — EXACT tuple mapping for Previous Quotes:
+     * - First tab (own job):
+     *   LeadJob = lead dropdown, RequestNo = enquiry no,
+     *   OwnJob = first tab label under Previous Quotes, ToName = customer dropdown.
+     * - Direct subjob tab (non-first):
+     *   LeadJob = lead dropdown, RequestNo = enquiry no,
+     *   OwnJob = selected tab label, ToName = first tab label.
      */
     const scopedEnquiryQuotesParams = React.useMemo(() => {
         const tabs =
@@ -3799,49 +3927,45 @@ const QuoteForm = () => {
             /^own\s*job$/i.test(firstLabelRaw);
 
         let ownJobName = '';
+        let toNameParam = '';
         let useDepartmentForOwnJob = false;
 
-        /** Same OwnJob / ToName strings as stored in EnquiryQuotes (full job name from hierarchy when possible). */
-        const ownJobNameFromJobNode = (tab) => {
-            if (!tab?.realId) return '';
-            const node = mergedJobPool.find((j) => String(j.id || j.ItemID || j.ID) === String(tab.realId));
-            return (node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
-        };
-
-        const firstTabJobNameForDb = () => (ownJobNameFromJobNode(first) || firstLabelRaw).trim();
+        const firstTabLabel = (stripQuoteJobPrefix(firstLabelRaw) || firstLabelRaw).trim();
+        const activeTabLabel = (stripQuoteJobPrefix(activeLabelRaw) || activeLabelRaw).trim();
 
         if (tabs.length === 1 || isFirstTab) {
+            // Own job tab mapping: OwnJob=first tab label, ToName=customer dropdown.
             if (placeholderFirst) {
                 const divOwn = (quoteListDivision || '').trim();
-                if (divOwn) {
-                    ownJobName = divOwn;
-                    useDepartmentForOwnJob = false;
-                } else {
-                    // No real first tab — server resolves OwnJob from logged-in user email → Master_ConcernedSE.Department
-                    useDepartmentForOwnJob = true;
-                }
+                if (divOwn) ownJobName = divOwn;
+                else useDepartmentForOwnJob = true;
             } else {
-                ownJobName = firstTabJobNameForDb();
+                ownJobName = firstTabLabel;
             }
+            toNameParam = String(toName || '').trim();
         } else {
-            // Subjob tab (not first): OwnJob = selected tab’s job (matches EnquiryQuotes.OwnJob intent)
-            ownJobName = (ownJobNameFromJobNode(active) || activeLabelRaw).trim();
+            // Direct subjob mapping: OwnJob=selected tab label, ToName=first tab label.
+            ownJobName = activeTabLabel;
+            toNameParam = firstTabLabel;
         }
 
-        // ToName must match getQuotePayload (external customer stays HVAC; internal job-as-customer uses parent tab label).
-        const toNameParam = resolveQuoteToNameForDbTuple(
-            calculatedTabs,
-            effectiveQuoteTabs,
-            activeQuoteTab,
-            toName,
-            mergedJobPool
-        );
-
-        const leadJobName = resolveRootLeadJobLabelForQuotes(
-            mergedJobPool,
-            selectedLeadId,
-            enquiryData?.leadJobPrefix || ''
-        );
+        // LeadJob must follow the lead dropdown selection used in UI.
+        const leadDropdownOptions = [
+            ...new Set((enquiryData?.divisions || []).map((d) => String(d || '').trim()).filter(Boolean)),
+        ];
+        const leadJobName =
+            resolveLeadJobSelectValue(
+                leadDropdownOptions,
+                selectedLeadId,
+                pricingData?.jobs,
+                enquiryData?.leadJobPrefix,
+                enquiryData?.divisionsHierarchy
+            ) ||
+            resolveRootLeadJobLabelForQuotes(
+                mergedJobPool,
+                selectedLeadId,
+                enquiryData?.leadJobPrefix || ''
+            );
 
         if (!leadJobName || !toNameParam) return null;
         if (!useDepartmentForOwnJob && !ownJobName) return null;
@@ -3900,8 +4024,50 @@ const QuoteForm = () => {
                 return prefix;
             })();
 
-            const useScopedPanel = quoteScopedForPanel.length > 0;
-            const quoteSourceList = useScopedPanel ? quoteScopedForPanel : existingQuotes;
+            // When tuple-scoped GET has settled, NEVER fall back to unscoped existingQuotes.
+            // If scoped tuple has no rows, Previous Quotes must be blank (do not show another tuple's Quote Ref).
+            const holdScopedPanelDuringTransition =
+                !!scopedEnquiryQuotesParams &&
+                browsePreviousQuotesRevisions &&
+                !!activeTabObj?.isSubJobTab &&
+                Array.isArray(quoteScopedForPanel) &&
+                quoteScopedForPanel.length > 0 &&
+                scopedQuotesFetchSettledKey !== scopedQuotePanelFetchKey;
+            const useScopedPanel =
+                !!scopedEnquiryQuotesParams &&
+                (
+                    scopedQuotesFetchSettledKey === scopedQuotePanelFetchKey ||
+                    holdScopedPanelDuringTransition
+                );
+            const quoteSourceList = (() => {
+                if (!useScopedPanel) return existingQuotes;
+                if (Array.isArray(quoteScopedForPanel) && quoteScopedForPanel.length > 0) {
+                    return quoteScopedForPanel;
+                }
+                // Strict scoped API can still miss rows due data-shape drift; fallback to client-side exact tuple match.
+                const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
+                if (!rn || !scopedEnquiryQuotesParams) return [];
+                const exactTuple = (existingQuotes || []).filter((q) =>
+                    quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, rn)
+                );
+                if (exactTuple.length > 0) return exactTuple;
+                /**
+                 * Direct subjob tabs: historical rows often drift only in ToName while LeadJob + OwnJob are correct.
+                 * If strict tuple yields none, relax ToName but keep RequestNo + LeadJob + OwnJob exact scope.
+                 */
+                if (activeTabObj?.isSubJobTab) {
+                    return (existingQuotes || []).filter((q) => {
+                        if (String(q.RequestNo ?? '').trim() !== rn) return false;
+                        if (!matchLeadJobForQuoteScope(q.LeadJob, scopedEnquiryQuotesParams.leadJobName)) return false;
+                        return matchOwnJobForQuoteScope(
+                            q.OwnJob,
+                            scopedEnquiryQuotesParams.ownJobName || '',
+                            false
+                        );
+                    });
+                }
+                return exactTuple;
+            })();
 
             /** When `forceUnscopedToName`, re-apply ToName / tab-ancestor rules on enquiry-wide rows (scoped SQL can omit tuples). */
             function rowMatchesPreviousQuotesTab(q, forceUnscopedToName) {
@@ -3934,12 +4100,31 @@ const QuoteForm = () => {
                         }
                     }
                     const isExactMatch = normalizedCurrentTo && normalizedQuoteTo === normalizedCurrentTo;
-                    const isAncestorMatch = activeTabAncestors.includes(normalizedQuoteTo);
-                    if (!normalizedCurrentTo) return false;
-                    if (!isExactMatch && !isAncestorMatch) return false;
+                    // On subjob tabs, do NOT allow ancestor ToName matches. Otherwise parent-job quotes show up under child option tabs
+                    // and the UI displays the wrong Quote Ref in "Previous Quotes / Revisions".
+                    const allowAncestorToNameMatch = !activeTabObj?.isSubJobTab;
+                    const isAncestorMatch = allowAncestorToNameMatch && activeTabAncestors.includes(normalizedQuoteTo);
+                    /**
+                     * Direct subjob tabs in browse mode:
+                     * historical EnquiryQuotes rows may drift in ToName while LeadJob + OwnJob are correct.
+                     * For these tabs, allow downstream OwnJob/LeadJob checks to decide row eligibility.
+                     */
+                    const allowSubjobToNameRelax =
+                        !!activeTabObj?.isSubJobTab && !!scopedEnquiryQuotesParams;
+                    if (!allowSubjobToNameRelax) {
+                        if (!normalizedCurrentTo) return false;
+                        if (!isExactMatch && !isAncestorMatch) return false;
+                    }
                 }
 
                 if (scopedPanel) {
+                    if (activeTabObj?.isOwnJobTab) {
+                        const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                        const tabOwn = collapseSpacesLower(
+                            stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                        );
+                        if (qOwn && tabOwn && qOwn !== tabOwn) return false;
+                    }
                     if (scopedEnquiryQuotesParams?.useDepartmentForOwnJob && tabs.length > 1) {
                         return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
                     }
@@ -4018,13 +4203,37 @@ const QuoteForm = () => {
                 .filter(quoteRevisionShowsInSignedOnlyList);
             if (
                 rows.length === 0 &&
-                useScopedPanel &&
-                Array.isArray(existingQuotes) &&
-                existingQuotes.length > 0
+                browsePreviousQuotesRevisions &&
+                activeTabObj?.isSubJobTab
             ) {
-                rows = existingQuotes
-                    .filter((q) => rowMatchesPreviousQuotesTab(q, true))
+                // Final relaxed subjob fallback: rely on tab branch/division identity from QuoteNumber + RequestNo.
+                const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
+                rows = (existingQuotes || [])
+                    .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
+                    .filter((q) => quoteNumberDivisionMatchesTab(q, activeTabObj, true))
                     .filter(quoteRevisionShowsInSignedOnlyList);
+                // If still empty, match by OwnJob label to selected direct subjob tab (ignore ToName drift).
+                if (rows.length === 0) {
+                    const tabOwn = collapseSpacesLower(
+                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                    );
+                    rows = (existingQuotes || [])
+                        .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
+                        .filter((q) => {
+                            const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q?.OwnJob || ''));
+                            if (qOwn && tabOwn && qOwn === tabOwn) return true;
+                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                        })
+                        .filter(quoteRevisionShowsInSignedOnlyList);
+                }
+            }
+            const cacheKey = String(activeTabObj?.id ?? tabId ?? '');
+            if (rows.length > 0) {
+                previousQuotesRowsCacheRef.current[cacheKey] = rows;
+                return rows;
+            }
+            if (browsePreviousQuotesRevisions && cacheKey && previousQuotesRowsCacheRef.current[cacheKey]?.length) {
+                return previousQuotesRowsCacheRef.current[cacheKey];
             }
             return rows;
         },
@@ -4042,6 +4251,8 @@ const QuoteForm = () => {
             isAdmin,
             scopedEnquiryQuotesParams,
             quoteListDivision,
+            browsePreviousQuotesRevisions,
+            enquiryData?.enquiry?.RequestNo,
         ]
     );
 
@@ -4073,12 +4284,22 @@ const QuoteForm = () => {
 
     useEffect(() => {
         const rn = enquiryData?.enquiry?.RequestNo;
+        const activeScopedTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
+        const holdScopedRowsForSubjobBrowse =
+            browsePreviousQuotesRevisions &&
+            !!activeScopedTabObj?.isSubJobTab &&
+            Array.isArray(quoteScopedForPanel) &&
+            quoteScopedForPanel.length > 0;
         if (!rn) {
             setQuoteScopedForPanel([]);
             setScopedQuotesFetchSettledKey(null);
             return;
         }
         if (!scopedQuotePanelFetchKey || !scopedEnquiryQuotesParams) {
+            if (holdScopedRowsForSubjobBrowse) {
+                // Keep prior scoped rows during tuple-key churn to avoid subjob tab flicker-to-blank.
+                return;
+            }
             setQuoteScopedForPanel([]);
             setScopedQuotesFetchSettledKey(null);
             return;
@@ -4097,6 +4318,9 @@ const QuoteForm = () => {
                 qs.set('leadJobName', p.leadJobName);
                 qs.set('toName', p.toName);
                 if (p.ownJobName) qs.set('ownJobName', p.ownJobName);
+                // Strict tuple match for Previous Quotes panel (avoid showing another tuple's Quote Ref).
+                qs.set('strictTuple', '1');
+                if ((quoteListDivision || '').trim()) qs.set('division', (quoteListDivision || '').trim());
 
                 const url = `${API_BASE}/api/quotes/by-enquiry/${encodeURIComponent(rn)}?${qs.toString()}`;
                 const res = await fetch(url);
@@ -4118,11 +4342,36 @@ const QuoteForm = () => {
 
         return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch keyed by scopedQuotePanelFetchKey; scopedEnquiryQuotesParams identity churns with pricingData
-    }, [enquiryData?.enquiry?.RequestNo, scopedQuotePanelFetchKey]);
+    }, [
+        enquiryData?.enquiry?.RequestNo,
+        scopedQuotePanelFetchKey,
+        browsePreviousQuotesRevisions,
+        activeQuoteTab,
+        calculatedTabs,
+    ]);
 
+    /** Keep Enquiry Type list seeded from selected enquiry when form list is empty. */
+    useEffect(() => {
+        if (!enquiryData?.enquiry?.RequestNo) return;
+        if ((quoteTypeList || []).length > 0) return;
+        const picked = resolveSelectedEnquiryTypes(enquiryData);
+        if (picked.length > 0) {
+            setQuoteTypeList(picked);
+            setQuoteEnquiryTypeSelect('');
+        }
+    }, [enquiryData?.enquiry?.RequestNo, enquiryData?.enquiry?.SelectedEnquiryTypes, enquiryData?.enquiry?.EnquiryType, quoteTypeList]);
+
+    const activeTabForScopedReady =
+        (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab)) || null;
     const scopedQuoteTupleReady =
         !scopedEnquiryQuotesParams ||
-        scopedQuotesFetchSettledKey === scopedQuotePanelFetchKey;
+        scopedQuotesFetchSettledKey === scopedQuotePanelFetchKey ||
+        (
+            DISABLE_QUOTE_TAB_AUTOMATION &&
+            browsePreviousQuotesRevisions &&
+            !!activeTabForScopedReady?.isOwnJobTab
+        );
+    const saveButtonScopeReady = !browsePreviousQuotesRevisions || scopedQuoteTupleReady;
 
     /** Preview must not show another tab's Quote Ref while scoped rows + active tab imply "no quote for this tab". */
     const loadedQuoteOutOfActiveTabScope = React.useMemo(() => {
@@ -4933,15 +5182,17 @@ const QuoteForm = () => {
         };
         document.addEventListener('mousedown', handleClickOutside);
 
-        // Fetch Pending Quotes
+        // Fetch Pending Quotes (guard: only when division is known + category is Pending)
         const userEmail = currentUser?.EmailId || currentUser?.email || '';
         console.log('[QuoteForm] current user object:', currentUser);
         console.log(`[QuoteForm] Fetched pending quotes for: ${userEmail}`);
 
-        refetchPendingQuotes();
+        if (quoteListCategory === QUOTE_LIST_CATEGORY.PENDING && (quoteListDivision || '').trim()) {
+            refetchPendingQuotes(quoteListDivision);
+        }
 
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [currentUser, refetchPendingQuotes]);
+    }, [currentUser, refetchPendingQuotes, quoteListCategory, quoteListDivision]);
 
     // Fetch Metadata Lists
     useEffect(() => {
@@ -6754,9 +7005,7 @@ const QuoteForm = () => {
                 .split(',')
                 .map((s) => s.trim())
                 .filter(Boolean);
-            const fromEnq = Array.isArray(enquiryData?.enquiry?.SelectedEnquiryTypes)
-                ? enquiryData.enquiry.SelectedEnquiryTypes.filter(Boolean)
-                : [];
+            const fromEnq = resolveSelectedEnquiryTypes(enquiryData);
             setQuoteTypeList(fromQuote.length > 0 ? fromQuote : fromEnq);
             setQuoteEnquiryTypeSelect('');
         }
@@ -6953,9 +7202,13 @@ const QuoteForm = () => {
         console.log('[loadQuote] Setting Context Scope:', newScope);
         setQuoteContextScope(newScope);
 
+        const tabAtLoad = (calculatedTabs || []).find((t) => String(t.id) === effectiveQuoteTab);
+
         // Trigger Summary Recalculation to update the Preview HTML with corrected scope
-        // This fixes "Corrupted" quotes that were saved with full pricing
-        if (pricingData) {
+        // This fixes "Corrupted" quotes that were saved with full pricing.
+        // IMPORTANT: For Previous-Quotes browse on direct subjob tabs, do NOT recalc; use the exact stored
+        // PricingTerms/BOQ from the selected quote row so plumbing/BMS/etc. previews never pick up Interior jobs.
+        if (pricingData && !(browsePreviousQuotesRevisions && tabAtLoad?.isSubJobTab)) {
             const rowToForSummary = String(quote.ToName ?? quote.toname ?? '').trim();
             const summaryToName = skipRecipientFromRow
                 ? rowToForSummary || String(toNameRef.current || '').trim()
@@ -6964,8 +7217,6 @@ const QuoteForm = () => {
             // Note: If pricingData is not for the correct customer, this might be slightly off provided values,
             // but structure will be correct. Usually Previous Quote Context implies same active enquiry.
         }
-
-        const tabAtLoad = (calculatedTabs || []).find((t) => String(t.id) === effectiveQuoteTab);
         if (tabAtLoad?.isSubJobTab) {
             setLoadedEnquiryQuoteRowForPreview(quote);
         } else {
@@ -6973,8 +7224,53 @@ const QuoteForm = () => {
         }
     };
 
+    /** Direct subjob tab: after tab commit, load latest quote row for right-side preview. */
+    const prevActiveSubjobTabForPreviewLoadRef = useRef('');
+    useEffect(() => {
+        if (!browsePreviousQuotesRevisions) return;
+        if (!activeQuoteTab) return;
+        const activeTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
+        if (!activeTabObj?.isSubJobTab) return;
+
+        const tabRows = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab) || [];
+        if (!tabRows.length) return;
+        const latest = [...tabRows].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
+        if (!latest) return;
+        const latestId = quoteRowId(latest);
+        const currentId = quoteRowId(loadedEnquiryQuoteRowForPreview);
+
+        if (!latestId) return;
+
+        const didTabChange = prevActiveSubjobTabForPreviewLoadRef.current !== String(activeQuoteTab);
+
+        // If preview already shows the latest revision and the tab did not just change, do nothing.
+        if (currentId && currentId === latestId && !didTabChange) return;
+
+        // If the user manually selected an older revision (currentId != latestId) and the tab didn't just change,
+        // don't overwrite their selection.
+        if (!didTabChange && currentId && currentId !== latestId) return;
+
+        // Mark the tab as handled only when we have a usable `latestId`.
+        prevActiveSubjobTabForPreviewLoadRef.current = String(activeQuoteTab);
+
+        loadQuote(latest, {
+            preserveRecipient: true,
+            skipPreparedSignatory: true,
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        browsePreviousQuotesRevisions,
+        activeQuoteTab,
+        calculatedTabs,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+        quoteScopedForPanel,
+        loadedEnquiryQuoteRowForPreview,
+    ]);
+
     // Auto-load Quote or Clear Form when Active Tab Changes
     useEffect(() => {
+        if (DISABLE_QUOTE_TAB_AUTOMATION) return;
         if (!activeQuoteTab || !calculatedTabs) return;
         if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
             return;
@@ -6985,6 +7281,9 @@ const QuoteForm = () => {
         ) {
             return;
         }
+
+        /** Local draft mode: preview comes from left panel only — never auto-load saved revisions into the form. */
+        if (!browsePreviousQuotesRevisions) return;
 
         // Ensure data is loaded
         if (!pricingData && !enquiryData) return;
@@ -7003,7 +7302,9 @@ const QuoteForm = () => {
         const rnScope = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
         const rawSource = scopedOnly
             ? quoteScopedForPanel
-            : (quoteScopedForPanel.length > 0 ? quoteScopedForPanel : existingQuotes);
+            : (scopedQuotesFetchSettledKey === scopedQuotePanelFetchKey && scopedEnquiryQuotesParams
+                  ? quoteScopedForPanel
+                  : existingQuotes);
         /** GET /by-enquiry is keyed off the new tuple before the response arrives — drop prior-customer rows. */
         const sourceQuotes =
             scopedOnly && scopedEnquiryQuotesParams && rnScope
@@ -7123,6 +7424,10 @@ const QuoteForm = () => {
             }
         } else {
             console.log('[AutoLoad] No quotes found for tab. Branch:', currentLeadCode);
+            if (browsePreviousQuotesRevisions && activeTabObj?.isSubJobTab) {
+                // Direct subjob tab: avoid clearing current preview during scoped/fallback races.
+                return;
+            }
             if (!(toName || '').trim()) {
                 console.log('[AutoLoad] toName empty; skip reset until customer is set again.');
                 return;
@@ -7255,7 +7560,7 @@ const QuoteForm = () => {
                 setQuoteDate(new Date().toISOString().split('T')[0]);
                 setValidityDays(30);
                 setSubject(enquiryData?.enquiry?.ProjectName ? `Proposal for ${enquiryData.enquiry.ProjectName}` : '');
-                setCustomerReference(enquiryData?.enquiry?.CustomerRefNo || enquiryData?.enquiry?.RequestNo || '');
+                setCustomerReference(enquiryData?.enquiry?.CustomerRefNo || '');
             }
 
             // Summary refresh on tab change is handled by the calculateSummary effect (paired tabs + same quoteId).
@@ -7277,11 +7582,13 @@ const QuoteForm = () => {
         jobsPool,
         getFilteredQuotesForPreviousQuotesTab,
         quotesMatchingScopedTuple,
+        browsePreviousQuotesRevisions,
     ]);
 
     // Hard fallback: when scoped API rows exist (or client-matched existingQuotes), load the latest for the active tab.
     // Never keep the full unfiltered panel when the tab filter is empty — that loaded another tab's Quote Ref (e.g. BMS on HVAC).
     useEffect(() => {
+        if (DISABLE_QUOTE_TAB_AUTOMATION) return;
         if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
             return;
         }
@@ -7291,6 +7598,7 @@ const QuoteForm = () => {
         ) {
             return;
         }
+        if (!browsePreviousQuotesRevisions) return;
         if (!(toName || '').trim()) return;
 
         const rnHard = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
@@ -7359,6 +7667,10 @@ const QuoteForm = () => {
             const trulyNoRowForTab = !aligned.some((q) =>
                 basePanel.some((b) => String(quoteRowId(b) ?? '') === String(quoteRowId(q) ?? ''))
             );
+            if (browsePreviousQuotesRevisions && activeTabObj?.isSubJobTab && trulyNoRowForTab) {
+                // Keep current view on subjob tabs; scoped sources can transiently report empty while switching.
+                return;
+            }
             if (narrowed && trulyNoRowForTab && (quoteId !== null || (quoteNumber || '').trim() !== '')) {
                 console.log('[HardFallback] No scoped quote for active tab; clearing Quote Ref for draft preview.');
                 setQuoteId(null);
@@ -7387,12 +7699,14 @@ const QuoteForm = () => {
         scopedQuotesFetchSettledKey,
         scopedQuotePanelFetchKey,
         getFilteredQuotesForPreviousQuotesTab,
+        browsePreviousQuotesRevisions,
     ]);
 
     /** When the user switches Previous Quotes job tabs, load the latest saved quote for that tab (matches sidebar list). */
     const prevQuoteTabForAutoLoadRef = React.useRef(null);
     const lastTabAutoLoadEnquiryRef = React.useRef(null);
     useEffect(() => {
+        if (DISABLE_QUOTE_TAB_AUTOMATION) return;
         if (typeof performance !== 'undefined' && performance.now() < quoteDraftHydrateSkipAutoLoadUntilRef.current) {
             return;
         }
@@ -7402,6 +7716,7 @@ const QuoteForm = () => {
         ) {
             return;
         }
+        if (!browsePreviousQuotesRevisions) return;
         const rn = enquiryData?.enquiry?.RequestNo;
         if (rn && lastTabAutoLoadEnquiryRef.current !== rn) {
             lastTabAutoLoadEnquiryRef.current = rn;
@@ -7443,7 +7758,83 @@ const QuoteForm = () => {
         quoteTabsFingerprint,
         pricingData,
         enquiryData,
+        browsePreviousQuotesRevisions,
     ]);
+
+    const browsePrevQuotesLatchRef = useRef(false);
+
+    /** New enquiry: allow Browse-mode initializer to run again (expand + load latest). */
+    useEffect(() => {
+        browsePrevQuotesLatchRef.current = false;
+    }, [enquiryData?.enquiry?.RequestNo]);
+
+    /** Browse mode on (once per enable): first tab, expand all revision groups, load latest saved quote for backend preview. */
+    useEffect(() => {
+        if (DISABLE_QUOTE_TAB_AUTOMATION) return;
+        if (!browsePreviousQuotesRevisions) {
+            browsePrevQuotesLatchRef.current = false;
+            // Checkbox OFF => keep all revision groups collapsed.
+            setExpandedGroups({});
+            return;
+        }
+        if (!calculatedTabs?.length || !(toName || '').trim()) return;
+
+        const firstId = calculatedTabs[0].id;
+        if (String(activeQuoteTab) !== String(firstId)) {
+            handleTabChange(firstId, { force: true });
+            return;
+        }
+
+        if (browsePrevQuotesLatchRef.current) return;
+        browsePrevQuotesLatchRef.current = true;
+
+        const filtered = getFilteredQuotesForPreviousQuotesTab(firstId);
+        const quoteGroups = filtered.reduce((acc, q) => {
+            const key = q.QuoteNumber?.split('-R')[0] || 'Unknown';
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(q);
+            return acc;
+        }, {});
+        setExpandedGroups((prev) => {
+            const next = { ...prev };
+            Object.keys(quoteGroups).forEach((k) => {
+                next[k] = true;
+            });
+            return next;
+        });
+
+        const sorted = [...filtered].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0));
+        const latest = sorted[0];
+        if (latest) {
+            queueMicrotask(() => {
+                try {
+                    loadQuote(latest, {
+                        preserveRecipient: true,
+                        skipPreparedSignatory: true,
+                        forActiveQuoteTab: firstId,
+                    });
+                } catch (e) {
+                    console.warn('[browsePreviousQuotesRevisions] load latest', e);
+                }
+            });
+        }
+    }, [
+        browsePreviousQuotesRevisions,
+        calculatedTabs,
+        quoteTabsFingerprint,
+        toName,
+        activeQuoteTab,
+        getFilteredQuotesForPreviousQuotesTab,
+    ]);
+
+    /** Draft mode: keep the active tab on Own Job (first `isSelf` tab). */
+    useEffect(() => {
+        if (browsePreviousQuotesRevisions) return;
+        if (!calculatedTabs?.length) return;
+        const ownTab = calculatedTabs.find((t) => t.isSelf) || calculatedTabs[0];
+        if (!ownTab || String(activeQuoteTab) === String(ownTab.id)) return;
+        handleTabChange(ownTab.id, { force: true });
+    }, [browsePreviousQuotesRevisions, calculatedTabs, quoteTabsFingerprint, activeQuoteTab]);
 
 
 
@@ -7603,12 +7994,64 @@ const QuoteForm = () => {
                 if (scopedEnquiryQuotesParams) {
                     setScopedQuotePanelRefreshNonce((n) => n + 1);
                 }
-                const match = Array.isArray(refreshed)
-                    ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newRevId ?? ''))
+                /**
+                 * After a successful Revision, switch to "Previous Quotes / Revisions" browse mode
+                 * so the right preview reflects the revised saved quote (backend row), not draft-only fields.
+                 */
+                setBrowsePreviousQuotesRevisions(true);
+                const latestForPreview = Array.isArray(refreshed)
+                    ? (() => {
+                          // Prefer current scoped tuple (active tab/customer), then select highest revision.
+                          const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
+                          const scopedRows =
+                              scopedEnquiryQuotesParams && rn
+                                  ? refreshed.filter((q) =>
+                                        quoteRowMatchesEnquiryScopedParams(
+                                            q,
+                                            scopedEnquiryQuotesParams,
+                                            rn
+                                        )
+                                    )
+                                  : refreshed;
+                          const pool = scopedRows.length > 0 ? scopedRows : refreshed;
+                          if (!pool.length) return null;
+                          const revisionRank = (row) => {
+                              const byField = Number(row?.RevisionNo);
+                              if (Number.isFinite(byField) && byField >= 0) return byField;
+                              const qn = String(row?.QuoteNumber ?? row?.quoteNumber ?? '').trim();
+                              const m = qn.match(/-R(\d+)$/i);
+                              return m ? Number(m[1]) : -1;
+                          };
+                          return [...pool].sort((a, b) => {
+                              const r = revisionRank(b) - revisionRank(a);
+                              if (r !== 0) return r;
+                              const ta = Date.parse(a.QuoteDate || 0) || 0;
+                              const tb = Date.parse(b.QuoteDate || 0) || 0;
+                              return tb - ta;
+                          })[0];
+                      })()
                     : null;
-                if (match) {
+                if (latestForPreview) {
+                    const forcedId = quoteRowId(latestForPreview);
+                    const forcedNo = String(
+                        latestForPreview.QuoteNumber ?? latestForPreview.quoteNumber ?? ''
+                    ).trim();
+                    // Prevent competing auto-load effects from snapping back to previous revision.
+                    if (typeof performance !== 'undefined') {
+                        quoteTabRestoreSuppressLoadQuoteUntilRef.current = performance.now() + 1800;
+                    }
+                    setQuoteId(forcedId != null ? forcedId : null);
+                    setQuoteNumber(forcedNo);
+                    const regPinned = tabStateRegistry.current[activeQuoteTab];
+                    if (regPinned && typeof regPinned === 'object') {
+                        regPinned.quoteId = forcedId != null ? forcedId : null;
+                        regPinned.quoteNumber = forcedNo;
+                    }
                     queueMicrotask(() =>
-                        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true })
+                        loadQuote(latestForPreview, {
+                            preserveRecipient: true,
+                            skipPreparedSignatory: true,
+                        })
                     );
                 }
 
@@ -7916,10 +8359,10 @@ const QuoteForm = () => {
                 setSignatory('');
                 setSignatoryDesignation('');
 
-                setCustomerReference(data.enquiry.CustomerRefNo || data.enquiry.RequestNo || ''); // Default to Cust Ref or Enquiry No → YourRef on save
+                setCustomerReference(resolveEnquiryCustomerRef(data.enquiry)); // Default from enquiry payload customer ref
                 setSubject(`Proposal for ${data.enquiry.ProjectName}`);
                 {
-                    const t = data.enquiry?.SelectedEnquiryTypes;
+                    const t = resolveSelectedEnquiryTypes(data);
                     setQuoteTypeList(Array.isArray(t) && t.length > 0 ? [...t] : []);
                     setQuoteEnquiryTypeSelect('');
                 }
@@ -8584,10 +9027,13 @@ const QuoteForm = () => {
                 enquiryData?.leadJobPrefix || ''
             ),
             ownJob: (() => {
+                // OwnJob must follow Division dropdown when present (especially for CC/Management users).
+                const divOwn = (quoteListDivision || '').trim();
+                if (divOwn) return divOwn;
                 const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
                 if (activeQuoteTab && tabs) {
                     const tab = tabs.find(t => String(t.id) === String(activeQuoteTab));
-                    if (tab) return tab.name || tab.label || '';
+                    if (tab) return (tab.name || tab.label || '').trim();
                 }
                 return '';
             })(),
@@ -9939,8 +10385,9 @@ const QuoteForm = () => {
     /** Quote preview / PDF: enquiry types as a single line (reference “Type” row). */
     const quotePreviewTypeLine = React.useMemo(() => {
         const parts = (quoteTypeList || []).map((x) => String(x || '').trim()).filter(Boolean);
-        return parts.length ? parts.join(', ') : '—';
-    }, [quoteTypeList]);
+        if (parts.length) return parts.join(', ');
+        return browsePreviousQuotesRevisions ? '—' : '';
+    }, [quoteTypeList, browsePreviousQuotesRevisions]);
 
     /** Prepared By contact number only (no "Tel:") for quote header "Contact:" row. */
     const quotePreviewPreparedByContactDisplay = React.useMemo(() => {
@@ -9961,6 +10408,15 @@ const QuoteForm = () => {
         );
     }, [calculatedTabs, activeQuoteTab, loadedEnquiryQuoteRowForPreview, usersList, preparedByOptions]);
 
+    /** Quote Ref line in A4 preview: saved quotes when browsing; Draft / *-Draft from left-panel ref when not. */
+    const quoteRefDisplayForPreview = React.useMemo(() => {
+        if (browsePreviousQuotesRevisions) {
+            const raw = subjobQuoteA4HeaderDisplay?.quoteNumber ?? quoteNumber ?? '';
+            return String(raw).trim() || 'Draft';
+        }
+        return quoteNumberToDraftDisplay(quoteNumber);
+    }, [browsePreviousQuotesRevisions, subjobQuoteA4HeaderDisplay, quoteNumber]);
+
     /**
      * A4 cover "To," block: first tab = left form (`toName` / address).
      * Direct subjob tab + loaded EnquiryQuotes row: always use **saved** ToName / ToAddress / contact from that row
@@ -9968,16 +10424,19 @@ const QuoteForm = () => {
      * replace with the subjob tab label or `availableProfiles` for OwnJob, or preview shows wrong "To").
      */
     const quotePreviewToBlockDisplay = React.useMemo(() => {
-        const pick = (fromRow, fromForm) => {
-            const r = String(fromRow ?? '').trim();
-            return r || String(fromForm ?? '').trim();
-        };
         const baseForm = {
             toName: String(toName || '').trim(),
             toAddress: String(toAddress || ''),
             toPhone: String(toPhone || '').trim(),
             toFax: String(toFax || '').trim(),
             toEmail: String(toEmail || '').trim(),
+        };
+        /** Draft preview: always use left-panel recipient fields only (no DB row). */
+        if (!browsePreviousQuotesRevisions) return baseForm;
+
+        const pick = (fromRow, fromForm) => {
+            const r = String(fromRow ?? '').trim();
+            return r || String(fromForm ?? '').trim();
         };
         const sj = subjobQuoteA4HeaderDisplay;
         const row = loadedEnquiryQuoteRowForPreview;
@@ -9991,6 +10450,7 @@ const QuoteForm = () => {
             toEmail: pick(sj.toEmail, toEmail),
         };
     }, [
+        browsePreviousQuotesRevisions,
         subjobQuoteA4HeaderDisplay,
         loadedEnquiryQuoteRowForPreview,
         toName,
@@ -9998,6 +10458,22 @@ const QuoteForm = () => {
         toPhone,
         toFax,
         toEmail,
+    ]);
+
+    /** Browse mode + own-job tab with no previous quote: right-side preview must be blank. */
+    const shouldBlankQuotePreviewInBrowse = React.useMemo(() => {
+        if (!browsePreviousQuotesRevisions) return false;
+        if (!activeQuoteTab || !calculatedTabs?.length) return false;
+        const tab = calculatedTabs.find((t) => String(t.id) === String(activeQuoteTab));
+        if (!tab?.isSelf) return false;
+        const rows = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab) || [];
+        return rows.length === 0;
+    }, [
+        browsePreviousQuotesRevisions,
+        activeQuoteTab,
+        calculatedTabs,
+        quoteTabsFingerprint,
+        getFilteredQuotesForPreviousQuotesTab,
     ]);
 
     const attentionSelectOptions = React.useMemo(() => {
@@ -10329,14 +10805,6 @@ const QuoteForm = () => {
                                             enquiryData.leadJobPrefix,
                                             enquiryData.divisionsHierarchy
                                         );
-
-                                        if (import.meta.env.DEV) {
-                                            console.log('[Quote Lead Job Render] State:', {
-                                                prefix: enquiryData.leadJobPrefix,
-                                                options: visibleLeadJobs,
-                                                selected: selectedValue
-                                            });
-                                        }
 
                                         const leadClean = (s) =>
                                             String(s || '')
@@ -10747,17 +11215,17 @@ const QuoteForm = () => {
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
                                 onClick={() => saveQuote()}
-                                disabled={saving || !canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted}
+                                disabled={saving || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted}
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
                                     padding: '6px 12px',
-                                    background: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
-                                    color: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
+                                    background: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
+                                    color: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
                                     border: 'none',
                                     borderRadius: '44px',
-                                    cursor: (!canEdit() || !scopedQuoteTupleReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
+                                    cursor: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
                                     fontWeight: '600',
                                     fontSize: '12px',
                                     opacity: saving ? 0.7 : 1
@@ -10766,7 +11234,7 @@ const QuoteForm = () => {
                                     saving ? 'Saving…' :
                                     isEditingRestricted ? 'Editing is restricted for this tab' :
                                     !canEdit() ? 'No permission to save (admin/lead access, pricing scope, or tab ownership required)' :
-                                    !scopedQuoteTupleReady ? 'Loading quote scope…' :
+                                    !saveButtonScopeReady ? 'Loading quote scope…' :
                                     hasPersistedQuoteForScope ? 'A quote already exists for this enquiry and customer. Use Revision to change it.' :
                                     ''
                                 }
@@ -10826,7 +11294,25 @@ const QuoteForm = () => {
 
                         {/* Unified Previous Quotes & Pricing Summary Section */}
                         <div style={{ padding: '8px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
-                            <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#475569' }}>Previous Quotes / Revisions (Updated):</h4>
+                            <label
+                                style={{
+                                    margin: '0 0 8px 0',
+                                    fontSize: '13px',
+                                    color: browsePreviousQuotesRevisions ? '#b91c1c' : '#475569',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '8px',
+                                    cursor: 'pointer',
+                                    userSelect: 'none',
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={browsePreviousQuotesRevisions}
+                                    onChange={(e) => setBrowsePreviousQuotesRevisions(e.target.checked)}
+                                />
+                                <span>Previous Quotes / Revisions (Updated)</span>
+                            </label>
 
                             {/* Tab Headers and Content Wrapper */}
                             {(() => {
@@ -10842,7 +11328,9 @@ const QuoteForm = () => {
                                             {tabs.map(tab => (
                                                 <button
                                                     key={tab.id}
-                                                    onClick={() => handleTabChange(tab.id)}
+                                                    type="button"
+                                                    onClick={() => browsePreviousQuotesRevisions && handleTabChange(tab.id)}
+                                                    disabled={!browsePreviousQuotesRevisions}
                                                     style={{
                                                         padding: '4px 8px',
                                                         fontSize: '11px',
@@ -10851,8 +11339,9 @@ const QuoteForm = () => {
                                                         background: activeQuoteTab === tab.id ? '#e0f2fe' : 'transparent',
                                                         color: activeQuoteTab === tab.id ? '#0284c7' : '#64748b',
                                                         borderBottom: activeQuoteTab === tab.id ? '2px solid #0284c7' : '2px solid transparent',
-                                                        cursor: 'pointer',
-                                                        borderRadius: '4px 4px 0 0'
+                                                        cursor: browsePreviousQuotesRevisions ? 'pointer' : 'not-allowed',
+                                                        borderRadius: '4px 4px 0 0',
+                                                        opacity: browsePreviousQuotesRevisions ? 1 : 0.55,
                                                     }}
                                                 >
                                                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: '1' }}>
@@ -10891,7 +11380,27 @@ const QuoteForm = () => {
                                                     return s;
                                                 })();
 
-                                                const filteredQuotes = getFilteredQuotesForPreviousQuotesTab(activeTabObj.id);
+                                                let filteredQuotes = getFilteredQuotesForPreviousQuotesTab(activeTabObj.id);
+                                                if (
+                                                    browsePreviousQuotesRevisions &&
+                                                    activeTabObj?.isSubJobTab &&
+                                                    (!filteredQuotes || filteredQuotes.length === 0)
+                                                ) {
+                                                    const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
+                                                    const tabOwn = collapseSpacesLower(
+                                                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                                                    );
+                                                    filteredQuotes = (existingQuotes || [])
+                                                        .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
+                                                        .filter((q) => {
+                                                            const qOwn = collapseSpacesLower(
+                                                                stripQuoteJobPrefix(q?.OwnJob || '')
+                                                            );
+                                                            if (qOwn && tabOwn && qOwn === tabOwn) return true;
+                                                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                                                        })
+                                                        .filter(quoteRevisionShowsInSignedOnlyList);
+                                                }
 
                                                 // Group revisions
                                                 const quoteGroups = filteredQuotes.reduce((acc, q) => {
@@ -10901,31 +11410,39 @@ const QuoteForm = () => {
                                                     return acc;
                                                 }, {});
 
-                                                const quoteList = Object.entries(quoteGroups)
-                                                    .sort(([a], [b]) => b.localeCompare(a))
-                                                    .slice(0, 1) // Only one quote reference to appear strictly
-                                                    .map(([quoteNo, revisions]) => {
+                                                const quoteGroupsSorted = Object.entries(quoteGroups).sort(([a], [b]) =>
+                                                    b.localeCompare(a)
+                                                );
+                                                const quoteGroupsForList = browsePreviousQuotesRevisions
+                                                    ? quoteGroupsSorted
+                                                    : quoteGroupsSorted.slice(0, 1);
+
+                                                const quoteList = quoteGroupsForList.map(([quoteNo, revisions]) => {
                                                         const sorted = revisions.sort((a, b) => b.RevisionNo - a.RevisionNo);
                                                         const latest = sorted[0];
-                                                        const isExpanded = expandedGroups[quoteNo];
+                                                        // Checkbox OFF => force collapsed view (single row only).
+                                                        const isExpanded = browsePreviousQuotesRevisions && expandedGroups[quoteNo];
                                                         const hasHistory = sorted.length > 1;
 
                                                         return (
                                                             <div key={quoteNo} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                                                 <div
-                                                                    onClick={() =>
+                                                                    onClick={() => {
+                                                                        if (!browsePreviousQuotesRevisions) return;
                                                                         loadQuote(latest, {
                                                                             preserveRecipient: true,
                                                                             skipPreparedSignatory: true,
-                                                                        })
-                                                                    }
+                                                                        });
+                                                                    }}
                                                                     style={{
                                                                         padding: '8px',
                                                                         background: String(quoteRowId(latest) ?? '') === String(quoteId ?? '') ? '#f0f9ff' : 'white',
                                                                         border: `1px solid ${String(quoteRowId(latest) ?? '') === String(quoteId ?? '') ? '#0ea5e9' : '#e2e8f0'}`,
                                                                         borderRadius: '8px',
-                                                                        cursor: 'pointer',
-                                                                        position: 'relative'
+                                                                        cursor: browsePreviousQuotesRevisions ? 'pointer' : 'not-allowed',
+                                                                        position: 'relative',
+                                                                        opacity: browsePreviousQuotesRevisions ? 1 : 0.55,
+                                                                        pointerEvents: browsePreviousQuotesRevisions ? 'auto' : 'none',
                                                                     }}
                                                                 >
                                                                     {/* Expand Toggle */}
@@ -10933,6 +11450,7 @@ const QuoteForm = () => {
                                                                         <div
                                                                             onClick={(e) => {
                                                                                 e.stopPropagation();
+                                                                                if (!browsePreviousQuotesRevisions) return;
                                                                                 toggleExpanded(quoteNo);
                                                                             }}
                                                                             style={{
@@ -10940,7 +11458,7 @@ const QuoteForm = () => {
                                                                                 right: '6px',
                                                                                 top: '6px',
                                                                                 padding: '2px',
-                                                                                cursor: 'pointer',
+                                                                                cursor: browsePreviousQuotesRevisions ? 'pointer' : 'default',
                                                                                 color: '#64748b'
                                                                             }}
                                                                         >
@@ -10948,45 +11466,175 @@ const QuoteForm = () => {
                                                                         </div>
                                                                     )}
 
-                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: hasHistory ? '20px' : '0' }}>
-                                                                        <span style={{ fontWeight: '700', fontSize: '12px' }}>{latest.QuoteNumber}</span>
-                                                                        <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7' }}>{latest.Status}</span>
+                                                                    <div
+                                                                        style={{
+                                                                            display: 'flex',
+                                                                            justifyContent: 'space-between',
+                                                                            alignItems: 'flex-start',
+                                                                            gap: '8px',
+                                                                            paddingRight: hasHistory ? '20px' : '0',
+                                                                        }}
+                                                                    >
+                                                                        <div
+                                                                            style={{
+                                                                                display: 'flex',
+                                                                                flexWrap: 'wrap',
+                                                                                alignItems: 'center',
+                                                                                gap: '8px',
+                                                                                minWidth: 0,
+                                                                            }}
+                                                                        >
+                                                                            <span style={{ fontWeight: '700', fontSize: '12px', color: '#0f172a' }}>
+                                                                                {latest.QuoteNumber}
+                                                                            </span>
+                                                                            {formatQuoteRowListQuoteDate(latest) ? (
+                                                                                <span style={{ fontSize: '10px', color: '#0f172a', fontWeight: 700 }}>
+                                                                                    {formatQuoteRowListQuoteDate(latest)}
+                                                                                </span>
+                                                                            ) : null}
+                                                                        </div>
+                                                                        <span
+                                                                            style={{
+                                                                                fontSize: '10px',
+                                                                                padding: '2px 6px',
+                                                                                borderRadius: '4px',
+                                                                                flexShrink: 0,
+                                                                                background: latest.Status === 'Draft' ? '#f1f5f9' : '#dcfce7',
+                                                                            }}
+                                                                        >
+                                                                            {latest.Status}
+                                                                        </span>
                                                                     </div>
-                                                                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-                                                                        BD {parseFloat(latest.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}
+                                                                    <div
+                                                                        style={{
+                                                                            display: 'flex',
+                                                                            flexWrap: 'wrap',
+                                                                            alignItems: 'center',
+                                                                            gap: '8px',
+                                                                            marginTop: '4px',
+                                                                            fontSize: '11px',
+                                                                            color: '#64748b',
+                                                                        }}
+                                                                    >
+                                                                        <span style={{ fontWeight: '600', color: '#334155' }}>
+                                                                            BD{' '}
+                                                                            {parseFloat(latest.TotalAmount || 0).toLocaleString(undefined, {
+                                                                                minimumFractionDigits: 3,
+                                                                            })}
+                                                                        </span>
+                                                                        {formatQuoteRowListUpdatedAt(latest) ? (
+                                                                            <span style={{ fontSize: '10px', color: '#15803d' }}>
+                                                                                Updated on: {formatQuoteRowListUpdatedAt(latest)}
+                                                                            </span>
+                                                                        ) : null}
                                                                     </div>
                                                                 </div>
 
-                                                                {/* Render History if Expanded */}
-                                                                {isExpanded && sorted.slice(1).map(rev => (
-                                                                    <div
-                                                                            key={String(quoteRowId(rev) ?? rev.QuoteNumber ?? rev.quoteNumber ?? 'rev')}
-                                                                            onClick={() =>
+                                                                {/* Render History if Expanded — same card layout as latest */}
+                                                                {isExpanded &&
+                                                                    sorted.slice(1).map((rev) => (
+                                                                        <div
+                                                                            key={String(
+                                                                                quoteRowId(rev) ??
+                                                                                    rev.QuoteNumber ??
+                                                                                    rev.quoteNumber ??
+                                                                                    'rev'
+                                                                            )}
+                                                                            onClick={() => {
+                                                                                if (!browsePreviousQuotesRevisions) return;
                                                                                 loadQuote(rev, {
                                                                                     preserveRecipient: true,
                                                                                     skipPreparedSignatory: true,
-                                                                                })
-                                                                            }
-                                                                        style={{
-                                                                            padding: '6px 8px',
-                                                                            background: String(quoteRowId(rev) ?? '') === String(quoteId ?? '') ? '#eff6ff' : '#f8fafc',
-                                                                            border: '1px solid #e2e8f0',
-                                                                            borderRadius: '6px',
-                                                                            marginLeft: '12px',
-                                                                            fontSize: '11px',
-                                                                            cursor: 'pointer',
-                                                                            display: 'flex',
-                                                                            justifyContent: 'space-between',
-                                                                            alignItems: 'center'
-                                                                        }}
-                                                                    >
-                                                                        <span style={{ color: '#475569' }}>{rev.QuoteNumber}</span>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                            <span style={{ fontWeight: '600' }}>BD {parseFloat(rev.TotalAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 3 })}</span>
-                                                                            <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '2px', background: '#e2e8f0' }}>{rev.Status}</span>
+                                                                                });
+                                                                            }}
+                                                                            style={{
+                                                                                padding: '8px',
+                                                                                background:
+                                                                                    String(quoteRowId(rev) ?? '') === String(quoteId ?? '')
+                                                                                        ? '#eff6ff'
+                                                                                        : '#f8fafc',
+                                                                                border: `1px solid ${
+                                                                                    String(quoteRowId(rev) ?? '') === String(quoteId ?? '')
+                                                                                        ? '#0ea5e9'
+                                                                                        : '#e2e8f0'
+                                                                                }`,
+                                                                                borderRadius: '8px',
+                                                                                marginLeft: '12px',
+                                                                                cursor: browsePreviousQuotesRevisions ? 'pointer' : 'not-allowed',
+                                                                                opacity: browsePreviousQuotesRevisions ? 1 : 0.55,
+                                                                                pointerEvents: browsePreviousQuotesRevisions ? 'auto' : 'none',
+                                                                            }}
+                                                                        >
+                                                                            <div
+                                                                                style={{
+                                                                                    display: 'flex',
+                                                                                    justifyContent: 'space-between',
+                                                                                    alignItems: 'flex-start',
+                                                                                    gap: '8px',
+                                                                                }}
+                                                                            >
+                                                                                <div
+                                                                                    style={{
+                                                                                        display: 'flex',
+                                                                                        flexWrap: 'wrap',
+                                                                                        alignItems: 'center',
+                                                                                        gap: '8px',
+                                                                                        minWidth: 0,
+                                                                                    }}
+                                                                                >
+                                                                                    <span
+                                                                                        style={{
+                                                                                            fontWeight: '700',
+                                                                                            fontSize: '12px',
+                                                                                            color: '#0f172a',
+                                                                                        }}
+                                                                                    >
+                                                                                        {rev.QuoteNumber ?? rev.quoteNumber}
+                                                                                    </span>
+                                                                                    {formatQuoteRowListQuoteDate(rev) ? (
+                                                                                        <span style={{ fontSize: '10px', color: '#0f172a', fontWeight: 700 }}>
+                                                                                            {formatQuoteRowListQuoteDate(rev)}
+                                                                                        </span>
+                                                                                    ) : null}
+                                                                                </div>
+                                                                                <span
+                                                                                    style={{
+                                                                                        fontSize: '10px',
+                                                                                        padding: '2px 6px',
+                                                                                        borderRadius: '4px',
+                                                                                        flexShrink: 0,
+                                                                                        background:
+                                                                                            rev.Status === 'Draft' ? '#f1f5f9' : '#dcfce7',
+                                                                                    }}
+                                                                                >
+                                                                                    {rev.Status}
+                                                                                </span>
+                                                                            </div>
+                                                                            <div
+                                                                                style={{
+                                                                                    display: 'flex',
+                                                                                    flexWrap: 'wrap',
+                                                                                    alignItems: 'center',
+                                                                                    gap: '8px',
+                                                                                    marginTop: '4px',
+                                                                                    fontSize: '11px',
+                                                                                    color: '#64748b',
+                                                                                }}
+                                                                            >
+                                                                                <span style={{ fontWeight: '600', color: '#334155' }}>
+                                                                                    BD{' '}
+                                                                                    {parseFloat(rev.TotalAmount || 0).toLocaleString(undefined, {
+                                                                                        minimumFractionDigits: 3,
+                                                                                    })}
+                                                                                </span>
+                                                                                {formatQuoteRowListUpdatedAt(rev) ? (
+                                                                                    <span style={{ fontSize: '10px', color: '#15803d' }}>
+                                                                                        Updated on: {formatQuoteRowListUpdatedAt(rev)}
+                                                                                    </span>
+                                                                                ) : null}
+                                                                            </div>
                                                                         </div>
-                                                                    </div>
-                                                                ))}
+                                                                    ))}
                                                             </div>
                                                         );
                                                     });
@@ -11055,8 +11703,8 @@ const QuoteForm = () => {
                                                     <>
                                                         {quoteList.length > 0 ? quoteList : <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No quotes for this tab.</div>}
 
-                                                        {/* Pricing Summary (Latest Price) */}
-                                                        {(filteredPricing.length > 0) && (
+                                                        {/* Pricing Summary (Latest Price) — hidden while browsing saved quotes from backend */}
+                                                        {!browsePreviousQuotesRevisions && filteredPricing.length > 0 && (
                                                             <div
                                                                 style={{
                                                                     padding: '8px',
@@ -11119,6 +11767,9 @@ const QuoteForm = () => {
                         {/* LOCKED UI LOGIC: Hide Quote Details for non-Own Job tabs */}
                         {!isEditingRestricted && (
                             <div>
+                                {/* Browsing saved quotes: left panel is only tabs + previous quotes; no form sections */}
+                                {!browsePreviousQuotesRevisions && (
+                                <>
                                 {/* Metadata Section (Quote Details) - Moved Below Pricing */}
                                 <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fafafa' }}>
 
@@ -11149,7 +11800,7 @@ const QuoteForm = () => {
                                             type="text"
                                             value={customerReference}
                                             onChange={(e) => setCustomerReference(e.target.value)}
-                                            placeholder="Your Ref / LPO Number..."
+                                            placeholder="Customer RFP or Enquiry ref"
                                             style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
                                         />
                                     </div>
@@ -11524,6 +12175,8 @@ const QuoteForm = () => {
                                         )}
                                     </div>
                                 </div>
+                                </>
+                                )}
                             </div>
                         )}
                     </div>
@@ -11611,9 +12264,11 @@ const QuoteForm = () => {
                                         <select
                                             value={quoteListDivision}
                                             onChange={(e) => {
-                                                setQuoteListDivision(e.target.value);
+                                                const nextDivision = e.target.value;
+                                                setQuoteListDivision(nextDivision);
                                                 if (quoteListCategory === QUOTE_LIST_CATEGORY.PENDING) {
-                                                    refetchPendingQuotes();
+                                                    // Pass nextDivision to avoid React state timing lag.
+                                                    refetchPendingQuotes(nextDivision);
                                                 }
                                             }}
                                             disabled={quoteListDivisionsLoading || !quoteListDivisions.length}
@@ -11652,7 +12307,7 @@ const QuoteForm = () => {
                                                 setQuoteListCategory(v);
                                                 if (v === QUOTE_LIST_CATEGORY.PENDING) {
                                                     setQuoteSearchResults([]);
-                                                    refetchPendingQuotes();
+                                                    refetchPendingQuotes(quoteListDivision);
                                                 }
                                             }}
                                             style={{
@@ -11881,7 +12536,7 @@ const QuoteForm = () => {
                                             onChange={(e) => {
                                                 setQuoteListDivision(e.target.value);
                                                 if (quoteListCategory === QUOTE_LIST_CATEGORY.PENDING) {
-                                                    refetchPendingQuotes();
+                                                    refetchPendingQuotes(e.target.value);
                                                 }
                                             }}
                                             disabled={quoteListDivisionsLoading || !quoteListDivisions.length}
@@ -11920,7 +12575,7 @@ const QuoteForm = () => {
                                                 setQuoteListCategory(v);
                                                 if (v === QUOTE_LIST_CATEGORY.PENDING) {
                                                     setQuoteSearchResults([]);
-                                                    refetchPendingQuotes();
+                                                    refetchPendingQuotes(quoteListDivision);
                                                 }
                                             }}
                                             style={{
@@ -12963,6 +13618,17 @@ const QuoteForm = () => {
                                         position: 'relative',
                                     }}
                                 >
+                                    {shouldBlankQuotePreviewInBrowse ? (
+                                        <div
+                                            style={{
+                                                minHeight: '260mm',
+                                                background: '#fff',
+                                                border: '1px dashed #e2e8f0',
+                                                borderRadius: '8px',
+                                            }}
+                                        />
+                                    ) : (
+                                        <div>
                                     <div
                                         ref={clauseMeasureHostRef}
                                         className="quote-clause-measure-host"
@@ -13058,17 +13724,13 @@ const QuoteForm = () => {
                                                                     <div className="quote-header-quote-panel-row quote-header-quote-panel-row--ref">
                                                                         <span className="quote-header-quote-panel-label">Quote Ref:</span>
                                                                         <span className="quote-header-quote-panel-value">
-                                                                            {String(
-                                                                                subjobQuoteA4HeaderDisplay
-                                                                                    ? subjobQuoteA4HeaderDisplay.quoteNumber
-                                                                                    : quoteNumber || ''
-                                                                            ).trim() || 'Draft'}
+                                                                            {quoteRefDisplayForPreview}
                                                                         </span>
                                                             </div>
                                                                     <div className="quote-header-quote-panel-row">
                                                                         <span className="quote-header-quote-panel-label">Date:</span>
                                                                         <span className="quote-header-quote-panel-value">
-                                                                            {subjobQuoteA4HeaderDisplay
+                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
                                                                                 ? formatQuoteYmdForDisplay(
                                                                                       subjobQuoteA4HeaderDisplay.quoteDateYmd
                                                                                   ) || ''
@@ -13079,10 +13741,10 @@ const QuoteForm = () => {
                                                                         <span className="quote-header-quote-panel-label">Prepared By:</span>
                                                                         <span className="quote-header-quote-panel-value">
                                                                             {String(
-                                                                                subjobQuoteA4HeaderDisplay
+                                                                                browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
                                                                                     ? subjobQuoteA4HeaderDisplay.preparedBy
                                                                                     : preparedBy || ''
-                                                                            ).trim() || '—'}
+                                                                            ).trim() || ''}
                                                                         </span>
                                             </div>
                                                                     {subjobQuoteA4HeaderDisplay?.preparedByContact ||
@@ -13090,15 +13752,17 @@ const QuoteForm = () => {
                                                                         <div className="quote-header-quote-panel-row">
                                                                             <span className="quote-header-quote-panel-label">Contact:</span>
                                                                             <span className="quote-header-quote-panel-value">
-                                                                                {subjobQuoteA4HeaderDisplay?.preparedByContact ||
-                                                                                    quotePreviewPreparedByContactDisplay}
+                                                                                {browsePreviousQuotesRevisions
+                                                                                    ? subjobQuoteA4HeaderDisplay?.preparedByContact ||
+                                                                                      quotePreviewPreparedByContactDisplay
+                                                                                    : quotePreviewPreparedByContactDisplay}
                                                                             </span>
                                         </div>
                                                                     ) : null}
                                                                     <div className="quote-header-quote-panel-row">
                                                                         <span className="quote-header-quote-panel-label">Type:</span>
                                                                         <span className="quote-header-quote-panel-value">
-                                                                            {subjobQuoteA4HeaderDisplay
+                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
                                                                                 ? subjobQuoteA4HeaderDisplay.quoteTypeLine
                                                                                 : quotePreviewTypeLine}
                                                                         </span>
@@ -13107,7 +13771,7 @@ const QuoteForm = () => {
                                                                         <span className="quote-header-quote-panel-label">Your Ref:</span>
                                                                         <span className="quote-header-quote-panel-value">
                                                                             {String(
-                                                                                subjobQuoteA4HeaderDisplay
+                                                                                browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
                                                                                     ? subjobQuoteA4HeaderDisplay.customerReference
                                                                                     : customerReference || ''
                                                                             ).trim() || ''}
@@ -13116,7 +13780,7 @@ const QuoteForm = () => {
                                                                     <div className="quote-header-quote-panel-row">
                                                                         <span className="quote-header-quote-panel-label">Validity:</span>
                                                                         <span className="quote-header-quote-panel-value">
-                                                                            {subjobQuoteA4HeaderDisplay
+                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
                                                                                 ? subjobQuoteA4HeaderDisplay.validityDisplay || ''
                                                                                 : getValidityDate() || ''}
                                                                         </span>
@@ -13146,7 +13810,7 @@ const QuoteForm = () => {
                                             <tbody>
                                                                     <tr className="quote-cover-meta-row-project">
                                                                         <td>Project Name:</td>
-                                                                        <td>{String(quotePreviewProjectName || '').trim() || '—'}</td>
+                                                                        <td>{String(quotePreviewProjectName || '').trim() || ''}</td>
                                                 </tr>
                                                 <tr>
                                                                         <td>Subject:</td>
@@ -13156,7 +13820,7 @@ const QuoteForm = () => {
                                                                                     ? subjobQuoteA4HeaderDisplay.subject ||
                                                                                           ''
                                                                                     : quotePreviewSubject || ''
-                                                                            ).trim() || '—'}
+                                                                            ).trim() || ''}
                                                                         </td>
                                                 </tr>
                                                 <tr>
@@ -13166,7 +13830,7 @@ const QuoteForm = () => {
                                                                                 subjobQuoteA4HeaderDisplay
                                                                                     ? subjobQuoteA4HeaderDisplay.toAttention
                                                                                     : toAttention || ''
-                                                                            ).trim() || '—'}
+                                                                            ).trim() || ''}
                                                                         </td>
                                                 </tr>
                                             </tbody>
@@ -13223,7 +13887,7 @@ const QuoteForm = () => {
                                                                         subjobQuoteA4HeaderDisplay
                                                                             ? subjobQuoteA4HeaderDisplay.signatory
                                                                             : signatory || ''
-                                                                    ).trim() || 'N/A'}
+                                                                    ).trim() || ''}
                                                                 </div>
                                                                 {String(
                                                                     subjobQuoteA4HeaderDisplay
@@ -13286,6 +13950,8 @@ const QuoteForm = () => {
                                                 ))}
                                         </div>
                                     ))}
+                                        </div>
+                                    )}
                                  </div>
                             </div>
                         </div>

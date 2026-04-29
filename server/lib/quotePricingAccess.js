@@ -74,11 +74,28 @@ async function resolvePricingAccessContext(userEmail) {
 
     const roleStr = String(user.Roles || '').toLowerCase();
     const isAdmin = roleStr.includes('admin') || roleStr.includes('system');
-    const isCcUser = isCcFromMaster;
+    const deptNorm = normalizePricingJobName(user.Department || '');
+    const isManagementDept = deptNorm === 'management';
+    // Management users act as a division proxy: pricing should behave like the selected Division's coordinator (CC scope).
+    // They may not appear in CCMailIds, so we treat them as CC-like with global division coordinator permissions.
+    const isCcUser = isCcFromMaster || isManagementDept;
 
     /** Departments where this user appears on any Master_EnquiryFor.CCMailIds (used to align list anchors with division dropdown). */
     let ccCoordinatorDepartmentNames = null;
     if (isCcUser) {
+        // Management: allow selecting any division; treat as coordinator for all departments.
+        if (isManagementDept) {
+            const allDeptRes = await sql.query`
+                SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, N''))) AS DepartmentName
+                FROM dbo.Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ISNULL(DepartmentName, N''))) <> N''
+            `;
+            ccCoordinatorDepartmentNames = new Set(
+                (allDeptRes.recordset || [])
+                    .map((r) => String(r.DepartmentName || '').trim().toLowerCase())
+                    .filter(Boolean)
+            );
+        } else {
         const deptRes = ccListPatLocal
             ? await sql.query`
                 SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, N''))) AS DepartmentName
@@ -103,11 +120,13 @@ async function resolvePricingAccessContext(userEmail) {
                 .map((r) => String(r.DepartmentName || '').trim().toLowerCase())
                 .filter(Boolean)
         );
+        }
     }
     return {
         user,
         isAdmin,
         isCcUser,
+        isManagementDept,
         normalizedEmail,
         userFullName: (user.FullName || '').trim(),
         userDepartment: (user.Department || '').trim(),

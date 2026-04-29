@@ -228,6 +228,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         const saved = localStorage.getItem('enquiry_new_consultantList');
         return (saved && activeTab === 'New') ? JSON.parse(saved) : [];
     });
+    const [pricedEnquiryForIds, setPricedEnquiryForIds] = useState(() => new Set());
 
     useEffect(() => {
         if (activeTab === 'New') {
@@ -1350,6 +1351,22 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 await loadAttachmentsForEnquiry(enq.RequestNo);
             }
 
+            // Fetch which EnquiryFor IDs have pricing rows (used to block structure delete)
+            try {
+                const pricedRes = await fetch(
+                    `/api/enquiries/${encodeURIComponent(requestNo)}/enquiryfor/priced-ids`
+                );
+                if (pricedRes.ok) {
+                    const priced = await pricedRes.json();
+                    const ids = Array.isArray(priced?.pricedIds) ? priced.pricedIds : [];
+                    setPricedEnquiryForIds(new Set(ids.map((x) => String(x))));
+                } else {
+                    setPricedEnquiryForIds(new Set());
+                }
+            } catch {
+                setPricedEnquiryForIds(new Set());
+            }
+
             setWorkflowComputed(null);
             try {
                 const q = new URLSearchParams({
@@ -1370,6 +1387,42 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             console.warn('Enquiry not found:', requestNo);
         }
     };
+
+    const canRemoveEnquiryForItem = useCallback((item) => {
+        const id = item?.id != null ? String(item.id) : '';
+        if (!id) return true;
+        if (pricedEnquiryForIds.has(id)) return false;
+
+        // Also block if any descendant is priced
+        const list = Array.isArray(enqForList) ? enqForList : [];
+        const byParent = new Map();
+        list.forEach((x) => {
+            const pid = x?.parentId != null ? String(x.parentId) : '';
+            if (!pid) return;
+            const arr = byParent.get(pid) || [];
+            arr.push(x);
+            byParent.set(pid, arr);
+        });
+        const q = [id];
+        const seen = new Set();
+        while (q.length) {
+            const cur = q.shift();
+            if (!cur || seen.has(cur)) continue;
+            seen.add(cur);
+            const kids = byParent.get(cur) || [];
+            for (const k of kids) {
+                const kidId = k?.id != null ? String(k.id) : '';
+                if (kidId && pricedEnquiryForIds.has(kidId)) return false;
+                if (kidId) q.push(kidId);
+            }
+        }
+        return true;
+    }, [enqForList, pricedEnquiryForIds]);
+
+    const onRemoveBlockedEnquiryForItem = useCallback((item) => {
+        const n = String(item?.itemName || '').trim() || 'This job';
+        alert(`${n} is already priced (or has priced sub-jobs). Delete its prices first in Pricing module, then delete the job.`);
+    }, []);
 
     const handleLoadEnquiry = async () => {
         await loadEnquiry(modifyRequestNo);
@@ -2194,6 +2247,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             });
                                                         }}
                                                         error={errors.EnquiryFor}
+                                                        canRemoveItem={canRemoveEnquiryForItem}
+                                                        onRemoveBlocked={onRemoveBlockedEnquiryForItem}
                                                         assigneeErrorIds={errors.EnquiryForAssigneeIds || []}
                                                         showNew={!isLimitedEdit && (currentUser?.role || currentUser?.Roles || '').toLowerCase().includes('admin')}
                                                         onNew={() => openNewModal(setShowEnqItemModal)}

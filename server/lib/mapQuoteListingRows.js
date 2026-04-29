@@ -69,6 +69,14 @@ function jsTupleCustomerMatch(quoteToName, pvCustomerName) {
     );
 }
 
+function normalizeDeptKey(s) {
+    return String(s || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^(l\d+|sub job)\s*-\s*/i, '')
+        .replace(/\s+/g, ' ');
+}
+
 function quoteRowToName(q) {
     if (!q) return '';
     return String(q.ToName ?? q.toName ?? q.TOName ?? q.toname ?? '').trim();
@@ -1292,6 +1300,18 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
 
             const enqJobs = allJobs.filter(j => j.RequestNo?.toString().trim() == enqRequestNo);
             const enqPrices = allPrices.filter(p => p.RequestNo?.toString().trim() == enqRequestNo);
+            const pendingOwnFromTupleRaw = (enq.ListPendingOwnJobItem ?? enq.listpendingownjobitem ?? '').toString().trim();
+            if (sessionDivTrim && pendingOwnFromTupleRaw) {
+                const divNorm = normalizeDeptKey(sessionDivTrim);
+                const ownMatchesDivision = enqJobs.some((j) => {
+                    if (!jsTupleOwnJobMatch(pendingOwnFromTupleRaw, j.ItemName)) return false;
+                    const depNorm = normalizeDeptKey(j.DepartmentName || '');
+                    if (depNorm) return depNorm === divNorm;
+                    // Fallback for rows with missing DepartmentName: match by item-name normalization.
+                    return normalizeDeptKey(j.ItemName || '') === divNorm;
+                });
+                if (!ownMatchesDivision) return null;
+            }
 
             // Build hierarchy
             const childrenMap = {};
@@ -1669,14 +1689,14 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
 
             // Latest-quote own job: sum base prices for that EnquiryFor node + all descendants (same selfPrices rules as Subjob Prices column).
             // Prefer the pending-list tuple (PV) so ref/date/summary align with the row, not another branch on the enquiry.
-            const pendingOwnFromTuple = (enq.ListPendingOwnJobItem ?? enq.listpendingownjobitem ?? '').toString().trim();
+            const pendingOwnFromTuple = pendingOwnFromTupleRaw;
             const listQuoteOwnFromRow = (enq.ListQuoteOwnJob ?? enq.listquoteownjob ?? '').toString().trim();
 
+            // Use the tuple's own job label for quote-matching/status.
+            // (If we force to sessionDivTrim here, it can break matching when quotes persist a slightly different representation.)
             let ownJobFromQuote = pendingOwnFromTuple;
             if (!ownJobFromQuote) {
-                if (sessionDivTrim) {
-                    ownJobFromQuote = sessionDivTrim;
-                } else if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
+                if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
                     ownJobFromQuote = String(userDepartment).trim();
                 } else {
                     // Admins / no department: use SQL column (latest quote on enquiry, any division).

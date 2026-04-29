@@ -15,6 +15,7 @@ const HierarchyBuilder = ({
     onEditItem,
     canRemove = true,
     canRemoveItem = null, // Callback: (item) => boolean, determines if specific item can be removed
+    onRemoveBlocked = null, // Callback: (item) => void, invoked when user tries to remove a blocked item
     assigneeUsers = [],
     canEditAssignee = true
 }) => {
@@ -341,16 +342,36 @@ const HierarchyBuilder = ({
                                 <Pencil size={14} />
                             </button>
                         )}
-                        {(canRemove && (!canRemoveItem || canRemoveItem(item))) && (
+                        {canRemove && (() => {
+                            const removable = !canRemoveItem || canRemoveItem(item);
+                            return (
                             <button
                                 type="button"
-                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRemoveItem(item); }}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', display: 'flex', padding: 0 }}
-                                title="Remove"
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    if (!removable) {
+                                        if (typeof onRemoveBlocked === 'function') onRemoveBlocked(item);
+                                        else alert('This job is already priced. Delete its prices first, then delete the job.');
+                                        return;
+                                    }
+                                    handleRemoveItem(item);
+                                }}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: removable ? 'pointer' : 'not-allowed',
+                                    color: removable ? '#ef4444' : '#94a3b8',
+                                    display: 'flex',
+                                    padding: 0,
+                                    opacity: removable ? 1 : 0.7
+                                }}
+                                title={removable ? 'Remove' : 'Cannot remove (priced)'}
                             >
                                 <X size={14} />
                             </button>
-                        )}
+                            );
+                        })()}
                     </div>
 
                     {/* Add Child Button */}
