@@ -5,6 +5,8 @@ const { sql } = require('../dbConfig');
 
 // --- Helper: Format RequestNo for SQL LIKE if needed, or simple exact match ---
 const normalizeUserEmail = (email) => (email || '').toString().toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
+const norm = (s) => (s || '').toString().trim().toLowerCase();
+let probabilityTableReady = false;
 
 const resolveCurrentUser = async (userEmail) => {
     const normalizedEmail = normalizeUserEmail(userEmail);
@@ -22,6 +24,267 @@ const resolveCurrentUser = async (userEmail) => {
         fullName: (userRes.recordset[0].FullName || '').toString().trim(),
         roles: (userRes.recordset[0].Roles || '').toString().trim()
     };
+};
+
+const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = '') => {
+    const normalizedEmail = normalizeUserEmail(userEmail);
+    if (!normalizedEmail) return null;
+
+    const userRes = await sql.query`
+        SELECT TOP 1 FullName, Roles, Department
+        FROM Master_ConcernedSE
+        WHERE LOWER(REPLACE(EmailId, '@almcg.com', '@almoayyedcg.com')) = ${normalizedEmail}
+    `;
+    if (!userRes.recordset?.length) return null;
+
+    const baseUser = userRes.recordset[0] || {};
+    const nonCcDepartment = String(baseUser.Department || '').trim();
+
+    const ccReq = new sql.Request();
+    ccReq.input('userEmail', sql.NVarChar, normalizedEmail);
+    const ccRes = await ccReq.query(`
+        SELECT DISTINCT LTRIM(RTRIM(ISNULL(mef.DepartmentName, ''))) AS DepartmentName
+        FROM Master_EnquiryFor mef
+        WHERE LTRIM(RTRIM(ISNULL(mef.DepartmentName, ''))) <> ''
+          AND (
+            ',' + REPLACE(REPLACE(LOWER(ISNULL(mef.CCMailIds, '')), ' ', ''), ';', ',') + ','
+              LIKE '%,' + LOWER(LTRIM(RTRIM(ISNULL(@userEmail, '')))) + ',%'
+          )
+        ORDER BY DepartmentName
+    `);
+    const ccDivisions = (ccRes.recordset || [])
+        .map((r) => String(r.DepartmentName || '').trim())
+        .filter(Boolean);
+
+    const isCcUser = ccDivisions.length > 0;
+    const divisions = isCcUser ? ccDivisions : (nonCcDepartment ? [nonCcDepartment] : []);
+    if (!divisions.length) return null;
+
+    const reqDiv = String(requestedDivision || '').trim();
+    const reqDivNorm = norm(reqDiv);
+    const chosenDivision =
+        (reqDiv && divisions.find((d) => norm(d) === reqDivNorm || norm(d).includes(reqDivNorm) || reqDivNorm.includes(norm(d)))) ||
+        divisions[0];
+
+    return {
+        email: normalizedEmail,
+        fullName: String(baseUser.FullName || '').trim(),
+        roles: String(baseUser.Roles || '').trim(),
+        isCcUser,
+        divisions,
+        division: chosenDivision,
+    };
+};
+
+const hasEnquiryDivisionAccess = async (requestNo, division) => {
+    const req = new sql.Request();
+    req.input('requestNo', sql.NVarChar, String(requestNo || '').trim());
+    req.input('division', sql.NVarChar, String(division || '').trim());
+    const result = await req.query(`
+        SELECT TOP 1 1 AS ok
+        FROM EnquiryFor ef
+        JOIN Master_EnquiryFor mef
+          ON (
+            ef.ItemName = mef.ItemName
+            OR ef.ItemName LIKE '%- ' + mef.ItemName
+            OR ef.ItemName LIKE '%-' + mef.ItemName
+          )
+        WHERE LTRIM(RTRIM(ISNULL(ef.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
+          AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+    `);
+    return (result.recordset?.length || 0) > 0;
+};
+
+const ensureProbabilityTable = async () => {
+    if (probabilityTableReady) return;
+    await sql.query(`
+        IF OBJECT_ID('dbo.Probability', 'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.Probability (
+                ID INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                RequestNo NVARCHAR(50) NULL,
+                ProjectName NVARCHAR(255) NULL,
+                LeadJobName NVARCHAR(255) NULL,
+                OwnJobName NVARCHAR(255) NULL,
+                ToName NVARCHAR(255) NULL,
+                TotalQuotedValue NVARCHAR(80) NULL,
+                NetQuotedValue NVARCHAR(80) NULL,
+                QuoteNo NVARCHAR(120) NULL,
+                QuoteRevision NVARCHAR(40) NULL,
+                QuoteRef NVARCHAR(120) NULL,
+                Status NVARCHAR(80) NULL,
+                ProbabilityChance NVARCHAR(120) NULL,
+                ExpectedDate DATETIME NULL,
+                ERPJobNo NVARCHAR(80) NULL,
+                FinalJobValueBooked NVARCHAR(80) NULL,
+                BookedDate DATETIME NULL,
+                GrossMargin DECIMAL(10,2) NULL,
+                ReasonForLoosing NVARCHAR(500) NULL,
+                CompetitorPrice NVARCHAR(80) NULL,
+                LostDate DATETIME NULL,
+                HoldReason NVARCHAR(500) NULL,
+                CencelledReason NVARCHAR(500) NULL,
+                RetenderedReason NVARCHAR(500) NULL,
+                Remarks NVARCHAR(MAX) NULL,
+                UpdatedBy NVARCHAR(255) NULL,
+                UpdatedDateTime DATETIME NOT NULL DEFAULT(GETDATE())
+            );
+            CREATE INDEX IX_Probability_RequestNo ON dbo.Probability (RequestNo, UpdatedDateTime DESC);
+            CREATE INDEX IX_Probability_OwnJobName ON dbo.Probability (OwnJobName, UpdatedDateTime DESC);
+        END
+        IF COL_LENGTH('dbo.Probability', 'LeadJobName') IS NULL
+        BEGIN
+            ALTER TABLE dbo.Probability ADD LeadJobName NVARCHAR(255) NULL;
+        END
+        IF COL_LENGTH('dbo.Probability', 'PreparedBy') IS NULL
+        BEGIN
+            ALTER TABLE dbo.Probability ADD PreparedBy NVARCHAR(255) NULL;
+        END
+        IF COL_LENGTH('dbo.Probability', 'QuoteOwnJob') IS NULL
+        BEGIN
+            ALTER TABLE dbo.Probability ADD QuoteOwnJob NVARCHAR(255) NULL;
+        END
+    `);
+    probabilityTableReady = true;
+};
+
+const fetchQuoteRowByQuoteNumber = async (quoteNumber) => {
+    const qn = String(quoteNumber || '').trim();
+    if (!qn) return null;
+    const rq = new sql.Request();
+    rq.input('qn', sql.NVarChar, qn);
+    const r = await rq.query(`
+        SELECT TOP 1
+            QuoteNo,
+            RevisionNo,
+            LeadJob,
+            OwnJob,
+            ToName,
+            PreparedBy
+        FROM EnquiryQuotes
+        WHERE LTRIM(RTRIM(ISNULL(QuoteNumber, ''))) = LTRIM(RTRIM(ISNULL(@qn, '')))
+    `);
+    return r.recordset?.[0] || null;
+};
+
+/** Last path segment: ACC/CIP/9-L1/12-R0 → quoteNo "12", revision "0" */
+const parseQuoteRefTail = (quoteRef) => {
+    const s = String(quoteRef || '').trim();
+    if (!s) return { quoteNo: '', revision: '' };
+    const parts = s.split('/').filter(Boolean);
+    const last = parts[parts.length - 1] || '';
+    const m = last.match(/^(\d+)-R(\d+)$/i);
+    if (m) return { quoteNo: m[1], revision: m[2] };
+    const m2 = last.match(/^(\d+)/);
+    return { quoteNo: m2 ? m2[1] : '', revision: '' };
+};
+
+const insertProbabilityHistory = async ({
+    enquiryNo,
+    projectName,
+    leadJobName,
+    division,
+    toName,
+    totalQuotedValue,
+    netQuotedValue,
+    quoteRef,
+    status,
+    probabilityOption,
+    expectedDate,
+    wonDetails,
+    lostDetails,
+    holdReason,
+    cancelledReason,
+    retenderedReason,
+    remarks,
+    updatedBy
+}) => {
+    await ensureProbabilityTable();
+    const qRow = quoteRef ? await fetchQuoteRowByQuoteNumber(quoteRef) : null;
+    const tail = parseQuoteRefTail(quoteRef);
+    const quoteNoIns =
+        qRow != null && qRow.QuoteNo != null && String(qRow.QuoteNo).trim() !== ''
+            ? String(qRow.QuoteNo).trim()
+            : tail.quoteNo || null;
+    const revIns =
+        qRow != null && qRow.RevisionNo != null && String(qRow.RevisionNo).trim() !== ''
+            ? String(qRow.RevisionNo).trim()
+            : tail.revision || null;
+    const leadIns =
+        (qRow && String(qRow.LeadJob || '').trim()) || String(leadJobName || '').trim() || null;
+    const toIns =
+        (qRow && String(qRow.ToName || '').trim()) || String(toName || '').trim() || null;
+    const preparedByIns =
+        qRow && String(qRow.PreparedBy || '').trim() ? String(qRow.PreparedBy).trim() : null;
+    const quoteOwnJobIns =
+        qRow && String(qRow.OwnJob || '').trim() ? String(qRow.OwnJob).trim() : null;
+
+    const req = new sql.Request();
+    req.input('RequestNo', sql.NVarChar, String(enquiryNo || '').trim() || null);
+    req.input('ProjectName', sql.NVarChar, String(projectName || '').trim() || null);
+    req.input('LeadJobName', sql.NVarChar, leadIns);
+    req.input('OwnJobName', sql.NVarChar, String(division || '').trim() || null);
+    req.input('ToName', sql.NVarChar, toIns);
+    // History: do not persist total quoted (ownjob+subjobs); keep column NULL on insert.
+    req.input('TotalQuotedValue', sql.NVarChar, null);
+    req.input('NetQuotedValue', sql.NVarChar, String(netQuotedValue || '').trim() || null);
+    req.input('QuoteNo', sql.NVarChar, quoteNoIns);
+    req.input('QuoteRevision', sql.NVarChar, revIns);
+    req.input('QuoteRef', sql.NVarChar, String(quoteRef || '').trim() || null);
+    req.input('PreparedBy', sql.NVarChar, preparedByIns);
+    req.input('QuoteOwnJob', sql.NVarChar, quoteOwnJobIns);
+    req.input('Status', sql.NVarChar, String(status || '').trim() || null);
+    req.input('ProbabilityChance', sql.NVarChar, String(probabilityOption || '').trim() || null);
+    req.input('ExpectedDate', sql.DateTime, expectedDate ? new Date(expectedDate) : null);
+    req.input('ERPJobNo', sql.NVarChar, wonDetails?.jobNo ? String(wonDetails.jobNo).trim() : null);
+    const statusStr = String(status || '').trim();
+    const isWon = statusStr === 'Won';
+    const rawWonVal = String(wonDetails?.orderValue || '')
+        .replace(/,/g, '')
+        .replace(/BD/gi, '')
+        .trim();
+    const wonNum = rawWonVal === '' ? NaN : parseFloat(rawWonVal);
+    const wonBookedOk = isWon && Number.isFinite(wonNum) && wonNum > 0;
+    req.input(
+        'FinalJobValueBooked',
+        sql.NVarChar,
+        wonBookedOk ? rawWonVal : null
+    );
+    req.input(
+        'BookedDate',
+        sql.DateTime,
+        wonBookedOk && expectedDate ? new Date(expectedDate) : null
+    );
+    req.input(
+        'GrossMargin',
+        sql.Decimal(10, 2),
+        wonBookedOk && wonDetails?.grossProfit != null && wonDetails?.grossProfit !== ''
+            ? parseFloat(wonDetails.grossProfit)
+            : null
+    );
+    req.input('ReasonForLoosing', sql.NVarChar, lostDetails?.reason ? String(lostDetails.reason).trim() : null);
+    req.input('CompetitorPrice', sql.NVarChar, lostDetails?.competitorPrice ? String(lostDetails.competitorPrice).replace(/,/g, '').trim() : null);
+    req.input('LostDate', sql.DateTime, lostDetails?.lostDate ? new Date(lostDetails.lostDate) : null);
+    req.input('HoldReason', sql.NVarChar, holdReason ? String(holdReason).trim() : null);
+    req.input('CencelledReason', sql.NVarChar, cancelledReason ? String(cancelledReason).trim() : null);
+    req.input('RetenderedReason', sql.NVarChar, retenderedReason ? String(retenderedReason).trim() : null);
+    req.input('Remarks', sql.NVarChar(sql.MAX), remarks ? String(remarks) : null);
+    req.input('UpdatedBy', sql.NVarChar, String(updatedBy || '').trim() || null);
+    await req.query(`
+        INSERT INTO dbo.Probability (
+            RequestNo, ProjectName, LeadJobName, OwnJobName, ToName, TotalQuotedValue, NetQuotedValue,
+            QuoteNo, QuoteRevision, QuoteRef, PreparedBy, QuoteOwnJob, Status, ProbabilityChance, ExpectedDate,
+            ERPJobNo, FinalJobValueBooked, BookedDate, GrossMargin, ReasonForLoosing,
+            CompetitorPrice, LostDate, HoldReason, CencelledReason, RetenderedReason,
+            Remarks, UpdatedBy
+        ) VALUES (
+            @RequestNo, @ProjectName, @LeadJobName, @OwnJobName, @ToName, @TotalQuotedValue, @NetQuotedValue,
+            @QuoteNo, @QuoteRevision, @QuoteRef, @PreparedBy, @QuoteOwnJob, @Status, @ProbabilityChance, @ExpectedDate,
+            @ERPJobNo, @FinalJobValueBooked, @BookedDate, @GrossMargin, @ReasonForLoosing,
+            @CompetitorPrice, @LostDate, @HoldReason, @CencelledReason, @RetenderedReason,
+            @Remarks, @UpdatedBy
+        )
+    `);
 };
 
 const hasProbabilityAccess = async (requestNo, userEmail) => {
@@ -45,14 +308,20 @@ const hasProbabilityAccess = async (requestNo, userEmail) => {
 // &fromDate=... &toDate=... &probability=...
 router.get('/list', async (req, res) => {
     try {
-        const { mode, fromDate, toDate, probability, userEmail: rawEmail, userDepartment } = req.query;
+        await ensureProbabilityTable();
+        const { mode, fromDate, toDate, probability, userEmail: rawEmail, userDepartment, division: requestedDivision } = req.query;
         const userEmail = rawEmail ? rawEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim() : '';
-        const currentUser = await resolveCurrentUser(userEmail);
-        const currentUserFullName = currentUser?.fullName || '';
-        if (!currentUserFullName) {
+        const divisionScope = await resolveProbabilityDivisionScope(userEmail, requestedDivision);
+        const currentUserFullName = divisionScope?.fullName || '';
+        const effectiveDivision = String(divisionScope?.division || '').trim();
+        const isCcUser = !!divisionScope?.isCcUser;
+        if (!isCcUser && !currentUserFullName) {
             return res.json([]);
         }
-        console.log(`[Probability API V5] Fetching list. Mode: ${mode}, User: ${userEmail}`);
+        if (!effectiveDivision) {
+            return res.json([]);
+        }
+        console.log(`[Probability API V5] Fetching list. Mode: ${mode}, User: ${userEmail}, Division: ${effectiveDivision}`);
         let query = `
             SELECT
                 LTRIM(RTRIM(E.RequestNo)) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
@@ -81,6 +350,7 @@ router.get('/list', async (req, res) => {
                                     WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
+                                    AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                                     AND (
                                         -- Standard: User has access to this specific item (Own Job)
                                         (
@@ -126,9 +396,12 @@ router.get('/list', async (req, res) => {
                                             AND (parent2.RequestNo = E.RequestNo OR parent2.ID IS NULL)
                                             AND (parent3.RequestNo = E.RequestNo OR parent3.ID IS NULL)
                                             AND (
-                                                ',' + REPLACE(REPLACE(ISNULL(pmef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                                OR ',' + REPLACE(REPLACE(ISNULL(pmef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                                OR pmef.ItemName = @userDepartment
+                                                UPPER(LTRIM(RTRIM(ISNULL(pmef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                                                AND (
+                                                    ',' + REPLACE(REPLACE(ISNULL(pmef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                    OR ',' + REPLACE(REPLACE(ISNULL(pmef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                                    OR pmef.ItemName = @userDepartment
+                                                )
                                             )
                                         )
                                         OR
@@ -136,6 +409,7 @@ router.get('/list', async (req, res) => {
                                         EXISTS (
                                             SELECT 1 FROM Master_EnquiryFor civil
                                             WHERE (civil.ItemName = 'Civil' OR civil.ItemName = 'Civil Project') 
+                                            AND UPPER(LTRIM(RTRIM(ISNULL(civil.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                                             AND (
                                                 ',' + REPLACE(REPLACE(ISNULL(civil.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
                                                 OR ',' + REPLACE(REPLACE(ISNULL(civil.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
@@ -167,6 +441,7 @@ router.get('/list', async (req, res) => {
                                     WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
                                     AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
+                                    AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                                     AND (
                                         -- Net Quoted: ONLY strict user affiliation
                                         ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
@@ -180,7 +455,7 @@ router.get('/list', async (req, res) => {
                 ) as NetQuotedValue,
                 (
                     SELECT STUFF((
-                        SELECT ',' + CAST(Q.QuoteNumber AS NVARCHAR(MAX)) + '|' + CAST(ISNULL(Q.ToName, 'N/A') AS NVARCHAR(MAX))
+                        SELECT ',' + CAST(Q.QuoteNumber AS NVARCHAR(MAX)) + '|' + CAST(ISNULL(Q.ToName, 'N/A') AS NVARCHAR(MAX)) + '|' + CAST(ISNULL(Q.LeadJob, '') AS NVARCHAR(MAX)) + '|' + ISNULL(CONVERT(NVARCHAR(23), Q.QuoteDate, 121), N'')
                         FROM EnquiryQuotes Q
                         WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
                         AND (
@@ -194,6 +469,7 @@ router.get('/list', async (req, res) => {
                                     ',' + REPLACE(REPLACE(ISNULL(UPPER(mef.CommonMailIds), ''), ' ', ''), ';', ',') + ',' LIKE '%,' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',%'
                                     OR ',' + REPLACE(REPLACE(ISNULL(UPPER(mef.CCMailIds), ''), ' ', ''), ';', ',') + ',' LIKE '%,' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',%'
                                 )
+                                AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                                 AND mef.DivisionCode IS NOT NULL
                                 AND LEN(LTRIM(RTRIM(mef.DivisionCode))) > 0
                                 AND CHARINDEX('/' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '/', UPPER(Q.QuoteNumber)) > 0
@@ -201,7 +477,21 @@ router.get('/list', async (req, res) => {
                             /* 3. Admin Fallback */
                             OR EXISTS (SELECT 1 FROM Master_ConcernedSE u WHERE LTRIM(RTRIM(UPPER(u.EmailId))) = LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) AND UPPER(u.Roles) LIKE '%ADMIN%')
                         )
-                        ORDER BY LTRIM(RTRIM(Q.ToName)) ASC, Q.RevisionNo DESC
+                        ORDER BY
+                            CASE
+                                WHEN PATINDEX('%/L[0-9]%', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                                    THEN TRY_CAST(
+                                        SUBSTRING(
+                                            UPPER(ISNULL(Q.QuoteNumber, '')),
+                                            PATINDEX('%/L[0-9]%', UPPER(ISNULL(Q.QuoteNumber, ''))) + 2,
+                                            10
+                                        ) AS INT
+                                    )
+                                ELSE 999999
+                            END ASC,
+                            LTRIM(RTRIM(ISNULL(Q.QuoteNumber, ''))) ASC,
+                            LTRIM(RTRIM(Q.ToName)) ASC,
+                            Q.RevisionNo DESC
                         FOR XML PATH(''), TYPE
                     ).value('.', 'NVARCHAR(MAX)'), 1, 1, '')
                 ) as FilteredQuoteRefs,
@@ -220,11 +510,36 @@ router.get('/list', async (req, res) => {
             WHERE 1 = 1
               AND EXISTS (
                     SELECT 1
+                    FROM EnquiryFor efDiv
+                    JOIN Master_EnquiryFor mefDiv
+                      ON (
+                        efDiv.ItemName = mefDiv.ItemName
+                        OR efDiv.ItemName LIKE '%- ' + mefDiv.ItemName
+                        OR efDiv.ItemName LIKE '%-' + mefDiv.ItemName
+                      )
+                    WHERE LTRIM(RTRIM(ISNULL(efDiv.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                      AND UPPER(LTRIM(RTRIM(ISNULL(mefDiv.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+              )
+              AND EXISTS (
+                    SELECT 1
                     FROM ConcernedSE cs
                     WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
                       AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
               )
     `;
+        if (isCcUser) {
+            query = query.replace(
+                `
+              AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cs
+                    WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                      AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
+              )
+    `,
+                '\n'
+            );
+        }
 
         // Filter Logic
         if (mode === 'Pending') {
@@ -314,6 +629,7 @@ router.get('/list', async (req, res) => {
         request.input('userEmail', sql.NVarChar, userEmail || '');
         request.input('userDepartment', sql.NVarChar, userDepartment || '');
         request.input('currentUserFullName', sql.NVarChar, currentUserFullName);
+        request.input('division', sql.NVarChar, effectiveDivision);
         request.input('now', sql.DateTime, now);
 
         const result = await request.query(query.replace(/GETDATE\(\)/g, '@now'));
@@ -324,6 +640,73 @@ router.get('/list', async (req, res) => {
 
     } catch (err) {
         console.error('API Error /list:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /api/probability/divisions?userEmail=...
+router.get('/divisions', async (req, res) => {
+    try {
+        await ensureProbabilityTable();
+        const userEmail = String(req.query.userEmail || '').trim();
+        const scope = await resolveProbabilityDivisionScope(userEmail, '');
+        if (!scope) {
+            return res.json({ divisions: [], isCcUser: false, selectedDivision: '' });
+        }
+        return res.json({
+            divisions: scope.divisions,
+            isCcUser: scope.isCcUser,
+            selectedDivision: scope.division,
+        });
+    } catch (err) {
+        console.error('API Error /divisions:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /api/probability/history/:requestNo?userEmail=...&division=...
+router.get('/history/:requestNo', async (req, res) => {
+    try {
+        await ensureProbabilityTable();
+        const requestNo = String(req.params.requestNo || '').trim();
+        const userEmail = String(req.query.userEmail || '').trim();
+        const requestedDivision = String(req.query.division || '').trim();
+        const scope = await resolveProbabilityDivisionScope(userEmail, requestedDivision);
+        if (!scope?.division) {
+            return res.status(403).json({ error: 'No division access for this user' });
+        }
+        const reqSql = new sql.Request();
+        reqSql.input('requestNo', sql.NVarChar, requestNo);
+        reqSql.input('division', sql.NVarChar, scope.division);
+        const result = await reqSql.query(`
+            SELECT
+                p.ID, p.RequestNo, p.ProjectName, p.OwnJobName, p.ToName, p.TotalQuotedValue, p.NetQuotedValue,
+                p.LeadJobName,
+                p.QuoteNo, p.QuoteRevision, p.QuoteRef, p.PreparedBy, p.QuoteOwnJob, p.Status, p.ProbabilityChance, p.ExpectedDate,
+                p.ERPJobNo, p.FinalJobValueBooked, p.BookedDate, p.GrossMargin, p.ReasonForLoosing,
+                p.CompetitorPrice, p.LostDate, p.HoldReason, p.CencelledReason, p.RetenderedReason,
+                p.Remarks, p.UpdatedBy, p.UpdatedDateTime,
+                COALESCE(NULLIF(LTRIM(RTRIM(u.FullName)), ''), LTRIM(RTRIM(p.UpdatedBy))) AS UpdatedByDisplayName,
+                qdt.QuoteDate AS QuoteRefQuoteDate
+            FROM dbo.Probability p
+            LEFT JOIN Master_ConcernedSE u
+              ON LOWER(REPLACE(LTRIM(RTRIM(ISNULL(u.EmailId, N''))), N'@almcg.com', N'@almoayyedcg.com'))
+               = LOWER(REPLACE(LTRIM(RTRIM(ISNULL(p.UpdatedBy, N''))), N'@almcg.com', N'@almoayyedcg.com'))
+            OUTER APPLY (
+                SELECT TOP 1 Q.QuoteDate
+                FROM EnquiryQuotes Q
+                WHERE LTRIM(RTRIM(ISNULL(Q.RequestNo, N''))) = LTRIM(RTRIM(ISNULL(p.RequestNo, N'')))
+                  AND LTRIM(RTRIM(ISNULL(Q.QuoteNumber, N''))) = LTRIM(RTRIM(ISNULL(p.QuoteRef, N'')))
+                  AND LTRIM(RTRIM(ISNULL(p.QuoteRef, N''))) <> N''
+                ORDER BY ISNULL(Q.RevisionNo, 0) DESC, Q.QuoteDate DESC
+            ) qdt
+            WHERE LTRIM(RTRIM(ISNULL(p.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
+              AND UPPER(LTRIM(RTRIM(ISNULL(p.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+            ORDER BY p.UpdatedDateTime DESC, p.ID DESC
+        `);
+        return res.json(result.recordset || []);
+    } catch (err) {
+        console.error('API Error /history/:requestNo:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -360,6 +743,12 @@ router.post('/update', async (req, res) => {
         const {
             enquiryNo,
             userEmail,
+            division: requestedDivision,
+            projectName,
+            leadJobName,
+            toName,
+            totalQuotedValue,
+            netQuotedValue,
             status,
             probabilityOption,
             probability: probInput,
@@ -375,8 +764,20 @@ router.post('/update', async (req, res) => {
             lostDetails
         } = req.body;
 
-        const allowed = await hasProbabilityAccess(enquiryNo, userEmail);
-        if (!allowed) return res.status(403).json({ error: 'Access denied for this enquiry' });
+        const scope = await resolveProbabilityDivisionScope(userEmail, requestedDivision);
+        if (!scope?.division) {
+            return res.status(403).json({ error: 'No division access for this user' });
+        }
+
+        const divisionAllowedForEnquiry = await hasEnquiryDivisionAccess(enquiryNo, scope.division);
+        if (!divisionAllowedForEnquiry) {
+            return res.status(403).json({ error: 'Access denied for this enquiry division' });
+        }
+
+        if (!scope.isCcUser) {
+            const allowed = await hasProbabilityAccess(enquiryNo, userEmail);
+            if (!allowed) return res.status(403).json({ error: 'Access denied for this enquiry' });
+        }
 
         console.log(`[Probability Update] Processing ReqNo: ${enquiryNo}, Status: ${status}`);
         console.log(`[Probability Update] Lost Details:`, lostDetails);
@@ -473,6 +874,26 @@ Status = @Status,
     `;
 
         await request.query(updateQuery);
+        await insertProbabilityHistory({
+            enquiryNo,
+            projectName,
+            leadJobName,
+            division: scope.division,
+            toName,
+            totalQuotedValue,
+            netQuotedValue,
+            quoteRef: wonDetails?.wonQuoteRef || '',
+            status,
+            probabilityOption,
+            expectedDate,
+            wonDetails,
+            lostDetails,
+            holdReason: (status === 'OnHold' || status === 'On Hold') ? (lostDetails?.reason || '') : '',
+            cancelledReason: status === 'Cancelled' ? (lostDetails?.reason || '') : '',
+            retenderedReason: status === 'Retendered' ? (lostDetails?.reason || '') : '',
+            remarks,
+            updatedBy: normalizeUserEmail(userEmail),
+        });
         res.json({ success: true, message: 'Probability updated successfully' });
 
     } catch (err) {
@@ -486,21 +907,93 @@ router.get('/quote-details/:quoteNumber', async (req, res) => {
     try {
         const { quoteNumber } = req.params;
         const userEmail = req.query.userEmail || '';
+        const division = String(req.query.division || '').trim();
         const decodedQuoteNumber = decodeURIComponent(quoteNumber);
 
-        const quoteRes = await sql.query`
-            SELECT RequestNo, ToName, TotalAmount 
-            FROM EnquiryQuotes 
-            WHERE QuoteNumber = ${decodedQuoteNumber}
-        `;
+        const qReq = new sql.Request();
+        qReq.input('qn', sql.NVarChar, decodedQuoteNumber);
+        const quoteRes = await qReq.query(`
+            SELECT RequestNo, ToName, TotalAmount, QuoteNo, RevisionNo, LeadJob, OwnJob, PreparedBy, QuoteDate
+            FROM EnquiryQuotes
+            WHERE LTRIM(RTRIM(ISNULL(QuoteNumber, ''))) = LTRIM(RTRIM(ISNULL(@qn, '')))
+        `);
 
         if (quoteRes.recordset.length === 0) {
             return res.status(404).json({ error: 'Quote not found' });
         }
 
         const quote = quoteRes.recordset[0];
-        const allowed = await hasProbabilityAccess(quote.RequestNo, userEmail);
-        if (!allowed) return res.status(403).json({ error: 'Access denied for this enquiry' });
+        const allowedSe = await hasProbabilityAccess(quote.RequestNo, userEmail);
+        const scope = await resolveProbabilityDivisionScope(userEmail, division);
+        const divOk =
+            scope?.division && (await hasEnquiryDivisionAccess(quote.RequestNo, scope.division));
+        if (!allowedSe && !divOk) {
+            return res.status(403).json({ error: 'Access denied for this enquiry' });
+        }
+
+        const totalsReq = new sql.Request();
+        totalsReq.input('reqNo', sql.NVarChar, String(quote.RequestNo || '').trim());
+        totalsReq.input('toName', sql.NVarChar, String(quote.ToName || '').trim());
+        totalsReq.input('division', sql.NVarChar, division || '');
+        const totalsRes = await totalsReq.query(`
+            ;WITH OwnJobNode AS (
+                SELECT TOP 1 ef.ID, ef.ItemName
+                FROM EnquiryFor ef
+                JOIN Master_EnquiryFor mef
+                  ON (
+                    ef.ItemName = mef.ItemName
+                    OR ef.ItemName LIKE '%- ' + mef.ItemName
+                    OR ef.ItemName LIKE '%-' + mef.ItemName
+                  )
+                WHERE LTRIM(RTRIM(ISNULL(ef.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@reqNo, '')))
+                  AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                ORDER BY ef.ID
+            ),
+            SubTree AS (
+                SELECT ef.ID, ef.ItemName
+                FROM EnquiryFor ef
+                JOIN OwnJobNode o ON ef.ID = o.ID
+                UNION ALL
+                SELECT c.ID, c.ItemName
+                FROM EnquiryFor c
+                JOIN SubTree p ON c.ParentID = p.ID
+                WHERE LTRIM(RTRIM(ISNULL(c.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@reqNo, '')))
+            ),
+            BaseRows AS (
+                SELECT pv.EnquiryForItem, MAX(ISNULL(pv.Price, 0)) AS MaxPrice
+                FROM EnquiryPricingValues pv
+                JOIN EnquiryPricingOptions po ON po.ID = pv.OptionID
+                WHERE LTRIM(RTRIM(ISNULL(pv.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@reqNo, '')))
+                  AND LTRIM(RTRIM(ISNULL(po.CustomerName, ''))) = LTRIM(RTRIM(ISNULL(@toName, '')))
+                  AND UPPER(LTRIM(RTRIM(ISNULL(po.OptionName, '')))) NOT LIKE '%OPTION%'
+                  AND UPPER(LTRIM(RTRIM(ISNULL(po.OptionName, '')))) NOT LIKE '%OPTIONAL%'
+                GROUP BY pv.EnquiryForItem
+            )
+            SELECT
+                CAST(ISNULL((
+                    SELECT SUM(br.MaxPrice)
+                    FROM BaseRows br
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM SubTree st
+                        WHERE br.EnquiryForItem = st.ItemName
+                           OR br.EnquiryForItem LIKE '%- ' + st.ItemName
+                           OR br.EnquiryForItem LIKE '%-' + st.ItemName
+                    )
+                ), 0) AS DECIMAL(18,3)) AS TotalQuotedValue,
+                CAST(ISNULL((
+                    SELECT SUM(br.MaxPrice)
+                    FROM BaseRows br
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM OwnJobNode o
+                        WHERE br.EnquiryForItem = o.ItemName
+                           OR br.EnquiryForItem LIKE '%- ' + o.ItemName
+                           OR br.EnquiryForItem LIKE '%-' + o.ItemName
+                    )
+                ), 0) AS DECIMAL(18,3)) AS NetQuotedValue
+        `);
+        const totals = totalsRes.recordset?.[0] || {};
 
         // Fetch optional prices
         const optionsRes = await sql.query`
@@ -518,6 +1011,14 @@ router.get('/quote-details/:quoteNumber', async (req, res) => {
         res.json({
             customerName: quote.ToName,
             totalAmount: quote.TotalAmount,
+            totalQuotedValue: totals.TotalQuotedValue ?? 0,
+            netQuotedValue: totals.NetQuotedValue ?? 0,
+            quoteNo: quote.QuoteNo,
+            revisionNo: quote.RevisionNo,
+            leadJob: quote.LeadJob,
+            ownJob: quote.OwnJob,
+            preparedBy: quote.PreparedBy,
+            quoteDate: quote.QuoteDate,
             options: optionsRes.recordset.map(o => ({
                 name: o.OptionName,
                 price: o.TotalPrice

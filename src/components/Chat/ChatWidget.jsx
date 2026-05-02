@@ -92,7 +92,7 @@ const ChatWidget = () => {
             {/* Chat Window */}
             {isOpen && (
                 <div className="chat-window shadow-lg border rounded-3 d-flex flex-column">
-                    <div className="chat-header bg-primary text-white p-3 d-flex justify-content-between align-items-center rounded-top">
+                    <div className="chat-header text-white p-3 d-flex justify-content-between align-items-center rounded-top">
                         <div className="d-flex align-items-center gap-2">
                             <Bot size={20} />
                             <h6 className="m-0">EMS Assistant</h6>
@@ -112,7 +112,7 @@ const ChatWidget = () => {
                                 key={msg.id}
                                 className={`message-wrapper d-flex flex-column mb-3 ${msg.sender === 'user' ? 'align-items-end' : 'align-items-start'}`}
                             >
-                                <div className={`message-bubble p-2 rounded ${msg.sender === 'user' ? 'bg-primary text-white' : 'bg-white border'}`}>
+                                <div className={`message-bubble p-2 rounded ${msg.sender === 'user' ? 'text-white' : 'bg-white border'}`}>
                                     {msg.text.split('\n').map((line, i) => (
                                         <p key={i} className="mb-0" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                                             {line}
@@ -164,7 +164,7 @@ const ChatWidget = () => {
                             style={{ resize: 'none', overflowY: 'hidden' }}
                         />
                         <button
-                            className="btn btn-primary d-flex align-items-center justify-content-center"
+                            className="btn d-flex align-items-center justify-content-center chat-send-btn"
                             onClick={handleSend}
                             disabled={!input.trim() || isLoading}
                             style={{ width: '40px', height: '40px', borderRadius: '50%' }}

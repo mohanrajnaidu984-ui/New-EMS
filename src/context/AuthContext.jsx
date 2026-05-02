@@ -3,6 +3,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 const AuthContext = createContext();
 
 const STORAGE_EMAIL_KEY = 'currentUserEmail';
+const STORAGE_USER_KEY = 'currentUser';
 
 export const useAuth = () => {
     const context = useContext(AuthContext);
@@ -12,12 +13,38 @@ export const useAuth = () => {
     return context;
 };
 
-/** Exact email saved at login (`localStorage` key `currentUserEmail`). Use for API `userEmail` / Master_ConcernedSE match. */
+/** Exact email saved at login (session-first). Use for API `userEmail` / Master_ConcernedSE match. */
 export function getStoredLoginEmail() {
-    return (localStorage.getItem(STORAGE_EMAIL_KEY) || '').trim();
+    return (
+        sessionStorage.getItem(STORAGE_EMAIL_KEY) ||
+        localStorage.getItem(STORAGE_EMAIL_KEY) ||
+        ''
+    ).trim();
 }
 
 export { STORAGE_EMAIL_KEY as LOGIN_EMAIL_STORAGE_KEY };
+
+function setStoredLoginEmail(email) {
+    const v = String(email || '').trim();
+    if (!v) {
+        sessionStorage.removeItem(STORAGE_EMAIL_KEY);
+        return;
+    }
+    sessionStorage.setItem(STORAGE_EMAIL_KEY, v);
+}
+
+function setStoredCurrentUser(user) {
+    if (!user) {
+        sessionStorage.removeItem(STORAGE_USER_KEY);
+        return;
+    }
+    sessionStorage.setItem(STORAGE_USER_KEY, JSON.stringify(user));
+}
+
+function clearLegacyLocalAuth() {
+    localStorage.removeItem(STORAGE_USER_KEY);
+    localStorage.removeItem(STORAGE_EMAIL_KEY);
+}
 
 async function fetchProfileByEmail(email) {
     const e = (email || '').trim();
@@ -77,13 +104,15 @@ export const AuthProvider = ({ children }) => {
         setCurrentUser((prev) => {
             const base = prev || {};
             const merged = applyRgiAdmin(applyProfileMerge(base, profile));
-            localStorage.setItem('currentUser', JSON.stringify(merged));
+            setStoredCurrentUser(merged);
             return merged;
         });
     }, []);
 
     useEffect(() => {
-        const storedUser = localStorage.getItem('currentUser');
+        const storedUser =
+            sessionStorage.getItem(STORAGE_USER_KEY) ||
+            localStorage.getItem(STORAGE_USER_KEY);
         const loginEmail = getStoredLoginEmail();
 
         let userData = null;
@@ -100,13 +129,18 @@ export const AuthProvider = ({ children }) => {
             const patched = stored
                 ? { ...userData, EmailId: stored, email: stored }
                 : userData;
-            setCurrentUser(applyRgiAdmin(patched));
+            const migrated = applyRgiAdmin(patched);
+            setCurrentUser(migrated);
+            // Migrate any legacy localStorage auth into this tab session, then drop legacy copy.
+            setStoredCurrentUser(migrated);
+            if (stored) setStoredLoginEmail(stored);
+            clearLegacyLocalAuth();
         }
 
         // Older sessions: `currentUser` JSON had email but `currentUserEmail` was never set — backfill for pricing API.
         const emailFromUser = (userData?.EmailId || userData?.email || userData?.MailId || '').trim();
         if (emailFromUser && !getStoredLoginEmail()) {
-            localStorage.setItem(STORAGE_EMAIL_KEY, emailFromUser);
+            setStoredLoginEmail(emailFromUser);
         }
 
         const email = getStoredLoginEmail() || userData?.EmailId || userData?.email || userData?.MailId;
@@ -121,11 +155,11 @@ export const AuthProvider = ({ children }) => {
         if (storedEmail) {
             finalUserData.EmailId = storedEmail;
             finalUserData.email = storedEmail;
-            localStorage.setItem(STORAGE_EMAIL_KEY, storedEmail);
+            setStoredLoginEmail(storedEmail);
         }
 
         setCurrentUser(finalUserData);
-        localStorage.setItem('currentUser', JSON.stringify(finalUserData));
+        setStoredCurrentUser(finalUserData);
 
         if (storedEmail) {
             mergeProfileForEmail(storedEmail);
@@ -134,8 +168,10 @@ export const AuthProvider = ({ children }) => {
 
     const logout = () => {
         setCurrentUser(null);
-        localStorage.removeItem('currentUser');
-        localStorage.removeItem(STORAGE_EMAIL_KEY);
+        sessionStorage.removeItem(STORAGE_USER_KEY);
+        sessionStorage.removeItem(STORAGE_EMAIL_KEY);
+        // Prevent auto-login from older localStorage fallback on next load.
+        clearLegacyLocalAuth();
         window.location.href = '/';
     };
 
@@ -149,7 +185,7 @@ export const AuthProvider = ({ children }) => {
             if (currentUser) {
                 const updatedUser = { ...currentUser, ProfileImage: base64 };
                 setCurrentUser(updatedUser);
-                localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+                setStoredCurrentUser(updatedUser);
             }
         } catch (err) {
             console.error('Failed to update profile image:', err);

@@ -1696,7 +1696,10 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
             // (If we force to sessionDivTrim here, it can break matching when quotes persist a slightly different representation.)
             let ownJobFromQuote = pendingOwnFromTuple;
             if (!ownJobFromQuote) {
-                if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
+                // Search/quoted rows often have no pending tuple; own-job must follow selected Division.
+                if (sessionDivTrim) {
+                    ownJobFromQuote = sessionDivTrim;
+                } else if (accessCtx && !accessCtx.isAdmin && String(userDepartment || '').trim()) {
                     ownJobFromQuote = String(userDepartment).trim();
                 } else {
                     // Admins / no department: use SQL column (latest quote on enquiry, any division).

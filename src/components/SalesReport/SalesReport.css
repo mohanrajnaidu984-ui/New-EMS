@@ -1,292 +1,802 @@
-/* Scoped Dark Mode for Sales Report Module Only */
+/* Sales Report — mock layout: 2×2 + pipeline column; single viewport; pipeline dark */
 
-.sales-report-dark-theme {
-    /* Define dark theme variables locally */
-    --sr-bg-dark: #0f172a;
-    --sr-bg-card: #1e293b;
-    --sr-text-primary: #f8fafc;
-    --sr-text-secondary: #94a3b8;
-    --sr-border: #334155;
-
-    background-color: var(--sr-bg-dark);
-    color: var(--sr-text-primary);
-    min-height: calc(100vh - 100px);
+.sales-report-page {
+    color: #0f172a;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    transition: background-color 0.3s ease;
+    padding: 0.4rem 0.5rem 0.35rem;
+    box-sizing: border-box;
+    /* Shared blue bar height: prior 1.35rem + 25% */
+    --sr-section-header-min-height: 1.6875rem;
+    --sr-bg-smoke: #f5f5f5;
+    --sr-blue: #6a73ae;
+    --sr-blue-light: #abc3e4;
+    --sr-header-bar-bg: var(--sr-blue);
+    --sr-header-bar-border: #5c648f;
+    --sr-header-bar-text: #fff;
+    background-color: var(--sr-bg-smoke);
 }
 
-/* Override standard Bootstrap/Utility classes narrowly within this scope */
-
-.sales-report-dark-theme .card {
-    background-color: var(--sr-bg-card);
-    border: 1px solid var(--sr-border);
-    color: var(--sr-text-primary);
+/* Data theme: primary blue + light blue (matches charts) */
+.sales-report-page .text-success {
+    color: var(--sr-blue) !important;
 }
 
-.sales-report-dark-theme .text-muted {
-    color: var(--sr-text-secondary) !important;
+.sales-report-page .text-danger {
+    color: var(--sr-blue-light) !important;
 }
 
-.sales-report-dark-theme .text-dark {
-    color: #f1f5f9 !important;
-    /* Invert text-dark to be light */
+/* Won/Lost summary only — semantic green / red (overrides blue theme above) */
+.sr-cell-won-text .text-success {
+    color: #15803d !important;
 }
 
-/* Form Controls in Dark Theme */
-.sales-report-dark-theme .form-select,
-.sales-report-dark-theme .form-control {
-    background-color: var(--sr-bg-card);
-    border: 1px solid var(--sr-border);
-    color: var(--sr-text-primary);
+.sr-cell-won-text .text-danger {
+    color: #dc2626 !important;
 }
 
-.sales-report-dark-theme .form-select:focus,
-.sales-report-dark-theme .form-control:focus {
-    border-color: #60a5fa;
-    /* Light blue focus */
-    box-shadow: 0 0 0 0.2rem rgba(96, 165, 250, 0.25);
-    background-color: var(--sr-bg-card);
-    /* Ensure it stays dark on focus */
-    color: var(--sr-text-primary);
+.sales-report-page .spinner-border.text-primary {
+    color: var(--sr-blue) !important;
 }
 
-/* Scrollbar styling for this dark section if needed */
-.sales-report-dark-theme ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+.sales-report-page.sales-report-fit {
+    height: calc(100vh - var(--sr-header-offset, 100px));
+    max-height: calc(100vh - var(--sr-header-offset, 100px));
+    overflow: hidden;
 }
 
-.sales-report-dark-theme ::-webkit-scrollbar-track {
-    background: #0f172a;
+/* Filter bar */
+.sr-filter-bar {
+    background: #e8ecf1;
+    border: 1px solid #d1d9e6;
+    border-radius: 6px;
+    padding: 0.4rem 0.65rem;
 }
 
-.sales-report-dark-theme ::-webkit-scrollbar-thumb {
-    background: #334155;
+.sr-filter-label {
+    display: block;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: #475569;
+    margin-bottom: 0.15rem;
+    line-height: 1.15;
+}
+
+.sr-filter-field .form-select {
+    background-color: #fff;
+    border: 1px solid #cbd5e1;
+    color: #1e293b;
+    padding-top: 0.2rem;
+    padding-bottom: 0.2rem;
+}
+
+/* Main grid:
+   Row1: [ Won | Target | Gross margin | Pipeline ]
+   Row2: [ Won chart | Target chart | GM chart | Pipeline ]
+   Row3: [ Table span 3 cols                      | Pipeline ]
+   Pipeline column width unchanged (minmax 200px / 22vw); cols 1–3 share space evenly.
+*/
+.sr-dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(200px, 22vw);
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1.08fr);
+    gap: 0.45rem;
+    min-height: 0;
+    flex: 1 1 0;
+}
+
+.sr-cell {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.sr-cell-won-text {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+.sr-cell-target-text {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+.sr-cell-won-chart {
+    grid-column: 1;
+    grid-row: 2;
+}
+
+.sr-cell-target-chart {
+    grid-column: 2;
+    grid-row: 2;
+}
+
+.sr-cell-gm-text {
+    grid-column: 3;
+    grid-row: 1;
+}
+
+.sr-cell-gm-chart {
+    grid-column: 3;
+    grid-row: 2;
+}
+
+.sr-cell-pipeline {
+    grid-column: 4;
+    grid-row: 1 / span 3;
+}
+
+.sr-cell-table {
+    grid-column: 1 / span 3;
+    grid-row: 3;
+}
+
+/* Long title in Gross margin summary card */
+.sr-gm-section .sr-summary-title {
+    font-size: 0.65rem;
+    line-height: 1.2;
+    padding-left: 0.25rem;
+    padding-right: 0.25rem;
+    font-weight: 400 !important;
+    min-height: var(--sr-section-header-min-height);
+}
+
+/* Summary text blocks (screenshot: rounded grey panels) */
+.sr-summary-panel {
+    background: var(--sr-bg-smoke);
+    border-radius: 8px;
+    overflow: hidden;
+    width: 100%;
+}
+
+/* Section headers: tinted bar + dark title */
+.sr-summary-compact .sr-summary-title {
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 400 !important;
+    min-height: var(--sr-section-header-min-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.19rem 0.35rem;
+    line-height: 1.2;
+    background: var(--sr-header-bar-bg);
+    border-bottom: 1px solid var(--sr-header-bar-border);
+    color: var(--sr-header-bar-text);
+}
+
+.sr-summary-compact .sr-summary-body {
+    padding: 0.22rem 0.45rem 0.28rem;
+    background: var(--sr-bg-smoke);
+    flex: 0 0 auto;
+    min-height: 0;
+}
+
+/* Row 1: all three summary cards share the same track height (set by the tallest).
+   Shorter cards stretch; body grows so card bottom aligns with neighbors. */
+.sr-cell-won-text .sr-summary-body.sr-target-body,
+.sr-cell-target-text .sr-summary-body.sr-target-body,
+.sr-cell-gm-text .sr-summary-body.sr-target-body {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.sr-cell-target-text .sr-summary-body.sr-target-body,
+.sr-cell-gm-text .sr-summary-body.sr-target-body {
+    justify-content: flex-start;
+}
+
+.sr-won-summary {
+    gap: 0.25rem;
+    align-items: stretch;
+    min-height: 0;
+}
+
+.sr-won-rates {
+    flex: 0 0 auto;
+    min-width: 40%;
+    justify-content: center;
+    min-height: 0;
+    gap: 0.45rem;
+}
+
+/* Won / Lost left column — grey stacked labels, large bold % (matches KPI reference) */
+.sr-rate-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.12rem;
+}
+
+.sr-rate-label {
+    display: block;
+    color: #64748b;
+    font-size: 0.62rem;
+    font-weight: 500;
+    line-height: 1.12;
+    max-width: 5.5rem;
+}
+
+.sr-rate-pct {
+    font-size: 1.42rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.03em;
+}
+
+.sr-won-values {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    border-left: 1px solid #dce3ec;
+    padding-left: 0.35rem;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Won / Lost right column: label left-centre, value centred in remaining width */
+.sr-cell-won-text .sr-won-values .sr-kpi-line {
+    flex: 1 1 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    column-gap: 0.35rem;
+    min-height: 0;
+}
+
+.sr-kpi-line {
+    border-color: #dce3ec !important;
+}
+
+.sr-kpi-label {
+    display: block;
+    font-size: 0.58rem;
+    line-height: 1.1;
+    margin-bottom: 0.05rem;
+}
+
+.sr-kpi-num {
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.1;
+    display: block;
+}
+
+/* Match Target vs Actual summary density (tighter than default .sr-kpi-num) */
+.sr-target-card .sr-won-summary .sr-kpi-label {
+    font-size: 0.55rem;
+    line-height: 1.05;
+    margin-bottom: 0.02rem;
+}
+
+.sr-target-card .sr-won-summary .sr-kpi-num {
+    font-size: 0.68rem;
+    line-height: 1.15;
+}
+
+/* Won/Lost right column: label left + vertically centred; value +50% font, centred in second column */
+.sr-cell-won-text .sr-won-values .sr-kpi-label {
+    font-size: 0.825rem !important;
+    line-height: 1.15;
+    margin-bottom: 0;
+    width: auto;
+    text-align: left;
+    justify-self: start;
+    align-self: center;
+}
+
+.sr-cell-won-text .sr-won-values .sr-kpi-num {
+    font-size: 1.02rem !important;
+    line-height: 1.15;
+    width: 100%;
+    text-align: right;
+    justify-self: stretch;
+    align-self: center;
+}
+
+.sr-quoted-strong {
+    color: var(--sr-blue);
+}
+
+/* —— Target vs Actual (reference layout) —— */
+.sr-target-card .sr-summary-title {
+    color: var(--sr-header-bar-text);
+    font-weight: 400 !important;
+}
+
+.sr-target-card .sr-summary-body.sr-target-body {
+    background: var(--sr-bg-smoke);
+    padding: 0.35rem 0.5rem 0.4rem;
+}
+
+.sr-target-top {
+    gap: 0.35rem;
+}
+
+.sr-target-achieved {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+.sr-target-achieved-label {
+    font-size: 0.68rem;
+    color: #64748b;
+    font-weight: 500;
+    line-height: 1.2;
+}
+
+.sr-target-achieved .sr-achieved-pct {
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.1;
+    margin-top: 0.08rem;
+}
+
+.sr-target-fraction {
+    min-width: 46%;
+    flex-shrink: 0;
+}
+
+.sr-fraction-actual,
+.sr-fraction-target {
+    line-height: 1.3;
+    font-size: 0.68rem;
+}
+
+.sr-fraction-value {
+    font-weight: 700;
+}
+
+.sr-fraction-actual .sr-fraction-value {
+    color: var(--sr-blue);
+}
+
+.sr-fraction-actual .sr-fraction-suffix {
+    color: var(--sr-blue-light);
+    font-weight: 600;
+}
+
+.sr-fraction-rule {
+    border: 0;
+    border-top: 1px solid #cbd5e1;
+    margin: 0.2rem 0;
+    width: 100%;
+}
+
+.sr-fraction-target-val {
+    color: var(--sr-blue-light);
+}
+
+.sr-fraction-target .sr-fraction-suffix {
+    color: var(--sr-blue-light);
+    font-weight: 600;
+}
+
+.sr-target-hr {
+    border: 0;
+    border-top: 1px solid #d1d5db;
+    margin: 0.35rem 0;
+    opacity: 1;
+}
+
+/* Four quarters in one row (explicit grid — avoids Bootstrap row/col stacking) */
+.sr-quarter-grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--sr-bg-smoke);
+    border: 1px solid #e5e7eb;
     border-radius: 4px;
+    overflow: hidden;
+    margin-top: 0.05rem;
 }
 
-.sales-report-dark-theme ::-webkit-scrollbar-thumb:hover {
-    background: #475569;
+.sr-quarter-grid-4 > .sr-quarter-col {
+    padding: 0.28rem 0.2rem;
+    min-width: 0;
+    border-right: 1px solid #e5e7eb;
 }
 
-/* Print Styles - Triggered by Class via JS or Media Query */
+.sr-quarter-grid-4 > .sr-quarter-col:last-child {
+    border-right: none;
+}
 
-/* 1. Layout Structure (triggered by JS class .printing for Recharts resize) */
-.sales-report-dark-theme.printing {
-    background-color: white !important;
-    color: black !important;
-    width: 100vw !important;
+.sr-quarter-header {
+    font-size: 0.62rem;
+    line-height: 1.25;
+    margin-bottom: 0.12rem;
+}
+
+.sr-quarter-name {
+    color: #64748b;
+    font-weight: 600;
+    margin-right: 0.2rem;
+}
+
+.sr-quarter-pct {
+    font-weight: 700;
+}
+
+.sr-quarter-actual {
+    font-size: 0.62rem;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.sr-quarter-target {
+    font-size: 0.62rem;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--sr-blue-light);
+}
+
+/* Target vs Actual + Gross margin summary: dark grey body copy; darker target/actual tints (matches bar fills) */
+.sr-cell-target-text,
+.sr-cell-gm-text {
+    --sr-ta-copy: #374151;
+    --sr-ta-actual: #4f5782;
+    --sr-ta-target: #7c94c8;
+}
+
+.sr-cell-target-text .sr-target-achieved-label,
+.sr-cell-gm-text .sr-target-achieved-label {
+    color: var(--sr-ta-copy);
+}
+
+.sr-cell-target-text .sr-achieved-pct.text-success,
+.sr-cell-gm-text .sr-achieved-pct.text-success {
+    color: var(--sr-ta-copy) !important;
+}
+
+.sr-cell-target-text .sr-quarter-name,
+.sr-cell-gm-text .sr-quarter-name {
+    color: var(--sr-ta-copy);
+}
+
+.sr-cell-target-text .sr-quarter-pct.text-success,
+.sr-cell-gm-text .sr-quarter-pct.text-success {
+    color: var(--sr-ta-copy) !important;
+}
+
+.sr-cell-target-text .sr-quarter-actual.text-success,
+.sr-cell-gm-text .sr-quarter-actual.text-success {
+    color: var(--sr-ta-actual) !important;
+}
+
+.sr-cell-target-text .sr-quarter-target,
+.sr-cell-gm-text .sr-quarter-target {
+    color: var(--sr-ta-target) !important;
+}
+
+.sr-cell-target-text .sr-fraction-actual .sr-fraction-value.text-success,
+.sr-cell-gm-text .sr-fraction-actual .sr-fraction-value.text-success {
+    color: var(--sr-ta-actual) !important;
+}
+
+.sr-cell-target-text .sr-fraction-actual .sr-fraction-suffix,
+.sr-cell-gm-text .sr-fraction-actual .sr-fraction-suffix {
+    color: var(--sr-ta-actual);
+}
+
+.sr-cell-target-text .sr-fraction-target-val,
+.sr-cell-gm-text .sr-fraction-target-val {
+    color: var(--sr-ta-target);
+}
+
+.sr-cell-target-text .sr-fraction-target .sr-fraction-suffix,
+.sr-cell-gm-text .sr-fraction-target .sr-fraction-suffix {
+    color: var(--sr-ta-target);
+}
+
+/* Chart-only panels */
+.sr-chart-panel {
+    background: var(--sr-bg-smoke);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.sr-chart-panel-inner {
+    flex: 1;
+    min-height: 0;
+    background: var(--sr-bg-smoke);
+}
+
+.sr-mini {
+    font-size: 0.72rem;
+    line-height: 1.2;
+}
+
+.sr-chart-pie,
+.sr-chart-bar {
+    min-height: 0;
+    flex: 1 1 0;
+}
+
+/* Pipeline funnel: fill cell + center the graphic */
+.sr-chart-funnel {
+    min-height: 0;
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Custom Sales Pipeline funnel — labels left, inverted triangle segments */
+.sales-pipeline-funnel-visual {
+    width: 100%;
+    max-width: min(100%, 22rem);
+    min-height: 0;
+    align-self: center;
+    align-items: stretch;
+}
+
+.sr-funnel-labels-col {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    width: 22%;
+    max-width: 3.25rem;
+    min-width: 2.25rem;
+    align-self: stretch;
+}
+
+.sr-funnel-label-cell {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 0.35rem;
+    border-right: 1px solid #1e293b;
+    min-height: 0;
+    box-sizing: border-box;
+}
+
+.sr-funnel-label-text {
+    font-size: 0.58rem;
+    line-height: 1.15;
+    color: #0f172a;
+    text-align: right;
+}
+
+.sr-funnel-svg-wrap {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 140px;
+    aspect-ratio: 1 / 1.15;
+    max-height: min(55vh, 360px);
+    display: flex;
+    align-items: stretch;
+    align-self: stretch;
+}
+
+.sr-funnel-svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* Sales Pipeline — same white card + blue header as other sections */
+.sr-pipeline-panel {
+    background: var(--sr-bg-smoke) !important;
+    color: #0f172a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.sr-pipeline-header {
+    flex-shrink: 0;
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 400 !important;
+    min-height: var(--sr-section-header-min-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--sr-header-bar-text);
+    letter-spacing: 0.02em;
+    background: var(--sr-header-bar-bg);
+    border-bottom: 1px solid var(--sr-header-bar-border);
+    padding-top: 0.19rem;
+    padding-bottom: 0.19rem;
+}
+
+.sr-pipeline-body {
+    flex: 1 1 0;
+    min-height: 0;
+    background: var(--sr-bg-smoke);
+    display: flex;
+    flex-direction: column;
+}
+
+.sr-pipeline-top {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.sr-pipeline-summary {
+    border-top: 1px solid #d1d9e6;
+    background: var(--sr-bg-smoke);
+    padding: 0.25rem 0.35rem 0.35rem;
+}
+
+.sr-pipeline-summary-row {
+    padding: 0.43rem 0.35rem;
+    font-size: 0.775rem;
+    line-height: 1.42;
+}
+
+.sr-pipeline-summary-row:not(:last-child) {
+    border-bottom: 1px solid #e8ecf1;
+}
+
+.sr-pipeline-swatch {
+    display: inline-block;
+    width: 0.8125rem;
+    height: 0.8125rem;
+    border-radius: 2px;
+    flex-shrink: 0;
+    border: 1px solid rgba(15, 23, 42, 0.2);
+}
+
+.sr-pipeline-summary-pct {
+    font-weight: 600;
+    color: #0f172a;
+    flex-shrink: 0;
+}
+
+.sr-pipeline-summary-legend {
+    font-size: 0.725rem;
+    font-weight: 500;
+    color: #334155;
+    min-width: 0;
+}
+
+.sr-pipeline-summary-value {
+    font-size: 0.775rem;
+    font-weight: 600;
+    color: var(--sr-blue);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Table block */
+.sr-cell-table {
+    background: var(--sr-bg-smoke);
+}
+
+.sr-report-table-title {
+    background: var(--sr-header-bar-bg) !important;
+    border-bottom: 1px solid var(--sr-header-bar-border) !important;
+    color: var(--sr-header-bar-text) !important;
+    font-weight: 400 !important;
+    min-height: var(--sr-section-header-min-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    padding-top: 0.19rem !important;
+    padding-bottom: 0.19rem !important;
+}
+
+/* Bootstrap card-header can force semibold on table section title */
+.sales-report-page .sr-report-table-title.card-header {
+    font-weight: 400 !important;
+}
+
+.sr-table-inner {
+    flex: 1 1 0;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--sr-bg-smoke);
+}
+
+.sr-detail-table thead th {
+    font-size: 0.68rem;
+    padding: 0.25rem 0.35rem;
+    line-height: 1.15;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    border-color: #cbd5e1 !important;
+}
+
+.sr-detail-table tbody td {
+    font-size: 0.68rem;
+    padding: 0.2rem 0.35rem;
+    line-height: 1.15;
+    vertical-align: middle;
+    border-color: #e2e8f0 !important;
+}
+
+.sr-detail-table .sr-job-bar-th {
+    width: 1%;
+    min-width: 11.55rem;
+    white-space: nowrap;
+    font-size: 0.65rem;
+}
+
+.sr-job-bar-cell {
+    vertical-align: middle;
+    padding-top: 0.15rem !important;
+    padding-bottom: 0.15rem !important;
+}
+
+.sr-job-bar-track {
+    height: 0.55rem;
+    min-width: 9.45rem;
+    max-width: 14.7rem;
+    background: #e2e8f0;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.sr-job-bar-fill {
+    height: 100%;
+    min-width: 0;
+    background: var(--sr-blue);
+    border-radius: 2px;
+    transition: width 0.2s ease;
+}
+
+.recharts-responsive-container {
+    min-height: 0 !important;
+}
+
+/* Narrow / short screens: horizontal scroll for grid instead of breaking layout */
+@media (max-width: 991.98px) {
+    .sales-report-page.sales-report-fit {
+        overflow-x: auto;
+        overflow-y: auto;
+    }
+
+    .sr-dashboard-grid {
+        min-width: 980px;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(200px, 22vw);
+    }
+}
+
+/* Print */
+.sales-report-page.printing {
     height: auto !important;
-    min-height: auto !important;
-    max-width: 100vw !important;
-    margin: 0 !important;
-    padding: 5px !important;
+    max-height: none !important;
     overflow: visible !important;
-    transform: scale(0.65);
-    transform-origin: top left;
-    width: 153.8% !important;
-    /* Inverse of 0.65 to fill width */
 }
 
-/* Flex Layout - Respect original structure */
-.sales-report-dark-theme.printing>.d-flex.w-100 {
-    display: grid !important;
-    grid-template-columns: 57fr 43fr !important;
-    gap: 10px !important;
-    height: 95vh !important;
-    width: 100% !important;
-    margin-top: 5px !important;
+.sales-report-page.printing .sr-dashboard-grid {
+    min-height: 520px;
+    page-break-inside: avoid;
 }
 
-/* Preserve Column Structure */
-.sales-report-dark-theme.printing>.d-flex.w-100>.d-flex.flex-column {
-    display: flex !important;
-    flex-direction: column !important;
-    width: 100% !important;
-    height: 100% !important;
-    justify-content: space-between !important;
-    overflow: hidden !important;
-    /* Ensure content doesn't spill out */
-}
-
-/* Preserve Row Structure within Columns */
-.sales-report-dark-theme.printing>.d-flex.w-100>.d-flex.flex-column>.d-flex.w-100 {
-    display: flex !important;
-    flex-direction: row !important;
-    /* height/flex is handled by inline styles in JSX (e.g. flex: 57), we just ensure it expands */
-    width: 100% !important;
-}
-
-/* Card Styling */
-.sales-report-dark-theme.printing .card {
-    background-color: white !important;
-    color: black !important;
-    border: 1px solid #ccc !important;
-    box-shadow: none !important;
-    margin: 0 !important;
-    padding: 2px !important;
-    overflow: visible !important;
-    height: 100% !important;
-    width: 100% !important;
-    display: flex !important;
-    flex-direction: column !important;
-}
-
-/* Content Within Cards */
-.sales-report-dark-theme.printing .card .flex-grow-1 {
-    flex: 1 !important;
-    height: 100% !important;
-    /* Ensure it fills the flex space for Recharts */
-    min-height: 0 !important;
-    max-height: 100% !important;
-    overflow: visible !important;
-    display: block !important;
-}
-
-/* Typography Compactness */
-.sales-report-dark-theme.printing .text-muted,
-.sales-report-dark-theme.printing .text-secondary,
-.sales-report-dark-theme.printing .text-dark,
-.sales-report-dark-theme.printing span,
-.sales-report-dark-theme.printing div,
-.sales-report-dark-theme.printing h6 {
-    color: black !important;
-    text-shadow: none !important;
-}
-
-.sales-report-dark-theme.printing h6,
-.sales-report-dark-theme.printing .fw-bold {
-    font-size: 11px !important;
-    margin-bottom: 2px !important;
-}
-
-.sales-report-dark-theme.printing .fs-2,
-.sales-report-dark-theme.printing .fs-3 {
-    font-size: 18px !important;
-}
-
-/* Recharts Sizing Force */
-.sales-report-dark-theme.printing .recharts-responsive-container {
-    height: 100% !important;
-    width: 100% !important;
-    max-height: 100% !important;
-    min-height: 0 !important;
-}
-
-/* Compact Typography for Print */
-.sales-report-dark-theme.printing .card h6,
-.sales-report-dark-theme.printing .card .fw-bold {
-    font-size: 10px !important;
-    margin-bottom: 2px !important;
-}
-
-.sales-report-dark-theme.printing .card .fs-2,
-.sales-report-dark-theme.printing .card .fs-3 {
-    font-size: 16px !important;
-    /* Shrink large numbers */
-}
-
-.sales-report-dark-theme.printing .card .fs-5,
-.sales-report-dark-theme.printing .card .fs-6 {
-    font-size: 12px !important;
-}
-
-.sales-report-dark-theme.printing .card .small,
-.sales-report-dark-theme.printing .card .text-muted {
-    font-size: 8px !important;
-}
-
-/* Hide some spacing elements if needed */
-.sales-report-dark-theme.printing .card hr {
-    margin: 2px 0 !important;
-}
-
-/* Remove specific color inline styles */
-.sales-report-dark-theme.printing *[style*="#E0E0E0"],
-.sales-report-dark-theme.printing *[style*="#f8fafc"] {
-    color: black !important;
-}
-
-/* Recharts Text (Axis Labels, Legends) */
-.sales-report-dark-theme.printing .recharts-text,
-.sales-report-dark-theme.printing .recharts-cartesian-axis-tick-value,
-.sales-report-dark-theme.printing .recharts-legend-item-text {
-    fill: black !important;
-    color: black !important;
-}
-
-/* Ensure Chart Lines/Grids are visible */
-.sales-report-dark-theme.printing .recharts-cartesian-grid-horizontal line,
-.sales-report-dark-theme.printing .recharts-cartesian-grid-vertical line {
-    stroke: #ccc !important;
-}
-
-/* Form Controls (Dropdowns) */
-.sales-report-dark-theme.printing .form-select {
-    background-color: white !important;
-    color: black !important;
-    border: 1px solid #ccc !important;
-    -webkit-appearance: none;
-    appearance: none;
-    padding: 0;
-    font-weight: bold;
-}
-
-/* Fix HR visibility */
-hr {
-    opacity: 1 !important;
-    border-color: #000 !important;
-}
-
-/* Layout Adjustments */
-.container-fluid {
-    width: 100% !important;
-    max-width: none !important;
-    padding: 0 !important;
-}
-
-/* Ensure SVGs have transparent backgrounds */
-svg {
-    background-color: transparent !important;
-}
-
-/* Specific Constraints for Pie Charts in Print to prevent explosion */
-.sales-report-dark-theme.printing>.d-flex.w-100>.d-flex.flex-column:nth-child(1)>.d-flex.w-100:nth-child(1)>.card:nth-child(2) .flex-grow-1,
-.sales-report-dark-theme.printing>.d-flex.w-100>.d-flex.flex-column:nth-child(1)>.d-flex.w-100:nth-child(2)>.card:nth-child(2) .flex-grow-1 {
-    height: 200px !important;
-    flex: none !important;
-    min-height: 0 !important;
-    max-height: 200px !important;
-    width: 100% !important;
-}
-
-/* 2. Media Print Overrides (Hiding UI elements) */
 @media print {
-
-    /* Hide non-printable elements */
-    .no-print,
-    .d-none-print,
-    .sidebar,
-    .header,
-    .navbar,
-    button,
-    #sidebar,
-    header,
-    nav {
+    .no-print {
         display: none !important;
     }
 
-    /* Page Setup */
     @page {
         size: landscape;
         margin: 5mm;
     }
 
-    /* Ensure .printing styles apply if class is present (it should be) 
-       but also apply basics if user uses Ctrl+P directly */
     body {
-        background-color: white !important;
-        margin: 0 !important;
-        padding: 0 !important;
+        background: #fff !important;
+    }
+
+    .sales-report-page {
+        overflow: visible !important;
+    }
+
+    .sr-table-inner {
+        overflow: visible !important;
+    }
+
+    .sr-pipeline-panel {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
     }
 }

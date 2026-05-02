@@ -29,9 +29,6 @@ function AppContent() {
   );
 }
 
-// Import ChatWidget
-import ChatWidget from './components/Chat/ChatWidget'; // Ensure path is correct
-
 function MainLayoutWrapper() {
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem('activeTab') || 'Enquiry';
@@ -39,8 +36,24 @@ function MainLayoutWrapper() {
   const [enquiryToOpen, setEnquiryToOpen] = useState(() => {
     return localStorage.getItem('enquiryToOpen') || null;
   });
+  const [openContext, setOpenContext] = useState(null);
 
-  const handleOpenEnquiry = (requestNo) => {
+  const handleOpenEnquiry = (target) => {
+    if (target && typeof target === 'object') {
+      const requestNo = String(target.requestNo || '').trim();
+      const tab = String(target.tab || 'Enquiry').trim() || 'Enquiry';
+      setOpenContext(target);
+      if (requestNo) {
+        setEnquiryToOpen(requestNo);
+        localStorage.setItem('enquiryToOpen', requestNo);
+      }
+      setActiveTab(tab);
+      localStorage.setItem('activeTab', tab);
+      return;
+    }
+    const requestNo = String(target || '').trim();
+    if (!requestNo) return;
+    setOpenContext(null);
     setEnquiryToOpen(requestNo);
     localStorage.setItem('enquiryToOpen', requestNo);
     setActiveTab('Enquiry');
@@ -62,9 +75,9 @@ function MainLayoutWrapper() {
         activeTab={activeTab}
         onNavigate={handleTabChange}
         enquiryToOpen={enquiryToOpen}
+        openContext={openContext}
         onOpenEnquiry={handleOpenEnquiry}
       />
-      <ChatWidget onOpenEnquiry={handleOpenEnquiry} />
     </MainLayout>
   );
 }

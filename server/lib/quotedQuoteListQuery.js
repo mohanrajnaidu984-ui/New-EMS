@@ -86,15 +86,37 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
     const isAdmin = !!(accessCtx && accessCtx.isAdmin);
     const userDepartment = accessCtx ? accessCtx.userDepartment : '';
     const isCcUser = !!(accessCtx && accessCtx.isCcUser);
+    const isManagementDept = !!(accessCtx && accessCtx.isManagementDept);
 
     const uEsc = (userEmail || '').replace(/'/g, "''");
-    const trimmedDept = (userDepartment || '').trim();
-    const deptEsc = trimmedDept.replace(/'/g, "''");
-    const deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
-    const hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
+    const uLocalEsc = ((userEmail || '').split('@')[0] || '').trim().replace(/'/g, "''");
+    let trimmedDept = (userDepartment || '').trim();
+    let deptEsc = trimmedDept.replace(/'/g, "''");
+    let deptNormEsc = (normalizePricingJobName(trimmedDept) || '').replace(/'/g, "''");
+    let hasDeptScope = deptEsc.length > 0 || deptNormEsc.length > 0;
+    if (isManagementDept) {
+        trimmedDept = '';
+        deptEsc = '';
+        deptNormEsc = '';
+        hasDeptScope = false;
+    }
+    // Division dropdown owns own-job scope for quote search; do not also constrain by profile Department.
+    if (divisionFilter && divisionFilter.toString().trim()) {
+        trimmedDept = '';
+        deptEsc = '';
+        deptNormEsc = '';
+        hasDeptScope = false;
+    }
     const mefAccessPredicate = isCcUser
         ? `(
-                REPLACE(ISNULL(MEF.CCMailIds, ''), '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    isManagementDept
+                        ? '1 = 1'
+                        : `(
+                    REPLACE(',' + REPLACE(ISNULL(MEF.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                    ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(MEF.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                )`
+                }
                 ${
                     hasDeptScope
                         ? `AND (
@@ -117,7 +139,14 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
 
     const scopedJobIdsSubquery = isCcUser
         ? `(
-                REPLACE(MEF2.CCMailIds, '@almcg.com', '@almoayyedcg.com') LIKE '%${uEsc}%'
+                ${
+                    isManagementDept
+                        ? '1 = 1'
+                        : `(
+                    REPLACE(',' + REPLACE(ISNULL(MEF2.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                    ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(MEF2.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                )`
+                }
                 ${
                     hasDeptScope
                         ? `AND (

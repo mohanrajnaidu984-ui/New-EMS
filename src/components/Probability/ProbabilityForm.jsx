@@ -1,19 +1,72 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Select from 'react-select';
 import AsyncSelect from 'react-select/async'; // START_OF_FILE_MODIFICATION
 import DatePicker from 'react-datepicker';
 import "react-datepicker/dist/react-datepicker.css";
 import { format } from 'date-fns';
+import { enUS } from 'date-fns/locale';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
+/** Numeric net quoted for filters/sort (same rules as display cell). */
+function getRowNetQuotedNumber(item, currentUser) {
+    const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+    const isSubUser = userDept && userDept !== 'civil' && userDept !== 'admin' && currentUser?.Roles !== 'Admin' && currentUser?.role !== 'Admin';
+    if (isSubUser && (!item.QuoteRefs || item.QuoteRefs.length === 0)) return null;
+    if (!String(item.WonQuoteRef || '').trim()) return null;
+    if (item.SelectedNetQuotedValue !== null && item.SelectedNetQuotedValue !== undefined && item.SelectedNetQuotedValue !== '') {
+        return Number(item.SelectedNetQuotedValue);
+    }
+    if (item.NetQuotedValue !== null && item.NetQuotedValue !== undefined && item.NetQuotedValue !== '') {
+        return Number(item.NetQuotedValue);
+    }
+    return null;
+}
+
+/** Same rules as inline UPDATE buttons in the Details column — single column uses this. */
+function shouldShowUpdateButton(item, listMode) {
+    const st = item.Status;
+    if (st === 'Pending' || st === 'Enquiry') return false;
+    if (st === 'Won') return true;
+    if (st === 'Lost' && (listMode === 'Pending' || listMode === 'Lost')) return true;
+    if (st === 'FollowUp' && (listMode === 'Pending' || listMode === 'FollowUp')) return true;
+    if ((st === 'OnHold' || st === 'Cancelled' || st === 'Retendered') && (listMode === 'Pending' || listMode === 'Won')) return true;
+    if (
+        listMode === 'Pending' &&
+        st !== 'Won' &&
+        st !== 'FollowUp' &&
+        st !== 'Lost' &&
+        st !== 'OnHold' &&
+        st !== 'Cancelled' &&
+        st !== 'Retendered' &&
+        st !== 'Pending' &&
+        st !== 'Enquiry'
+    ) {
+        return true;
+    }
+    return false;
+}
+
+function compareEnquiryNo(a, b) {
+    const sa = String(a ?? '');
+    const sb = String(b ?? '');
+    const na = Number(sa);
+    const nb = Number(sb);
+    if (!Number.isNaN(na) && !Number.isNaN(nb) && String(na) === sa.trim() && String(nb) === sb.trim()) {
+        return na - nb;
+    }
+    return sa.localeCompare(sb, undefined, { numeric: true, sensitivity: 'base' });
+}
 
 const ProbabilityForm = () => {
     const { currentUser } = useAuth();
     const { masters } = useData();
 
     // --- View State ---
+    const [divisionOptions, setDivisionOptions] = useState([]);
+    const [selectedDivision, setSelectedDivision] = useState(() => localStorage.getItem('prob_division') || '');
     const [listMode, setListMode] = useState(() => localStorage.getItem('prob_listMode') || 'Pending'); // 'Pending', 'Won', 'Lost', 'OnHold', 'Cancelled', 'FollowUp', 'Retendered'
     const [fromDate, setFromDate] = useState(() => localStorage.getItem('prob_fromDate') || '');
     const [toDate, setToDate] = useState(() => localStorage.getItem('prob_toDate') || '');
@@ -22,26 +75,72 @@ const ProbabilityForm = () => {
     const [loadingList, setLoadingList] = useState(false);
     const [updatingReqNo, setUpdatingReqNo] = useState(null); // Track which row is being updated
     const [updatedItems, setUpdatedItems] = useState({});
+    const [historyReqNo, setHistoryReqNo] = useState('');
+    const [historyHeader, setHistoryHeader] = useState({ projectName: '', leadJobName: '' });
+    const [historyRows, setHistoryRows] = useState([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+
+    /** Excel-style column filters: null = inactive (show all). */
+    const [colFEnquiry, setColFEnquiry] = useState(null);
+    const [colFProject, setColFProject] = useState(null);
+    const [colFCustomer, setColFCustomer] = useState(null);
+    const [colFStatus, setColFStatus] = useState(null);
+    const [colFNet, setColFNet] = useState({ mode: 'all', v1: '', v2: '' });
+    const [sortCol, setSortCol] = useState(null);
+    const [sortAsc, setSortAsc] = useState(true);
+    const [openColFilter, setOpenColFilter] = useState(null);
+    const [draftMulti, setDraftMulti] = useState(() => new Set());
+    const [draftNet, setDraftNet] = useState({ mode: 'all', v1: '', v2: '' });
+    const [filterSearch, setFilterSearch] = useState('');
 
     // -- Persistence --
     useEffect(() => {
+        localStorage.setItem('prob_division', selectedDivision);
         localStorage.setItem('prob_listMode', listMode);
         localStorage.setItem('prob_fromDate', fromDate);
         localStorage.setItem('prob_toDate', toDate);
         localStorage.setItem('prob_filterProbability', filterProbability);
-    }, [listMode, fromDate, toDate, filterProbability]);
+    }, [selectedDivision, listMode, fromDate, toDate, filterProbability]);
     const [enquiriesList, setEnquiriesList] = useState([]);
     // Removed viewMode and detail states as per request
 
 
 
+    useEffect(() => {
+        const loadDivisions = async () => {
+            if (!currentUser) return;
+            try {
+                const userEmail = currentUser?.EmailId || currentUser?.email || '';
+                if (!userEmail) return;
+                const res = await fetch(`${API_BASE}/api/probability/divisions?userEmail=${encodeURIComponent(userEmail)}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const list = Array.isArray(data?.divisions) ? data.divisions.map((d) => String(d || '').trim()).filter(Boolean) : [];
+                setDivisionOptions(list);
+                if (!list.length) {
+                    setSelectedDivision('');
+                    return;
+                }
+                const existing = String(selectedDivision || '').trim().toLowerCase();
+                const hit = list.find((d) => d.toLowerCase() === existing);
+                setSelectedDivision(hit || data?.selectedDivision || list[0]);
+            } catch (e) {
+                console.error('ProbabilityForm: failed to load divisions', e);
+                setDivisionOptions([]);
+                setSelectedDivision('');
+            }
+        };
+        loadDivisions();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentUser?.EmailId, currentUser?.email]);
+
     // --- Fetch List ---
     useEffect(() => {
-        if (currentUser) {
+        if (currentUser && selectedDivision) {
             console.log('ProbabilityForm: Current User:', currentUser);
             fetchList();
         }
-    }, [listMode, fromDate, toDate, filterProbability, currentUser]);
+    }, [listMode, fromDate, toDate, filterProbability, selectedDivision, currentUser]);
 
     const fetchList = async () => {
         setLoadingList(true);
@@ -52,7 +151,8 @@ const ProbabilityForm = () => {
                 toDate: toDate || '',
                 probability: filterProbability || '',
                 userEmail: currentUser?.EmailId || currentUser?.email || '',
-                userDepartment: currentUser?.Department || ''
+                userDepartment: currentUser?.Department || '',
+                division: selectedDivision || ''
             });
 
             const url = `${API_BASE}/api/probability/list?${queryParams}`;
@@ -96,14 +196,36 @@ const ProbabilityForm = () => {
                                     item.QuoteRefs = qRefsRaw.split(',').filter(Boolean);
                                 }
                             } else {
-                                // STRING_AGG format: "Ref1|Name1,Ref2|Name2"
+                                // STRING_AGG format: "Ref|ToName|LeadJob[,QuoteDate]" — date is last segment when present
                                 item.QuoteRefs = qRefsRaw.split(',').filter(Boolean).map(refStr => {
-                                    const [ref, name] = refStr.includes('|') ? refStr.split('|') : [refStr, 'N/A'];
-                                    return { QuoteNumber: ref.trim(), ToName: name.trim() };
+                                    const parts = refStr.includes('|') ? refStr.split('|') : [refStr, 'N/A', ''];
+                                    const ref = (parts[0] || '').trim();
+                                    const name = (parts[1] || 'N/A').trim();
+                                    const lastSeg = (parts[parts.length - 1] || '').trim();
+                                    const lastIsDate = /^\d{4}-\d{2}-\d{2}/.test(lastSeg) || (lastSeg && !Number.isNaN(Date.parse(lastSeg)));
+                                    let quoteDate = null;
+                                    let leadJob = '';
+                                    if (parts.length >= 4 && lastIsDate) {
+                                        quoteDate = lastSeg;
+                                        leadJob = parts.slice(2, -1).join('|').trim();
+                                    } else {
+                                        leadJob = parts.slice(2).join('|').trim();
+                                    }
+                                    return {
+                                        QuoteNumber: ref,
+                                        ToName: name,
+                                        LeadJob: String(leadJob || '').trim(),
+                                        QuoteDate: quoteDate || null,
+                                    };
                                 }).sort((a, b) => {
-                                    const nameA = a.ToName.toLowerCase(), nameB = b.ToName.toLowerCase();
-                                    if (nameA !== nameB) return nameA.localeCompare(nameB);
-                                    return b.QuoteNumber.localeCompare(a.QuoteNumber);
+                                    const extractLeadCode = (quoteNo) => {
+                                        const m = String(quoteNo || '').toUpperCase().match(/\/L(\d+)\b/);
+                                        return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+                                    };
+                                    const aCode = extractLeadCode(a.QuoteNumber);
+                                    const bCode = extractLeadCode(b.QuoteNumber);
+                                    if (aCode !== bCode) return aCode - bCode;
+                                    return String(a.QuoteNumber || '').localeCompare(String(b.QuoteNumber || ''));
                                 });
                             }
                         } else if (Array.isArray(qRefsRaw)) {
@@ -153,6 +275,87 @@ const ProbabilityForm = () => {
         } finally {
             setLoadingList(false);
         }
+    };
+
+    const formatHistoryDateTime = (iso) => {
+        if (!iso) return '';
+        try {
+            return format(new Date(iso), 'dd-MMM-yy hh:mm a', { locale: enUS });
+        } catch {
+            return '';
+        }
+    };
+
+    /** Label next to project name: from WonCustomerName or the selected row in QuoteRefs (ToName). */
+    const customerNameForQuoteRef = (item) => {
+        const ref = String(item?.WonQuoteRef || '').trim();
+        if (!ref) return '';
+        let name = String(item?.WonCustomerName || '').trim();
+        if (!name && Array.isArray(item?.QuoteRefs)) {
+            const hit = item.QuoteRefs.find((q) => {
+                const num = typeof q === 'string' ? String(q).trim() : String(q?.QuoteNumber || q?.value || '').trim();
+                return num === ref;
+            });
+            if (hit && typeof hit === 'object') {
+                name = String(hit.ToName || hit.customer || '').trim();
+            }
+        }
+        return name;
+    };
+
+    const quoteRefLabelWithDate = (ref, dateVal) => {
+        const r = String(ref || '').trim();
+        if (!r) return '';
+        const d = formatHistoryDateTime(dateVal);
+        return d ? `${r} (${d})` : r;
+    };
+
+    const statusSelectStyle = (status) => {
+        const s = String(status || '').trim().toLowerCase();
+        return {
+            fontWeight: 700,
+            color: s === 'won' ? '#198754' : '#dc3545',
+        };
+    };
+
+    const buildQuoteRefOptions = (item) =>
+        (Array.isArray(item?.QuoteRefs) ? item.QuoteRefs : []).map((q) => {
+            if (typeof q === 'string') {
+                return {
+                    value: q,
+                    label: quoteRefLabelWithDate(q, null),
+                    quoteDate: null,
+                    customer: 'N/A',
+                    leadJob: '',
+                };
+            }
+            const v = q.QuoteNumber || q.value || '';
+            const qd = q.QuoteDate || q.quoteDate || null;
+            return {
+                value: v,
+                label: quoteRefLabelWithDate(v, qd),
+                quoteDate: qd,
+                customer: q.ToName || q.customer || '',
+                leadJob: q.LeadJob || q.leadJob || '',
+            };
+        });
+
+    const quoteRefSelectValue = (item) => {
+        const ref = String(item?.WonQuoteRef || '').trim();
+        if (!ref) return null;
+        const opts = buildQuoteRefOptions(item);
+        const sel = opts.find((o) => o.value === ref);
+        let dt = sel?.quoteDate;
+        if (item.WonQuoteRefDate != null && item.WonQuoteRefDate !== '') {
+            dt = item.WonQuoteRefDate;
+        }
+        return {
+            value: ref,
+            label: quoteRefLabelWithDate(ref, dt),
+            quoteDate: dt,
+            customer: sel?.customer,
+            leadJob: sel?.leadJob,
+        };
     };
 
     // --- Handlers ---
@@ -241,7 +444,13 @@ const ProbabilityForm = () => {
 
             const payload = {
                 enquiryNo: item.RequestNo,
+                projectName: item.ProjectName,
+                leadJobName: item.LeadJobName || '',
                 userEmail: currentUser?.EmailId || currentUser?.email || '',
+                division: selectedDivision || '',
+                toName: item.WonCustomerName || '',
+                totalQuotedValue: item.SelectedTotalQuotedValue ?? item.TotalQuotedValue,
+                netQuotedValue: item.SelectedNetQuotedValue ?? item.NetQuotedValue,
                 status: item.Status,
                 probabilityOption: item.ProbabilityOption,
                 remarks: item.ProbabilityRemarks,
@@ -293,10 +502,45 @@ const ProbabilityForm = () => {
         handleUpdate(item, { Status: newStatus });
     };
 
+    const fetchHistory = async (item) => {
+        const requestNo = item?.RequestNo;
+        try {
+            setHistoryReqNo(String(requestNo || ''));
+            setHistoryHeader({
+                projectName: item?.ProjectName || '',
+                leadJobName: item?.LeadJobName || '',
+            });
+            setHistoryLoading(true);
+            const userEmail = currentUser?.EmailId || currentUser?.email || '';
+            const qs = new URLSearchParams({
+                userEmail,
+                division: selectedDivision || '',
+            });
+            const res = await fetch(`${API_BASE}/api/probability/history/${encodeURIComponent(requestNo)}?${qs.toString()}`);
+            if (!res.ok) throw new Error('Failed to load history');
+            const data = await res.json();
+            const rows = Array.isArray(data) ? data : [];
+            setHistoryRows(rows);
+            if (rows.length > 0) {
+                const top = rows[0];
+                setHistoryHeader((h) => ({
+                    projectName: (h.projectName && String(h.projectName).trim()) ? h.projectName : (top.ProjectName || ''),
+                    leadJobName: (h.leadJobName && String(h.leadJobName).trim()) ? h.leadJobName : (top.LeadJobName || ''),
+                }));
+            }
+        } catch (e) {
+            console.error('Probability history load failed', e);
+            setHistoryRows([]);
+            alert('Failed to load probability history.');
+        } finally {
+            setHistoryLoading(false);
+        }
+    };
+
     const fetchQuoteDetails = async (quoteNumber) => {
         try {
             const userEmail = currentUser?.EmailId || currentUser?.email || '';
-            const res = await fetch(`${API_BASE}/api/probability/quote-details/${encodeURIComponent(quoteNumber)}?userEmail=${encodeURIComponent(userEmail)}`);
+            const res = await fetch(`${API_BASE}/api/probability/quote-details/${encodeURIComponent(quoteNumber)}?userEmail=${encodeURIComponent(userEmail)}&division=${encodeURIComponent(selectedDivision || '')}`);
             if (res.ok) {
                 return await res.json();
             }
@@ -307,13 +551,21 @@ const ProbabilityForm = () => {
     };
 
     const handleInlineUpdate = async (item, field, value) => {
+        if (field === 'WonQuoteRef' && !value) {
+            handleUpdate(item, { WonQuoteRef: '', WonCustomerName: '', WonQuoteRefDate: '' });
+            return;
+        }
         if (field === 'WonQuoteRef' && value) {
             const details = await fetchQuoteDetails(value);
             if (details) {
                 const updates = {
                     WonQuoteRef: value,
                     WonCustomerName: details.customerName,
+                    WonQuoteRefDate: details.quoteDate,
                     WonOrderValue: details.totalAmount, // Default to total amount
+                    SelectedTotalQuotedValue: details.totalQuotedValue,
+                    SelectedNetQuotedValue: details.netQuotedValue,
+                    QuotePreparedBy: details.preparedBy != null && details.preparedBy !== '' ? String(details.preparedBy) : '',
                 };
 
                 // If there are options, we don't auto-fill WonOrderValue yet, 
@@ -340,6 +592,283 @@ const ProbabilityForm = () => {
     };
 
     // Removed handleSelectEnquiry, fetchQuotes, handleProbabilityChange, handleDetailsChange, handleSubmit
+
+    const customerKey = (item) => {
+        const s = String(customerNameForQuoteRef(item) || '').trim();
+        return s || '—';
+    };
+    const projectKey = (item) => {
+        const s = String(item.ProjectName || '').trim();
+        return s || '—';
+    };
+    const statusKey = (item) => String(item.Status || '').trim() || '—';
+
+    const columnUniques = useMemo(() => {
+        const enquiry = new Set();
+        const project = new Set();
+        const customer = new Set();
+        const status = new Set();
+        for (const item of enquiriesList) {
+            enquiry.add(String(item.RequestNo ?? ''));
+            project.add(projectKey(item));
+            customer.add(customerKey(item));
+            status.add(statusKey(item));
+        }
+        return {
+            enquiry: [...enquiry].sort(compareEnquiryNo),
+            project: [...project].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+            customer: [...customer].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+            status: [...status].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+        };
+    }, [enquiriesList]);
+
+    const filteredSortedRows = useMemo(() => {
+        let rows = [...enquiriesList];
+        if (colFEnquiry !== null) {
+            rows = rows.filter((r) => colFEnquiry.has(String(r.RequestNo ?? '')));
+        }
+        if (colFProject !== null) {
+            rows = rows.filter((r) => colFProject.has(projectKey(r)));
+        }
+        if (colFCustomer !== null) {
+            rows = rows.filter((r) => colFCustomer.has(customerKey(r)));
+        }
+        if (colFStatus !== null) {
+            rows = rows.filter((r) => colFStatus.has(statusKey(r)));
+        }
+        if (colFNet && colFNet.mode !== 'all') {
+            const v1 = parseFloat(String(colFNet.v1 ?? '').replace(/,/g, '').trim());
+            const v2 = parseFloat(String(colFNet.v2 ?? '').replace(/,/g, '').trim());
+            rows = rows.filter((r) => {
+                const n = getRowNetQuotedNumber(r, currentUser);
+                if (n === null || Number.isNaN(n)) return false;
+                switch (colFNet.mode) {
+                    case 'gt':
+                        return !Number.isNaN(v1) && n > v1;
+                    case 'lt':
+                        return !Number.isNaN(v1) && n < v1;
+                    case 'eq':
+                        return !Number.isNaN(v1) && Math.abs(n - v1) < 1e-6;
+                    case 'gte':
+                        return !Number.isNaN(v1) && n >= v1;
+                    case 'lte':
+                        return !Number.isNaN(v1) && n <= v1;
+                    case 'between':
+                        if (Number.isNaN(v1) || Number.isNaN(v2)) return false;
+                        return n >= Math.min(v1, v2) && n <= Math.max(v1, v2);
+                    default:
+                        return true;
+                }
+            });
+        }
+        if (sortCol) {
+            const mul = sortAsc ? 1 : -1;
+            rows.sort((a, b) => {
+                let c = 0;
+                switch (sortCol) {
+                    case 'enquiry':
+                        c = compareEnquiryNo(a.RequestNo, b.RequestNo);
+                        break;
+                    case 'project':
+                        c = projectKey(a).localeCompare(projectKey(b), undefined, { sensitivity: 'base' });
+                        break;
+                    case 'customer':
+                        c = customerKey(a).localeCompare(customerKey(b), undefined, { sensitivity: 'base' });
+                        break;
+                    case 'net': {
+                        const na = getRowNetQuotedNumber(a, currentUser);
+                        const nb = getRowNetQuotedNumber(b, currentUser);
+                        const fa = na === null || Number.isNaN(na) ? -Infinity : na;
+                        const fb = nb === null || Number.isNaN(nb) ? -Infinity : nb;
+                        c = fa === fb ? 0 : fa < fb ? -1 : 1;
+                        break;
+                    }
+                    case 'status':
+                        c = statusKey(a).localeCompare(statusKey(b), undefined, { sensitivity: 'base' });
+                        break;
+                    default:
+                        c = 0;
+                }
+                return c * mul;
+            });
+        }
+        return rows;
+    }, [enquiriesList, colFEnquiry, colFProject, colFCustomer, colFStatus, colFNet, sortCol, sortAsc, currentUser]);
+
+    const listAggregates = useMemo(() => {
+        let sumNet = 0;
+        let sumJob = 0;
+        let gpSum = 0;
+        let gpCount = 0;
+        for (const item of filteredSortedRows) {
+            const n = getRowNetQuotedNumber(item, currentUser);
+            if (n !== null && !Number.isNaN(n)) sumNet += n;
+            if (item.Status === 'Won') {
+                const rawJv = String(item.WonOrderValue ?? '').replace(/,/g, '').replace(/BD/g, '').trim();
+                const jv = parseFloat(rawJv);
+                if (!Number.isNaN(jv)) sumJob += jv;
+                const gp = Number(item.WonGrossProfit);
+                if (item.WonGrossProfit !== null && item.WonGrossProfit !== undefined && item.WonGrossProfit !== '' && !Number.isNaN(gp)) {
+                    gpSum += gp;
+                    gpCount += 1;
+                }
+            }
+        }
+        return {
+            sumNet,
+            sumJob,
+            avgGp: gpCount > 0 ? gpSum / gpCount : null,
+        };
+    }, [filteredSortedRows, currentUser]);
+
+    useEffect(() => {
+        if (!openColFilter) return undefined;
+        const onDoc = (e) => {
+            if (e.target.closest('.prob-filter-panel') || e.target.closest('.prob-table-filter-header')) return;
+            setOpenColFilter(null);
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [openColFilter]);
+
+    const openMultiDraft = (kind) => {
+        const all =
+            kind === 'enquiry'
+                ? columnUniques.enquiry
+                : kind === 'project'
+                  ? columnUniques.project
+                  : kind === 'customer'
+                    ? columnUniques.customer
+                    : columnUniques.status;
+        const active =
+            kind === 'enquiry'
+                ? colFEnquiry
+                : kind === 'project'
+                  ? colFProject
+                  : kind === 'customer'
+                    ? colFCustomer
+                    : colFStatus;
+        setDraftMulti(active !== null ? new Set(active) : new Set(all));
+        setFilterSearch('');
+        setOpenColFilter(kind);
+    };
+
+    const applyMultiDraft = (kind) => {
+        const all =
+            kind === 'enquiry'
+                ? columnUniques.enquiry
+                : kind === 'project'
+                  ? columnUniques.project
+                  : kind === 'customer'
+                    ? columnUniques.customer
+                    : columnUniques.status;
+        const next = new Set(draftMulti);
+        const setter =
+            kind === 'enquiry'
+                ? setColFEnquiry
+                : kind === 'project'
+                  ? setColFProject
+                  : kind === 'customer'
+                    ? setColFCustomer
+                    : setColFStatus;
+        if (next.size === all.length) {
+            setter(null);
+        } else {
+            setter(next);
+        }
+        setOpenColFilter(null);
+    };
+
+    const clearMultiFilter = (kind) => {
+        const setter =
+            kind === 'enquiry'
+                ? setColFEnquiry
+                : kind === 'project'
+                  ? setColFProject
+                  : kind === 'customer'
+                    ? setColFCustomer
+                    : setColFStatus;
+        setter(null);
+        setOpenColFilter(null);
+    };
+
+    const openNetDraft = () => {
+        setDraftNet({ ...colFNet });
+        setOpenColFilter('net');
+    };
+
+    const toggleMultiColumnFilter = (kind, e) => {
+        if (e.target.closest('.prob-filter-panel')) return;
+        if (e.target.closest('[data-sort-only="true"]')) return;
+        if (openColFilter === kind) {
+            setOpenColFilter(null);
+        } else {
+            openMultiDraft(kind);
+        }
+    };
+
+    const toggleNetColumnFilter = (e) => {
+        if (e.target.closest('.prob-filter-panel')) return;
+        if (e.target.closest('[data-sort-only="true"]')) return;
+        if (openColFilter === 'net') {
+            setOpenColFilter(null);
+        } else {
+            openNetDraft();
+        }
+    };
+
+    const applyNetDraft = () => {
+        if (draftNet.mode === 'all') {
+            setColFNet({ mode: 'all', v1: '', v2: '' });
+        } else {
+            setColFNet({ ...draftNet });
+        }
+        setOpenColFilter(null);
+    };
+
+    const clearNetFilter = () => {
+        setColFNet({ mode: 'all', v1: '', v2: '' });
+        setOpenColFilter(null);
+    };
+
+    const handleSortClick = (key) => {
+        if (sortCol !== key) {
+            setSortCol(key);
+            setSortAsc(true);
+        } else {
+            setSortAsc((v) => !v);
+        }
+    };
+
+    const sortIndicator = (key) => {
+        if (sortCol !== key) return '⇅';
+        return sortAsc ? '▲' : '▼';
+    };
+
+    const filterActiveClass = (kind) => {
+        if (kind === 'net') {
+            return colFNet && colFNet.mode !== 'all' ? 'text-primary' : 'text-secondary';
+        }
+        const s =
+            kind === 'enquiry'
+                ? colFEnquiry
+                : kind === 'project'
+                  ? colFProject
+                  : kind === 'customer'
+                    ? colFCustomer
+                    : colFStatus;
+        return s !== null ? 'text-primary' : 'text-secondary';
+    };
+
+    const clearAllColumnFilters = () => {
+        setColFEnquiry(null);
+        setColFProject(null);
+        setColFCustomer(null);
+        setColFStatus(null);
+        setColFNet({ mode: 'all', v1: '', v2: '' });
+        setSortCol(null);
+        setSortAsc(true);
+    };
 
     // --- Render Logic ---
 
@@ -523,13 +1052,32 @@ const ProbabilityForm = () => {
 
     // List View
     return (
-        <div className="container-fluid pt-1 pb-4 bg-light min-vh-100">
-            <div className="row justify-content-center">
-                <div className="col-12 col-lg-10">
-                    <div className="card border-0 shadow-sm rounded-3">
+        <div className="container-fluid pt-1 pb-4 bg-light min-vh-100 prob-probability-page d-flex flex-column">
+            <div className="row justify-content-center flex-grow-1" style={{ minHeight: 0 }}>
+                <div className="col-12 col-lg-10 d-flex flex-column" style={{ minHeight: 0, flex: '1 1 auto' }}>
+                    <div className="card border-0 shadow-sm rounded-3 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
                         {/* Header & Filters */}
-                        <div className="card-header bg-white border-bottom py-3">
+                        <div className="card-header bg-white border-bottom py-3" style={{ flexShrink: 0 }}>
                             <div className="d-flex flex-wrap align-items-center gap-3">
+                                {/* Division Selector */}
+                                <div style={{ width: '250px' }}>
+                                    <label className="small text-muted fw-bold mb-1">Division</label>
+                                    <select
+                                        className="form-select"
+                                        value={selectedDivision}
+                                        onChange={(e) => setSelectedDivision(e.target.value)}
+                                        disabled={divisionOptions.length <= 1}
+                                    >
+                                        {divisionOptions.length === 0 ? (
+                                            <option value="">Select division</option>
+                                        ) : (
+                                            divisionOptions.map((div) => (
+                                                <option key={div} value={div}>{div}</option>
+                                            ))
+                                        )}
+                                    </select>
+                                </div>
+
                                 {/* Mode Selector */}
                                 <div style={{ width: '250px' }}>
                                     <label className="small text-muted fw-bold mb-1">View Mode</label>
@@ -584,8 +1132,11 @@ const ProbabilityForm = () => {
                                     </div>
                                 )}
 
-                                {/* Refresh Button */}
-                                <div className="ms-auto align-self-end">
+                                {/* Refresh & table column filters */}
+                                <div className="ms-auto align-self-end d-flex gap-2">
+                                    <button type="button" className="btn btn-outline-secondary btn-sm" onClick={clearAllColumnFilters} title="Clear column filters and sort">
+                                        Clear table filters
+                                    </button>
                                     <button className="btn btn-outline-primary" onClick={fetchList} disabled={loadingList}>
                                         {loadingList ? 'Loading...' : 'Refresh'}
                                     </button>
@@ -593,77 +1144,386 @@ const ProbabilityForm = () => {
                             </div>
                         </div>
 
-                        <div className="card-body p-0">
-                            <div className="table-responsive">
-                                <table className="table table-hover mb-0 align-bottom" style={{ minWidth: '2100px', tableLayout: 'fixed' }}>
-                                    <thead className="bg-light text-secondary text-uppercase" style={{ fontSize: '0.7rem' }}>
-                                        <tr>
-                                            <th className="px-2 py-1" style={{ width: '50px', textAlign: 'left', verticalAlign: 'bottom' }}>SL</th>
-                                            <th className="px-2 py-1" style={{ width: '80px', textAlign: 'left', verticalAlign: 'bottom' }}>Enquiry No.</th>
-                                            <th className="px-2 py-1" style={{ width: '200px', textAlign: 'left', verticalAlign: 'bottom' }}>Project Name</th>
-                                            <th className="px-2 py-1" style={{ width: '100px', textAlign: 'left', verticalAlign: 'bottom', whiteSpace: 'normal' }}>Total Quoted</th>
-                                            <th className="px-2 py-1" style={{ width: '100px', textAlign: 'left', verticalAlign: 'bottom', whiteSpace: 'normal' }}>Net Quoted</th>
-                                            <th className="px-2 py-1" style={{ width: '130px', textAlign: 'left', verticalAlign: 'bottom' }}>Status</th>
-                                            <th className="px-2 py-1" style={{ width: '1300px', textAlign: 'left', verticalAlign: 'bottom' }}>Details</th>
+                        <div className="card-body p-0 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
+                            <div
+                                className="prob-table-scroll-wrap border-top px-3 flex-grow-1"
+                                style={{
+                                    flex: '1 1 auto',
+                                    minHeight: 0,
+                                    overflow: 'auto',
+                                    scrollbarGutter: 'stable',
+                                }}
+                            >
+                                <table className="table table-hover mb-0 prob-probability-list-table" style={{ minWidth: '2312px', tableLayout: 'fixed' }}>
+                                    <thead>
+                                        <tr className="prob-summary-row">
+                                            <th className="prob-summary-th" style={{ width: '72px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th" style={{ width: '50px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th" style={{ width: '100px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th" style={{ width: '200px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th" style={{ width: '160px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th prob-summary-net text-end pe-2" style={{ width: '140px' }}>
+                                                {filteredSortedRows.length === 0 ? (
+                                                    <span className="text-muted">—</span>
+                                                ) : (
+                                                    <>
+                                                        <span className="prob-summary-muted">Total </span>
+                                                        BD {listAggregates.sumNet.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                                                    </>
+                                                )}
+                                            </th>
+                                            <th className="prob-summary-th" style={{ width: '130px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th prob-summary-details" style={{ width: '1300px' }}>
+                                                <div className="d-flex align-items-end" style={{ fontSize: '11px', fontWeight: 600, color: '#0c4a6e' }}>
+                                                    <div style={{ width: '320px' }} aria-hidden="true" />
+                                                    <div style={{ width: '130px' }} aria-hidden="true" />
+                                                    <div style={{ width: '140px', textAlign: 'right' }} title="Job Value total (Won)">
+                                                        {listAggregates.sumJob > 0 ? (
+                                                            <>
+                                                                <span className="prob-summary-muted">Total </span>
+                                                                BD {listAggregates.sumJob.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                                                            </>
+                                                        ) : (
+                                                            <span className="text-muted">—</span>
+                                                        )}
+                                                    </div>
+                                                    <div style={{ width: '110px', textAlign: 'right' }} title="GP % average (Won)">
+                                                        {listAggregates.avgGp != null ? (
+                                                            <>
+                                                                <span className="prob-summary-muted">Avg </span>
+                                                                {listAggregates.avgGp.toFixed(2)}%
+                                                            </>
+                                                        ) : (
+                                                            <span className="text-muted">—</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </th>
+                                        </tr>
+                                        <tr className="prob-thead-labels">
+                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '72px', textAlign: 'left' }}>Update</th>
+                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '50px', textAlign: 'left' }}>SL</th>
+                                            <th
+                                                className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
+                                                style={{ width: '100px', textAlign: 'left', cursor: 'pointer' }}
+                                                onClick={(e) => toggleMultiColumnFilter('enquiry', e)}
+                                            >
+                                                <div className="d-flex align-items-end justify-content-between gap-1">
+                                                    <span className="fw-bold">Enquiry</span>
+                                                    <span className="d-flex align-items-center gap-1 flex-shrink-0">
+                                                        <span className={`user-select-none ${filterActiveClass('enquiry')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
+                                                        <button
+                                                            type="button"
+                                                            data-sort-only="true"
+                                                            className="btn btn-link p-0 text-decoration-none user-select-none"
+                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            title="Sort"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSortClick('enquiry');
+                                                            }}
+                                                        >
+                                                            {sortIndicator('enquiry')}
+                                                        </button>
+                                                    </span>
+                                                </div>
+                                                {openColFilter === 'enquiry' && (
+                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                                        <div className="d-flex gap-1 mb-2">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.enquiry))}>All</button>
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
+                                                        </div>
+                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                                            {columnUniques.enquiry.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
+                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
+                                                                    <span className="text-truncate">{val}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('enquiry')}>Clear</button>
+                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('enquiry')}>Apply</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </th>
+                                            <th
+                                                className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
+                                                style={{ width: '200px', textAlign: 'left', cursor: 'pointer' }}
+                                                onClick={(e) => toggleMultiColumnFilter('project', e)}
+                                            >
+                                                <div className="d-flex align-items-end justify-content-between gap-1">
+                                                    <span className="fw-bold">Project Name</span>
+                                                    <span className="d-flex align-items-center gap-1 flex-shrink-0">
+                                                        <span className={`user-select-none ${filterActiveClass('project')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
+                                                        <button
+                                                            type="button"
+                                                            data-sort-only="true"
+                                                            className="btn btn-link p-0 text-decoration-none user-select-none"
+                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            title="Sort"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSortClick('project');
+                                                            }}
+                                                        >
+                                                            {sortIndicator('project')}
+                                                        </button>
+                                                    </span>
+                                                </div>
+                                                {openColFilter === 'project' && (
+                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                                        <div className="d-flex gap-1 mb-2">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.project))}>All</button>
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
+                                                        </div>
+                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                                            {columnUniques.project.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
+                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
+                                                                    <span className="text-truncate">{val}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('project')}>Clear</button>
+                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('project')}>Apply</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </th>
+                                            <th
+                                                className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
+                                                style={{ width: '160px', textAlign: 'left', cursor: 'pointer' }}
+                                                onClick={(e) => toggleMultiColumnFilter('customer', e)}
+                                            >
+                                                <div className="d-flex align-items-end justify-content-between gap-1">
+                                                    <span className="fw-bold">Customer Name</span>
+                                                    <span className="d-flex align-items-center gap-1 flex-shrink-0">
+                                                        <span className={`user-select-none ${filterActiveClass('customer')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
+                                                        <button
+                                                            type="button"
+                                                            data-sort-only="true"
+                                                            className="btn btn-link p-0 text-decoration-none user-select-none"
+                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            title="Sort"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSortClick('customer');
+                                                            }}
+                                                        >
+                                                            {sortIndicator('customer')}
+                                                        </button>
+                                                    </span>
+                                                </div>
+                                                {openColFilter === 'customer' && (
+                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                                        <div className="d-flex gap-1 mb-2">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.customer))}>All</button>
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
+                                                        </div>
+                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                                            {columnUniques.customer.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
+                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
+                                                                    <span className="text-truncate">{val}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('customer')}>Clear</button>
+                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('customer')}>Apply</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </th>
+                                            <th
+                                                className="px-2 py-1 align-bottom position-relative prob-table-filter-header prob-net-quoted-th"
+                                                style={{ width: '140px', textAlign: 'left', cursor: 'pointer' }}
+                                                onClick={(e) => toggleNetColumnFilter(e)}
+                                            >
+                                                <div className="d-flex align-items-end justify-content-between gap-1">
+                                                    <div className="d-flex flex-column align-items-start" style={{ minWidth: 0, textAlign: 'left' }}>
+                                                        <span className="fw-bold">Net Quote</span>
+                                                        <span className="prob-net-quoted-sub">(Excludes Subjobs)</span>
+                                                    </div>
+                                                    <span className="d-flex align-items-center gap-1 flex-shrink-0 align-self-end">
+                                                        <span className={`user-select-none ${filterActiveClass('net')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">
+                                                            ▼
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            data-sort-only="true"
+                                                            className="btn btn-link p-0 text-decoration-none user-select-none"
+                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            title="Sort"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSortClick('net');
+                                                            }}
+                                                        >
+                                                            {sortIndicator('net')}
+                                                        </button>
+                                                    </span>
+                                                </div>
+                                                {openColFilter === 'net' && (
+                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', right: 0, top: '100%', zIndex: 1060, minWidth: 240, fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                                                        <label className="form-label small mb-1">Condition</label>
+                                                        <select className="form-select form-select-sm mb-2" value={draftNet.mode} onChange={(e) => setDraftNet((d) => ({ ...d, mode: e.target.value }))}>
+                                                            <option value="all">All</option>
+                                                            <option value="gt">Greater than</option>
+                                                            <option value="lt">Less than</option>
+                                                            <option value="eq">Equal to</option>
+                                                            <option value="gte">Greater or equal</option>
+                                                            <option value="lte">Less or equal</option>
+                                                            <option value="between">Between</option>
+                                                        </select>
+                                                        <label className="form-label small mb-1">Value (BD)</label>
+                                                        <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 101.100" value={draftNet.v1} onChange={(e) => setDraftNet((d) => ({ ...d, v1: e.target.value }))} />
+                                                        {draftNet.mode === 'between' && (
+                                                            <>
+                                                                <label className="form-label small mb-1">And (BD)</label>
+                                                                <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 200" value={draftNet.v2} onChange={(e) => setDraftNet((d) => ({ ...d, v2: e.target.value }))} />
+                                                            </>
+                                                        )}
+                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={clearNetFilter}>Clear</button>
+                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={applyNetDraft}>Apply</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </th>
+                                            <th
+                                                className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
+                                                style={{ width: '130px', textAlign: 'left', cursor: 'pointer' }}
+                                                onClick={(e) => toggleMultiColumnFilter('status', e)}
+                                            >
+                                                <div className="d-flex align-items-end justify-content-between gap-1">
+                                                    <span className="fw-bold">Status</span>
+                                                    <span className="d-flex align-items-center gap-1 flex-shrink-0">
+                                                        <span className={`user-select-none ${filterActiveClass('status')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">
+                                                            ▼
+                                                        </span>
+                                                        <button
+                                                            type="button"
+                                                            data-sort-only="true"
+                                                            className="btn btn-link p-0 text-decoration-none user-select-none"
+                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            title="Sort"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSortClick('status');
+                                                            }}
+                                                        >
+                                                            {sortIndicator('status')}
+                                                        </button>
+                                                    </span>
+                                                </div>
+                                                {openColFilter === 'status' && (
+                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 220, maxHeight: 280, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                                        <div className="d-flex gap-1 mb-2">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.status))}>All</button>
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
+                                                        </div>
+                                                        <div style={{ maxHeight: 140, overflowY: 'auto' }}>
+                                                            {columnUniques.status.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
+                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
+                                                                    <span className="text-truncate">{val}</span>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
+                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('status')}>Clear</button>
+                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('status')}>Apply</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </th>
+                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '1300px', textAlign: 'left' }}>
+                                                Details
+                                            </th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {loadingList ? (
                                             <tr>
-                                                <td colSpan="7" className="text-center py-5">Loading...</td>
+                                                <td colSpan="8" className="text-center py-5">Loading...</td>
                                             </tr>
                                         ) : enquiriesList.length === 0 ? (
                                             <tr>
-                                                <td colSpan="7" className="text-center py-5 text-muted">No records found.</td>
+                                                <td colSpan="8" className="text-center py-5 text-muted">No records found.</td>
+                                            </tr>
+                                        ) : filteredSortedRows.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="8" className="text-center py-5 text-muted">
+                                                    No rows match the current column filters.{' '}
+                                                    <button type="button" className="btn btn-link btn-sm p-0" onClick={clearAllColumnFilters}>
+                                                        Clear filters
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ) : (
-                                            enquiriesList.map((item, index) => (
+                                            filteredSortedRows.map((item, index) => (
                                                 <tr key={item.RequestNo} className="border-b hover:bg-gray-50">
-                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary align-bottom">
+                                                    <td className="px-2 py-1 prob-td text-center">
+                                                        {shouldShowUpdateButton(item, listMode) ? (
+                                                            <button
+                                                                type="button"
+                                                                className={`btn btn-sm px-2 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
+                                                                onClick={() => persistUpdate(item)}
+                                                                disabled={updatingReqNo === item.RequestNo}
+                                                                style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '64px' }}
+                                                            >
+                                                                {updatingReqNo === item.RequestNo ? (
+                                                                    <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                                                                ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
+                                                            </button>
+                                                        ) : null}
+                                                    </td>
+                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
                                                         {index + 1}
                                                     </td>
-                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary align-bottom">
-                                                        {item.RequestNo}
+                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
+                                                        <div className="d-flex align-items-center gap-2">
+                                                            <span>{item.RequestNo}</span>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-link p-0"
+                                                                style={{ fontSize: '11px', textDecoration: 'underline' }}
+                                                                onClick={() => fetchHistory(item)}
+                                                            >
+                                                                History
+                                                            </button>
+                                                        </div>
                                                     </td>
-                                                    <td className="px-2 pt-1 pb-2 text-gray-700 align-bottom">{item.ProjectName}</td>
-                                                    <td className="px-2 pt-1 pb-2 text-right fw-medium align-bottom" style={{ fontSize: '12px' }}>
-                                                        {item.TotalQuotedValue === 'Refer quote' ? (
-                                                            <span className="text-danger italic">Refer quote</span>
-                                                        ) : (
-                                                            item.TotalQuotedValue !== null && item.TotalQuotedValue !== undefined ?
-                                                                'BD ' + Number(item.TotalQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
-                                                                : 'BD 0'
-                                                        )}
+                                                    <td className="px-2 pt-1 pb-2 text-gray-700 prob-td">{item.ProjectName || ''}</td>
+                                                    <td className="px-2 pt-1 pb-2 text-gray-700 prob-td" style={{ fontSize: '12px' }}>
+                                                        {customerNameForQuoteRef(item)}
                                                     </td>
-                                                    <td className="px-2 pt-1 pb-2 text-right fw-medium align-bottom" style={{ fontSize: '12px' }}>
+                                                    <td className="px-2 pt-1 pb-2 fw-medium prob-td prob-td-net" style={{ fontSize: '12px' }}>
                                                         {(() => {
                                                             const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
                                                             const isSubUser = userDept && userDept !== 'civil' && userDept !== 'admin' && currentUser?.Roles !== 'Admin' && currentUser?.role !== 'Admin';
                                                             if (isSubUser && (!item.QuoteRefs || item.QuoteRefs.length === 0)) return <span className="text-muted italic">Restricted</span>;
-
-                                                            let val = item.NetQuotedValue;
-                                                            // If sub-user, try to use their specific quote total if the global one looks too large?
-                                                            // For now, if we have filtered quotes, we should ideally show the sum of THOSE quotes.
-                                                            if (isSubUser && item.QuoteRefs && item.QuoteRefs.length > 0) {
-                                                                // Note: We don't have individual quote totals in item.QuoteRefs objects in this module's current state,
-                                                                // but we should at least not show the global TotalQuotedValue if it's not theirs.
-                                                                // If NetQuotedValue exists, we show it, but the user requested strict isolation.
-                                                                // If the global NetQuotedValue matches the sum of sub-job prices, it's risky.
-                                                                // For now, if no quote addressed to them exists, we show Restricted.
+                                                            if (!String(item.WonQuoteRef || '').trim()) return '';
+                                                            if (item.SelectedNetQuotedValue !== null && item.SelectedNetQuotedValue !== undefined && item.SelectedNetQuotedValue !== '') {
+                                                                return 'BD ' + Number(item.SelectedNetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
                                                             }
-
-                                                            return item.NetQuotedValue === 'Refer quote' ? (
-                                                                <span className="text-danger italic">Refer quote</span>
-                                                            ) : (
-                                                                item.NetQuotedValue !== null && item.NetQuotedValue !== undefined ?
-                                                                    'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
-                                                                    : 'BD 0'
-                                                            );
+                                                            return item.NetQuotedValue !== null && item.NetQuotedValue !== undefined
+                                                                ? 'BD ' + Number(item.NetQuotedValue).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
+                                                                : '';
                                                         })()}
                                                     </td>
-                                                    <td className="px-2 py-1 text-center">
+                                                    <td className="px-2 py-1 prob-td">
                                                         <select
                                                             className="form-select form-select-sm"
+                                                            style={statusSelectStyle(item.Status)}
                                                             value={item.Status}
                                                             onChange={(e) => handleStatusChange(item, e.target.value)}
                                                             onClick={(e) => e.stopPropagation()}
@@ -677,8 +1537,8 @@ const ProbabilityForm = () => {
                                                             <option value="Retendered">Retendered</option>
                                                         </select>
                                                     </td>
-                                                    <td className="px-2 py-1">
-                                                        <div className="d-flex align-items-center gap-2">
+                                                    <td className="px-2 py-1 prob-td">
+                                                        <div className="d-flex align-items-end gap-2 flex-wrap">
                                                             {item.Status === 'Lost' && (
                                                                 <>
                                                                     <div className="d-flex flex-column">
@@ -801,18 +1661,6 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    {(listMode === 'Pending' || listMode === 'Lost') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
-                                                                        <button
-                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                            onClick={() => persistUpdate(item)}
-                                                                            disabled={updatingReqNo === item.RequestNo}
-                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                        >
-                                                                            {updatingReqNo === item.RequestNo ? (
-                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                                        </button>
-                                                                    )}
                                                                 </>
                                                             )}
                                                             {/* Follow Up UI in 7th Column */}
@@ -820,31 +1668,47 @@ const ProbabilityForm = () => {
                                                                 <>
                                                                     <div className="d-flex flex-column">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
-                                                                        <div style={{ width: '220px' }}>
+                                                                        <div style={{ width: '300px' }}>
                                                                             <Select
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
                                                                                 placeholder="Quote ref..."
                                                                                 isSearchable={true}
                                                                                 menuPortalTarget={document.body}
-                                                                                value={item.WonQuoteRef ? { value: item.WonQuoteRef, label: item.WonQuoteRef } : null}
-                                                                                onChange={(option) => {
-                                                                                    handleInlineUpdate(item, 'WonQuoteRef', option ? option.value : '');
-                                                                                }}
-                                                                                options={(Array.isArray(item.QuoteRefs) ? item.QuoteRefs : []).map(q => {
-                                                                                    if (typeof q === 'string') {
-                                                                                        return { value: q, label: q, customer: 'N/A' };
+                                                                                value={quoteRefSelectValue(item)}
+                                                                                onChange={async (option) => {
+                                                                                    const nextRef = option ? option.value : '';
+                                                                                    const nextLead = option?.leadJob || '';
+                                                                                    if (!nextRef) {
+                                                                                        handleUpdate(item, {
+                                                                                            WonQuoteRef: '',
+                                                                                            LeadJobName: '',
+                                                                                            WonCustomerName: '',
+                                                                                            WonQuoteRefDate: '',
+                                                                                            SelectedTotalQuotedValue: null,
+                                                                                            SelectedNetQuotedValue: null,
+                                                                                            QuotePreparedBy: '',
+                                                                                        });
+                                                                                        return;
                                                                                     }
-                                                                                    return {
-                                                                                        value: q.QuoteNumber || q.value || '',
-                                                                                        label: q.QuoteNumber || q.label || '',
-                                                                                        customer: q.ToName || q.customer || ''
-                                                                                    };
-                                                                                })}
-                                                                                formatOptionLabel={({ label, customer }) => (
+                                                                                    const details = await fetchQuoteDetails(nextRef);
+                                                                                    handleUpdate(item, {
+                                                                                        WonQuoteRef: nextRef,
+                                                                                        LeadJobName: nextLead,
+                                                                                        WonCustomerName: details?.customerName || item.WonCustomerName || '',
+                                                                                        WonQuoteRefDate: details?.quoteDate ?? option?.quoteDate ?? null,
+                                                                                        SelectedTotalQuotedValue: details?.totalQuotedValue ?? null,
+                                                                                        SelectedNetQuotedValue: details?.netQuotedValue ?? null,
+                                                                                        QuotePreparedBy: details?.preparedBy != null && details?.preparedBy !== '' ? String(details.preparedBy) : '',
+                                                                                    });
+                                                                                }}
+                                                                                options={buildQuoteRefOptions(item)}
+                                                                                formatOptionLabel={({ label, customer, leadJob }) => (
                                                                                     <div style={{ lineHeight: '1.2', padding: '2px 0' }}>
                                                                                         <div style={{ fontWeight: 'bold', fontSize: '13px' }}>{label}</div>
-                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>{customer}</div>
+                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>
+                                                                                            {customer}{leadJob ? ` (Leadjob-${leadJob})` : ''}
+                                                                                        </div>
                                                                                     </div>
                                                                                 )}
                                                                                 styles={{
@@ -923,50 +1787,66 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    {(listMode === 'Pending' || listMode === 'FollowUp') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
-                                                                        <button
-                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                            onClick={() => persistUpdate(item)}
-                                                                            disabled={updatingReqNo === item.RequestNo}
-                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                        >
-                                                                            {updatingReqNo === item.RequestNo ? (
-                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                                        </button>
-                                                                    )}
+                                                                    <div className="d-flex flex-column">
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Prepared by</span>
+                                                                        <div style={{ width: '200px' }}>
+                                                                            <input
+                                                                                type="text"
+                                                                                readOnly
+                                                                                className="form-control form-control-sm"
+                                                                                value={item.QuotePreparedBy || ''}
+                                                                                onClick={(e) => e.stopPropagation()}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
                                                                 </>
                                                             )}                                                                      {/* Won UI in 7th Column */}
                                                             {item.Status === 'Won' && (
                                                                 <>
                                                                     <div className="d-flex flex-column">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
-                                                                        <div style={{ width: '260px' }}>
+                                                                        <div style={{ width: '320px' }}>
                                                                             <Select
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
                                                                                 placeholder="Quote ref..."
                                                                                 isSearchable={true}
                                                                                 menuPortalTarget={document.body}
-                                                                                value={item.WonQuoteRef ? { value: item.WonQuoteRef, label: item.WonQuoteRef } : null}
-                                                                                onChange={(option) => {
+                                                                                value={quoteRefSelectValue(item)}
+                                                                                onChange={async (option) => {
                                                                                     console.log('[Debug] Selected Option:', option);
-                                                                                    handleInlineUpdate(item, 'WonQuoteRef', option ? option.value : '');
-                                                                                }}
-                                                                                options={(Array.isArray(item.QuoteRefs) ? item.QuoteRefs : []).map(q => {
-                                                                                    if (typeof q === 'string') {
-                                                                                        return { value: q, label: q, customer: 'N/A' };
+                                                                                    const nextRef = option ? option.value : '';
+                                                                                    const nextLead = option?.leadJob || '';
+                                                                                    if (!nextRef) {
+                                                                                        handleUpdate(item, {
+                                                                                            WonQuoteRef: '',
+                                                                                            LeadJobName: '',
+                                                                                            WonCustomerName: '',
+                                                                                            WonQuoteRefDate: '',
+                                                                                            SelectedTotalQuotedValue: null,
+                                                                                            SelectedNetQuotedValue: null,
+                                                                                            QuotePreparedBy: '',
+                                                                                        });
+                                                                                        return;
                                                                                     }
-                                                                                    return {
-                                                                                        value: q.QuoteNumber || q.value || '',
-                                                                                        label: q.QuoteNumber || q.label || '',
-                                                                                        customer: q.ToName || q.customer || ''
-                                                                                    };
-                                                                                })}
-                                                                                formatOptionLabel={({ label, customer }) => (
+                                                                                    const details = await fetchQuoteDetails(nextRef);
+                                                                                    handleUpdate(item, {
+                                                                                        WonQuoteRef: nextRef,
+                                                                                        LeadJobName: nextLead,
+                                                                                        WonCustomerName: details?.customerName || item.WonCustomerName || '',
+                                                                                        WonQuoteRefDate: details?.quoteDate ?? option?.quoteDate ?? null,
+                                                                                        SelectedTotalQuotedValue: details?.totalQuotedValue ?? null,
+                                                                                        SelectedNetQuotedValue: details?.netQuotedValue ?? null,
+                                                                                        QuotePreparedBy: details?.preparedBy != null && details?.preparedBy !== '' ? String(details.preparedBy) : '',
+                                                                                    });
+                                                                                }}
+                                                                                options={buildQuoteRefOptions(item)}
+                                                                                formatOptionLabel={({ label, customer, leadJob }) => (
                                                                                     <div style={{ lineHeight: '1.2', padding: '2px 0' }}>
                                                                                         <div style={{ fontWeight: 'bold', fontSize: '13px' }}>{label}</div>
-                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>{customer}</div>
+                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>
+                                                                                            {customer}{leadJob ? ` (Leadjob-${leadJob})` : ''}
+                                                                                        </div>
                                                                                     </div>
                                                                                 )}
                                                                                 styles={{
@@ -1009,7 +1889,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-field-num">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Job Value</span>
                                                                         <div className="input-group input-group-sm" style={{ width: '140px' }}>
                                                                             <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>BD</span>
@@ -1023,7 +1903,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-field-num">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>GP % <span className="text-danger">*</span></span>
                                                                         <div className="input-group input-group-sm" style={{ width: '110px' }}>
                                                                             <input
@@ -1071,16 +1951,18 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <button
-                                                                        className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                        onClick={() => persistUpdate(item)}
-                                                                        disabled={updatingReqNo === item.RequestNo}
-                                                                        style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                    >
-                                                                        {updatingReqNo === item.RequestNo ? (
-                                                                            <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                                    </button>
+                                                                    <div className="d-flex flex-column">
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Prepared by</span>
+                                                                        <div style={{ width: '200px' }}>
+                                                                            <input
+                                                                                type="text"
+                                                                                readOnly
+                                                                                className="form-control form-control-sm"
+                                                                                value={item.QuotePreparedBy || ''}
+                                                                                onClick={(e) => e.stopPropagation()}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
                                                                 </>
                                                             )}
 
@@ -1113,34 +1995,6 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    {(listMode === 'Pending' || listMode === 'Won') && item.Status !== 'Pending' && item.Status !== 'Enquiry' && (
-                                                                        <button
-                                                                            className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                            onClick={() => persistUpdate(item)}
-                                                                            disabled={updatingReqNo === item.RequestNo}
-                                                                            style={{ fontSize: '11px', fontWeight: 'bold', height: '31px', alignSelf: 'flex-end', marginBottom: '1px' }}
-                                                                        >
-                                                                            {updatingReqNo === item.RequestNo ? (
-                                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                                        </button>
-                                                                    )}
-                                                                </>
-                                                            )}
-
-                                                            {/* Pending/Other UI in 7th Column - Still show update button if not Pending */}
-                                                            {listMode === 'Pending' && (item.Status !== 'Won' && item.Status !== 'FollowUp' && item.Status !== 'Lost' && item.Status !== 'OnHold' && item.Status !== 'Cancelled' && item.Status !== 'Retendered' && item.Status !== 'Pending' && item.Status !== 'Enquiry') && (
-                                                                <>
-                                                                    <button
-                                                                        className={`btn btn-sm px-3 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                        onClick={() => persistUpdate(item)}
-                                                                        disabled={updatingReqNo === item.RequestNo}
-                                                                        style={{ fontSize: '11px', fontWeight: 'bold', height: '31px' }}
-                                                                    >
-                                                                        {updatingReqNo === item.RequestNo ? (
-                                                                            <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                                                                        ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                                    </button>
                                                                 </>
                                                             )}
                                                         </div>
@@ -1156,6 +2010,89 @@ const ProbabilityForm = () => {
                     </div>
                 </div>
             </div >
+            {historyReqNo ? (
+                <div className="position-fixed top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center" style={{ background: 'rgba(0,0,0,0.35)', zIndex: 2000 }}>
+                    <div className="bg-white rounded shadow" style={{ width: '95%', maxWidth: '1200px', maxHeight: '85vh', overflow: 'hidden' }}>
+                        <div className="d-flex justify-content-between align-items-start border-bottom p-3">
+                            <div>
+                                <h6 className="mb-2 fw-semibold">Probability Update History for</h6>
+                                <div className="small text-dark" style={{ lineHeight: 1.65 }}>
+                                    <div><span className="text-muted">Enquiry No.:</span> {historyReqNo}</div>
+                                    <div>
+                                        <span className="text-muted">Project Name:</span>{' '}
+                                        <strong className="text-dark">{historyHeader.projectName || '—'}</strong>
+                                    </div>
+                                    <div><span className="text-muted">Leadjob Name:</span> {historyHeader.leadJobName || '—'}</div>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className="btn btn-sm btn-outline-secondary"
+                                onClick={() => {
+                                    setHistoryReqNo('');
+                                    setHistoryRows([]);
+                                    setHistoryHeader({ projectName: '', leadJobName: '' });
+                                }}
+                            >
+                                Close
+                            </button>
+                        </div>
+                        <div className="p-2" style={{ maxHeight: '70vh', overflow: 'auto' }}>
+                            <table className="table table-sm table-bordered mb-0" style={{ fontSize: '12px' }}>
+                                <thead>
+                                    <tr>
+                                        <th>Updated</th>
+                                        <th>Customer name</th>
+                                        <th>Quote Ref</th>
+                                        <th>Status</th>
+                                        <th>Probability</th>
+                                        <th>Remarks</th>
+                                        <th>Probability Updated by</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {historyLoading ? (
+                                        <tr><td colSpan="7" className="text-center py-3">Loading history...</td></tr>
+                                    ) : historyRows.length === 0 ? (
+                                        <tr><td colSpan="7" className="text-center py-3 text-muted">No history found.</td></tr>
+                                    ) : [...historyRows]
+                                        .sort((a, b) => {
+                                            const ta = new Date(a.UpdatedDateTime || 0).getTime();
+                                            const tb = new Date(b.UpdatedDateTime || 0).getTime();
+                                            return tb - ta;
+                                        })
+                                        .map((r) => (
+                                        <tr key={r.ID}>
+                                            <td>{formatHistoryDateTime(r.UpdatedDateTime)}</td>
+                                            <td>{r.ToName || ''}</td>
+                                            <td>
+                                                {r.QuoteRef || ''}
+                                                {r.QuoteRefQuoteDate
+                                                    ? ` (${formatHistoryDateTime(r.QuoteRefQuoteDate)})`
+                                                    : ''}
+                                            </td>
+                                            <td
+                                                style={{
+                                                    fontWeight: 700,
+                                                    color:
+                                                        String(r.Status || '').trim().toLowerCase() === 'won'
+                                                            ? '#198754'
+                                                            : '#dc3545',
+                                                }}
+                                            >
+                                                {r.Status || ''}
+                                            </td>
+                                            <td>{r.ProbabilityChance || ''}</td>
+                                            <td>{r.Remarks || ''}</td>
+                                            <td>{r.UpdatedByDisplayName || r.UpdatedBy || ''}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </div >
     );
 };

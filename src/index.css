@@ -53,6 +53,10 @@ html {
   align-items: flex-end;
 }
 
+.align-bottom {
+  vertical-align: bottom !important;
+}
+
 .justify-content-start {
   justify-content: flex-start;
 }
@@ -589,6 +593,140 @@ input[type="date"]:focus::-webkit-datetime-edit {
   --bs-table-hover-color: #000;
   color: #000;
   border-color: #dfe0e1;
+}
+
+/* Probability list: totals row + sky-blue label row; entire thead sticks as one block */
+.prob-probability-list-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  color: #0c4a6e;
+}
+
+.prob-probability-list-table.table > thead > tr.prob-summary-row > th {
+  background: #f1f5f9 !important;
+  color: #0c4a6e !important;
+  border-bottom: 1px solid #cbd5e1;
+  font-size: 0.7rem;
+  font-weight: 600;
+  vertical-align: bottom;
+  padding: 0.5rem 0.5rem;
+  box-sizing: border-box;
+  box-shadow: none !important;
+  --bs-table-bg: #f1f5f9 !important;
+  --bs-table-accent-bg: transparent !important;
+}
+
+.prob-probability-list-table.table > thead > tr.prob-summary-row > th.prob-summary-details {
+  background: #f8fafc !important;
+  --bs-table-bg: #f8fafc !important;
+}
+
+.prob-probability-list-table thead tr.prob-summary-row th.prob-summary-net,
+.prob-probability-list-table thead tr.prob-summary-row th.prob-summary-details .d-flex > div {
+  white-space: nowrap;
+}
+
+.prob-probability-list-table .prob-summary-muted {
+  color: rgba(12, 74, 110, 0.65);
+  font-weight: 500;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.prob-probability-list-table thead tr.prob-thead-labels {
+  background-color: #7dd3fc;
+  background-image: linear-gradient(
+    145deg,
+    #f0f9ff 0%,
+    #e0f2fe 18%,
+    #bae6fd 42%,
+    #7dd3fc 72%,
+    #38bdf8 100%
+  );
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.45) inset;
+}
+
+/* Sky-blue label row: kill Bootstrap .table white/inset fill so gradient shows on every column */
+.prob-probability-list-table.table > thead > tr.prob-thead-labels > th {
+  background-color: transparent !important;
+  background-image: none !important;
+  color: #0c4a6e !important;
+  --bs-table-bg: transparent !important;
+  --bs-table-accent-bg: transparent !important;
+  vertical-align: bottom;
+  text-align: left;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  padding-top: calc(0.5rem * 1.3);
+  padding-bottom: calc(0.5rem * 1.3);
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 0 rgba(14, 116, 144, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.prob-probability-list-table thead tr:not(.prob-summary-row):not(.prob-thead-labels) {
+  background: transparent !important;
+}
+
+.prob-probability-list-table thead th.prob-net-quoted-th {
+  line-height: 1.2;
+  vertical-align: bottom;
+}
+
+.prob-probability-list-table thead th.prob-net-quoted-th .prob-net-quoted-sub {
+  display: block;
+  font-size: 0.55rem;
+  font-weight: 600;
+  line-height: 1.15;
+  margin-top: 0.12rem;
+  color: rgba(12, 74, 110, 0.82);
+}
+
+@supports (background: linear-gradient(in oklab, white, blue)) {
+  .prob-probability-list-table thead tr.prob-thead-labels {
+    background-image: linear-gradient(
+      145deg in oklab,
+      oklch(0.97 0.03 230) 0%,
+      oklch(0.91 0.06 230) 38%,
+      oklch(0.82 0.11 240) 72%,
+      oklch(0.74 0.14 245) 100%
+    );
+  }
+}
+
+/* Probability list: body alignment (bottom-left; net / numeric exceptions) */
+.prob-probability-page {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+.prob-probability-list-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.prob-probability-list-table tbody td.prob-td {
+  vertical-align: bottom;
+  text-align: left;
+}
+
+.prob-probability-list-table tbody td.prob-td.prob-td-net {
+  text-align: right;
+  vertical-align: bottom;
+}
+
+.prob-detail-field-num.d-flex.flex-column {
+  align-items: flex-end;
+}
+
+.prob-detail-field-num .form-control,
+.prob-detail-field-num .input-group .form-control {
+  text-align: right;
 }
 
 /* Modal */

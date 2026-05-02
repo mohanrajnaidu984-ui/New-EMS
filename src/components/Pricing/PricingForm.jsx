@@ -555,17 +555,25 @@ function splitSubJobPricesForListColumns(subJobPricesStr) {
 
 /** Department spec status from `getEnquiryPricingList` (Partial / None / All Priced). */
 function pricingListSpecStatusMeta(enq) {
-    const specStatus = enq?.UserSpecPricingSummaryStatus ?? enq?.userSpecPricingSummaryStatus;
-    if (!specStatus) return null;
+    const rawSpecStatus = enq?.UserSpecPricingSummaryStatus ?? enq?.userSpecPricingSummaryStatus;
+    if (!rawSpecStatus) return null;
+    const specStatusDisplay =
+        rawSpecStatus === 'None Priced'
+            ? 'None Priced for Ownjob'
+            : rawSpecStatus === 'Partial Priced'
+              ? 'Partial Priced for Ownjob'
+              : rawSpecStatus === 'All Priced'
+                ? 'All Priced for Ownjob'
+                : rawSpecStatus;
     const specStatusColor =
-        specStatus === 'All Priced'
+        rawSpecStatus === 'All Priced'
             ? '#16a34a'
-            : specStatus === 'None Priced'
+            : rawSpecStatus === 'None Priced'
               ? '#dc2626'
-              : specStatus === 'Partial Priced'
+              : rawSpecStatus === 'Partial Priced'
                 ? '#ca8a04'
                 : '#64748b';
-    return { specStatus, specStatusColor };
+    return { rawSpecStatus, specStatusDisplay, specStatusColor };
 }
 
 function tryParsePricingListDisplay(enq) {
@@ -870,7 +878,7 @@ function PricingListSubJobPriceLines({ rows, priceFixedDecimals }) {
     return <>{lines}</>;
 }
 
-const PricingForm = () => {
+const PricingForm = ({ openContext = null }) => {
     const { currentUser } = useAuth();
 
     /**
@@ -901,7 +909,9 @@ const PricingForm = () => {
     /** List filter: Master_EnquiryFor.DepartmentName; empty = all (unchanged). Options from /api/pricing/list/divisions */
     const [pricingListDivisions, setPricingListDivisions] = useState([]);
     const [pricingListDivisionsLoading, setPricingListDivisionsLoading] = useState(false);
-    const [pricingListDivision, setPricingListDivision] = useState('');
+    const [pricingListDivision, setPricingListDivision] = useState(
+        () => localStorage.getItem('pricing_listDivision') || ''
+    );
     /** Pending list waits for this so the first fetch uses the resolved Division (avoids flicker + empty after refetch). */
     const [pricingDivisionBootstrapDone, setPricingDivisionBootstrapDone] = useState(false);
     const searchRef = useRef(null);
@@ -959,6 +969,14 @@ const PricingForm = () => {
     useEffect(() => {
         localStorage.setItem('pricing_listSearchCriteria', pricingListSearchCriteria);
     }, [pricingListSearchCriteria]);
+
+    useEffect(() => {
+        if (pricingListDivision && pricingListDivision.trim()) {
+            localStorage.setItem('pricing_listDivision', pricingListDivision.trim());
+        } else {
+            localStorage.removeItem('pricing_listDivision');
+        }
+    }, [pricingListDivision]);
 
     useEffect(() => {
         localStorage.setItem('pricing_selectedCustomer', selectedCustomer);
@@ -1065,6 +1083,8 @@ const PricingForm = () => {
                 setPricingListDivisions(list);
                 setPricingListDivision((prev) => {
                     if (!list.length) return '';
+                    const saved = localStorage.getItem('pricing_listDivision') || '';
+                    if (saved && list.includes(saved)) return saved;
                     if (prev && list.includes(prev)) return prev;
                     return list[0];
                 });
@@ -2174,6 +2194,16 @@ const PricingForm = () => {
         }
         void loadPricing(requestNo, null, null, { ignoreExistingLeadSelection: true });
     };
+    const handledOpenContextKeyRef = useRef('');
+    useEffect(() => {
+        if (!openContext || openContext.tab !== 'Pricing') return;
+        const requestNo = String(openContext.requestNo || '').trim();
+        if (!requestNo) return;
+        const key = `${requestNo}::${String(openContext.enquiryForId || '')}::${String(openContext.subJob || '')}`;
+        if (handledOpenContextKeyRef.current === key) return;
+        handledOpenContextKeyRef.current = key;
+        openPricingEditorForEnquiry(requestNo);
+    }, [openContext]);
 
     // Add new option row
     /** `scopeJobId`: EnquiryFor row for this section — required when UI `targetScope` is a display key (e.g. `L1 - Name`) that does not equal `ItemName`. */
@@ -2554,8 +2584,6 @@ const PricingForm = () => {
 
         let skippedCount = 0;
         const valuesToSave = [];
-        /** User tried to persist $0 for Base Price or an option (not allowed except cascade wipe). */
-        let rejectedZeroPricing = false;
 
         // Step 1: Realize any simulated keys that have values (Step 3401)
         const simsToProcess = Array.from(allKeys).filter(k => k.startsWith('simulated') && values[k] !== undefined && values[k] !== '');
@@ -2996,8 +3024,7 @@ const PricingForm = () => {
             const wantsZeroSave = priceToSave <= 0;
             const allowCascadeZero =
                 userInitiatedZero && hiddenSum > 0 && wantsZeroSave;
-            if (wantsZeroSave && !allowCascadeZero) {
-                rejectedZeroPricing = true;
+            if (wantsZeroSave && !allowCascadeZero && !hasExplicitDbRow) {
                 skippedCount++;
                 continue;
             }
@@ -3013,13 +3040,6 @@ const PricingForm = () => {
                 priceOption: opt.name === 'Base Price' ? 'Base Price' : opt.name,
                 allowOptionalZero: allowCascadeZero,
             });
-        }
-
-        if (rejectedZeroPricing) {
-            alert(
-                'Zero value cannot be accepted for Base Price and option prices.\n\nEnter a value greater than zero, then save again.'
-            );
-            return;
         }
 
         if (valuesToSave.length === 0) {
@@ -3048,7 +3068,7 @@ const PricingForm = () => {
                 debugSaveAll
             });
 
-            alert('⚠️ Cannot save: All price values are empty or zero.\n\nPlease enter at least one valid price value greater than zero.');
+            alert('No changes to save.');
             loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
             return;
         }
@@ -4272,7 +4292,7 @@ const PricingForm = () => {
                                                             lineHeight: 1.3,
                                                         }}
                                                     >
-                                                        {specMeta.specStatus}
+                                                        {specMeta.specStatusDisplay}
                                                     </div>
                                                 )}
                                             </td>
@@ -4500,7 +4520,7 @@ const PricingForm = () => {
                                                     }}
                                                 >
                                                     <div>{enq.RequestNo}</div>
-                                                    {specMeta && specMeta.specStatus !== 'All Priced' && (
+                                                    {specMeta && specMeta.rawSpecStatus !== 'All Priced' && (
                                                         <div
                                                             style={{
                                                                 fontSize: '11px',
@@ -4510,7 +4530,7 @@ const PricingForm = () => {
                                                                 lineHeight: 1.3,
                                                             }}
                                                         >
-                                                            {specMeta.specStatus}
+                                                            {specMeta.specStatusDisplay}
                                                         </div>
                                                     )}
                                                 </td>

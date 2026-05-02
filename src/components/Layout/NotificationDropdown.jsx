@@ -57,9 +57,21 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
 
         // Navigate
         // Only navigate if LinkID is present and it is NOT 'Profile' or 'System' (which are markers for system msgs)
-        const isSystemMsg = notification.LinkID === 'Profile' || notification.LinkID === 'System';
-        if (notification.LinkID && onOpenEnquiry && !isSystemMsg) {
-            onOpenEnquiry(notification.LinkID);
+        const rawLink = notification.LinkID;
+        const isSystemMsg = rawLink === 'Profile' || rawLink === 'System';
+        if (rawLink && onOpenEnquiry && !isSystemMsg) {
+            let linkTarget = rawLink;
+            if (typeof rawLink === 'string') {
+                const t = rawLink.trim();
+                if (t.startsWith('{') && t.endsWith('}')) {
+                    try {
+                        linkTarget = JSON.parse(t);
+                    } catch {
+                        linkTarget = rawLink;
+                    }
+                }
+            }
+            onOpenEnquiry(linkTarget);
         }
     };
 
@@ -90,6 +102,10 @@ const NotificationDropdown = ({ onOpenEnquiry }) => {
 
     const renderMessage = (message, linkId) => {
         if (!linkId) return message;
+        if (typeof linkId === 'string') {
+            const t = linkId.trim();
+            if (t.startsWith('{') && t.endsWith('}')) return message;
+        }
 
         // If message contains the linkId, replace it with a styled span
         // Otherwise just return appropriate text

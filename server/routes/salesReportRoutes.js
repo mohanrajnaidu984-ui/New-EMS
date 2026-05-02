@@ -375,6 +375,27 @@ router.get('/summary', async (req, res) => {
             `;
         const actualRes = await request.query(actualQuery);
 
+        // 1b. Gross margin target vs actual (SalesTargets.GrossProfitTarget vs EnquiryMaster.WonGrossProfit by quarter)
+        let gmTargetRes = { recordset: [] };
+        let gmActualRes = { recordset: [] };
+        try {
+            gmTargetRes = await request.query(`
+                SELECT Quarter, SUM(ISNULL(GrossProfitTarget, 0)) as TotalTarget
+                FROM SalesTargets
+                ${targetFilter}
+                GROUP BY Quarter
+            `);
+            gmActualRes = await request.query(`
+                SELECT DATEPART(QUARTER, E.ExpectedOrderDate) as Q, SUM(ISNULL(E.WonGrossProfit, 0)) as TotalActual
+                FROM EnquiryMaster E
+                WHERE E.Status = 'Won' AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
+                ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
+                GROUP BY DATEPART(QUARTER, E.ExpectedOrderDate)
+            `);
+        } catch (gmErr) {
+            console.warn('[Sales Report] Gross margin summary skipped:', gmErr.message);
+        }
+
         // 2. Win-Loss Ratio (Count)
         const winLossQuery = `
             SELECT 
@@ -389,6 +410,18 @@ router.get('/summary', async (req, res) => {
             GROUP BY Status
         `;
         const winLossRes = await request.query(winLossQuery);
+
+        // 2b. Quoted / pre-award pipeline (for Won–Lost pie “Quoted” slice)
+        const quotedRes = await request.query(`
+            SELECT 
+                COUNT(*) as Cnt, 
+                SUM(${itemValueCol}) as TotalValue
+            FROM EnquiryMaster E
+            ${itemValueApply}
+            WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
+              AND Status IN ('Quote', 'Quoted', 'Priced', 'Estimated', 'Enquiry', 'Pending')
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
+        `);
 
         // 3. Top 10 Customers
         const topCustomersQuery = `
@@ -429,6 +462,30 @@ router.get('/summary', async (req, res) => {
         `;
         const topClientsRes = await request.query(topClientsQuery);
 
+        // 5b. Top 10 job-booked rows (for Sales Report table)
+        const topJobBookedRes = await request.query(`
+            SELECT TOP 10
+                x.ProjectName,
+                x.JobValue,
+                x.CustomerName,
+                x.ClientName,
+                x.ConsultantName
+            FROM (
+                SELECT
+                    E.ProjectName,
+                    ${itemValueCol} AS JobValue,
+                    LTRIM(RTRIM(ISNULL(E.WonCustomerName, E.CustomerName))) AS CustomerName,
+                    E.ClientName,
+                    E.ConsultantName
+                FROM EnquiryMaster E
+                ${itemValueApply}
+                WHERE E.Status = 'Won'
+                  AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
+            ) x
+            ORDER BY x.JobValue DESC
+        `);
+
         // 6. Probability Funnel (5 Stages)
         const probabilityFunnelRes = await request.query(`
             SELECT 
@@ -461,6 +518,20 @@ router.get('/summary', async (req, res) => {
             if (quarters[r.Q - 1]) quarters[r.Q - 1].actual = r.TotalActual;
         });
 
+        const gmQuarters = [
+            { name: 'Q1', target: 0, actual: 0 },
+            { name: 'Q2', target: 0, actual: 0 },
+            { name: 'Q3', target: 0, actual: 0 },
+            { name: 'Q4', target: 0, actual: 0 }
+        ];
+        (gmTargetRes.recordset || []).forEach(r => {
+            const idx = parseInt(String(r.Quarter || '').replace('Q', ''), 10) - 1;
+            if (gmQuarters[idx]) gmQuarters[idx].target = r.TotalTarget;
+        });
+        (gmActualRes.recordset || []).forEach(r => {
+            if (gmQuarters[r.Q - 1]) gmQuarters[r.Q - 1].actual = r.TotalActual;
+        });
+
         const winLoss = {
             won: 0,
             lost: 0,
@@ -477,6 +548,9 @@ router.get('/summary', async (req, res) => {
             else if (s === 'lost') { winLoss.lost = r.Count; winLoss.lostValue = r.TotalValue; }
             else if (s === 'followup') { winLoss.followUp = r.Count; winLoss.followUpValue = r.TotalValue; }
         });
+        const q0 = (quotedRes.recordset && quotedRes.recordset[0]) || {};
+        winLoss.quoted = q0.Cnt || 0;
+        winLoss.quotedValue = q0.TotalValue || 0;
         console.log('[Sales Report] Final winLoss object:', winLoss);
 
 
@@ -576,12 +650,20 @@ router.get('/summary', async (req, res) => {
 
         res.json({
             targetVsActual: quarters,
+            grossMarginTargetVsActual: gmQuarters,
             winLoss: winLoss,
             topCustomers: topCustomersRes.recordset,
             topProjects: topProjectsRes.recordset,
             topClients: topClientsRes.recordset,
             probabilityFunnel: probabilityFunnelRes.recordset,
-            itemWiseStats: itemWiseStats
+            itemWiseStats: itemWiseStats,
+            topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
+                ProjectName: r.ProjectName,
+                JobValue: r.JobValue,
+                CustomerName: r.CustomerName,
+                ClientName: r.ClientName,
+                ConsultantName: r.ConsultantName
+            }))
         });
 
     } catch (err) {

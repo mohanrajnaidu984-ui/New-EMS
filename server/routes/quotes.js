@@ -62,6 +62,93 @@ function applyOwnJobAfterDepartmentLookup(currentOwnJob, userDept) {
     return oj;
 }
 
+function parseMailCsv(raw) {
+    return String(raw || '')
+        .split(/[;,]/g)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+async function notifyParentJobQuoteEvent({
+    requestNo,
+    ownJobName,
+    quoteId,
+    quoteNumber,
+    eventType,
+    triggerUserName,
+    triggerUserEmail,
+}) {
+    try {
+        const ownTrim = String(ownJobName || '').trim();
+        if (!requestNo || !ownTrim) return;
+
+        const jobRes = await sql.query`
+            SELECT TOP 1 ID, ParentID, ItemName
+            FROM EnquiryFor
+            WHERE RequestNo = ${requestNo}
+              AND LTRIM(RTRIM(ISNULL(ItemName, N''))) = ${ownTrim}
+            ORDER BY ID
+        `;
+        const job = jobRes.recordset?.[0];
+        if (!job || !job.ParentID || String(job.ParentID) === '0') return; // Not a direct subjob
+
+        const parentRes = await sql.query`
+            SELECT TOP 1 ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo} AND ID = ${job.ParentID}
+        `;
+        const parentJobName = String(parentRes.recordset?.[0]?.ItemName || '').trim();
+        const subJobName = String(job.ItemName || ownTrim).trim();
+        if (!parentJobName || !subJobName) return;
+
+        const recipientEmails = new Set();
+        const mef = await sql.query`
+            SELECT TOP 1 CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName = ${parentJobName}
+        `;
+        if (mef.recordset?.length) {
+            parseMailCsv(mef.recordset[0].CommonMailIds).forEach((e) => recipientEmails.add(e));
+            parseMailCsv(mef.recordset[0].CCMailIds).forEach((e) => recipientEmails.add(e));
+        }
+        const deptUsers = await sql.query`
+            SELECT EmailId FROM Master_ConcernedSE WHERE LTRIM(RTRIM(ISNULL(Department, N''))) = ${parentJobName}
+        `;
+        for (const r of deptUsers.recordset || []) {
+            const em = String(r.EmailId || '').trim().toLowerCase();
+            if (em) recipientEmails.add(em);
+        }
+
+        const triggerEmail = String(triggerUserEmail || '').trim().toLowerCase();
+        if (triggerEmail) recipientEmails.delete(triggerEmail);
+        if (recipientEmails.size === 0) return;
+
+        const linkPayload = JSON.stringify({
+            tab: 'Quote',
+            requestNo: String(requestNo),
+            quoteId: String(quoteId || ''),
+            quoteNumber: String(quoteNumber || ''),
+            parentJob: parentJobName,
+            subJob: subJobName,
+        });
+        const enq = await sql.query`
+            SELECT TOP 1 ProjectName FROM EnquiryMaster WHERE RequestNo = ${requestNo}
+        `;
+        const projectName = String(enq.recordset?.[0]?.ProjectName || '').trim();
+        const message = `Quote updated by ${subJobName} for ${requestNo}, ${projectName || '-'}`;
+        const now = new Date();
+        const createdBy = String(triggerUserName || triggerUserEmail || 'System').trim() || 'System';
+
+        for (const email of recipientEmails) {
+            const u = await sql.query`SELECT TOP 1 ID FROM Master_ConcernedSE WHERE LOWER(LTRIM(RTRIM(EmailId))) = ${email}`;
+            const userId = u.recordset?.[0]?.ID;
+            if (!userId) continue;
+            await sql.query`
+                INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy, CreatedAt)
+                VALUES (${userId}, ${eventType}, ${message}, ${linkPayload}, ${createdBy}, ${now})
+            `;
+        }
+    } catch (err) {
+        console.error('[quote notify] parent-job subjob quote event', err);
+    }
+}
+
 /** Align ToName filter with UI job labels ("L1 - Civil Project" vs "Civil Project"). */
 /** EnquiryQuotes.TotalAmount — use client value when present (JSON omits `undefined`, so do not treat missing as 0 on revise). */
 function resolveQuoteTotalAmountForInsert(body, existingTotal) {
@@ -289,11 +376,40 @@ router.get('/list/search', async (req, res) => {
         const pendingMapped = await mapQuoteListingRows(sql, pendingRaw || [], ue, accessCtx, divisionTrim);
         const quotedMapped = await mapQuoteListingRows(sql, quotedRaw || [], ue, accessCtx, divisionTrim);
         const byNo = new Map();
-        for (const row of quotedMapped) {
-            byNo.set(String(row.RequestNo), { ...row, QuoteListKind: 'quoted' });
-        }
+        const quoteRowScore = (row) => {
+            if (!row) return 0;
+            let score = 0;
+            const ref = String(row.ListQuoteRef || '').trim();
+            if (ref) score += 50;
+            const st = String(row.ListQuoteRollupStatus || '').trim();
+            if (st === 'All Quoted') score += 30;
+            else if (st === 'Partial Quoted') score += 20;
+            else if (st === 'None Quoted') score += 5;
+            const lines = Array.isArray(row.ListQuoteDetailLines) ? row.ListQuoteDetailLines : [];
+            if (lines.some((ln) => !/\(Not Quoted\)/i.test(String(ln?.textLine || '')))) score += 20;
+            if (String(row.ListQuoteDate || '').trim()) score += 10;
+            return score;
+        };
+        const pickBetter = (prev, next) => {
+            if (!prev) return next;
+            const a = quoteRowScore(prev);
+            const b = quoteRowScore(next);
+            if (b > a) return next;
+            if (a > b) return prev;
+            // Tie-breaker: prefer quoted-kind row over pending-kind row.
+            if (prev.QuoteListKind === 'quoted') return prev;
+            if (next.QuoteListKind === 'quoted') return next;
+            return next;
+        };
         for (const row of pendingMapped) {
-            byNo.set(String(row.RequestNo), { ...row, QuoteListKind: 'pending' });
+            const key = String(row.RequestNo);
+            const next = { ...row, QuoteListKind: 'pending' };
+            byNo.set(key, pickBetter(byNo.get(key), next));
+        }
+        for (const row of quotedMapped) {
+            const key = String(row.RequestNo);
+            const next = { ...row, QuoteListKind: 'quoted' };
+            byNo.set(key, pickBetter(byNo.get(key), next));
         }
         const merged = Array.from(byNo.values()).sort((a, b) => {
             const ta = a.DueDate ? new Date(a.DueDate).getTime() : 0;
@@ -368,7 +484,11 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
 
         if (userEmail) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
-            const ok = await userHasQuotePricingEnquiryAccess(normalizedEmail, requestNo);
+            const ok = await userHasQuotePricingEnquiryAccess(
+                normalizedEmail,
+                requestNo,
+                (req.query.division || '').toString().trim()
+            );
             if (!ok) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
@@ -384,15 +504,12 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         // - Own-tab without ownJobName query: resolve OwnJob from logged-in user's email.
         // - Subjob-tab: use explicit ownJobName from selected tab label.
         let ownJobName = '';
-        if (ownJobNameFromTab) {
-            ownJobName = ownJobNameFromTab;
-        } else if (strictTuple && division) {
-            // Strict tuple mode for Previous Quotes panel:
-            // Division dropdown is DepartmentName; resolve to the EnquiryFor.ItemName that represents that division on this enquiry.
-            // Prefer a root (ParentID null/0) row.
+        let strictDivisionCode = '';
+        if (strictTuple && division) {
+            // Always resolve strictDivisionCode from selected Division for QuoteNumber fallback.
             try {
                 const r = await sql.query`
-                    SELECT TOP 1 ef.ItemName
+                    SELECT TOP 1 ef.ItemName, mef.DivisionCode
                     FROM dbo.EnquiryFor ef
                     INNER JOIN dbo.Master_EnquiryFor mef
                         ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
@@ -402,10 +519,16 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                         CASE WHEN ef.ParentID IS NULL OR ef.ParentID = 0 OR ef.ParentID = '0' THEN 0 ELSE 1 END,
                         ef.ID
                 `;
-                ownJobName = (r.recordset?.[0]?.ItemName || '').toString().trim();
+                strictDivisionCode = (r.recordset?.[0]?.DivisionCode || '').toString().trim().toUpperCase();
+                // OwnJob source:
+                // - Subjob tab sends explicit ownJobName -> use it
+                // - Ownjob tab (no explicit ownJobName) -> use selected Division's root ownjob
+                ownJobName = ownJobNameFromTab || (r.recordset?.[0]?.ItemName || '').toString().trim();
             } catch (_) {
                 // fall through (ownJobName remains '')
             }
+        } else if (ownJobNameFromTab) {
+            ownJobName = ownJobNameFromTab;
         } else if (userEmail && hasScopedFilters) {
             const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
             const userRes = await sql.query`
@@ -450,6 +573,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         request.input('leadJobNameStripped', sql.NVarChar, leadJobNameStripped);
         request.input('ownJobName', sql.NVarChar, ownJobName || null);
         request.input('ownJobNameStripped', sql.NVarChar, ownJobNameFromTabStripped || stripJobPrefixForQuoteMatch(ownJobName) || null);
+        request.input('strictDivisionCode', sql.NVarChar, strictDivisionCode || null);
         request.input('strictTuple', sql.Bit, strictTuple ? 1 : 0);
 
         const result = await request.query(`
@@ -471,6 +595,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                 OR LTRIM(RTRIM(ISNULL(CAST(@toName AS NVARCHAR(4000)), N''))) = N''
                 OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N''))))
                 OR (
+                  @strictTuple = 0 AND
                   @toNameStripped IS NOT NULL
                   AND LTRIM(RTRIM(ISNULL(@toNameStripped, N''))) <> N''
                   AND (
@@ -487,6 +612,7 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                 @leadJobName IS NULL
                 OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
                 OR (
+                  @strictTuple = 0 AND
                   @leadJobNameStripped IS NOT NULL
                   AND LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))) <> N''
                   AND LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))))
@@ -503,11 +629,21 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                     OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N'-%'
                   )
                 )
+                OR (
+                  @strictTuple = 1
+                  AND @strictDivisionCode IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
+                  AND CHARINDEX(
+                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
+                        UPPER(ISNULL(QuoteNumber, N''))
+                      ) > 0
+                )
               )
               AND (
                 @ownJobName IS NULL
                 OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N''))))
                 OR (
+                  @strictTuple = 0 AND
                   @ownJobNameStripped IS NOT NULL
                   AND LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))) <> N''
                   AND LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))))
@@ -520,6 +656,15 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
                     LOWER(LTRIM(RTRIM(@ownJobName))) LIKE LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) + N'%'
                     OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) LIKE LOWER(LTRIM(RTRIM(@ownJobName))) + N'%'
                   )
+                )
+                OR (
+                  @strictTuple = 1
+                  AND @strictDivisionCode IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
+                  AND CHARINDEX(
+                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
+                        UPPER(ISNULL(QuoteNumber, N''))
+                      ) > 0
                 )
               )
             ORDER BY QuoteNo, RevisionNo DESC
@@ -1896,6 +2041,13 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'Request number is required' });
         }
 
+        const totalAmtNum = Number(totalAmount);
+        if (!Number.isFinite(totalAmtNum) || totalAmtNum <= 0) {
+            return res.status(400).json({
+                error: 'Ownjob base price must be greater than zero. Cannot create quote until the first-tab ownjob base price is priced.',
+            });
+        }
+
         let dept = departmentCode || "AAC";
         let division = divisionCode || "GEN";
         let effectiveOwnJob = (ownJob || '').trim();
@@ -2026,6 +2178,16 @@ router.post('/', async (req, res) => {
             WHERE RequestNo = ${requestNo} 
             AND (Status IS NULL OR Status IN ('Enquiry', 'Open', 'Pricing', 'Pending'))
         `;
+
+        await notifyParentJobQuoteEvent({
+            requestNo,
+            ownJobName: effectiveOwnJob,
+            quoteId: result.recordset[0].ID,
+            quoteNumber: result.recordset[0].QuoteNumber,
+            eventType: 'Subjob Quote Creation',
+            triggerUserName: preparedBy || '',
+            triggerUserEmail: preparedByEmail || '',
+        });
 
         res.json({
             success: true,
@@ -2224,6 +2386,13 @@ router.post('/:id/revise', async (req, res) => {
         const newRevisionNo = existing.RevisionNo + 1;
         console.log(`[Revise] Existing quote: ${existing.QuoteNumber}, Current Revision: ${existing.RevisionNo}, New Revision: ${newRevisionNo}`);
 
+        const resolvedTotalForRev = resolveQuoteTotalAmountForInsert(req.body, existing.TotalAmount);
+        if (!Number.isFinite(resolvedTotalForRev) || resolvedTotalForRev <= 0) {
+            return res.status(400).json({
+                error: 'Ownjob base price must be greater than zero. Cannot create revision until the first-tab ownjob base price is priced.',
+            });
+        }
+
         const existingParts = existing.QuoteNumber ? existing.QuoteNumber.split("/") : [];
 
         // For revisions, preserve the existing quote's reference part (including lead job prefix)
@@ -2334,6 +2503,16 @@ router.post('/:id/revise', async (req, res) => {
         `;
 
         console.log(`[Revise] Revision created successfully! New ID: ${result.recordset[0].ID}, QuoteNumber: ${result.recordset[0].QuoteNumber}`);
+
+        await notifyParentJobQuoteEvent({
+            requestNo: existing.RequestNo,
+            ownJobName: effectiveOwnJob,
+            quoteId: result.recordset[0].ID,
+            quoteNumber: result.recordset[0].QuoteNumber,
+            eventType: 'Subjob Quote Revision',
+            triggerUserName: preparedBy || existing.PreparedBy || '',
+            triggerUserEmail: preparedByEmail || existing.PreparedByEmail || '',
+        });
 
         res.json({
             success: true,

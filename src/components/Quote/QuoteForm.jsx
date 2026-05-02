@@ -233,7 +233,7 @@ function formatQuoteYmdForDisplay(ymd) {
 
 /**
  * Rollup key from API for colour + label. Accepts optional trailing "(…)" and ignores it for display.
- * Shown text is only: None Quoted | Partial Quoted | All Quoted (no parenthetical hint).
+ * Canonical key text is: None Quoted | Partial Quoted | All Quoted.
  */
 function normalizeListQuoteRollupKey(raw) {
     let s = String(raw || '').trim();
@@ -244,7 +244,11 @@ function normalizeListQuoteRollupKey(raw) {
 }
 
 function formatListQuoteRollupStatusLine(raw) {
-    return normalizeListQuoteRollupKey(raw);
+    const key = normalizeListQuoteRollupKey(raw);
+    if (key === 'None Quoted') return 'None Quoted for Ownjob';
+    if (key === 'Partial Quoted') return 'Partial Quoted for Ownjob';
+    if (key === 'All Quoted') return 'All Quoted for Ownjob';
+    return 'None Quoted for Ownjob';
 }
 
 function listQuoteRollupStatusColor(raw) {
@@ -499,22 +503,12 @@ const normalizeCustomerKey = (s) =>
         .replace(/[^a-z0-9]/g, '');
 
 /**
- * Previous Quotes / Revisions: hide rows that have signature slots but no usable images.
- * NULL / missing column = legacy row → show. `[]` = unsigned / draft → show (was wrongly hidden).
+ * Previous Quotes / Revisions must always show matching quote refs.
+ * Signature payload quality should never hide rows from the list.
  */
 function quoteRevisionShowsInSignedOnlyList(q) {
-    const raw = q?.DigitalSignaturesJson ?? q?.digitalSignaturesJson;
-    if (raw == null || raw === undefined) return true;
-    const s = typeof raw === 'string' ? raw.trim() : '';
-    if (s === '' || s === '[]') return true;
-    try {
-        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (!Array.isArray(arr)) return true;
-        if (arr.length === 0) return true;
-        return arr.some((st) => st && typeof st.imageDataUrl === 'string' && st.imageDataUrl.length > 10);
-    } catch {
-        return true;
-    }
+    void q;
+    return true;
 }
 
 /** Trailing "(L2)" on EnquiryCustomer / dropdown labels — ties external customer to a lead branch. */
@@ -618,7 +612,7 @@ const matchLeadJobForQuoteScope = (rowLead, paramLead) => {
     return false;
 };
 
-const matchOwnJobForQuoteScope = (rowOwn, pOwn, useDept) => {
+const matchOwnJobForQuoteScope = (rowOwn, pOwn, useDept, altOwn = '') => {
     if (useDept) return true;
     const clean = (s) =>
         String(s || '')
@@ -629,15 +623,24 @@ const matchOwnJobForQuoteScope = (rowOwn, pOwn, useDept) => {
     const bRaw = String(pOwn || '').trim();
     const a = normalize(aRaw);
     const b = normalize(bRaw);
+    const altRaw = String(altOwn || '').trim();
+    const alt = normalize(altRaw);
     const ac = normalize(clean(aRaw));
     const bc = normalize(clean(bRaw));
-    if (!b) return true;
+    const altc = normalize(clean(altRaw));
+    if (!b && !alt) return true;
     if (!a) return false;
-    if (a === b) return true;
-    if (ac && bc && ac === bc) return true;
-    if (a.startsWith(b) || b.startsWith(a)) return true;
-    if (a.startsWith(`${b} `) || b.startsWith(`${a} `)) return true;
-    if (ac && bc && (ac.startsWith(bc) || bc.startsWith(ac))) return true;
+    const matches = (x, xc) => {
+        if (!x) return false;
+        if (a === x) return true;
+        if (ac && xc && ac === xc) return true;
+        if (a.startsWith(x) || x.startsWith(a)) return true;
+        if (a.startsWith(`${x} `) || x.startsWith(`${a} `)) return true;
+        if (ac && xc && (ac.startsWith(xc) || xc.startsWith(ac))) return true;
+        return false;
+    };
+    if (matches(b, bc)) return true;
+    if (matches(alt, altc)) return true;
     return false;
 };
 
@@ -667,7 +670,12 @@ function quoteRowMatchesEnquiryScopedParams(q, p, requestNo) {
         return false;
     }
     if (!matchLeadJobForQuoteScope(q.LeadJob, p.leadJobName)) return false;
-    return matchOwnJobForQuoteScope(q.OwnJob, p.ownJobName || '', !!p.useDepartmentForOwnJob);
+    return matchOwnJobForQuoteScope(
+        q.OwnJob,
+        p.ownJobName || '',
+        !!p.useDepartmentForOwnJob,
+        p.divisionOwnJob || ''
+    );
 }
 
 const stripQuoteJobPrefix = (name) =>
@@ -724,11 +732,11 @@ function computeQuoteCustomerDropdownBaseOptions({
     const poolForEf = enquiryData.divisionsHierarchy?.length ? enquiryData.divisionsHierarchy : (pool.length > 0 ? pool : []);
     const allJobNamesNormSet = new Set(poolForEf.map((n) => normalize(n.itemName || n.DivisionName || '')));
 
-    /** Own-job label: Division dropdown when set, else profile Department (not enquiry-derived). */
+    /** Own-job label: Division dropdown only (strict); do not drift to profile Department here. */
     const ownjob = String(
         (sessionOwnJobLabel != null && String(sessionOwnJobLabel).trim() !== '')
             ? String(sessionOwnJobLabel).trim()
-            : (currentUser?.Department ?? currentUser?.department ?? '')
+            : ''
     ).trim();
     const ownjobLower = ownjob.toLowerCase();
 
@@ -1691,7 +1699,7 @@ const indicesEqual = (a, b) => {
 const clausePaginateEqual = (a, b) =>
     indicesEqual(a?.pageOne, b?.pageOne) && clausePageGroupsEqual(a?.continuation, b?.continuation);
 
-const QuoteForm = () => {
+const QuoteForm = ({ openContext = null }) => {
     const { currentUser } = useAuth();
     const isAdmin = ['Admin', 'Admins'].includes(currentUser?.role || currentUser?.Roles);
 
@@ -1701,6 +1709,8 @@ const QuoteForm = () => {
     const [showSuggestions, setShowSuggestions] = useState(false);
     const searchRef = useRef(null);
     const debounceRef = useRef(null);
+    /** Incremented on Clear and at each new enquiry pick — stale async loads must not overwrite panel after Clear. */
+    const quoteEnquiryLoadSeqRef = useRef(0);
     /** Assigned each render after `handleClear` — lets toolbar Search reset the left panel without reordering declarations. */
     const clearLeftPanelForToolbarSearchRef = useRef(null);
 
@@ -1785,6 +1795,7 @@ const QuoteForm = () => {
     /** When inputs match last committed run, skip the whole calculateSummary body (stops console/render storms). */
     const lastQuickCalcInputRef = useRef('');
     const pricingSelectionTouchedRef = useRef({});
+    const pricingSelectionInitContextRef = useRef('');
     const [expandedGroups, setExpandedGroups] = useState({}); // Track expanded revisions
     /** Avoid flicker-to-blank on tab switch: remember last non-empty previous-quote rows per tab. */
     const previousQuotesRowsCacheRef = useRef({});
@@ -1905,7 +1916,9 @@ const QuoteForm = () => {
     /** Division filter (Master_EnquiryFor.DepartmentName); options from /api/pricing/list/divisions (same rules as Pricing). */
     const [quoteListDivisions, setQuoteListDivisions] = useState([]);
     const [quoteListDivisionsLoading, setQuoteListDivisionsLoading] = useState(false);
-    const [quoteListDivision, setQuoteListDivision] = useState('');
+    const [quoteListDivision, setQuoteListDivision] = useState(
+        () => localStorage.getItem('quote_listDivision') || ''
+    );
     const [showEmailModal, setShowEmailModal] = useState(false);
     const [emailSending, setEmailSending] = useState(false);
     const [emailDetails, setEmailDetails] = useState({ to: '', cc: '', bcc: '', subject: '', body: '', pdfBlob: null, pdfName: '' });
@@ -2051,6 +2064,14 @@ const QuoteForm = () => {
         [quoteListCategory, quoteSearchResults, pendingQuotes],
     );
 
+    useEffect(() => {
+        if (quoteListDivision && quoteListDivision.trim()) {
+            localStorage.setItem('quote_listDivision', quoteListDivision.trim());
+        } else {
+            localStorage.removeItem('quote_listDivision');
+        }
+    }, [quoteListDivision]);
+
     const refetchPendingQuotes = useCallback((divisionOverride = null) => {
         const userEmail = currentUser?.EmailId || currentUser?.email || '';
         if (!userEmail) {
@@ -2100,28 +2121,17 @@ const QuoteForm = () => {
     }, [quoteListCategory, quoteListSearchCriteria, quoteListDateFrom, quoteListDateTo, quoteListDivision, currentUser]);
 
     const handleQuoteListClear = useCallback(() => {
+        // Same full reset as the left panel Search row "Clear" (enquiry no, lead job, customer, etc.)
+        clearLeftPanelForToolbarSearchRef.current?.();
         setQuoteListSearchCriteria('');
         setQuoteListDateFrom('');
         setQuoteListDateTo('');
         setQuoteSearchResults([]);
         setQuoteListCategory(QUOTE_LIST_CATEGORY.PENDING);
-        // Clear left panel so Pricing Summary + new/draft view are visible again.
         setShowQuoteListSummaryOverQuote(false);
-        setQuoteId(null);
-        setQuoteNumber('');
-        setLoadedEnquiryQuoteRowForPreview(null);
-        setSubject('');
-        setSignatory('');
-        setSignatoryDesignation('');
-        setPreparedBy((currentUser?.FullName || currentUser?.name || '').trim());
-        setLoadedQuotePreparedByEmail('');
-        setQuoteDate(new Date().toISOString().split('T')[0]);
-        setCustomerReference(resolveEnquiryCustomerRef(enquiryData?.enquiry));
-        setQuoteTypeList([]);
-        setQuoteEnquiryTypeSelect('');
         // Pass division explicitly to avoid fetching with a stale/empty division value.
         refetchPendingQuotes(quoteListDivision);
-    }, [refetchPendingQuotes, quoteListDivision, currentUser, enquiryData?.enquiry]);
+    }, [refetchPendingQuotes, quoteListDivision]);
 
     useEffect(() => {
         const email = (currentUser?.EmailId || currentUser?.email || currentUser?.MailId || '').trim();
@@ -2143,6 +2153,8 @@ const QuoteForm = () => {
                 setQuoteListDivisions(list);
                 setQuoteListDivision((prev) => {
                     if (!list.length) return '';
+                    const saved = localStorage.getItem('quote_listDivision') || '';
+                    if (saved && list.includes(saved)) return saved;
                     if (prev && list.includes(prev)) return prev;
                     return list[0];
                 });
@@ -2273,8 +2285,14 @@ const QuoteForm = () => {
 
         // Browse mode + direct subjob tab: do not restore/reset tab snapshot fields here.
         // That path can clear Quote Ref/preview during scoped fetch transitions (flicker -> blank).
-        const directDestTab = (calculatedTabs || []).find((t) => String(t.id) === String(newTabId));
-        if (browsePreviousQuotesRevisions && directDestTab?.isSubJobTab) {
+        const tabsForDest = calculatedTabs || [];
+        const directDestTab = tabsForDest.find((t) => String(t.id) === String(newTabId));
+        const directDestTabIdx = tabsForDest.findIndex((t) => String(t.id) === String(newTabId));
+        const isDirectSubjobDestTab = !!(
+            directDestTab &&
+            (directDestTab.isSubJobTab || (!directDestTab.isSelf && directDestTabIdx > 0))
+        );
+        if (browsePreviousQuotesRevisions && isDirectSubjobDestTab) {
             setActiveQuoteTab(newTabId);
             // Expand matching revision group now.
             // Right-side preview load happens in a dedicated effect after `activeQuoteTab` commits.
@@ -2309,9 +2327,14 @@ const QuoteForm = () => {
          * - Browse mode + direct subjob tab: let the dedicated subjob preview effect decide (do not clear here).
          * - Other tabs / modes: keep previous behaviour (restore saved row if it belongs to this tab, else clear).
          */
-        if (browsePreviousQuotesRevisions && destTabObj?.isSubJobTab) {
+        const destTabObjIdx = (calculatedTabs || []).findIndex((t) => String(t.id) === String(newTabId));
+        const isDirectSubjobDestObj = !!(
+            destTabObj &&
+            (destTabObj.isSubJobTab || (!destTabObj.isSelf && destTabObjIdx > 0))
+        );
+        if (browsePreviousQuotesRevisions && isDirectSubjobDestObj) {
             // No-op: subjob preview is managed by the effect that reacts to `activeQuoteTab`.
-        } else if (destTabObj?.isSubJobTab && savedRowBelongsToThisTab && savedQid) {
+        } else if (isDirectSubjobDestObj && savedRowBelongsToThisTab && savedQid) {
             const matchedRow = filteredForNewTab.find((q) => String(quoteRowId(q) ?? '') === savedQid);
             setLoadedEnquiryQuoteRowForPreview(matchedRow || null);
         } else {
@@ -3183,7 +3206,7 @@ const QuoteForm = () => {
 
             // RESOLVE EFFECTIVE ROOT:
             // 1. Determine user context (Division dropdown overrides profile Department for own-job scope)
-            const userDept = (quoteListDivision || currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
+            const userDept = String(quoteListDivision || '').trim().toLowerCase();
             const hasLeadAccess = isAdmin || ['civil', 'admin', 'bms admin'].includes(userDept) || pricingData?.access?.hasLeadAccess;
             const isSubUser = !hasLeadAccess;
 
@@ -3320,7 +3343,7 @@ const QuoteForm = () => {
                     .toLowerCase()
                     .replace(/@almcg\.com/g, '@almoayyedcg.com')
                     .trim();
-                const userDeptNorm = (quoteListDivision || currentUser?.Department || '').trim().toLowerCase();
+                const userDeptNorm = String(quoteListDivision || '').trim().toLowerCase();
                 const editableNames = (pricingData?.access?.editableJobs || []).map((n) =>
                     String(n).replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase()
                 );
@@ -3348,6 +3371,27 @@ const QuoteForm = () => {
                 };
 
                 const candidates = mergedJobsForHierarchy.filter(inLeadBranch);
+
+                // STRICT: when Division dropdown is selected, own-job must come from that Division first.
+                if ((quoteListDivision || '').trim()) {
+                    const divNorm = String(quoteListDivision || '')
+                        .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                        .trim()
+                        .toLowerCase();
+                    for (const n of candidates) {
+                        const nodeNameNorm = (n.itemName || n.DivisionName || '')
+                            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                            .trim()
+                            .toLowerCase();
+                        if (!nodeNameNorm || !divNorm) continue;
+                        if (nodeNameNorm === divNorm) return n;
+                        if (divNorm.length > 2 && (nodeNameNorm.includes(divNorm) || divNorm.includes(nodeNameNorm))) {
+                            return n;
+                        }
+                    }
+                    // If selected Division doesn't map to this lead branch, do not fall back to email/CC row.
+                    return null;
+                }
 
                 for (const n of candidates) {
                     if (mailMatchesNode(n)) return n;
@@ -3506,6 +3550,25 @@ const QuoteForm = () => {
             // 4. Final Polish: Sorting
             finalTabs.sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : (a.name || '').localeCompare(b.name || '')));
 
+            // Ensure tab IDs are always unique/non-empty; duplicate IDs (e.g. "subjob-undefined")
+            // can make tab selection resolve to the wrong tab and leak another tab's quote refs.
+            const usedTabIds = new Set();
+            finalTabs = finalTabs.map((t, idx) => {
+                const baseId = String(t?.id ?? '').trim();
+                const real = String(t?.realId ?? '').trim();
+                const label = String(t?.label || t?.name || '').trim();
+                let nextId = baseId;
+                if (!nextId) nextId = `tab-${real || label || idx}`;
+                if (usedTabIds.has(nextId)) {
+                    nextId = `${nextId}-${real || label || idx}`;
+                }
+                if (usedTabIds.has(nextId)) {
+                    nextId = `${nextId}-${idx}`;
+                }
+                usedTabIds.add(nextId);
+                return { ...t, id: nextId };
+            });
+
             // Safety Fix: Ensure 'self' tab exists and is tagged
             if (finalTabs.length > 0 && !finalTabs.some(t => t.isSelf)) {
                 finalTabs[0].isSelf = true;
@@ -3632,6 +3695,11 @@ const QuoteForm = () => {
         [calculatedTabs]
     );
 
+    // When tab identity set changes, drop previous-quote cache to prevent stale rows from prior tab IDs.
+    React.useEffect(() => {
+        previousQuotesRowsCacheRef.current = {};
+    }, [quoteTabsFingerprint]);
+
     /** Tab branding without `calculatedTabs` reference in effect deps (prevents logo/footer setState every render). */
     const quoteTabBrandingFingerprint = React.useMemo(
         () =>
@@ -3651,11 +3719,89 @@ const QuoteForm = () => {
     );
 
     /** Clause 4 sidebar: same auto-table as PDF body; shown outside Jodit (editor often does not reflect merged table HTML). */
+    const divisionOwnjobFallbackSummary = React.useMemo(() => {
+        const div = String(quoteListDivision || '').trim();
+        if (!div) return [];
+        const rows = Array.isArray(pricingData?.pricingValueRows) ? pricingData.pricingValueRows : [];
+        if (rows.length === 0) return [];
+        const optMap = new Map();
+        (Array.isArray(pricingData?.options) ? pricingData.options : []).forEach((o) => {
+            const id = String(o?.ID ?? o?.OptionID ?? o?.optionID ?? '').trim();
+            if (!id) return;
+            const nm = String(o?.OptionName ?? o?.optionName ?? '').trim();
+            if (nm) optMap.set(id, nm);
+        });
+        const divNorm = collapseSpacesLower(stripQuoteJobPrefix(div));
+        let baseTotal = 0;
+        rows.forEach((r) => {
+            const itemName = String(r?.EnquiryForItem ?? r?.enquiryForItem ?? '').trim();
+            const itemNorm = collapseSpacesLower(stripQuoteJobPrefix(itemName));
+            if (!itemNorm) return;
+            if (!(itemNorm === divNorm || itemNorm.includes(divNorm) || divNorm.includes(itemNorm))) return;
+            const optId = String(r?.OptionID ?? r?.optionID ?? r?.OptionId ?? '').trim();
+            const po = String(r?.PriceOption ?? r?.priceOption ?? optMap.get(optId) ?? 'Base Price').trim();
+            if (collapseSpacesLower(po) !== 'base price') return;
+            const v = Number(r?.Price ?? r?.price ?? 0);
+            if (!Number.isFinite(v)) return;
+            baseTotal += v;
+        });
+        if (Math.abs(baseTotal) < 0.0005) return [];
+        return [{ name: div, total: baseTotal, items: [{ name: 'Base Price', total: baseTotal }] }];
+    }, [pricingData, quoteListDivision]);
+
+    const pricingSummaryForClause = React.useMemo(() => {
+        if (Array.isArray(pricingSummary) && pricingSummary.length > 0) return pricingSummary;
+        return divisionOwnjobFallbackSummary;
+    }, [pricingSummary, divisionOwnjobFallbackSummary]);
+
+    const activeJobsForClause = React.useMemo(() => {
+        const allNames = (pricingSummaryForClause || []).map((g) => g?.name).filter(Boolean);
+        const currentSelectionKey = `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`;
+        const touched = Boolean(pricingSelectionTouchedRef.current[currentSelectionKey]);
+        if (!touched) return allNames;
+        const base = Array.isArray(selectedJobs) ? selectedJobs : [];
+        if (base.length > 0) return base;
+        return allNames;
+    }, [selectedJobs, pricingSummaryForClause, enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]);
+
+    const fallbackGrandBaseTotal = React.useMemo(
+        () =>
+            (pricingSummaryForClause || []).reduce(
+                (sum, g) =>
+                    sum +
+                    (g?.items || []).reduce((s, i) => (i?.name === 'Base Price' ? s + (Number(i?.total) || 0) : s), 0),
+                0
+            ),
+        [pricingSummaryForClause]
+    );
+
     const pricingTermsAutoTablePreviewHtml = React.useMemo(() => {
-        if (!pricingSummary?.length || !pricingData) return '';
-        const { tableHtml } = buildEmsAutoPricingTableHtml(pricingSummary, selectedJobs);
+        if (!pricingSummaryForClause?.length || !pricingData) return '';
+        const { tableHtml } = buildEmsAutoPricingTableHtml(pricingSummaryForClause, activeJobsForClause);
         return tableHtml;
-    }, [pricingSummary, selectedJobs, selectedJobsSig, pricingStableSig]);
+    }, [pricingSummaryForClause, activeJobsForClause, pricingStableSig, pricingData]);
+
+    // Keep Clause 4 editor content in sync with the same auto-table shown in preview.
+    React.useEffect(() => {
+        if (!pricingTermsAutoTablePreviewHtml) return;
+        const proseFallback = clauseContent?.pricingTerms || defaultClauses.pricingTerms || '';
+        const merged = mergePricingTermsClauseHtml(
+            clauseContent?.pricingTerms,
+            pricingTermsAutoTablePreviewHtml,
+            proseFallback
+        );
+        const synced = syncPricingTerms41LumpSumProse(
+            merged,
+            fallbackGrandBaseTotal,
+            false,
+            numberToWordsBHD
+        );
+        setClauseContent((prev) => {
+            const prevTerms = String(prev?.pricingTerms || '');
+            if (prevTerms === synced) return prev;
+            return { ...prev, pricingTerms: synced };
+        });
+    }, [pricingTermsAutoTablePreviewHtml, fallbackGrandBaseTotal]);
 
     /** Aligns with UI fallback when calculatedTabs is empty (e.g. lead job + internal customer only). */
     const effectiveQuoteTabs = React.useMemo(() => {
@@ -3669,10 +3815,61 @@ const QuoteForm = () => {
         }];
     }, [calculatedTabs]);
 
+    /**
+     * EnquiryQuotes.TotalAmount must be ownjob base only: same job as the first tab in Previous Quotes
+     * (first tab = own job), Base Price line(s) for that group.
+     * Must be declared after `effectiveQuoteTabs` (avoids TDZ: cannot access before initialization).
+     */
+    const ownjobBasePriceForEnquiryQuoteTotal = React.useMemo(() => {
+        const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs;
+        const firstTabRaw = String(tabs?.[0]?.label || tabs?.[0]?.name || '').trim();
+        const firstNorm = collapseSpacesLower(stripQuoteJobPrefix(firstTabRaw));
+        const baseFromGroup = (g) =>
+            (Array.isArray(g?.items) ? g.items : []).reduce(
+                (s, i) => (String(i?.name || '').trim() === 'Base Price' ? s + (Number(i?.total) || 0) : s),
+                0
+            );
+        const summary = Array.isArray(pricingSummaryForClause) ? pricingSummaryForClause : [];
+        if (firstNorm) {
+            for (const g of summary) {
+                const gn = collapseSpacesLower(stripQuoteJobPrefix(String(g?.name || '')));
+                if (!gn) continue;
+                if (gn === firstNorm || gn.includes(firstNorm) || firstNorm.includes(gn)) {
+                    const v = baseFromGroup(g);
+                    if (Number.isFinite(v) && Math.abs(v) > 0.0005) return v;
+                }
+            }
+        }
+        const fb = Array.isArray(divisionOwnjobFallbackSummary) ? divisionOwnjobFallbackSummary[0] : null;
+        if (fb) {
+            const v = baseFromGroup(fb);
+            if (Number.isFinite(v) && Math.abs(v) > 0.0005) return v;
+            const t = Number(fb.total);
+            if (Number.isFinite(t) && Math.abs(t) > 0.0005) return t;
+        }
+        return 0;
+    }, [calculatedTabs, effectiveQuoteTabs, pricingSummaryForClause, divisionOwnjobFallbackSummary]);
+
     const pricingSelectionContextKey = React.useMemo(
         () => `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`,
         [enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]
     );
+
+    // New context must start with all pricing groups checked (ignore stale touched memory from older context).
+    React.useEffect(() => {
+        if (!pricingSelectionContextKey) return;
+        const allNames = (pricingSummaryRowsForUi || []).map((g) => g?.name).filter(Boolean);
+        if (!allNames.length) return;
+        if (pricingSelectionInitContextRef.current === pricingSelectionContextKey) return;
+
+        pricingSelectionInitContextRef.current = pricingSelectionContextKey;
+        pricingSelectionTouchedRef.current[pricingSelectionContextKey] = false;
+        setSelectedJobs((prev) => {
+            const sameSize = prev.length === allNames.length;
+            const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
+            return sameMembers ? prev : allNames;
+        });
+    }, [pricingSelectionContextKey, pricingSummaryRowsForUi]);
 
     /** Avoid preview signature/footer falling back to a personal-locked enquiry row when multiple job tabs are shown. */
     const quotePreviewEnquiryCompanyFallback = React.useMemo(() => {
@@ -3763,16 +3960,8 @@ const QuoteForm = () => {
             }
         });
 
-        const names = pricingSummary
-            .filter((grp) => {
-                const grpNameNorm = collapseSpacesLower(stripQuoteJobPrefix(grp.name || ''));
-                const matchingJobs = jobsPool.filter((j) =>
-                    collapseSpacesLower(stripQuoteJobPrefix(j.itemName || j.DivisionName || j.ItemName || '')) === grpNameNorm
-                );
-                if (matchingJobs.length === 0) return false;
-                return matchingJobs.some((job) => pairedBranchIds.has(String(job.id || job.ItemID || job.ID)));
-            })
-            .map((g) => g.name);
+        // Default behavior: all pricing summary groups start checked.
+        const names = (pricingSummary || []).map((g) => g?.name).filter(Boolean);
 
         if (!names.length) return;
 
@@ -3819,31 +4008,62 @@ const QuoteForm = () => {
 
     // Global default: for any context, start with all pricing groups checked until user manually deselects.
     React.useEffect(() => {
-        if (!pricingSummary?.length) return;
+        const allNames = (pricingSummaryRowsForUi || []).map((g) => g?.name).filter(Boolean);
+        if (!allNames.length) return;
         if (!pricingSelectionContextKey) return;
         if (pricingSelectionTouchedRef.current[pricingSelectionContextKey]) return;
-
-        const tabs = calculatedTabs || [];
-        const pairedOwnSub =
-            tabs.length >= 2 &&
-            tabs[0]?.realId &&
-            tabs[0].isOwnJobTab &&
-            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
-        const pairedLeadSubExternal =
-            tabs.length >= 2 &&
-            tabs[0]?.realId &&
-            tabs[0].isLeadInternalTab &&
-            tabs.slice(1).every((t) => t?.realId && t.isSubJobTab);
-        if (pairedOwnSub || pairedLeadSubExternal) return;
-
-        const allNames = pricingSummary.map((g) => g?.name).filter(Boolean);
-        if (!allNames.length) return;
         setSelectedJobs((prev) => {
             const sameSize = prev.length === allNames.length;
             const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
             return sameMembers ? prev : allNames;
         });
-    }, [pricingSummaryNamesKey, pricingSelectionContextKey, quoteTabsFingerprint]);
+    }, [pricingSummaryRowsForUi, pricingSelectionContextKey, quoteTabsFingerprint]);
+
+    // When Previous Quotes is OFF, pricing summary must follow Division dropdown ownjob.
+    React.useEffect(() => {
+        if (browsePreviousQuotesRevisions) return;
+        const div = String(quoteListDivision || '').trim();
+        if (!div) return;
+
+        setQuoteContextScope((prev) => (String(prev || '').trim() === div ? prev : div));
+
+        const allGroups = Array.isArray(pricingSummaryRowsForUi) ? pricingSummaryRowsForUi : [];
+        if (allGroups.length === 0) return;
+
+        const divNorm = collapseSpacesLower(stripQuoteJobPrefix(div));
+        const ownjobGroups = allGroups
+            .map((g) => String(g?.name || '').trim())
+            .filter(Boolean)
+            .filter((name) => {
+                const n = collapseSpacesLower(stripQuoteJobPrefix(name));
+                return n === divNorm || n.includes(divNorm) || divNorm.includes(n);
+            });
+
+        if (ownjobGroups.length > 0) {
+            setSelectedJobs((prev) => {
+                const p = Array.isArray(prev) ? prev : [];
+                const sameSize = p.length === ownjobGroups.length;
+                const sameMembers = sameSize && ownjobGroups.every((n) => p.includes(n));
+                return sameMembers ? p : ownjobGroups;
+            });
+        }
+    }, [browsePreviousQuotesRevisions, quoteListDivision, pricingSummaryRowsForUi]);
+
+    // Safety fallback: if summary is still empty in non-browse mode, relax customer filter and recalc by division scope.
+    React.useEffect(() => {
+        if (browsePreviousQuotesRevisions) return;
+        const div = String(quoteListDivision || '').trim();
+        if (!div) return;
+        if (!pricingData?.options) return;
+        if ((pricingSummaryRowsForUi || []).length > 0) return;
+        calculateSummaryRef.current(pricingData, selectedJobs, '', div);
+    }, [
+        browsePreviousQuotesRevisions,
+        quoteListDivision,
+        pricingData,
+        selectedJobsSig,
+        pricingSummaryRowsForUi?.length,
+    ]);
 
     /**
      * Quote customer dropdown: see `computeQuoteCustomerDropdownBaseOptions` (session email → profile Department;
@@ -3937,7 +4157,7 @@ const QuoteForm = () => {
             first?.isEmptyCalculatedTabsFallback === true ||
             /^own\s*job$/i.test(firstLabelRaw);
 
-        let ownJobName = '';
+        let ownJobName = String(quoteListDivision || '').trim();
         let toNameParam = '';
         let useDepartmentForOwnJob = false;
 
@@ -3945,18 +4165,12 @@ const QuoteForm = () => {
         const activeTabLabel = (stripQuoteJobPrefix(activeLabelRaw) || activeLabelRaw).trim();
 
         if (tabs.length === 1 || isFirstTab) {
-            // Own job tab mapping: OwnJob=first tab label, ToName=customer dropdown.
-            if (placeholderFirst) {
-                const divOwn = (quoteListDivision || '').trim();
-                if (divOwn) ownJobName = divOwn;
-                else useDepartmentForOwnJob = true;
-            } else {
-                ownJobName = firstTabLabel;
-            }
+            // STRICT: OwnJob always follows selected Division dropdown.
+            if (!ownJobName) useDepartmentForOwnJob = true;
             toNameParam = String(toName || '').trim();
         } else {
-            // Direct subjob mapping: OwnJob=selected tab label, ToName=first tab label.
-            ownJobName = activeTabLabel;
+            // Subjob tab: OwnJob must be selected subjob tab name.
+            ownJobName = activeTabLabel || ownJobName;
             toNameParam = firstTabLabel;
         }
 
@@ -4001,6 +4215,7 @@ const QuoteForm = () => {
             }
             const activeTabObj = tabs.find((t) => String(t.id) === String(tabId)) || tabs[0];
             if (!activeTabObj) return [];
+            const requestNoScope = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
 
             const activeTabRealId = activeTabObj.realId;
 
@@ -4085,6 +4300,27 @@ const QuoteForm = () => {
                 const scopedPanel = forceUnscopedToName ? false : useScopedPanel;
                 const normalizedQuoteTo = normalize(q.ToName || '');
                 const normalizedCurrentTo = normalize(toName || '');
+                const strictBrowseTuple =
+                    browsePreviousQuotesRevisions &&
+                    !!scopedEnquiryQuotesParams &&
+                    !!requestNoScope;
+                const firstTabId = String(tabs?.[0]?.id ?? '');
+                const isFirstTabActive = String(activeTabObj?.id ?? '') === firstTabId;
+
+                // Hard rule for Previous Quotes checkbox ON:
+                // show only rows that match the current tab tuple (request + lead + to + ownjob).
+                if (strictBrowseTuple) {
+                    if (!quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope)) {
+                        return false;
+                    }
+                    const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                    const expectedOwn = isFirstTabActive
+                        ? collapseSpacesLower(stripQuoteJobPrefix(scopedEnquiryQuotesParams.ownJobName || ''))
+                        : collapseSpacesLower(
+                              stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                          );
+                    if (expectedOwn && qOwn !== expectedOwn) return false;
+                }
 
                 if (!scopedPanel) {
                     const activeTabAncestors = [];
@@ -4123,21 +4359,32 @@ const QuoteForm = () => {
                     const allowSubjobToNameRelax =
                         !!activeTabObj?.isSubJobTab && !!scopedEnquiryQuotesParams;
                     if (!allowSubjobToNameRelax) {
-                        if (!normalizedCurrentTo) return false;
+                        if (!normalizedCurrentTo) {
+                            // Customer can be temporarily empty during enquiry/tab hydration.
+                            // In that state, keep quote rows that belong to the active tab division instead of blanking the panel.
+                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                        }
                         if (!isExactMatch && !isAncestorMatch) return false;
                     }
                 }
 
                 if (scopedPanel) {
+                    if (!scopedEnquiryQuotesParams || !requestNoScope) return false;
+                    if (!quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope)) {
+                        return false;
+                    }
                     if (activeTabObj?.isOwnJobTab) {
                         const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                        const panelOwn = collapseSpacesLower(stripQuoteJobPrefix(scopedEnquiryQuotesParams.ownJobName || ''));
+                        // Ownjob tab must be strict: never show subjob quote refs when ownjob quote is absent.
+                        if (panelOwn && qOwn !== panelOwn) return false;
+                    }
+                    if (activeTabObj?.isSubJobTab) {
                         const tabOwn = collapseSpacesLower(
                             stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
                         );
-                        if (qOwn && tabOwn && qOwn !== tabOwn) return false;
-                    }
-                    if (scopedEnquiryQuotesParams?.useDepartmentForOwnJob && tabs.length > 1) {
-                        return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
+                        const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
+                        if (tabOwn && qOwn !== tabOwn) return false;
                     }
                     return true;
                 }
@@ -4217,25 +4464,30 @@ const QuoteForm = () => {
                 browsePreviousQuotesRevisions &&
                 activeTabObj?.isSubJobTab
             ) {
-                // Final relaxed subjob fallback: rely on tab branch/division identity from QuoteNumber + RequestNo.
-                const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
-                rows = (existingQuotes || [])
-                    .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
-                    .filter((q) => quoteNumberDivisionMatchesTab(q, activeTabObj, true))
-                    .filter(quoteRevisionShowsInSignedOnlyList);
-                // If still empty, match by OwnJob label to selected direct subjob tab (ignore ToName drift).
-                if (rows.length === 0) {
-                    const tabOwn = collapseSpacesLower(
-                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
-                    );
-                    rows = (existingQuotes || [])
-                        .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
-                        .filter((q) => {
-                            const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q?.OwnJob || ''));
-                            if (qOwn && tabOwn && qOwn === tabOwn) return true;
-                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
-                        })
-                        .filter(quoteRevisionShowsInSignedOnlyList);
+                // Keep strict tuple behavior in browse mode: no relaxed fallbacks.
+                rows = [];
+            }
+            if (
+                rows.length === 0 &&
+                browsePreviousQuotesRevisions &&
+                scopedEnquiryQuotesParams &&
+                requestNoScope &&
+                loadedEnquiryQuoteRowForPreview
+            ) {
+                const pinned = loadedEnquiryQuoteRowForPreview;
+                const pinnedOwn = collapseSpacesLower(stripQuoteJobPrefix(pinned?.OwnJob || ''));
+                const firstTabId = String(tabs?.[0]?.id ?? '');
+                const isFirstTabActive = String(activeTabObj?.id ?? '') === firstTabId;
+                const expectedOwn = isFirstTabActive
+                    ? collapseSpacesLower(stripQuoteJobPrefix(scopedEnquiryQuotesParams.ownJobName || ''))
+                    : collapseSpacesLower(
+                          stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
+                      );
+                if (
+                    quoteRowMatchesEnquiryScopedParams(pinned, scopedEnquiryQuotesParams, requestNoScope) &&
+                    (!expectedOwn || pinnedOwn === expectedOwn)
+                ) {
+                    rows = [pinned];
                 }
             }
             const cacheKey = String(activeTabObj?.id ?? tabId ?? '');
@@ -4243,9 +4495,7 @@ const QuoteForm = () => {
                 previousQuotesRowsCacheRef.current[cacheKey] = rows;
                 return rows;
             }
-            if (browsePreviousQuotesRevisions && cacheKey && previousQuotesRowsCacheRef.current[cacheKey]?.length) {
-                return previousQuotesRowsCacheRef.current[cacheKey];
-            }
+            // No cache fallback when current strict tuple has no rows (prevents stale/subjob leakage into ownjob tab).
             return rows;
         },
         [
@@ -4383,6 +4633,7 @@ const QuoteForm = () => {
             !!activeTabForScopedReady?.isOwnJobTab
         );
     const saveButtonScopeReady = !browsePreviousQuotesRevisions || scopedQuoteTupleReady;
+    const disableSaveRevisionInBrowse = browsePreviousQuotesRevisions;
 
     /** Preview must not show another tab's Quote Ref while scoped rows + active tab imply "no quote for this tab". */
     const loadedQuoteOutOfActiveTabScope = React.useMemo(() => {
@@ -4562,7 +4813,32 @@ const QuoteForm = () => {
             hierarchyLogoNode?.CompanyLogo ||
             null;
 
+        const profiles = enquiryData?.availableProfiles || [];
+        const firstTabId = String((calculatedTabs || [])[0]?.id || '');
+        const isOwnjobTab = String(activeQuoteTab || '') === firstTabId;
+        const useSelectedDivisionBranding = !browsePreviousQuotesRevisions || isOwnjobTab;
         const brandingRows = enquiryData?.enquiryForBrandingRows;
+        const selectedDivisionLabel = String(quoteListDivision || '').trim();
+        const selectedDivisionNorm = collapseSpacesLower(stripQuoteJobPrefix(selectedDivisionLabel));
+        const profileFromSelectedDivision = (() => {
+            if (!useSelectedDivisionBranding) return null;
+            if (!selectedDivisionNorm) return null;
+            const pHit = profiles.find((p) => {
+                if (p.isPersonalProfile) return false;
+                const pn = collapseSpacesLower(stripQuoteJobPrefix(p.itemName || p.name || ''));
+                return !!pn && (pn === selectedDivisionNorm || pn.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(pn));
+            });
+            if (pHit) return pHit;
+            const mefHit = (Array.isArray(brandingRows) ? brandingRows : []).find((r) => {
+                const dn = collapseSpacesLower(stripQuoteJobPrefix(r?.departmentName || ''));
+                const inm = collapseSpacesLower(stripQuoteJobPrefix(r?.itemName || r?.companyName || ''));
+                return (
+                    (dn && (dn === selectedDivisionNorm || dn.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(dn))) ||
+                    (inm && (inm === selectedDivisionNorm || inm.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(inm)))
+                );
+            });
+            return mefHit || null;
+        })();
         if (Array.isArray(brandingRows) && brandingRows.length > 0) {
             const mefHit = matchMasterEnquiryForBrandingRow(activeTab, brandingRows);
             if (
@@ -4573,20 +4849,22 @@ const QuoteForm = () => {
                     (mefHit.companyName || '').trim() ||
                     (mefHit.departmentName || '').trim())
             ) {
+                // Ownjob tab follows Division dropdown; subjob tabs follow active tab/profile.
+                const source = profileFromSelectedDivision || mefHit;
                 const displayName =
-                    String(mefHit.companyName || '').trim() ||
-                    String(mefHit.departmentName || '').trim() ||
+                    String(source.name || source.companyName || '').trim() ||
+                    String(source.departmentName || '').trim() ||
                     String(activeTab.label || activeTab.name || '').trim();
-                const mefLogo = (mefHit.companyLogo && String(mefHit.companyLogo).trim()) || null;
+                const mefLogo = (source.logo || source.companyLogo) ? String(source.logo || source.companyLogo).trim() : null;
                 const logo = mefLogo || logoFromActiveJob || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || null;
                 setQuoteLogo((prev) => (prev === logo ? prev : logo));
                 setQuoteCompanyName((prev) => (prev === displayName ? prev : displayName));
                 const nextFooter = {
                     name: displayName,
-                    address: mefHit.address || '',
-                    phone: mefHit.phone || '',
-                    fax: mefHit.faxNo || '',
-                    email: mefHit.email || '',
+                    address: source.address || '',
+                    phone: source.phone || '',
+                    fax: source.fax || source.faxNo || '',
+                    email: source.email || '',
                 };
                 setFooterDetails((prev) => {
                     if (
@@ -4613,8 +4891,6 @@ const QuoteForm = () => {
 
         const jobNode = tabJobForLogo;
 
-        const profiles = enquiryData?.availableProfiles || [];
-
         const refLike = String(activeTab.quoteNo || quoteNumber || '').trim();
         const refDivU = (() => {
             const parts = refLike.split('/').map((s) => s.trim());
@@ -4626,6 +4902,16 @@ const QuoteForm = () => {
         })();
 
         const resolveDivisionProfile = () => {
+            const selectedDivisionLabel = String(quoteListDivision || '').trim();
+            const selectedDivisionNorm = collapseSpacesLower(stripQuoteJobPrefix(selectedDivisionLabel));
+            if (useSelectedDivisionBranding && selectedDivisionNorm) {
+                let byDivisionLabel = profiles.find((p) => {
+                    if (p.isPersonalProfile) return false;
+                    const pn = collapseSpacesLower(stripQuoteJobPrefix(p.itemName || p.name || ''));
+                    return !!pn && (pn === selectedDivisionNorm || pn.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(pn));
+                });
+                if (byDivisionLabel) return byDivisionLabel;
+            }
             if (!tabContext) return null;
 
             if (refDivU) {
@@ -4764,15 +5050,17 @@ const QuoteForm = () => {
                 activeTab.departmentName
             );
             finalLogo = preferTabBranding
-                ? logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || personalProfile?.logo || null
-                : personalProfile?.logo || logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || null;
+                ? divisionProfile?.logo || logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || personalProfile?.logo || null
+                : divisionProfile?.logo || personalProfile?.logo || logoFromActiveJob || jobLogo || (enquiryData?.enquiryLogo ? String(enquiryData.enquiryLogo).trim() : null) || null;
             finalCompanyName = preferTabBranding
                 ? activeTab.companyName ||
                   activeTab.departmentName ||
+                  divisionProfile?.name ||
                   personalProfile?.name ||
                   enquiryData?.enquiryCompanyName ||
                   'Almoayyed Air Conditioning'
-                : personalProfile?.name ||
+                : divisionProfile?.name ||
+                  personalProfile?.name ||
                   activeTab.companyName ||
                   activeTab.departmentName ||
                   enquiryData?.enquiryCompanyName ||
@@ -4780,8 +5068,27 @@ const QuoteForm = () => {
             footerSource = preferTabBranding
                 ? activeTab?.address || activeTab?.phone || activeTab?.email
                     ? activeTab
-                    : enquiryData?.companyDetails || activeTab || personalProfile
-                : personalProfile || activeTab || enquiryData?.companyDetails;
+                    : divisionProfile || enquiryData?.companyDetails || activeTab || personalProfile
+                : divisionProfile || personalProfile || activeTab || enquiryData?.companyDetails;
+        }
+
+        // HARD LOCK only for ownjob context: keep Division dropdown authoritative there.
+        // For subjob tabs in Previous Quotes mode, active subjob branding must win.
+        if (profileFromSelectedDivision) {
+            finalLogo =
+                profileFromSelectedDivision.logo ||
+                profileFromSelectedDivision.companyLogo ||
+                finalLogo ||
+                null;
+            finalCompanyName =
+                String(
+                    profileFromSelectedDivision.name ||
+                    profileFromSelectedDivision.companyName ||
+                    profileFromSelectedDivision.departmentName ||
+                    finalCompanyName ||
+                    ''
+                ).trim() || finalCompanyName;
+            footerSource = profileFromSelectedDivision;
         }
 
         if (import.meta.env.DEV) {
@@ -4828,6 +5135,7 @@ const QuoteForm = () => {
         enquiryData?.enquiryLogo,
         enquiryData?.enquiryCompanyName,
         enquiryData?.divisionsHierarchy,
+        quoteListDivision,
     ]);
 
 
@@ -5883,13 +6191,18 @@ const QuoteForm = () => {
 
     const handleJobToggle = (jobName) => {
         pricingSelectionTouchedRef.current[pricingSelectionContextKey] = true;
-        const had = jobNameMatchesActiveJobsList(jobName, selectedJobs);
+        const defaultAllNames = (pricingSummaryRowsForUi || []).map((g) => g?.name).filter(Boolean);
+        const baseSelected =
+            Array.isArray(selectedJobs) && selectedJobs.length > 0
+                ? selectedJobs
+                : defaultAllNames;
+        const had = jobNameMatchesActiveJobsList(jobName, baseSelected);
         const nJob = collapseSpacesLower(stripQuoteJobPrefix(jobName));
         const newSelected = had
-            ? selectedJobs.filter(
+            ? baseSelected.filter(
                   (j) => collapseSpacesLower(stripQuoteJobPrefix(String(j || ''))) !== nJob
               )
-            : [...selectedJobs, jobName];
+            : [...baseSelected, jobName];
         setSelectedJobs(newSelected);
         calculateSummary(pricingData, newSelected);
     };
@@ -6742,7 +7055,19 @@ const QuoteForm = () => {
             summary.sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        const { tableHtml, htmlGrandTotal } = buildEmsAutoPricingTableHtml(summary, activeJobs);
+        const currentSelectionKey = `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(activeCustomer || '')}`;
+        const touchedSelection = Boolean(pricingSelectionTouchedRef.current[currentSelectionKey]);
+        const summaryNamesForTable = summary.map((g) => g?.name).filter(Boolean);
+        const effectiveActiveJobsForTable =
+            !touchedSelection
+                ? summaryNamesForTable
+                : (Array.isArray(activeJobs) && activeJobs.length > 0
+                    ? activeJobs
+                    : summaryNamesForTable);
+        const { tableHtml, htmlGrandTotal } = buildEmsAutoPricingTableHtml(
+            summary,
+            effectiveActiveJobsForTable
+        );
 
         // Update Pricing Terms Text with Dynamic Total
         let pricingText = defaultClauses.pricingTerms || '';
@@ -6769,20 +7094,17 @@ const QuoteForm = () => {
         }
 
         /** Same as sidebar "GRAND BASE PRICE TOTAL": Base Price only for jobs checked in Pricing Summary (EnquiryQuotes.TotalAmount). */
-        const grandBasePriceFromCheckedJobs =
-            !activeJobs || activeJobs.length === 0
-                ? 0
-                : summary.reduce(
-                      (sum, g) =>
-                          jobNameMatchesActiveJobsList(g.name, activeJobs)
-                              ? sum +
-                                (g.items || []).reduce(
-                                    (s, i) => (i.name === 'Base Price' ? s + i.total : s),
-                                    0
-                                )
-                              : sum,
-                      0
-                  );
+        const grandBasePriceFromCheckedJobs = summary.reduce(
+            (sum, g) =>
+                jobNameMatchesActiveJobsList(g.name, effectiveActiveJobsForTable)
+                    ? sum +
+                      (g.items || []).reduce(
+                          (s, i) => (i.name === 'Base Price' ? s + i.total : s),
+                          0
+                      )
+                    : sum,
+            0
+        );
 
         const round6 = (n) => Number((Number(n) || 0).toFixed(6));
         let calcSig = '';
@@ -7099,7 +7421,8 @@ const QuoteForm = () => {
         // Header/footer: with multiple branch tabs, branding is driven by the active tab + quote ref (useEffect).
         // Applying personalProfile here overwrote Civil/CIP with the logged-in user's AC identity after every loadQuote.
         const multiTabBranch = (calculatedTabs || []).length > 1;
-        if (!multiTabBranch) {
+        const hasDivisionSelection = String(quoteListDivision || '').trim().length > 0;
+        if (!multiTabBranch && !hasDivisionSelection) {
         const personalProfile = enquiryData?.availableProfiles?.find(p => p.isPersonalProfile);
         const resolvedProfile = personalProfile || enquiryData?.companyDetails;
 
@@ -7228,41 +7551,52 @@ const QuoteForm = () => {
             // Note: If pricingData is not for the correct customer, this might be slightly off provided values,
             // but structure will be correct. Usually Previous Quote Context implies same active enquiry.
         }
-        if (tabAtLoad?.isSubJobTab) {
+        // Browse mode preview must be driven strictly by backend row for the selected quote/ref.
+        if (browsePreviousQuotesRevisions) {
             setLoadedEnquiryQuoteRowForPreview(quote);
         } else {
             setLoadedEnquiryQuoteRowForPreview(null);
         }
     };
 
-    /** Direct subjob tab: after tab commit, load latest quote row for right-side preview. */
-    const prevActiveSubjobTabForPreviewLoadRef = useRef('');
+    /** Direct subjob tab: after tab commit, always auto-load latest quote row for right-side preview. */
     useEffect(() => {
         if (!browsePreviousQuotesRevisions) return;
         if (!activeQuoteTab) return;
-        const activeTabObj = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
-        if (!activeTabObj?.isSubJobTab) return;
+        const tabsForActive = calculatedTabs || [];
+        const activeTabObj = tabsForActive.find((t) => String(t.id) === String(activeQuoteTab));
+        const activeTabIdx = tabsForActive.findIndex((t) => String(t.id) === String(activeQuoteTab));
+        const isDirectSubjobActiveTab = !!(
+            activeTabObj &&
+            (activeTabObj.isSubJobTab || (!activeTabObj.isSelf && activeTabIdx > 0))
+        );
+        if (!isDirectSubjobActiveTab) {
+            return;
+        }
 
         const tabRows = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab) || [];
-        if (!tabRows.length) return;
+        if (!tabRows.length) {
+            setLoadedEnquiryQuoteRowForPreview(null);
+            return;
+        }
         const latest = [...tabRows].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
         if (!latest) return;
         const latestId = quoteRowId(latest);
         const currentId = quoteRowId(loadedEnquiryQuoteRowForPreview);
-
-        if (!latestId) return;
-
-        const didTabChange = prevActiveSubjobTabForPreviewLoadRef.current !== String(activeQuoteTab);
-
-        // If preview already shows the latest revision and the tab did not just change, do nothing.
-        if (currentId && currentId === latestId && !didTabChange) return;
-
-        // If the user manually selected an older revision (currentId != latestId) and the tab didn't just change,
-        // don't overwrite their selection.
-        if (!didTabChange && currentId && currentId !== latestId) return;
-
-        // Mark the tab as handled only when we have a usable `latestId`.
-        prevActiveSubjobTabForPreviewLoadRef.current = String(activeQuoteTab);
+        const latestNumber = String(latest?.QuoteNumber || latest?.quoteNumber || '').trim();
+        const currentNumber = String(
+            loadedEnquiryQuoteRowForPreview?.QuoteNumber ||
+            loadedEnquiryQuoteRowForPreview?.quoteNumber ||
+            ''
+        ).trim();
+        const sameLatestById = !!(latestId && currentId && String(currentId) === String(latestId));
+        const sameLatestByNumber =
+            !sameLatestById &&
+            !!(latestNumber && currentNumber && (
+                latestNumber === currentNumber ||
+                latestNumber.split('-R')[0] === currentNumber.split('-R')[0]
+            ));
+        if (sameLatestById || sameLatestByNumber) return;
 
         loadQuote(latest, {
             preserveRecipient: true,
@@ -7890,6 +8224,36 @@ const QuoteForm = () => {
         return true;
     }, [quoteDate, validityDays, toAttention, subject, preparedBy, signatory, customerReference, quoteTypeList]);
 
+    const focusBrowseOnOwnjobWithQuote = React.useCallback((row, fallbackId = null, fallbackQuoteNo = '') => {
+        const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : effectiveQuoteTabs || [];
+        const ownTab = tabs.find((t) => t?.isOwnJobTab) || tabs.find((t) => t?.isSelf) || tabs[0];
+        const ownTabId = String(ownTab?.id ?? 'default');
+        const forcedId = row ? quoteRowId(row) : fallbackId;
+        const forcedNo = String(row?.QuoteNumber ?? row?.quoteNumber ?? fallbackQuoteNo ?? '').trim();
+
+        setBrowsePreviousQuotesRevisions(true);
+        setActiveQuoteTab(ownTabId);
+        setQuoteId(forcedId != null && String(forcedId).trim() !== '' ? forcedId : null);
+        setQuoteNumber(forcedNo);
+        if (!tabStateRegistry.current[ownTabId]) tabStateRegistry.current[ownTabId] = {};
+        tabStateRegistry.current[ownTabId].quoteId =
+            forcedId != null && String(forcedId).trim() !== '' ? forcedId : null;
+        tabStateRegistry.current[ownTabId].quoteNumber = forcedNo;
+
+        if (row) {
+            if (typeof performance !== 'undefined') {
+                quoteTabRestoreSuppressLoadQuoteUntilRef.current = performance.now() + 1800;
+            }
+            queueMicrotask(() =>
+                loadQuote(row, {
+                    preserveRecipient: true,
+                    skipPreparedSignatory: true,
+                    forActiveQuoteTab: ownTabId,
+                })
+            );
+        }
+    }, [calculatedTabs, effectiveQuoteTabs, loadQuote]);
+
     const handleRevise = async () => {
         const sortedTuple = (() => {
             if (!quotesMatchingScopedTuple?.length) return [];
@@ -7918,6 +8282,14 @@ const QuoteForm = () => {
 
         // Validate mandatory fields before revision
         if (!validateMandatoryFields()) return;
+
+        const ownjobAmtRev = Number(ownjobBasePriceForEnquiryQuoteTotal);
+        if (!Number.isFinite(ownjobAmtRev) || ownjobAmtRev <= 0) {
+            alert(
+                'Cannot create revision: ownjob base price must be greater than zero. Ensure pricing exists for the first tab job (Previous Quotes) before revising.'
+            );
+            return;
+        }
 
         if (!window.confirm('Are you sure you want to create a new revision based on this quote?')) {
             console.log('[handleRevise] User cancelled');
@@ -7959,7 +8331,7 @@ const QuoteForm = () => {
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
-                        TotalAmount: grandTotal,
+                        TotalAmount: ownjobBasePriceForEnquiryQuoteTotal,
                         OwnJob: payload.ownJob, // CRITICAL for AutoLoad matching
                         LeadJob: payload.leadJob, // CRITICAL for AutoLoad matching
                         DigitalSignaturesJson: payload.digitalSignaturesJson,
@@ -7975,7 +8347,7 @@ const QuoteForm = () => {
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
-                        TotalAmount: grandTotal,
+                        TotalAmount: ownjobBasePriceForEnquiryQuoteTotal,
                         OwnJob: payload.ownJob,
                         LeadJob: payload.leadJob,
                         DigitalSignaturesJson: payload.digitalSignaturesJson,
@@ -8005,66 +8377,10 @@ const QuoteForm = () => {
                 if (scopedEnquiryQuotesParams) {
                     setScopedQuotePanelRefreshNonce((n) => n + 1);
                 }
-                /**
-                 * After a successful Revision, switch to "Previous Quotes / Revisions" browse mode
-                 * so the right preview reflects the revised saved quote (backend row), not draft-only fields.
-                 */
-                setBrowsePreviousQuotesRevisions(true);
-                const latestForPreview = Array.isArray(refreshed)
-                    ? (() => {
-                          // Prefer current scoped tuple (active tab/customer), then select highest revision.
-                          const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
-                          const scopedRows =
-                              scopedEnquiryQuotesParams && rn
-                                  ? refreshed.filter((q) =>
-                                        quoteRowMatchesEnquiryScopedParams(
-                                            q,
-                                            scopedEnquiryQuotesParams,
-                                            rn
-                                        )
-                                    )
-                                  : refreshed;
-                          const pool = scopedRows.length > 0 ? scopedRows : refreshed;
-                          if (!pool.length) return null;
-                          const revisionRank = (row) => {
-                              const byField = Number(row?.RevisionNo);
-                              if (Number.isFinite(byField) && byField >= 0) return byField;
-                              const qn = String(row?.QuoteNumber ?? row?.quoteNumber ?? '').trim();
-                              const m = qn.match(/-R(\d+)$/i);
-                              return m ? Number(m[1]) : -1;
-                          };
-                          return [...pool].sort((a, b) => {
-                              const r = revisionRank(b) - revisionRank(a);
-                              if (r !== 0) return r;
-                              const ta = Date.parse(a.QuoteDate || 0) || 0;
-                              const tb = Date.parse(b.QuoteDate || 0) || 0;
-                              return tb - ta;
-                          })[0];
-                      })()
+                const createdRow = Array.isArray(refreshed)
+                    ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newRevId ?? ''))
                     : null;
-                if (latestForPreview) {
-                    const forcedId = quoteRowId(latestForPreview);
-                    const forcedNo = String(
-                        latestForPreview.QuoteNumber ?? latestForPreview.quoteNumber ?? ''
-                    ).trim();
-                    // Prevent competing auto-load effects from snapping back to previous revision.
-                    if (typeof performance !== 'undefined') {
-                        quoteTabRestoreSuppressLoadQuoteUntilRef.current = performance.now() + 1800;
-                    }
-                    setQuoteId(forcedId != null ? forcedId : null);
-                    setQuoteNumber(forcedNo);
-                    const regPinned = tabStateRegistry.current[activeQuoteTab];
-                    if (regPinned && typeof regPinned === 'object') {
-                        regPinned.quoteId = forcedId != null ? forcedId : null;
-                        regPinned.quoteNumber = forcedNo;
-                    }
-                    queueMicrotask(() =>
-                        loadQuote(latestForPreview, {
-                            preserveRecipient: true,
-                            skipPreparedSignatory: true,
-                        })
-                    );
-                }
+                focusBrowseOnOwnjobWithQuote(createdRow, newRevId, newRevQn);
 
                 // Upload any pending files now that we have a new Revision ID
                 if (pendingFiles.length > 0 && newRevId != null && newRevId !== '') {
@@ -8129,6 +8445,7 @@ const QuoteForm = () => {
 
 
     const handleSelectEnquiry = async (enq) => {
+        const loadSeq = ++quoteEnquiryLoadSeqRef.current;
         let enquiryLoadSucceeded = false;
         setSearchTerm(enq.RequestNo);
         setSuggestions([]);
@@ -8178,8 +8495,10 @@ const QuoteForm = () => {
                 `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}${divQ}`,
                 { cache: 'no-store' }
             );
+            if (loadSeq !== quoteEnquiryLoadSeqRef.current) return;
             if (res.ok) {
                 const data = await res.json();
+                if (loadSeq !== quoteEnquiryLoadSeqRef.current) return;
                 fetchExistingQuotes(enq.RequestNo);
 
                 setQuoteNumber(data.quoteNumber);
@@ -8294,7 +8613,8 @@ const QuoteForm = () => {
                     }
                 }
 
-                // 3a. Auto-Select Lead Job — always pick first L-job (sorted by L number) when multiple exist
+                // 3a. Auto-Select Lead Job.
+                // STRICT: when Division dropdown is selected, pick the lead branch that contains that division.
                 console.log('[QuoteForm] Auto-Select Lead Job - divisions:', data.divisions);
                 console.log('[QuoteForm] Auto-Select Lead Job - divisionsHierarchy:', data.divisionsHierarchy);
 
@@ -8314,7 +8634,64 @@ const QuoteForm = () => {
                 const sortedLeadJobs = [...leadJobs].sort((a, b) => leadSortKey(a) - leadSortKey(b));
                 console.log('[QuoteForm] Filtered Lead Jobs (sorted):', sortedLeadJobs);
 
-                if (sortedLeadJobs.length >= 1) {
+                const selectedDivisionTrim = String(quoteListDivision || '').trim();
+                const selectedDivisionNorm = selectedDivisionTrim
+                    .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                    .trim()
+                    .toLowerCase();
+                const hierarchyRows = Array.isArray(data.divisionsHierarchy) ? data.divisionsHierarchy : [];
+                const byId = new Map();
+                hierarchyRows.forEach((n) => {
+                    const id = n?.id ?? n?.ID ?? n?.ItemID;
+                    if (id != null && id !== '') byId.set(String(id), n);
+                });
+                const extractLeadCodeFromNode = (node) => {
+                    const c = String(node?.leadJobCode || node?.LeadJobCode || '').trim().toUpperCase();
+                    const m1 = c.match(/^(L\d+)/i);
+                    if (m1) return m1[1].toUpperCase();
+                    const nm = String(node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
+                    const m2 = nm.match(/^(L\d+)/i);
+                    return m2 ? m2[1].toUpperCase() : '';
+                };
+                const findRootLeadCode = (startNode) => {
+                    let cur = startNode;
+                    const seen = new Set();
+                    let guard = 0;
+                    while (cur && guard < 80) {
+                        const pid = cur.parentId ?? cur.ParentID;
+                        if (pid == null || pid === '' || pid === 0 || pid === '0') break;
+                        const key = String(pid);
+                        if (seen.has(key)) break;
+                        seen.add(key);
+                        const parent = byId.get(key);
+                        if (!parent) break;
+                        cur = parent;
+                        guard += 1;
+                    }
+                    return extractLeadCodeFromNode(cur) || '';
+                };
+                let leadFromDivision = '';
+                if (selectedDivisionNorm && hierarchyRows.length > 0) {
+                    const hit = hierarchyRows.find((n) => {
+                        const nm = String(n?.itemName || n?.ItemName || n?.DivisionName || '')
+                            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                            .trim()
+                            .toLowerCase();
+                        if (!nm) return false;
+                        if (nm === selectedDivisionNorm) return true;
+                        if (selectedDivisionNorm.length > 2 && (nm.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(nm))) return true;
+                        return false;
+                    });
+                    if (hit) leadFromDivision = findRootLeadCode(hit);
+                }
+
+                if (leadFromDivision) {
+                    data.leadJobPrefix = leadFromDivision;
+                    firstLeadDivisionFull =
+                        sortedLeadJobs.find((d) => String(d).trim().toUpperCase().startsWith(leadFromDivision)) ||
+                        leadFromDivision;
+                    console.log('[QuoteForm] Auto-selecting lead from Division dropdown:', data.leadJobPrefix, selectedDivisionTrim);
+                } else if (sortedLeadJobs.length >= 1) {
                     firstLeadDivisionFull = String(sortedLeadJobs[0]).trim();
                     data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
                     console.log('[QuoteForm] Auto-selecting first Lead Job:', data.leadJobPrefix, firstLeadDivisionFull);
@@ -8401,6 +8778,61 @@ const QuoteForm = () => {
         }
         return enquiryLoadSucceeded;
     };
+    const handledQuoteOpenContextKeyRef = useRef('');
+    const pendingQuoteOpenTargetRef = useRef(null);
+    useEffect(() => {
+        if (!openContext || openContext.tab !== 'Quote') return;
+        const requestNo = String(openContext.requestNo || '').trim();
+        if (!requestNo) return;
+        const targetKey = [
+            requestNo,
+            String(openContext.quoteId || '').trim(),
+            String(openContext.quoteNumber || '').trim(),
+        ].join('::');
+        if (handledQuoteOpenContextKeyRef.current === targetKey) return;
+        handledQuoteOpenContextKeyRef.current = targetKey;
+        pendingQuoteOpenTargetRef.current = {
+            requestNo,
+            quoteId: String(openContext.quoteId || '').trim(),
+            quoteNumber: String(openContext.quoteNumber || '').trim(),
+        };
+        (async () => {
+            const ok = await handleSelectEnquiry({ RequestNo: requestNo, ProjectName: '' });
+            if (ok) setBrowsePreviousQuotesRevisions(true);
+        })();
+    }, [openContext]);
+    useEffect(() => {
+        const target = pendingQuoteOpenTargetRef.current;
+        if (!target) return;
+        const rnActive = String(enquiryData?.enquiry?.RequestNo || '').trim();
+        if (!rnActive || rnActive !== target.requestNo) return;
+        if (!Array.isArray(existingQuotes) || existingQuotes.length === 0) return;
+        let match = null;
+        if (target.quoteId) {
+            match = existingQuotes.find((q) => String(quoteRowId(q) ?? '') === target.quoteId) || null;
+        }
+        if (!match && target.quoteNumber) {
+            match =
+                existingQuotes.find((q) => String(q.QuoteNumber || q.quoteNumber || '').trim() === target.quoteNumber) ||
+                existingQuotes.find(
+                    (q) =>
+                        String(q.QuoteNumber || q.quoteNumber || '').trim().split('-R')[0] ===
+                        target.quoteNumber.split('-R')[0]
+                ) ||
+                null;
+        }
+        if (!match) return;
+        const own = collapseSpacesLower(stripQuoteJobPrefix(match.OwnJob || ''));
+        const tabs = calculatedTabs || [];
+        const tabForOwn = tabs.find(
+            (t) => collapseSpacesLower(stripQuoteJobPrefix(t.label || t.name || '')) === own
+        );
+        if (tabForOwn && String(activeQuoteTab) !== String(tabForOwn.id)) {
+            handleTabChange(tabForOwn.id, { force: true });
+        }
+        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true });
+        pendingQuoteOpenTargetRef.current = null;
+    }, [existingQuotes, enquiryData?.enquiry?.RequestNo, calculatedTabs, activeQuoteTab]);
 
     const quoteListSummaryBody = React.useMemo(() => {
         if (!quoteListDisplayRows.length) {
@@ -8823,9 +9255,15 @@ const QuoteForm = () => {
 
     // Clear selection
     const handleClear = () => {
+        quoteEnquiryLoadSeqRef.current += 1;
+        if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+            debounceRef.current = null;
+        }
         calculatedTabsCacheRef.current = { sig: '', tabs: EMPTY_CALCULATED_TABS };
         // --- LOCKED LOGIC: Clear Tab State Registry on Reset ---
         tabStateRegistry.current = {};
+        quoteTabRestoreSuppressLoadQuoteUntilRef.current = 0;
         setExistingQuotes([]);
         setQuoteScopedForPanel([]);
         setScopedQuotesFetchSettledKey(null);
@@ -8834,14 +9272,46 @@ const QuoteForm = () => {
         setSearchTerm('');
         setSuggestions([]);
         setShowSuggestions(false);
+        // Lead + row-pick refs (same as new enquiry) so lead dropdown / customer do not keep prior branch state
+        leadChoiceFingerprintRef.current = '';
+        autoSelectCustomerAfterLeadChangeRef.current = false;
+        setLeadSwitchShellHold(false);
+        preserveQuoteOnLeadChangeRef.current = null;
+        quoteRowAutoSelectLeadRef.current = false;
+        quoteRowFirstLeadDivisionFullRef.current = '';
+        quoteRowDivisionLeadLockRef.current = false;
+        quoteRowSyncDropdownCustomerRef.current = false;
+        quoteRowAwaitingLeadForCustomerRef.current = false;
+        pendingPricingBootstrapRef.current = null;
+        setSelectedLeadId(null);
+        setBrowsePreviousQuotesRevisions(false);
+        setShowQuoteListSummaryOverQuote(false);
+        setActiveQuoteTab('self');
+        setLoading(false);
         setEnquiryData(null);
         setPricingData(null);
 
         // Reset all metadata and clauses
         resetFormState();
+        // `resetFormState` closes over the previous `enquiryData` — override so left panel + refs clear fully
+        setCustomerReference('');
+        setToName('');
+        setToAddress('');
+        setToPhone('');
+        setToEmail('');
+        setToFax('');
+        setToAttention('');
+        setGrandTotal(0);
         setQuoteCompanyName('Almoayyed Air Conditioning');
         setQuoteLogo(null);
         setCompanyProfiles([]);
+        setFooterDetails({
+            name: 'Almoayyed Air Conditioning',
+            address: '',
+            phone: '',
+            fax: '',
+            email: '',
+        });
     };
     clearLeftPanelForToolbarSearchRef.current = handleClear;
 
@@ -9011,7 +9481,11 @@ const QuoteForm = () => {
             preparedByEmail: sessionUserEmail,
             ...clauses,
             ...clauseContent,
-            totalAmount: Number.isFinite(Number(grandTotal)) ? Number(grandTotal) : 0,
+            totalAmount:
+                Number.isFinite(Number(ownjobBasePriceForEnquiryQuoteTotal)) &&
+                Number(ownjobBasePriceForEnquiryQuoteTotal) > 0
+                    ? Number(ownjobBasePriceForEnquiryQuoteTotal)
+                    : 0,
             customClauses,
             clauseOrder: orderedClauses,
             quoteDate,
@@ -9051,7 +9525,7 @@ const QuoteForm = () => {
             status: 'Saved',
             digitalSignaturesJson: serializeDigitalStampsForApi(quoteDigitalStamps),
         };
-    }, [enquiryData, selectedJobs, pricingSummary, currentUser, quoteListDivision, pricingData, validityDays, preparedBy, clauses, clauseContent, grandTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
+    }, [enquiryData, selectedJobs, pricingSummary, currentUser, quoteListDivision, pricingData, validityDays, preparedBy, clauses, clauseContent, ownjobBasePriceForEnquiryQuoteTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
 
 
 
@@ -9068,6 +9542,14 @@ const QuoteForm = () => {
             }
 
             if (!validateMandatoryFields()) return null;
+
+            const ownjobAmt = Number(ownjobBasePriceForEnquiryQuoteTotal);
+            if (!Number.isFinite(ownjobAmt) || ownjobAmt <= 0) {
+                alert(
+                    'Cannot save quote: ownjob base price must be greater than zero. Ensure pricing exists for the first tab job (Previous Quotes) before saving.'
+                );
+                return null;
+            }
 
             // Warning for the VERY FIRST save of a draft
             const confirmed = window.confirm(
@@ -9135,7 +9617,7 @@ const QuoteForm = () => {
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
-                        TotalAmount: grandTotal,
+                        TotalAmount: ownjobBasePriceForEnquiryQuoteTotal,
                         OwnJob: savePayload.ownJob, // CRITICAL for AutoLoad matching
                         LeadJob: savePayload.leadJob, // CRITICAL for AutoLoad matching
                         DigitalSignaturesJson: savePayload.digitalSignaturesJson,
@@ -9152,7 +9634,7 @@ const QuoteForm = () => {
                         Status: 'Saved',
                         QuoteDate: quoteDate,
                         PreparedBy: preparedBy,
-                        TotalAmount: grandTotal,
+                        TotalAmount: ownjobBasePriceForEnquiryQuoteTotal,
                         OwnJob: savePayload.ownJob,
                         LeadJob: savePayload.leadJob,
                         DigitalSignaturesJson: savePayload.digitalSignaturesJson,
@@ -9218,11 +9700,7 @@ const QuoteForm = () => {
                 const match = Array.isArray(refreshed)
                     ? refreshed.find((q) => String(quoteRowId(q) ?? '') === String(newId ?? ''))
                     : null;
-                if (match) {
-                    queueMicrotask(() =>
-                        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true })
-                    );
-                }
+                focusBrowseOnOwnjobWithQuote(match, newId, newQn);
 
                 return { ...data, id: newId, quoteNumber: newQn };
             } else {
@@ -9239,7 +9717,7 @@ const QuoteForm = () => {
         } finally {
             if (!isAutoSave) setSaving(false);
         }
-    }, [enquiryData, toName, quoteId, existingQuotes, getQuotePayload, calculatedTabs, pricingData, selectedJobs, fetchExistingQuotes, validateMandatoryFields, grandTotal, scopedEnquiryQuotesParams]);
+    }, [enquiryData, toName, quoteId, existingQuotes, getQuotePayload, calculatedTabs, pricingData, selectedJobs, fetchExistingQuotes, validateMandatoryFields, ownjobBasePriceForEnquiryQuoteTotal, scopedEnquiryQuotesParams, focusBrowseOnOwnjobWithQuote]);
 
     // Paste Handle
     useEffect(() => {
@@ -10408,31 +10886,35 @@ const QuoteForm = () => {
         return t;
     }, [preparedByContactFromMaster]);
 
-    /** Subjob tabs: A4 document header uses EnquiryQuotes row only (own-job tab uses left-panel state via memos above). */
+    /** Browse mode: A4 document header uses selected EnquiryQuotes row only (strict backend source). */
     const subjobQuoteA4HeaderDisplay = React.useMemo(() => {
-        const tab = (calculatedTabs || []).find((t) => String(t.id) === String(activeQuoteTab));
-        if (!tab?.isSubJobTab || !loadedEnquiryQuoteRowForPreview) return null;
+        if (!browsePreviousQuotesRevisions || !loadedEnquiryQuoteRowForPreview) return null;
         return buildSubjobQuoteHeaderDisplayFromRow(
             loadedEnquiryQuoteRowForPreview,
             usersList,
             preparedByOptions
         );
-    }, [calculatedTabs, activeQuoteTab, loadedEnquiryQuoteRowForPreview, usersList, preparedByOptions]);
+    }, [browsePreviousQuotesRevisions, loadedEnquiryQuoteRowForPreview, usersList, preparedByOptions]);
 
     /** Quote Ref line in A4 preview: saved quotes when browsing; Draft / *-Draft from left-panel ref when not. */
     const quoteRefDisplayForPreview = React.useMemo(() => {
         if (browsePreviousQuotesRevisions) {
-            const raw = subjobQuoteA4HeaderDisplay?.quoteNumber ?? quoteNumber ?? '';
+            const raw =
+                subjobQuoteA4HeaderDisplay?.quoteNumber ??
+                String(
+                    loadedEnquiryQuoteRowForPreview?.QuoteNumber ??
+                    loadedEnquiryQuoteRowForPreview?.quoteNumber ??
+                    ''
+                ).trim();
             return String(raw).trim() || 'Draft';
         }
         return quoteNumberToDraftDisplay(quoteNumber);
-    }, [browsePreviousQuotesRevisions, subjobQuoteA4HeaderDisplay, quoteNumber]);
+    }, [browsePreviousQuotesRevisions, subjobQuoteA4HeaderDisplay, loadedEnquiryQuoteRowForPreview, quoteNumber]);
 
     /**
-     * A4 cover "To," block: first tab = left form (`toName` / address).
-     * Direct subjob tab + loaded EnquiryQuotes row: always use **saved** ToName / ToAddress / contact from that row
-     * (LeadJob + RequestNo + OwnJob = active subjob tab; ToName = first-tab internal customer as stored — do not
-     * replace with the subjob tab label or `availableProfiles` for OwnJob, or preview shows wrong "To").
+     * A4 cover "To," block:
+     * - Browse mode ON: strict backend values from selected EnquiryQuotes row only (no left-panel fallback).
+     * - Browse mode OFF: left form values.
      */
     const quotePreviewToBlockDisplay = React.useMemo(() => {
         const baseForm = {
@@ -10445,20 +10927,16 @@ const QuoteForm = () => {
         /** Draft preview: always use left-panel recipient fields only (no DB row). */
         if (!browsePreviousQuotesRevisions) return baseForm;
 
-        const pick = (fromRow, fromForm) => {
-            const r = String(fromRow ?? '').trim();
-            return r || String(fromForm ?? '').trim();
-        };
         const sj = subjobQuoteA4HeaderDisplay;
         const row = loadedEnquiryQuoteRowForPreview;
         if (!sj || !row) return baseForm;
 
         return {
-            toName: pick(sj.toName, toName),
-            toAddress: pick(sj.toAddress, toAddress),
-            toPhone: pick(sj.toPhone, toPhone),
-            toFax: pick(sj.toFax, toFax),
-            toEmail: pick(sj.toEmail, toEmail),
+            toName: String(sj.toName || '').trim(),
+            toAddress: String(sj.toAddress || '').trim(),
+            toPhone: String(sj.toPhone || '').trim(),
+            toFax: String(sj.toFax || '').trim(),
+            toEmail: String(sj.toEmail || '').trim(),
         };
     }, [
         browsePreviousQuotesRevisions,
@@ -10471,12 +10949,13 @@ const QuoteForm = () => {
         toEmail,
     ]);
 
-    /** Browse mode + own-job tab with no previous quote: right-side preview must be blank. */
+    /** Browse mode + own/direct-subjob tab with no previous quote: right-side preview must be blank. */
     const shouldBlankQuotePreviewInBrowse = React.useMemo(() => {
         if (!browsePreviousQuotesRevisions) return false;
         if (!activeQuoteTab || !calculatedTabs?.length) return false;
         const tab = calculatedTabs.find((t) => String(t.id) === String(activeQuoteTab));
-        if (!tab?.isSelf) return false;
+        const isOwnOrDirectSubjobTab = !!(tab?.isSelf || tab?.isSubJobTab);
+        if (!isOwnOrDirectSubjobTab) return false;
         const rows = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab) || [];
         return rows.length === 0;
     }, [
@@ -11226,23 +11705,24 @@ const QuoteForm = () => {
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
                                 onClick={() => saveQuote()}
-                                disabled={saving || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted}
+                                disabled={disableSaveRevisionInBrowse || saving || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted}
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
                                     padding: '6px 12px',
-                                    background: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
-                                    color: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
+                                    background: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
+                                    color: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
                                     border: 'none',
                                     borderRadius: '44px',
-                                    cursor: (!canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
+                                    cursor: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
                                     fontWeight: '600',
                                     fontSize: '12px',
                                     opacity: saving ? 0.7 : 1
                                 }}
                                 title={
                                     saving ? 'Saving…' :
+                                    disableSaveRevisionInBrowse ? 'Disable "Previous Quotes / Revisions" to enable Save.' :
                                     isEditingRestricted ? 'Editing is restricted for this tab' :
                                     !canEdit() ? 'No permission to save (admin/lead access, pricing scope, or tab ownership required)' :
                                     !saveButtonScopeReady ? 'Loading quote scope…' :
@@ -11257,28 +11737,30 @@ const QuoteForm = () => {
                             {hasPersistedQuoteForScope && (
                                 <button
                                     onClick={handleRevise}
-                                    disabled={saving || !canEdit() || isEditingRestricted || !canRevisePersistedQuote}
+                                    disabled={disableSaveRevisionInBrowse || saving || !canEdit() || isEditingRestricted || !canRevisePersistedQuote}
                                     style={{
                                         display: 'flex',
                                         alignItems: 'center',
                                         gap: '6px',
                                         padding: '6px 12px',
                                         background:
-                                            !canEdit() || isEditingRestricted || !canRevisePersistedQuote
+                                            disableSaveRevisionInBrowse || !canEdit() || isEditingRestricted || !canRevisePersistedQuote
                                                 ? '#94a3b8'
                                                 : '#0284c7',
                                         color: 'white',
                                         border: 'none',
                                         borderRadius: '4px',
                                         cursor:
-                                            !canEdit() || isEditingRestricted || !canRevisePersistedQuote
+                                            disableSaveRevisionInBrowse || !canEdit() || isEditingRestricted || !canRevisePersistedQuote
                                                 ? 'not-allowed'
                                                 : 'pointer',
                                         fontWeight: '600',
                                         fontSize: '12px',
                                     }}
                                     title={
-                                        isEditingRestricted
+                                        disableSaveRevisionInBrowse
+                                            ? 'Disable "Previous Quotes / Revisions" to enable Revision.'
+                                            : isEditingRestricted
                                             ? 'Editing is restricted for this tab'
                                             : !canEdit()
                                               ? 'No permission to revise'
@@ -11392,26 +11874,7 @@ const QuoteForm = () => {
                                                 })();
 
                                                 let filteredQuotes = getFilteredQuotesForPreviousQuotesTab(activeTabObj.id);
-                                                if (
-                                                    browsePreviousQuotesRevisions &&
-                                                    activeTabObj?.isSubJobTab &&
-                                                    (!filteredQuotes || filteredQuotes.length === 0)
-                                                ) {
-                                                    const rn = String(enquiryData?.enquiry?.RequestNo ?? '').trim();
-                                                    const tabOwn = collapseSpacesLower(
-                                                        stripQuoteJobPrefix(activeTabObj.label || activeTabObj.name || '')
-                                                    );
-                                                    filteredQuotes = (existingQuotes || [])
-                                                        .filter((q) => String(q?.RequestNo ?? '').trim() === rn)
-                                                        .filter((q) => {
-                                                            const qOwn = collapseSpacesLower(
-                                                                stripQuoteJobPrefix(q?.OwnJob || '')
-                                                            );
-                                                            if (qOwn && tabOwn && qOwn === tabOwn) return true;
-                                                            return quoteNumberDivisionMatchesTab(q, activeTabObj, true);
-                                                        })
-                                                        .filter(quoteRevisionShowsInSignedOnlyList);
-                                                }
+                                                // Strict behavior: when a tab has no matching tuple rows, keep it blank.
 
                                                 // Group revisions
                                                 const quoteGroups = filteredQuotes.reduce((acc, q) => {
@@ -11709,13 +12172,71 @@ const QuoteForm = () => {
 
                                                     return true;
                                                 });
+                                                const pricingRowsForPanel =
+                                                    filteredPricing.length > 0 ? filteredPricing : pricingSummaryRowsForUi;
+                                                const pricingRowsFromDivisionValues = (() => {
+                                                    if (pricingRowsForPanel.length > 0) return [];
+                                                    const div = String(quoteListDivision || '').trim();
+                                                    if (!div) return [];
+                                                    const rows = Array.isArray(pricingData?.pricingValueRows)
+                                                        ? pricingData.pricingValueRows
+                                                        : [];
+                                                    if (rows.length === 0) return [];
+                                                    const optMap = new Map();
+                                                    (Array.isArray(pricingData?.options) ? pricingData.options : []).forEach((o) => {
+                                                        const id = String(o?.ID ?? o?.OptionID ?? o?.optionID ?? '').trim();
+                                                        if (!id) return;
+                                                        const nm = String(o?.OptionName ?? o?.optionName ?? '').trim();
+                                                        if (nm) optMap.set(id, nm);
+                                                    });
+                                                    const divNorm = collapseSpacesLower(stripQuoteJobPrefix(div));
+                                                    let baseTotal = 0;
+                                                    rows.forEach((r) => {
+                                                        const itemName = String(
+                                                            r?.EnquiryForItem ?? r?.enquiryForItem ?? ''
+                                                        ).trim();
+                                                        const itemNorm = collapseSpacesLower(stripQuoteJobPrefix(itemName));
+                                                        if (!itemNorm) return;
+                                                        if (!(itemNorm === divNorm || itemNorm.includes(divNorm) || divNorm.includes(itemNorm))) {
+                                                            return;
+                                                        }
+                                                        const optId = String(
+                                                            r?.OptionID ?? r?.optionID ?? r?.OptionId ?? ''
+                                                        ).trim();
+                                                        const po = String(
+                                                            r?.PriceOption ??
+                                                            r?.priceOption ??
+                                                            optMap.get(optId) ??
+                                                            'Base Price'
+                                                        ).trim();
+                                                        if (collapseSpacesLower(po) !== 'base price') return;
+                                                        const v = Number(r?.Price ?? r?.price ?? 0);
+                                                        if (!Number.isFinite(v)) return;
+                                                        baseTotal += v;
+                                                    });
+                                                    if (Math.abs(baseTotal) < 0.0005) return [];
+                                                    return [
+                                                        {
+                                                            name: div,
+                                                            total: baseTotal,
+                                                            items: [{ name: 'Base Price', total: baseTotal }],
+                                                        },
+                                                    ];
+                                                })();
+                                                const pricingRowsEffective =
+                                                    pricingRowsForPanel.length > 0
+                                                        ? pricingRowsForPanel
+                                                        : pricingRowsFromDivisionValues;
+                                                const pricingSelectionTouched = Boolean(
+                                                    pricingSelectionTouchedRef.current[pricingSelectionContextKey]
+                                                );
 
                                                 return (
                                                     <>
                                                         {quoteList.length > 0 ? quoteList : <div style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>No quotes for this tab.</div>}
 
-                                                        {/* Pricing Summary (Latest Price) — hidden while browsing saved quotes from backend */}
-                                                        {!browsePreviousQuotesRevisions && filteredPricing.length > 0 && (
+                                                        {/* Pricing Summary visible only when Previous Quotes is OFF */}
+                                                        {!browsePreviousQuotesRevisions && (
                                                             <div
                                                                 style={{
                                                                     padding: '8px',
@@ -11730,12 +12251,21 @@ const QuoteForm = () => {
                                                                 <h5 style={{ margin: '0 0 8px 0', fontSize: '11px', color: '#166534', fontWeight: '800' }}>
                                                                     PRICING SUMMARY (LATEST):{pricingSummaryBusy ? ' …' : ''}
                                                                 </h5>
-                                                                {filteredPricing.map((grp, i) => (
+                                                                {pricingRowsEffective.length === 0 && (
+                                                                    <div style={{ fontSize: '10px', color: '#64748b', fontStyle: 'italic' }}>
+                                                                        No pricing summary available.
+                                                                    </div>
+                                                                )}
+                                                                {pricingRowsEffective.map((grp, i) => (
                                                                     <div key={i} style={{ marginBottom: '6px', paddingBottom: '4px', borderBottom: '1px dashed #e2e8f0' }}>
                                                                         <div style={{ fontSize: '11px', fontWeight: '700', color: '#166534', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                                                             <input
                                                                                 type="checkbox"
-                                                                                checked={jobNameMatchesActiveJobsList(grp.name, selectedJobs)}
+                                                                                checked={
+                                                                                    pricingSelectionTouched
+                                                                                        ? jobNameMatchesActiveJobsList(grp.name, selectedJobs)
+                                                                                        : true
+                                                                                }
                                                                                 onChange={() => handleJobToggle(grp.name)}
                                                                             />
                                                                             {grp.name}
@@ -11754,8 +12284,16 @@ const QuoteForm = () => {
                                                                 <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '2px solid #bbf7d0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                                                     <span style={{ fontSize: '11px', fontWeight: '800', color: '#166534' }}>GRAND BASE PRICE TOTAL:</span>
                                                                     <span style={{ fontSize: '12px', fontWeight: '800', color: '#15803d' }}>
-                                                                        BD {filteredPricing
-                                                                            .filter((g) => jobNameMatchesActiveJobsList(g.name, selectedJobs))
+                                                                        BD {pricingRowsEffective
+                                                                            .filter((g) =>
+                                                                                pricingRowsForPanel.length > 0
+                                                                                    ? (
+                                                                                        pricingSelectionTouched
+                                                                                            ? jobNameMatchesActiveJobsList(g.name, selectedJobs)
+                                                                                            : true
+                                                                                    )
+                                                                                    : true
+                                                                            )
                                                                             .reduce((sum, g) => {
                                                                                 // Sum only Base Price items
                                                                                 const groupBase = g.items.reduce((s, i) => (i.name === 'Base Price' ? s + i.total : s), 0);
@@ -12129,8 +12667,30 @@ const QuoteForm = () => {
 
                                                 {expandedClause === contentKey && (
                                                     <div style={{ marginLeft: '32px' }}>
+                                                        {(() => {
+                                                            const editorHtml =
+                                                                !isCustom && contentKey === 'pricingTerms'
+                                                                    ? syncPricingTerms41LumpSumProse(
+                                                                          mergePricingTermsClauseHtml(
+                                                                              clauseContent[contentKey],
+                                                                              pricingTermsAutoTablePreviewHtml || '',
+                                                                              defaultClauses.pricingTerms
+                                                                          ),
+                                                                          fallbackGrandBaseTotal,
+                                                                          false,
+                                                                          numberToWordsBHD
+                                                                      )
+                                                                    : (isCustom
+                                                                          ? customClause.content
+                                                                          : clauseContent[contentKey]);
+                                                            return (
                                                         <ClauseEditor
-                                                            html={isCustom ? customClause.content : clauseContent[contentKey]}
+                                                            key={
+                                                                !isCustom && contentKey === 'pricingTerms'
+                                                                    ? `${contentKey}:${String(pricingTermsAutoTablePreviewHtml || '').length}:${String(fallbackGrandBaseTotal || 0)}`
+                                                                    : contentKey
+                                                            }
+                                                            html={editorHtml}
                                                             onChange={(val) => {
                                                                 if (isCustom) updateCustomClause(id, 'content', val);
                                                                 else updateClauseContent(contentKey, val);
@@ -12149,6 +12709,8 @@ const QuoteForm = () => {
                                                                 outline: 'none'
                                                             }}
                                                         />
+                                                            );
+                                                        })()}
                                                     </div>
                                                 )}
                                             </div>

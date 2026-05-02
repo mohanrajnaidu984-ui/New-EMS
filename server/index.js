@@ -170,104 +170,116 @@ const sendEnquiryEmail = async (enquiryData, recipients, attachments = []) => {
 
 // ... (keep existing code) ...
 
-// Updated createNotifications helper to fix syntax and logic
+const splitEmails = (raw) =>
+    String(raw || '')
+        .split(/[;,]/g)
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+
+// Optimized notification generation: bulk lookups + single-pass inserts.
 const createNotifications = async (requestNo, type, message, triggerUserEmail, triggerUserName) => {
     try {
         console.log('--- START NOTIFICATION GENERATION ---');
         console.log(`Request: ${requestNo}, Type: ${type}, Trigger: ${triggerUserName} (${triggerUserEmail})`);
 
-        let recipientEmails = new Set();
+        const recipientEmails = new Set();
 
-        // 1. Get Enquiry Details (CreatedBy)
+        // 1) Creator + Concerned SE names
         const enqRes = await sql.query`SELECT CreatedBy FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
-        let createdBy = '';
-        if (enqRes.recordset.length > 0) {
-            createdBy = enqRes.recordset[0].CreatedBy;
-            console.log(`Enquiry Created By: ${createdBy}`);
-        }
-
-        // A. Add Creator
-        if (createdBy) {
-            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${createdBy}`;
-            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
-                const email = u.recordset[0].EmailId.trim().toLowerCase();
-                recipientEmails.add(email);
-                console.log(`Added Creator Email: ${email}`);
-            }
-        }
-
-        // B. Add Concerned SEs
+        const createdBy = String(enqRes.recordset?.[0]?.CreatedBy || '').trim();
         const seRes = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
-        console.log(`Found ${seRes.recordset.length} Concerned SEs linked.`);
-        for (const row of seRes.recordset) {
-            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${row.SEName}`;
-            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
-                const email = u.recordset[0].EmailId.trim().toLowerCase();
-                recipientEmails.add(email);
-                console.log(`Added Concerned SE Email: ${email} (Name: ${row.SEName})`);
-            }
-        }
+        const seNames = [
+            createdBy,
+            ...(seRes.recordset || []).map((r) => String(r.SEName || '').trim()),
+        ].filter(Boolean);
 
-        // C. Add Enquiry For Items -> Emails (Division Members)
-        const itemRes = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
-        console.log(`Found ${itemRes.recordset.length} Enquiry Items linked.`);
-        if (itemRes.recordset.length > 0) {
-            for (const itemRow of itemRes.recordset) {
-                const mItem = await sql.query`SELECT CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName = ${itemRow.ItemName}`;
-                if (mItem.recordset.length > 0) {
-                    const { CommonMailIds, CCMailIds } = mItem.recordset[0];
-                    if (CommonMailIds) {
-                        CommonMailIds.split(',').forEach(e => {
-                            const email = e.trim().toLowerCase();
-                            if (email) {
-                                recipientEmails.add(email);
-                                console.log(`Added CommonMailId: ${email} (Item: ${itemRow.ItemName})`);
-                            }
-                        });
-                    }
-                    if (CCMailIds) {
-                        CCMailIds.split(',').forEach(e => {
-                            const email = e.trim().toLowerCase();
-                            if (email) {
-                                recipientEmails.add(email);
-                                console.log(`Added CCMailId: ${email} (Item: ${itemRow.ItemName})`);
-                            }
-                        });
-                    }
+        if (seNames.length > 0) {
+            const req = new sql.Request();
+            const params = [];
+            seNames.forEach((name, i) => {
+                const p = `n${i}`;
+                req.input(p, sql.NVarChar, name);
+                params.push(`@${p}`);
+            });
+            const usersRes = await req.query(`
+                SELECT EmailId FROM Master_ConcernedSE WHERE LTRIM(RTRIM(FullName)) IN (${params.join(', ')})
+            `);
+            for (const u of usersRes.recordset || []) {
+                const email = String(u.EmailId || '').trim().toLowerCase();
+                if (email) {
+                    recipientEmails.add(email);
                 }
             }
         }
 
-        // Remove Trigger User
+        // 2) EnquiryFor ItemName -> Common/CC mail ids (bulk)
+        const itemRes = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
+        const itemNames = [...new Set((itemRes.recordset || []).map((r) => String(r.ItemName || '').trim()).filter(Boolean))];
+        if (itemNames.length > 0) {
+            const req = new sql.Request();
+            const params = [];
+            itemNames.forEach((name, i) => {
+                const p = `it${i}`;
+                req.input(p, sql.NVarChar, name);
+                params.push(`@${p}`);
+            });
+            const masterRes = await req.query(`
+                SELECT ItemName, CommonMailIds, CCMailIds
+                FROM Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ItemName)) IN (${params.join(', ')})
+            `);
+            for (const row of masterRes.recordset || []) {
+                splitEmails(row.CommonMailIds).forEach((e) => recipientEmails.add(e));
+                splitEmails(row.CCMailIds).forEach((e) => recipientEmails.add(e));
+            }
+        }
+
+        // 3) Remove trigger user
         if (triggerUserEmail) {
-            const triggerEmailLower = triggerUserEmail.trim().toLowerCase();
-            if (recipientEmails.has(triggerEmailLower)) {
-                recipientEmails.delete(triggerEmailLower);
-                console.log(`Removed Trigger User Email: ${triggerEmailLower}`);
-            }
+            recipientEmails.delete(String(triggerUserEmail).trim().toLowerCase());
         }
 
-        console.log('Final Recipient List:', Array.from(recipientEmails));
-
-        // Insert
-        for (const email of recipientEmails) {
-            const u = await sql.query`SELECT ID FROM Master_ConcernedSE WHERE EmailId = ${email}`;
-            if (u.recordset.length > 0) {
-                const userId = u.recordset[0].ID;
-                const now = new Date();
-                await sql.query`
-                    INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy, CreatedAt)
-                    VALUES (${userId}, ${type}, ${message}, ${requestNo}, ${triggerUserName}, ${now})
-                 `;
-                console.log(`Notification inserted for UserID: ${userId} (${email})`);
-            } else {
-                console.log(`WARNING: No UserID found for email: ${email} - Notification skipped.`);
-            }
+        const finalEmails = [...recipientEmails];
+        console.log('Final Recipient List:', finalEmails);
+        if (finalEmails.length === 0) {
+            console.log('--- END NOTIFICATION GENERATION (no recipients) ---');
+            return;
         }
+
+        // 4) Resolve UserIDs in one query
+        const userReq = new sql.Request();
+        const emailParams = [];
+        finalEmails.forEach((email, i) => {
+            const p = `e${i}`;
+            userReq.input(p, sql.NVarChar, email);
+            emailParams.push(`@${p}`);
+        });
+        const users = await userReq.query(`
+            SELECT ID, LOWER(LTRIM(RTRIM(EmailId))) AS EmailIdNorm
+            FROM Master_ConcernedSE
+            WHERE LOWER(LTRIM(RTRIM(EmailId))) IN (${emailParams.join(', ')})
+        `);
+        const now = new Date();
+        for (const u of users.recordset || []) {
+            await sql.query`
+                INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy, CreatedAt)
+                VALUES (${u.ID}, ${type}, ${message}, ${requestNo}, ${triggerUserName}, ${now})
+            `;
+            console.log(`Notification inserted for UserID: ${u.ID} (${u.EmailIdNorm})`);
+        }
+
         console.log('--- END NOTIFICATION GENERATION ---');
     } catch (e) {
         console.error('CRITICAL ERROR creating notifications:', e);
     }
+};
+
+const queueCreateNotifications = (requestNo, type, message, triggerUserEmail, triggerUserName) => {
+    setImmediate(() => {
+        createNotifications(requestNo, type, message, triggerUserEmail, triggerUserName).catch((e) => {
+            console.error('queueCreateNotifications error:', e);
+        });
+    });
 };
 
 // Ensure uploads directory exists
@@ -934,7 +946,10 @@ app.get('/api/enquiries/check-project-name', async (req, res) => {
 // Add Enquiry
 app.post('/api/enquiries', async (req, res) => {
     const logFile = path.join(__dirname, 'debug.log');
-    const log = (msg) => fs.appendFileSync(logFile, `${new Date().toISOString()} - ${msg}\n`);
+    const log = (msg) => {
+        if (process.env.ENQUIRY_DEBUG_LOG !== '1') return;
+        fs.appendFile(logFile, `${new Date().toISOString()} - ${msg}\n`, () => {});
+    };
 
     try {
         log(`POST /api/enquiries Body: ${JSON.stringify(req.body, null, 2)}`);
@@ -1167,14 +1182,10 @@ app.post('/api/enquiries', async (req, res) => {
             }
         };
 
-        await insertRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers, transaction);
-        await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes, transaction);
         await insertRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor, transaction);
         await normalizeEnquiryForLeadMeta(RequestNo, transaction);
-        await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs, transaction);
-        await insertRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants, transaction);
-
-        if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+        const insertReceivedFrom = async () => {
+            if (!SelectedReceivedFroms || SelectedReceivedFroms.length === 0) return;
             for (const item of SelectedReceivedFroms) {
                 const [contact, company] = item.split('|');
                 const r = new sql.Request(transaction);
@@ -1183,7 +1194,12 @@ app.post('/api/enquiries', async (req, res) => {
                 r.input('company', sql.NVarChar, company);
                 await r.query(`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (@reqNo, @contact, @company)`);
             }
-        }
+        };
+        await insertRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers, transaction);
+        await insertRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes, transaction);
+        await insertRelated('ConcernedSE', 'SEName', SelectedConcernedSEs, transaction);
+        await insertRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants, transaction);
+        await insertReceivedFrom();
 
 
 
@@ -1254,181 +1270,68 @@ app.post('/api/enquiries', async (req, res) => {
 
         await transaction.commit();
 
-        // --- Email Notification Logic ---
-        try {
-            console.log('Starting Email Logic...');
-            console.log('SelectedEnquiryFor:', SelectedEnquiryFor);
-            console.log('SelectedConcernedSEs:', SelectedConcernedSEs);
-
-            // 1. Fetch Emails for Enquiry Items (To: CommonMailIds, CC: CCMailIds)
-            let itemTo = [];
-            let itemCC = [];
-            if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
-                const itemsStr = SelectedEnquiryFor.map(i => {
-                    const name = (typeof i === 'string') ? i : (i.itemName || '');
-                    return `'${name.replace(/'/g, "''")}'`;
-                }).join(',');
-                const itemsRes = await sql.query(`SELECT CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
-                itemsRes.recordset.forEach(row => {
-                    if (row.CommonMailIds) itemTo.push(...row.CommonMailIds.split(',').map(e => e.trim()));
-                    if (row.CCMailIds) itemCC.push(...row.CCMailIds.split(',').map(e => e.trim()));
-                });
-            }
-
-            // 2. Fetch Emails for Concerned SEs (To)
-            if (SelectedConcernedSEs && SelectedConcernedSEs.length > 0) {
-                const sesStr = SelectedConcernedSEs.map(s => `'${s}'`).join(',');
-                const seRes = await sql.query(`SELECT EmailId FROM Master_ConcernedSE WHERE FullName IN (${sesStr})`);
-                seRes.recordset.forEach(row => {
-                    if (row.EmailId) itemTo.push(row.EmailId.trim());
-                });
-            }
-
-            // Deduplicate
-            const uniqueTo = [...new Set(itemTo)].filter(Boolean);
-            const uniqueCC = [...new Set(itemCC)].filter(Boolean);
-
-            console.log('Recipients To:', uniqueTo);
-            console.log('Recipients CC:', uniqueCC);
-
-            // Prepare Data for Email
-            const emailData = {
-                RequestNo,
-                EnquiryDate,
-                ReceivedFrom: SelectedReceivedFroms ? SelectedReceivedFroms.map(i => i.split('|')[0]).join(', ') : '',
-                EnquiryType: SelectedEnquiryTypes ? SelectedEnquiryTypes.join(', ') : '',
-                ProjectName,
-                ClientName,
-                ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
-                DetailsOfEnquiry,
-                DueOn,
-                DocumentsReceived,
-                Remark
-            };
-
-            // Send Email (Async - Do not await to speed up UI)
-            // COMMENTED OUT: Logic moved to /api/enquiries/notify to handle attachments
-            // sendEnquiryEmail(emailData, { to: uniqueTo, cc: uniqueCC })
-            //    .then(() => log('Internal Enquiry Email sent successfully'))
-            //    .catch(err => log(`Error sending Internal Enquiry Email: ${err.message}`));
-
-            // New Email Logic
-            console.log(`[Email Debug] Checking AutoAck: '${AutoAck}' (Type: ${typeof AutoAck})`);
-            if (AutoAck === true || AutoAck === 'true') {
-                console.log('--- AUTOACK STARTING ---');
-                log('Processing AutoAck...');
-                // Trigger sending email asynchronously
-                (async () => {
-                    try {
-                        log('AutoAck is true, preparing to send acknowledgement emails...');
-
-                        const emailData = {
-                            RequestNo: RequestNo,
-                            EnquiryDate: EnquiryDate,
-                            CustomerName: SelectedCustomers ? SelectedCustomers.join(', ') : '',
-                            ProjectName: ProjectName,
-                            ClientName: ClientName,
-                            ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
-                            DetailsOfEnquiry: DetailsOfEnquiry
-                        };
-
-                        // 1. Fetch CC Email
-                        let ccString = '';
-                        if (AcknowledgementSE) {
-                            const ccRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${AcknowledgementSE}`;
-                            if (ccRes.recordset.length > 0 && ccRes.recordset[0].EmailId) {
-                                ccString = ccRes.recordset[0].EmailId;
-                                log(`CC found: ${ccString}`);
-                            } else {
-                                log(`CC NOT found for AcknowledgementSE: ${AcknowledgementSE}`);
-                            }
+        // Post-commit tasks (emails + notifications) should not block API response.
+        setImmediate(async () => {
+            try {
+                if (AutoAck === true || AutoAck === 'true') {
+                    log('Processing AutoAck...');
+                    const emailData = {
+                        RequestNo,
+                        EnquiryDate,
+                        CustomerName: SelectedCustomers ? SelectedCustomers.join(', ') : '',
+                        ProjectName,
+                        ClientName,
+                        ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
+                        DetailsOfEnquiry,
+                    };
+                    let ccString = '';
+                    if (AcknowledgementSE) {
+                        const ccRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${AcknowledgementSE}`;
+                        if (ccRes.recordset.length > 0 && ccRes.recordset[0].EmailId) {
+                            ccString = ccRes.recordset[0].EmailId;
                         }
-
-                        // 2. Fetch To Emails (Selected Received From Contacts)
-                        if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
-                            log(`Proccessing ${SelectedReceivedFroms.length} contacts for AutoAck`);
-                            const processedEmails = new Set();
-
-                            for (const item of SelectedReceivedFroms) {
-                                const [contact, company] = item.split('|');
-                                log(`Looking up email for Contact: ${contact}, Company: ${company}`);
-                                // Fetch email for this specific contact
-                                const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
-
-                                if (rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId) {
-                                    const recipientEmail = rfRes.recordset[0].EmailId.trim();
-                                    log(`Found email: ${recipientEmail}`);
-
-                                    // Avoid sending duplicate emails to the same address for the same request
-                                    if (!processedEmails.has(recipientEmail)) {
-                                        // 3. Fetch CC Emails from Enquiry Items (Master_EnquiryFor)
-                                        let itemCCs = [];
-                                        if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
-                                            const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
-                                            try {
-                                                const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
-                                                itemsRes.recordset.forEach(row => {
-                                                    if (row.CCMailIds) {
-                                                        const emails = row.CCMailIds.split(',').map(e => e.trim().toLowerCase());
-                                                        itemCCs.push(...emails);
-                                                    }
-                                                });
-                                            } catch (ccErr) {
-                                                log(`Error fetching Item CCs: ${ccErr.message}`);
-                                            }
-                                        }
-
-                                        // Combine relevant CCs (AcknowledgementSE + Item CCs)
-                                        let allCCs = [];
-                                        if (ccString) allCCs.push(ccString);
-                                        if (itemCCs.length > 0) allCCs.push(...itemCCs);
-
-                                        // Deduplicate CCs
-                                        const uniqueCCs = [...new Set(allCCs)].filter(Boolean);
-                                        const finalCCString = uniqueCCs.join(',');
-
-                                        log(`Sending acknowledgement to Received From: ${contact} (${recipientEmail}) CC: ${finalCCString}`);
-                                        log(`Item CCs found: ${itemCCs.join(', ')}`);
-
-                                        try {
-                                            const sent = await sendAcknowledgementEmail(emailData, recipientEmail, finalCCString, ceosign);
-                                            if (sent) {
-                                                log(`Email sent successfully to ${recipientEmail}`);
-                                                processedEmails.add(recipientEmail);
-                                            } else {
-                                                log(`Failed to send email to ${recipientEmail}`);
-                                            }
-                                        } catch (e) {
-                                            log(`Error sending email to ${recipientEmail}: ${e.stack || e}`);
-                                        }
-                                    } else {
-                                        log(`Email ${recipientEmail} already processed in this batch.`);
-                                    }
-                                } else {
-                                    log(`No email found for Received From contact: ${contact} (${company})`);
-                                    // Try fallback query just by ContactName if Company might be mismatched? No, stay strict.
-                                }
-                            }
-                        } else {
-                            log('No Received From contacts selected. Skipping acknowledgement email.');
-                        }
-                    } catch (err) {
-                        log(`Async Email Error: ${err.message}\n${err.stack}`);
                     }
-                })();
-            } else {
-                log('AutoAck is false, skipping email');
+                    if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                        const processedEmails = new Set();
+                        for (const item of SelectedReceivedFroms) {
+                            const [contact, company] = item.split('|');
+                            const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
+                            if (!(rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId)) continue;
+                            const recipientEmail = rfRes.recordset[0].EmailId.trim();
+                            if (processedEmails.has(recipientEmail)) continue;
+                            let itemCCs = [];
+                            if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
+                                const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
+                                const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
+                                itemsRes.recordset.forEach(row => {
+                                    if (row.CCMailIds) {
+                                        itemCCs.push(...row.CCMailIds.split(',').map(e => e.trim().toLowerCase()));
+                                    }
+                                });
+                            }
+                            const finalCCString = [...new Set([...(ccString ? [ccString] : []), ...itemCCs])].filter(Boolean).join(',');
+                            await sendAcknowledgementEmail(emailData, recipientEmail, finalCCString, ceosign);
+                            processedEmails.add(recipientEmail);
+                        }
+                    }
+                }
+            } catch (emailErr) {
+                console.error('Failed async post-create email notification:', emailErr);
             }
-
-        } catch (emailErr) {
-            console.error('Failed to send email notification:', emailErr);
-            // Don't fail the request if email fails, just log it
-        }
-
-        // Notification
-        const currentUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${req.body.CreatedBy}`;
-        const currentUserEmail = currentUserEmailRes.recordset.length > 0 ? currentUserEmailRes.recordset[0].EmailId : null;
-        await createNotifications(RequestNo, 'New Enquiry', `New Enquiry ${RequestNo} created by ${req.body.CreatedBy}`, currentUserEmail, req.body.CreatedBy);
+            try {
+                const currentUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${req.body.CreatedBy}`;
+                const currentUserEmail = currentUserEmailRes.recordset.length > 0 ? currentUserEmailRes.recordset[0].EmailId : null;
+                queueCreateNotifications(
+                    RequestNo,
+                    'New Enquiry',
+                    `New Enquiry created ${RequestNo} for ${req.body.ProjectName || req.body.projectName || '-'} by ${req.body.CreatedBy}`,
+                    currentUserEmail,
+                    req.body.CreatedBy
+                );
+            } catch (notifErr) {
+                console.error('Failed async post-create notifications:', notifErr);
+            }
+        });
 
         res.status(201).json({ message: 'Enquiry created' });
     } catch (err) {
@@ -1841,6 +1744,11 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 WHERE RequestNo = ${reqNo}
             `;
             const existingRows = existingRes.recordset || [];
+            const existingById = new Map(
+                existingRows
+                    .filter((r) => Number.isFinite(Number(r.ID)))
+                    .map((r) => [Number(r.ID), r])
+            );
             const existingIds = new Set(existingRows.map((r) => Number(r.ID)).filter((n) => Number.isFinite(n)));
 
             // 2) Normalize payload items
@@ -1968,10 +1876,14 @@ app.put('/api/enquiries/:id', async (req, res) => {
                 pass += 1;
             }
 
-            // 6) Update existing rows in place + set correct ParentID (for both old and newly inserted)
+            // 6) Update only existing rows that actually changed.
+            // Newly inserted rows already have final values from step 5, so skip redundant UPDATEs.
             for (const item of normalized) {
-                const finalId = item.id != null ? Number(item.id) : Number(idMap[String(item.tempId)]);
+                if (item.id == null) continue;
+                const finalId = Number(item.id);
                 if (!Number.isFinite(finalId)) continue;
+                const prev = existingById.get(finalId);
+                if (!prev) continue;
 
                 const parentRaw = item.parentId;
                 let parentResolved = null;
@@ -1983,12 +1895,24 @@ app.put('/api/enquiries/:id', async (req, res) => {
                     parentResolved = Number(idMap[String(parentRaw)]);
                 }
 
+                const nextCode = item.leadJobCode || null;
+                const nextLeadName = item.leadJobName || null;
+                const nextItemName = item.itemName;
+                const prevParent = prev.ParentID == null ? null : Number(prev.ParentID);
+                const hasChange =
+                    String(prev.ItemName || '') !== String(nextItemName || '') ||
+                    String(prev.LeadJobCode || '') !== String(nextCode || '') ||
+                    String(prev.LeadJobName || '') !== String(nextLeadName || '') ||
+                    (Number.isFinite(prevParent) ? prevParent : null) !== parentResolved;
+
+                if (!hasChange) continue;
+
                 const u = new sql.Request();
                 u.input('reqNo', sql.NVarChar, reqNo);
                 u.input('id', sql.Int, finalId);
-                u.input('code', sql.NVarChar, item.leadJobCode || null);
-                u.input('lname', sql.NVarChar, item.leadJobName || null);
-                u.input('val', sql.NVarChar, item.itemName);
+                u.input('code', sql.NVarChar, nextCode);
+                u.input('lname', sql.NVarChar, nextLeadName);
+                u.input('val', sql.NVarChar, nextItemName);
                 u.input('pId', sql.Int, parentResolved);
                 await u.query(
                     `UPDATE EnquiryFor
@@ -2149,28 +2073,30 @@ app.put('/api/enquiries/:id', async (req, res) => {
             }
         };
 
-        await updateRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers);
-        await updateRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes);
         await updateRelated('EnquiryFor', 'ItemName', SelectedEnquiryFor);
         await normalizeEnquiryForLeadMeta(id);
-        await updateRelated('ConcernedSE', 'SEName', SelectedConcernedSEs);
-        await updateRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants);
-
-        // ReceivedFrom has multiple columns, handle separately if needed, or just ContactName/CompanyName
-        // For now assuming simple string or split logic similar to POST
-        const delRF = new sql.Request();
-        delRF.input('reqNo', sql.NVarChar, id);
-        await delRF.query(`DELETE FROM ReceivedFrom WHERE RequestNo = @reqNo`);
-        if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
-            for (const item of SelectedReceivedFroms) {
-                const [contact, company] = item.split('|');
-                const req = new sql.Request();
-                req.input('RequestNo', sql.NVarChar, id);
-                req.input('ContactName', sql.NVarChar, contact);
-                req.input('CompanyName', sql.NVarChar, company);
-                await req.query(`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (@RequestNo, @ContactName, @CompanyName)`);
+        const updateReceivedFrom = async () => {
+            const delRF = new sql.Request();
+            delRF.input('reqNo', sql.NVarChar, id);
+            await delRF.query(`DELETE FROM ReceivedFrom WHERE RequestNo = @reqNo`);
+            if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
+                for (const item of SelectedReceivedFroms) {
+                    const [contact, company] = item.split('|');
+                    const req = new sql.Request();
+                    req.input('RequestNo', sql.NVarChar, id);
+                    req.input('ContactName', sql.NVarChar, contact);
+                    req.input('CompanyName', sql.NVarChar, company);
+                    await req.query(`INSERT INTO ReceivedFrom (RequestNo, ContactName, CompanyName) VALUES (@RequestNo, @ContactName, @CompanyName)`);
+                }
             }
-        }
+        };
+        await Promise.all([
+            updateRelated('EnquiryCustomer', 'CustomerName', SelectedCustomers),
+            updateRelated('EnquiryType', 'TypeName', SelectedEnquiryTypes),
+            updateRelated('ConcernedSE', 'SEName', SelectedConcernedSEs),
+            updateRelated('EnquiryConsultant', 'ConsultantName', SelectedConsultants),
+            updateReceivedFrom(),
+        ]);
 
 
         // Send Acknowledgement Email on Update if checked - REMOVED per user request
@@ -2180,7 +2106,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
         const modBy = req.body.ModifiedBy || 'System';
         const modUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${modBy}`;
         const modUserEmail = modUserEmailRes.recordset.length > 0 ? modUserEmailRes.recordset[0].EmailId : null;
-        await createNotifications(id, 'Enquiry Update', `Enquiry ${id} updated by ${modBy}`, modUserEmail, modBy);
+        queueCreateNotifications(id, 'Enquiry Update', `Enquiry ${id} updated by ${modBy}`, modUserEmail, modBy);
 
         res.json({ message: 'Enquiry updated' });
     } catch (err) {

@@ -9,7 +9,7 @@ import ProbabilityForm from './Probability/ProbabilityForm';
 import SalesReport from './SalesReport/SalesReport';
 import SalesTarget from './SalesTarget/SalesTarget';
 
-const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
+const Main = ({ activeTab, onNavigate, enquiryToOpen, openContext, onOpenEnquiry }) => {
     return (
         <div>
             {/* Tab Content */}
@@ -21,10 +21,10 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, onOpenEnquiry }) => {
                     <EnquiryForm requestNoToOpen={enquiryToOpen} />
                 )}
                 {activeTab === 'Pricing' && (
-                    <PricingForm />
+                    <PricingForm openContext={openContext} />
                 )}
                 {activeTab === 'Quote' && (
-                    <QuoteForm />
+                    <QuoteForm openContext={openContext} />
                 )}
                 {activeTab === 'Probability' && (
                     <ProbabilityForm />

@@ -12,6 +12,108 @@ function logToFile(message) {
     fs.appendFileSync(debugLogPath, `[${timestamp}] ${message}\n`);
 }
 
+function parseMailCsv(raw) {
+    return String(raw || '')
+        .split(/[;,]/g)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+async function notifyParentJobPricingUpdate({
+    requestNo,
+    enquiryForId,
+    ownJobName,
+    updatedBy,
+    priceValue,
+    priceOption,
+}) {
+    try {
+        if (!requestNo) return;
+        const ownTrim = String(ownJobName || '').trim();
+        if (!enquiryForId && !ownTrim) return;
+
+        let triggerEmail = '';
+        const updater = String(updatedBy || '').trim();
+        if (updater.includes('@')) {
+            triggerEmail = updater.toLowerCase();
+        } else if (updater) {
+            const u = await sql.query`SELECT TOP 1 EmailId FROM Master_ConcernedSE WHERE FullName = ${updater}`;
+            triggerEmail = String(u.recordset?.[0]?.EmailId || '').trim().toLowerCase();
+        }
+
+        const jobRes = await sql.query`
+            SELECT TOP 1 ID, ParentID, ItemName
+            FROM EnquiryFor
+            WHERE RequestNo = ${requestNo}
+              AND (
+                    (${enquiryForId || null} IS NOT NULL AND ID = ${enquiryForId || null})
+                    OR (${ownTrim} <> '' AND LTRIM(RTRIM(ISNULL(ItemName, N''))) = ${ownTrim})
+                  )
+            ORDER BY CASE WHEN ID = ${enquiryForId || null} THEN 0 ELSE 1 END, ID
+        `;
+        const job = jobRes.recordset?.[0];
+        if (!job || !job.ParentID || String(job.ParentID) === '0') return; // own/lead job, not subjob
+
+        const parentRes = await sql.query`
+            SELECT TOP 1 ID, ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo} AND ID = ${job.ParentID}
+        `;
+        const parent = parentRes.recordset?.[0];
+        if (!parent) return;
+
+        const parentJobName = String(parent.ItemName || '').trim();
+        const subJobName = String(job.ItemName || ownTrim || '').trim();
+        if (!parentJobName || !subJobName) return;
+
+        const recipientEmails = new Set();
+
+        const mef = await sql.query`
+            SELECT TOP 1 CommonMailIds, CCMailIds FROM Master_EnquiryFor WHERE ItemName = ${parentJobName}
+        `;
+        if (mef.recordset?.length) {
+            parseMailCsv(mef.recordset[0].CommonMailIds).forEach((e) => recipientEmails.add(e));
+            parseMailCsv(mef.recordset[0].CCMailIds).forEach((e) => recipientEmails.add(e));
+        }
+
+        const deptUsers = await sql.query`
+            SELECT EmailId FROM Master_ConcernedSE WHERE LTRIM(RTRIM(ISNULL(Department, N''))) = ${parentJobName}
+        `;
+        for (const r of deptUsers.recordset || []) {
+            const em = String(r.EmailId || '').trim().toLowerCase();
+            if (em) recipientEmails.add(em);
+        }
+
+        if (triggerEmail) recipientEmails.delete(triggerEmail);
+        if (recipientEmails.size === 0) return;
+
+        const linkPayload = JSON.stringify({
+            tab: 'Pricing',
+            requestNo: String(requestNo),
+            enquiryForId: String(job.ID),
+            parentJob: parentJobName,
+            subJob: subJobName,
+        });
+        const enq = await sql.query`
+            SELECT TOP 1 ProjectName FROM EnquiryMaster WHERE RequestNo = ${requestNo}
+        `;
+        const projectName = String(enq.recordset?.[0]?.ProjectName || '').trim();
+        const type = 'Subjob Pricing Update';
+        const message = `Price updated by ${subJobName} for ${requestNo}, ${projectName || '-'}`;
+        const now = new Date();
+
+        for (const email of recipientEmails) {
+            const u = await sql.query`SELECT TOP 1 ID FROM Master_ConcernedSE WHERE LOWER(LTRIM(RTRIM(EmailId))) = ${email}`;
+            const userId = u.recordset?.[0]?.ID;
+            if (!userId) continue;
+            await sql.query`
+                INSERT INTO Notifications (UserID, Type, Message, LinkID, CreatedBy, CreatedAt)
+                VALUES (${userId}, ${type}, ${message}, ${linkPayload}, ${updater || 'System'}, ${now})
+            `;
+        }
+    } catch (err) {
+        console.error('[pricing notify] parent-job subjob update', err);
+    }
+}
+
 /**
  * node-mssql recordsets may use PascalCase, camelCase, or lowercase keys depending on driver/config.
  * Pending/quote logic expects stable field names.
@@ -768,6 +870,22 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             .filter(c => reqNoEq(c.RequestNo, enq.RequestNo))
             .map(c => (c.CustomerName || '').trim())
             .filter(Boolean);
+        const customerHeaderPool = Array.from(
+            new Set(
+                [
+                    ...enquiryCustomerNames,
+                    ...externalCustomers.filter((c) => isExternalPricingCustomer(c)),
+                    ...Array.from(optionCustomers).filter((c) => isExternalPricingCustomer(c)),
+                ]
+                    .map((c) => String(c || '').trim())
+                    .filter(Boolean)
+            )
+        );
+        const externalCustomerKeySet = new Set(
+            customerHeaderPool
+                .map((name) => normPricingCustomerKey(name))
+                .filter(Boolean)
+        );
 
         /**
          * Pending list customer column keys (Nass, Alkomed, …): used so division-internal base rows
@@ -776,12 +894,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
          */
         const listCustomerKeyIsEnquiryExternal = (wantKey) => {
             if (!wantKey) return false;
-            return (
-                enquiryCustomerNames.some((name) => normPricingCustomerKey(name) === wantKey) ||
-                externalCustomers.some(
-                    (c) => isExternalPricingCustomer(c) && normPricingCustomerKey(c) === wantKey
-                )
-            );
+            return externalCustomerKeySet.has(wantKey);
         };
 
         const hasSubjobAnchors = myJobs.some((j) => j.ParentID && String(j.ParentID) !== '0' && j.ParentID !== 0);
@@ -832,7 +945,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 });
                 return Array.from(set);
             })();
-            enquiryCustomerNames.forEach((c) => {
+            customerHeaderPool.forEach((c) => {
                 if (leadCodes.length === 0) {
                     addDistinctCustomer(c);
                 } else {
@@ -1377,8 +1490,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                     );
                     const headerName = namesForLead.length
                         ? namesForLead.join(', ')
-                        : enquiryCustomerNames.length > 0
-                          ? enquiryCustomerNames.map((c) => withLeadCode(c, leadCodeR)).join(', ')
+                        : customerHeaderPool.length > 0
+                          ? customerHeaderPool.map((c) => withLeadCode(c, leadCodeR)).join(', ')
                           : externalCustomers
                                 .filter((c) => isExternalPricingCustomer(c))
                                 .map((c) => withLeadCode(c, leadCodeR))
@@ -1443,7 +1556,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             const rootsWithExternalOwnjobHeader = new Set();
             const leadHeaderExternalsAvailable =
                 hasLeadAnchors &&
-                (enquiryCustomerNames.length > 0 ||
+                (customerHeaderPool.length > 0 ||
                     externalCustomers.some((c) => isExternalPricingCustomer(c)));
             if (leadHeaderExternalsAvailable) {
                 visualRoots.forEach((root) => {
@@ -1456,8 +1569,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                     );
                     const headerName = namesForLead.length
                         ? namesForLead.join(', ')
-                        : enquiryCustomerNames.length > 0
-                          ? enquiryCustomerNames.map((c) => withLeadCode(c, leadCodeR)).join(', ')
+                        : customerHeaderPool.length > 0
+                          ? customerHeaderPool.map((c) => withLeadCode(c, leadCodeR)).join(', ')
                           : externalCustomers
                                 .filter((c) => isExternalPricingCustomer(c))
                                 .map((c) => withLeadCode(c, leadCodeR))
@@ -1721,8 +1834,8 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 );
                 if (namesForLead.length > 0) {
                     customerHeaderEntries = namesForLead.map((n) => String(n).trim()).filter(Boolean);
-                } else if (enquiryCustomerNames.length > 0) {
-                    customerHeaderEntries = enquiryCustomerNames
+                } else if (customerHeaderPool.length > 0) {
+                    customerHeaderEntries = customerHeaderPool
                         .map((c) => withLeadCode(c, leadCodeR))
                         .filter(Boolean);
                 } else {
@@ -1921,12 +2034,70 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             rootKeyOrder.push(k);
         }
         const pricingJobForestDeduped = rootKeyOrder.map((k) => bestRootByKey.get(k).node);
+        const pricingJobForestScoped = (() => {
+            if (!divisionTrim) return pricingJobForestDeduped;
+            const keepNodeByLabel = (label) => {
+                const lbl = String(label || '').trim();
+                if (!lbl) return false;
+                if (departmentMatchesItemName(divisionTrim.trim(), lbl)) return true;
+                const ck = normPricingCustomerKey(lbl);
+                if (ck && listCustomerKeyIsEnquiryExternal(ck)) return true;
+                return false;
+            };
+            const prune = (node) => {
+                if (!node) return null;
+                const children = Array.isArray(node.children)
+                    ? node.children.map((c) => prune(c)).filter(Boolean)
+                    : [];
+                // Keep non-division internal subjobs when they already carry a real priced value.
+                // This avoids hiding priced subjob lines in "Individual & Subjob Base prices".
+                const keepSelf =
+                    keepNodeByLabel(node.label) ||
+                    (node.hasPrice && parsePriceNum(node.price) > 0.01);
+                if (!keepSelf && children.length === 0) return null;
+                return { ...node, children };
+            };
+            return pricingJobForestDeduped.map((n) => prune(n)).filter(Boolean);
+        })();
+        const sumTreeNodeBasesForTotals = (rootNode) => {
+            let sumCents = 0;
+            let maxAt = null;
+            const walk = (n) => {
+                if (!n) return;
+                if (n.hasPrice && parsePriceNum(n.price) > 0.01) {
+                    sumCents += Math.round(parsePriceNum(n.price) * 100);
+                }
+                const at = n.updatedAt || null;
+                if (at && (!maxAt || new Date(at) > new Date(maxAt))) maxAt = at;
+                for (const ch of n.children || []) walk(ch);
+            };
+            walk(rootNode);
+            return { sum: sumCents / 100, maxAt };
+        };
+
+        /**
+         * Keep left column fully consistent with right column:
+         * build "Customer Name & Total Price" strictly from the same deduped job-forest roots.
+         * This avoids label drift / duplicates (e.g. HVAC/BMS mismatch while right side shows BEMCO/TEMCO roots).
+         */
+        const pricingListCustomerTotalsAligned = pricingJobForestScoped.map((rootNode) => {
+            const lbl = String(rootNode?.label || '').trim();
+            const t = sumTreeNodeBasesForTotals(rootNode);
+            const ownJobPriced =
+                !!(rootNode && rootNode.hasPrice && parsePriceNum(rootNode.price) > 0.01);
+            return {
+                label: lbl,
+                // Total appears only after ownjob (root) Base Price is updated.
+                total: ownJobPriced && t.sum > 0.01 ? t.sum : 0,
+                updatedAt: ownJobPriced && t.maxAt ? new Date(t.maxAt).toISOString() : null,
+            };
+        });
 
         let pricingListDisplayJson = '';
         try {
             pricingListDisplayJson = JSON.stringify({
-                customerTotals: pricingListCustomerTotals,
-                jobForest: pricingJobForestDeduped,
+                customerTotals: pricingListCustomerTotalsAligned,
+                jobForest: pricingJobForestScoped,
             });
         } catch {
             pricingListDisplayJson = '';
@@ -2170,13 +2341,67 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
              * Division-filtered Pending Pricing must be an "own-job" view.
              *
              * IMPORTANT:
-             * - Use *ID-based* base-price presence for the division's anchor job(s), not display-line labels.
-             * - Display-line heuristics can still show "Not Updated" due to inheritance / label drift even after
-             *   the Own Job Base Price is saved, which keeps enquiries stuck in Pending.
+             * - Status is based strictly on own-job base pricing:
+             *   None Priced (0/total), Partial Priced (>0 and <total), All Priced (total/total).
+             * - Pending list must show only None/Partial and hide All.
              */
-            const divAnchors = getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
+            const divNorm = normalizePricingJobName(String(divisionTrim).trim());
+            const divAnchorsRaw = getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
+            // Division pending must be evaluated on exact ownjob anchors for the selected division.
+            // Fuzzy anchor matching can pull sibling/child jobs and keep an enquiry in Pending incorrectly.
+            let divAnchors = (divAnchorsRaw || []).filter((jobRec) => {
+                const nm = normalizePricingJobName(jobRec?.ItemName || '');
+                return !!divNorm && nm === divNorm;
+            });
+            if (divAnchors.length === 0) {
+                // Backward-safe fallback if exact label differs in legacy data.
+                divAnchors = divAnchorsRaw || [];
+            }
             if (divAnchors && divAnchors.length > 0) {
-                hasPendingItems = divAnchors.some((jobRec) => !strictHasPositiveBaseForJob(jobRec));
+                let priced = 0;
+                let unpriced = 0;
+                for (const jobRec of divAnchors) {
+                    if (strictHasPositiveBaseForJob(jobRec)) priced += 1;
+                    else unpriced += 1;
+                }
+                /**
+                 * Pending list must also stay pending when any enquiry customer is missing a direct
+                 * Base Price row for any own-job anchor in the selected division.
+                 * (Fix: enquiry can look "All Priced for Ownjob" while customer-wise base rows are incomplete.)
+                 */
+                const enquiryCustomerKeys = Array.from(
+                    new Set(
+                        allEnquiryCustomers
+                            .filter((c) => reqNoEq(c.RequestNo, enq.RequestNo))
+                            .map((row) => String(row.CustomerName ?? row.customerName ?? '').trim())
+                            .filter(Boolean)
+                            .map((name) => normPricingCustomerKey(name))
+                            .filter(Boolean)
+                    )
+                );
+                let hasCustomerBaseGap = false;
+                // Single-ownjob division scope: pending should clear once that ownjob is priced.
+                // Customer-gap enforcement is kept only when multiple anchors are in scope.
+                if (divAnchors.length > 1 && enquiryCustomerKeys.length > 0) {
+                    for (const customerKey of enquiryCustomerKeys) {
+                        let customerCoveredInDivision = false;
+                        for (const jobRec of divAnchors) {
+                            const jid = jobIdOf(jobRec);
+                            if (jid == null || jid === '' || String(jid) === '0') continue;
+                            if (hasDirectCustomerBaseForJobSubtree(jid, customerKey, null)) {
+                                customerCoveredInDivision = true;
+                                break;
+                            }
+                        }
+                        if (!customerCoveredInDivision) {
+                            hasCustomerBaseGap = true;
+                            break;
+                        }
+                    }
+                }
+                // None Priced for Ownjob / Partial Priced for Ownjob => Price Pending
+                // All Priced for Ownjob => Not Pending
+                hasPendingItems = hasCustomerBaseGap || !(unpriced === 0 && priced > 0);
             } else if (divisionScopedPricingStatus) {
                 // Fallback for unexpected data (no anchors): use the older display-line scoped status.
                 hasPendingItems = divisionScopedPricingStatus !== 'All Priced';
@@ -3516,15 +3741,6 @@ router.put('/value', async (req, res) => {
             return res.status(400).json({ error: 'Price cannot be negative', skipped: true });
         }
 
-        // Zero is not stored for Base Price or any option unless the client sends allowOptionalZero
-        // (cascade wipe of hidden child rows).
-        if (priceValue <= 0 && allowOptionalZero !== true) {
-            return res.status(400).json({
-                error: 'Zero value cannot be accepted for Base Price and option prices.',
-                skipped: true,
-            });
-        }
-
         // --- HIERARCHY RESOLUTION (Step 2026-03-09) ---
         // 1. EnquiryForItem - Own Job (Division name)
         // 2. CustomerName - Parent job name (If ownjob is subjob), External customer names (if ownjob is leadjob)
@@ -3622,6 +3838,12 @@ router.put('/value', async (req, res) => {
         }
 
         const now = new Date();
+        // Do not insert brand-new zero-value rows.
+        // But if a row already exists, allow updating it to zero.
+        if (priceValue <= 0 && existingResult.recordset.length === 0) {
+            return res.json({ success: true, skipped: true, reason: 'zero-new-row-skipped' });
+        }
+
         if (existingResult.recordset.length > 0) {
             if (enquiryForId) {
                 await sql.query`
@@ -3675,6 +3897,14 @@ router.put('/value', async (req, res) => {
             }
         }
 
+        await notifyParentJobPricingUpdate({
+            requestNo,
+            enquiryForId: enquiryForId || null,
+            ownJobName: resolvedItemName || enquiryForItem || '',
+            updatedBy: updatedBy || '',
+            priceValue,
+            priceOption: priceOption || 'Base Price',
+        });
         res.json({ success: true });
 
     } catch (err) {
