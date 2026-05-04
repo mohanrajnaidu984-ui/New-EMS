@@ -10,6 +10,9 @@ import { useAuth } from '../../context/AuthContext';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
+/** Lost To — search Master directory (contractors + clients) only after this many characters. */
+const LOST_TO_MIN_SEARCH_CHARS = 3;
+
 /** Numeric net quoted for filters/sort (same rules as display cell). */
 function getRowNetQuotedNumber(item, currentUser) {
     const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
@@ -23,30 +26,6 @@ function getRowNetQuotedNumber(item, currentUser) {
         return Number(item.NetQuotedValue);
     }
     return null;
-}
-
-/** Same rules as inline UPDATE buttons in the Details column — single column uses this. */
-function shouldShowUpdateButton(item, listMode) {
-    const st = item.Status;
-    if (st === 'Pending' || st === 'Enquiry') return false;
-    if (st === 'Won') return true;
-    if (st === 'Lost' && (listMode === 'Pending' || listMode === 'Lost')) return true;
-    if (st === 'FollowUp' && (listMode === 'Pending' || listMode === 'FollowUp')) return true;
-    if ((st === 'OnHold' || st === 'Cancelled' || st === 'Retendered') && (listMode === 'Pending' || listMode === 'Won')) return true;
-    if (
-        listMode === 'Pending' &&
-        st !== 'Won' &&
-        st !== 'FollowUp' &&
-        st !== 'Lost' &&
-        st !== 'OnHold' &&
-        st !== 'Cancelled' &&
-        st !== 'Retendered' &&
-        st !== 'Pending' &&
-        st !== 'Enquiry'
-    ) {
-        return true;
-    }
-    return false;
 }
 
 function compareEnquiryNo(a, b) {
@@ -404,6 +383,39 @@ const ProbabilityForm = () => {
             }
             if (item.WonGrossProfit === null || item.WonGrossProfit === undefined || item.WonGrossProfit === '') {
                 alert('GP % is mandatory for Won status.');
+                return;
+            }
+        }
+
+        if (item.Status === 'Lost') {
+            if (!String(item.LostCompetitor || '').trim()) {
+                alert('Lost To is mandatory for Lost status.');
+                return;
+            }
+            if (!String(item.LostReason || '').trim()) {
+                alert('Reason for losing is mandatory for Lost status.');
+                return;
+            }
+            const priceRaw = String(item.LostCompetitorPrice ?? '')
+                .replace(/,/g, '')
+                .replace(/BD/gi, '')
+                .trim();
+            if (priceRaw === '' || Number.isNaN(Number(priceRaw))) {
+                alert("Competitor's price is mandatory for Lost status (enter a number, 0 is allowed).");
+                return;
+            }
+            if (Number(priceRaw) < 0) {
+                alert("Competitor's price cannot be negative.");
+                return;
+            }
+            const lostDateVal = item.LostDate;
+            if (lostDateVal == null || (typeof lostDateVal === 'string' && !lostDateVal.trim())) {
+                alert('Lost Date is mandatory for Lost status.');
+                return;
+            }
+            const lostTime = new Date(lostDateVal).getTime();
+            if (Number.isNaN(lostTime)) {
+                alert('Lost Date is invalid. Please select a valid date.');
                 return;
             }
         }
@@ -1472,19 +1484,17 @@ const ProbabilityForm = () => {
                                             filteredSortedRows.map((item, index) => (
                                                 <tr key={item.RequestNo} className="border-b hover:bg-gray-50">
                                                     <td className="px-2 py-1 prob-td text-center">
-                                                        {shouldShowUpdateButton(item, listMode) ? (
-                                                            <button
-                                                                type="button"
-                                                                className={`btn btn-sm px-2 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                                onClick={() => persistUpdate(item)}
-                                                                disabled={updatingReqNo === item.RequestNo}
-                                                                style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '64px' }}
-                                                            >
-                                                                {updatingReqNo === item.RequestNo ? (
-                                                                    <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
-                                                                ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                            </button>
-                                                        ) : null}
+                                                        <button
+                                                            type="button"
+                                                            className={`btn btn-sm px-2 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
+                                                            onClick={() => persistUpdate(item)}
+                                                            disabled={updatingReqNo === item.RequestNo}
+                                                            style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '64px' }}
+                                                        >
+                                                            {updatingReqNo === item.RequestNo ? (
+                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
+                                                        </button>
                                                     </td>
                                                     <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
                                                         {index + 1}
@@ -1547,9 +1557,10 @@ const ProbabilityForm = () => {
                                                                             <AsyncSelect
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
-                                                                                placeholder="Lost to..."
+                                                                                placeholder="Quoted below — type 3+ letters to search contractors & clients"
                                                                                 isSearchable={true}
                                                                                 menuPortalTarget={document.body}
+                                                                                cacheOptions
                                                                                 value={item.LostCompetitor ? { value: item.LostCompetitor, label: item.LostCompetitor } : null}
                                                                                 onChange={(option) => handleInlineUpdate(item, 'LostCompetitor', option ? option.value : '')}
                                                                                 defaultOptions={(Array.isArray(item.QuoteRefs) ? item.QuoteRefs : [])
@@ -1559,35 +1570,63 @@ const ProbabilityForm = () => {
                                                                                         type: 'Quoted'
                                                                                     }))
                                                                                     .filter((v, i, a) => a.findIndex(t => t.value === v.value) === i)}
+                                                                                formatOptionLabel={(opt) => (
+                                                                                    <span className="d-flex justify-content-between gap-2 align-items-baseline">
+                                                                                        <span className="text-truncate">{opt.label}</span>
+                                                                                        {opt.type && (
+                                                                                            <span className="text-muted flex-shrink-0" style={{ fontSize: '10px' }}>
+                                                                                                {opt.type === 'Quoted' ? 'Quote' : opt.type}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </span>
+                                                                                )}
+                                                                                noOptionsMessage={({ inputValue }) => {
+                                                                                    const t = String(inputValue || '').trim();
+                                                                                    if (t.length > 0 && t.length < LOST_TO_MIN_SEARCH_CHARS) {
+                                                                                        return `Type at least ${LOST_TO_MIN_SEARCH_CHARS} letters to search contractors & clients`;
+                                                                                    }
+                                                                                    return 'No matches';
+                                                                                }}
                                                                                 loadOptions={(inputValue, callback) => {
                                                                                     const normalize = (str) => (str || '').toLowerCase();
-                                                                                    const term = normalize(inputValue);
+                                                                                    const raw = String(inputValue || '').trim();
+                                                                                    const termLo = normalize(raw);
 
-                                                                                    // 1. Quoted (Always available)
                                                                                     const quotedRaw = (Array.isArray(item.QuoteRefs) ? item.QuoteRefs : []).map(q => ({
                                                                                         value: q.ToName || 'N/A',
                                                                                         label: q.ToName || 'N/A',
                                                                                         type: 'Quoted'
                                                                                     }));
                                                                                     const quoted = quotedRaw.filter((v, i, a) => a.findIndex(t => t.value === v.value) === i);
+                                                                                    const filteredQuoted = termLo
+                                                                                        ? quoted.filter((q) => normalize(q.label).includes(termLo))
+                                                                                        : quoted;
 
-                                                                                    // Filter Quoted by input if filtered results are desired from quoted list too
-                                                                                    const filteredQuoted = term ? quoted.filter(q => normalize(q.label).includes(term)) : quoted;
-
-                                                                                    // 2. Global (Only if term exists)
                                                                                     let globals = [];
-                                                                                    if (term && masters?.customers) {
+                                                                                    if (raw.length >= LOST_TO_MIN_SEARCH_CHARS && masters?.customers?.length) {
+                                                                                        const isContractorOrClient = (c) => {
+                                                                                            const cat = String(c?.Category || '').trim().toLowerCase();
+                                                                                            return cat === 'contractor' || cat === 'client';
+                                                                                        };
                                                                                         globals = masters.customers
-                                                                                            .filter(c => normalize(c.CompanyName).includes(term))
-                                                                                            .map(c => ({ value: c.CompanyName, label: c.CompanyName, type: 'Global' }))
-                                                                                            .slice(0, 50);
+                                                                                            .filter(
+                                                                                                (c) =>
+                                                                                                    isContractorOrClient(c) &&
+                                                                                                    normalize(c.CompanyName).includes(termLo)
+                                                                                            )
+                                                                                            .map((c) => ({
+                                                                                                value: c.CompanyName,
+                                                                                                label: c.CompanyName,
+                                                                                                type: String(c.Category || '').trim() || 'Directory'
+                                                                                            }))
+                                                                                            .slice(0, 80);
                                                                                     }
 
-                                                                                    // 3. Dedup
-                                                                                    const existing = new Set(filteredQuoted.map(q => q.value));
-                                                                                    const final = [...filteredQuoted, ...globals.filter(g => !existing.has(g.value))];
-
-                                                                                    callback(final);
+                                                                                    const existing = new Set(filteredQuoted.map((q) => q.value));
+                                                                                    callback([
+                                                                                        ...filteredQuoted,
+                                                                                        ...globals.filter((g) => !existing.has(g.value))
+                                                                                    ]);
                                                                                 }}
                                                                                 styles={{
                                                                                     control: (base) => ({

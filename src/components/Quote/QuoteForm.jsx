@@ -1754,6 +1754,14 @@ const QuoteForm = ({ openContext = null }) => {
     const pendingPricingBootstrapRef = useRef(null);
     /** Incremented per loadPricingData call; stale fetch responses must not overwrite state (reduces flicker). */
     const pricingFetchGenerationRef = useRef(0);
+    /** True while the current (matching gen) pricing fetch is in flight — blocks calculateSummary effect from using stale values vs toName. */
+    const pricingFetchInFlightRef = useRef(false);
+    /**
+     * Row-pick bootstrap loads pricing with empty customerName (for jobs/lead). merged values can be inflated.
+     * Customer sync clears quoteRowSync before toName commits — one render can have correct To + stale bootstrap data.
+     * Block calculateSummary until a fetch completes with the real customer filter.
+     */
+    const quotePricingAwaitingNamedCustomerRef = useRef(false);
     /** After hydrating a quote form draft, block auto-load of latest saved quote (would overwrite clauses / tab snapshot). */
     const quoteDraftHydrateSkipAutoLoadUntilRef = useRef(0);
     const formDraftMenuWrapRef = useRef(null);
@@ -5841,6 +5849,8 @@ const QuoteForm = ({ openContext = null }) => {
         if (!first?.value?.trim() && !fallback) {
             quoteRowSyncDropdownCustomerRef.current = false;
             quoteRowAwaitingLeadForCustomerRef.current = false;
+            quotePricingAwaitingNamedCustomerRef.current = false;
+            setPricingSummaryBusy(false);
             return;
         }
 
@@ -5912,6 +5922,8 @@ const QuoteForm = ({ openContext = null }) => {
     // Helper to load pricing data (Component Level)
     const loadPricingData = async (reqNo, cxName, options = {}) => {
         const gen = ++pricingFetchGenerationRef.current;
+        let pricingLoadCommitted = false;
+        pricingFetchInFlightRef.current = true;
         setPricingSummaryBusy(true);
         console.log('--- loadPricingData START ---');
         console.log('Req:', reqNo, 'Cx:', cxName, 'Opts:', options);
@@ -6046,12 +6058,74 @@ const QuoteForm = ({ openContext = null }) => {
 
                     const hadLeadMatch = [...matchedKeys].some((k) => k !== 'legacy' && k !== normalize('Legacy'));
                     const leadMergeEmpty = Object.keys(out).length === 0;
+                    const namedCustomerFetch = String(cxName || '').trim().length > 0;
                     if ((!hadLeadMatch || leadMergeEmpty) && availableLeadBuckets.length > 0) {
-                        console.log('[Quote loadPricingData] lead bucket fallback: merging ALL lead sub-buckets for customer', resolvedCustomerKeyForLog);
-                        out = {};
-                        Object.values(bucket).forEach((sub) => {
-                            if (sub && typeof sub === 'object' && !Array.isArray(sub)) Object.assign(out, sub);
-                        });
+                        if (!namedCustomerFetch) {
+                            console.log('[Quote loadPricingData] lead bucket fallback: merging ALL lead sub-buckets for customer', resolvedCustomerKeyForLog);
+                            out = {};
+                            Object.values(bucket).forEach((sub) => {
+                                if (sub && typeof sub === 'object' && !Array.isArray(sub)) Object.assign(out, sub);
+                            });
+                        } else {
+                            // With an explicit customer filter, merging every lead bucket sums unrelated branches (e.g. ~30k vs ~10k).
+                            const narrow = new Set();
+                            const lpRaw = String(enquiryData?.leadJobPrefix || '').trim().toUpperCase();
+                            const lpTok = lpRaw.match(/^(L\d+)/i)?.[0]?.toUpperCase() || '';
+                            if (selectedLeadId != null && String(selectedLeadId).trim() !== '') {
+                                const jn = (pData.jobs || []).find((j) =>
+                                    String(j.id || j.ItemID || j.ID) === String(selectedLeadId)
+                                );
+                                if (jn) {
+                                    const code = String(jn.leadJobCode || jn.LeadJobCode || '').trim().toUpperCase();
+                                    const nm = String(jn.itemName || jn.DivisionName || jn.ItemName || '');
+                                    const codeTok = code.match(/^(L\d+)/i)?.[0]?.toUpperCase() || '';
+                                    const idxFromName = extractLeadIndex(nm);
+                                    const hints = [codeTok, lpTok, idxFromName ? `L${idxFromName}` : ''].filter(Boolean);
+                                    for (const bk of availableLeadBuckets) {
+                                        if (bk === 'legacy' || bk === normalize('Legacy')) continue;
+                                        const bkU = String(bk).toUpperCase();
+                                        const bkN = normalize(bk);
+                                        if (hints.some((h) => h && (bkU.includes(h) || bkN.includes(normalize(h))))) {
+                                            narrow.add(bk);
+                                        }
+                                    }
+                                }
+                            }
+                            if (narrow.size === 0 && lpTok) {
+                                for (const bk of availableLeadBuckets) {
+                                    if (bk === 'legacy' || bk === normalize('Legacy')) continue;
+                                    const bkU = String(bk).toUpperCase();
+                                    if (bkU.includes(lpTok) || (lpRaw && bkU.includes(lpRaw))) narrow.add(bk);
+                                }
+                            }
+                            if (narrow.size === 0 && (quoteListDivision || '').trim()) {
+                                const divNorm = collapseSpacesLower(stripQuoteJobPrefix(quoteListDivision));
+                                for (const bk of availableLeadBuckets) {
+                                    if (bk === 'legacy' || bk === normalize('Legacy')) continue;
+                                    const bn = collapseSpacesLower(String(bk));
+                                    if (divNorm && (bn.includes(divNorm) || divNorm.includes(bn))) narrow.add(bk);
+                                }
+                            }
+                            out = {};
+                            if (narrow.size > 0) {
+                                narrow.forEach((k) => Object.assign(out, bucket[k] || {}));
+                            } else {
+                                const nonLegacy = availableLeadBuckets.filter(
+                                    (k) => k !== 'legacy' && k !== normalize('Legacy')
+                                );
+                                if (nonLegacy.length === 1) {
+                                    Object.assign(out, bucket[nonLegacy[0]] || {});
+                                } else if (nonLegacy[0]) {
+                                    Object.assign(out, bucket[nonLegacy[0]] || {});
+                                } else {
+                                    const leg = availableLeadBuckets.find(
+                                        (k) => k === 'legacy' || k === normalize('Legacy')
+                                    );
+                                    if (leg) Object.assign(out, bucket[leg] || {});
+                                }
+                            }
+                            console.log('[Quote loadPricingData] named customer: narrowed lead buckets', [...narrow], 'for', resolvedCustomerKeyForLog);
+                        }
                     }
 
                     console.log('[Quote loadPricingData] customer slice resolved key', resolvedCustomerKeyForLog, 'lead bucket keys', availableLeadBuckets);
@@ -6072,10 +6146,18 @@ const QuoteForm = ({ openContext = null }) => {
                     return mergeLeadBucketsForCustomer(slice, resolvedKey);
                 };
 
-                pData.values = {
-                    ...getBucket('Main', 'main'),
-                    ...getBucket(cxName || '', 'currentCustomer')
-                };
+                const cxTrimForValues = String(cxName || '').trim();
+                // Merging Main + current customer keeps distinct option keys from Main (other leads/branches);
+                // calculateSummary sums the whole flat map → inflated totals (e.g. ~30k vs ~10k). With an explicit
+                // customer filter, use only that customer's merged slice (bootstrap with empty cx still uses Main+'').
+                if (cxTrimForValues) {
+                    pData.values = getBucket(cxTrimForValues, 'currentCustomer');
+                } else {
+                    pData.values = {
+                        ...getBucket('Main', 'main'),
+                        ...getBucket('', 'currentCustomer')
+                    };
+                }
 
                 const vk = Object.keys(pData.values || {});
                 console.log('[Quote loadPricingData] flat values keys count', vk.length, 'sample', vk.slice(0, 8));
@@ -6097,6 +6179,7 @@ const QuoteForm = ({ openContext = null }) => {
                 if (gen !== pricingFetchGenerationRef.current) return;
 
                 setPricingData(pData);
+                pricingLoadCommitted = true;
 
                 // Calculate Summary
                 const summary = [];
@@ -6153,9 +6236,22 @@ const QuoteForm = ({ openContext = null }) => {
                     }
                 }
 
-                // We need to calculate summary based on all jobs initially
+                // Row-pick bootstrap uses empty customer so jobs/lead can resolve; merged buckets + "all leads" fallback
+                // in the API path would inflate the summary (e.g. 30k vs 10k) — only calculate after To is set.
+                const awaitingRowCustomerBootstrap =
+                    quoteRowSyncDropdownCustomerRef.current && !(String(cxName || '').trim());
                 if (gen !== pricingFetchGenerationRef.current) return;
-                calculateSummary(pData, allJobs, cxName);
+                if (!awaitingRowCustomerBootstrap) {
+                    calculateSummary(pData, allJobs, cxName);
+                } else {
+                    setPricingSummary([]);
+                    setGrandTotal(0);
+                }
+                if (awaitingRowCustomerBootstrap) {
+                    quotePricingAwaitingNamedCustomerRef.current = true;
+                } else if (String(cxName || '').trim()) {
+                    quotePricingAwaitingNamedCustomerRef.current = false;
+                }
 
                 if ((cxName || '').trim()) {
                     quoteRowDivisionLeadLockRef.current = false;
@@ -6163,6 +6259,7 @@ const QuoteForm = ({ openContext = null }) => {
             } else {
                 console.error('Pricing API Error:', pricingRes.status);
                 if (gen === pricingFetchGenerationRef.current) {
+                    quotePricingAwaitingNamedCustomerRef.current = false;
                     setPricingData(null);
                     setPricingSummary([]);
                     setHasUserPricing(false);
@@ -6171,18 +6268,25 @@ const QuoteForm = ({ openContext = null }) => {
         } catch (err) {
             console.error('Error loading pricing data:', err);
             if (gen === pricingFetchGenerationRef.current) {
+                quotePricingAwaitingNamedCustomerRef.current = false;
                 setPricingData(null);
                 setPricingSummary([]);
                 setHasUserPricing(false);
             }
         } finally {
             if (gen === pricingFetchGenerationRef.current) {
+                pricingFetchInFlightRef.current = false;
                 // Empty-customer bootstrap finishes before React re-applies To from auto-select; clearing busy
                 // immediately made quotePreviewCustomerGate false for a frame (layout flash).
                 const awaitingCustomerAfterLead =
                     autoSelectCustomerAfterLeadChangeRef.current &&
                     !(cxName || '').trim();
-                if (!awaitingCustomerAfterLead) {
+                const awaitingRowCustomerBootstrap =
+                    quoteRowSyncDropdownCustomerRef.current && !(String(cxName || '').trim());
+                const deferBusyClear =
+                    pricingLoadCommitted &&
+                    (awaitingCustomerAfterLead || awaitingRowCustomerBootstrap);
+                if (!deferBusyClear) {
                     setPricingSummaryBusy(false);
                 }
             }
@@ -6375,6 +6479,32 @@ const QuoteForm = ({ openContext = null }) => {
             branchIds.clear();
             expandBranchIdsFromSeeds([String(rootJob.id || rootJob.ItemID || rootJob.ID)]);
         }
+
+        // Quote tab can point at a subjob (e.g. HVAC) while Division dropdown is the own job (e.g. BMS Project).
+        // Branch isolation above would drop the own-job node from branchIds → wrong Base Price in PRICING SUMMARY.
+        if (!browsePreviousQuotesRevisions && jobsPool.length > 0) {
+            const divLabel = String(quoteListDivision || '').trim();
+            if (divLabel) {
+                const divNorm = collapseSpacesLower(stripQuoteJobPrefix(divLabel));
+                let divJob =
+                    jobsPool.find((j) => {
+                        const nm = collapseSpacesLower(
+                            stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')
+                        );
+                        return nm && nm === divNorm;
+                    }) ||
+                    jobsPool.find((j) => {
+                        const nm = collapseSpacesLower(
+                            stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')
+                        );
+                        return nm && (nm.includes(divNorm) || divNorm.includes(nm));
+                    });
+                if (divJob) {
+                    expandBranchIdsFromSeeds([String(divJob.id || divJob.ItemID || divJob.ID)]);
+                }
+            }
+        }
+
         if (import.meta.env.DEV) {
         console.log('[calculateSummary] Branch Isolation:', { branchPrefix, branchIds: Array.from(branchIds) });
         }
@@ -7168,6 +7298,9 @@ const QuoteForm = ({ openContext = null }) => {
     // Use selectedJobsSig so a new array reference with the same job names does not re-enter the effect.
     React.useEffect(() => {
         if (!pricingData?.options) return;
+        if (pricingFetchInFlightRef.current) return;
+        if (quotePricingAwaitingNamedCustomerRef.current) return;
+        if (quoteRowSyncDropdownCustomerRef.current && !(String(toName || '').trim())) return;
         calculateSummaryRef.current(pricingData, selectedJobs, toName, quoteContextScope);
     }, [activeQuoteTab, selectedJobsSig, quoteTabsFingerprint, quoteContextScope, pricingStableSig, toName]);
 
@@ -8465,7 +8598,11 @@ const QuoteForm = ({ openContext = null }) => {
         quoteRowDivisionLeadLockRef.current = false;
         quoteRowSyncDropdownCustomerRef.current = false;
         quoteRowAwaitingLeadForCustomerRef.current = false;
+        quotePricingAwaitingNamedCustomerRef.current = false;
         setShowQuoteListSummaryOverQuote(false);
+        setPricingSummary([]);
+        setGrandTotal(0);
+        lastNonEmptyPricingSummaryRef.current = null;
         setToName('');
         setToAddress('');
         setToPhone('');
@@ -8758,15 +8895,23 @@ const QuoteForm = ({ openContext = null }) => {
                 quoteRowFirstLeadDivisionFullRef.current = firstLeadDivisionFull;
                 quoteRowAutoSelectLeadRef.current = Boolean(data.leadJobPrefix);
                 quoteRowDivisionLeadLockRef.current = Boolean(data.leadJobPrefix);
-                quoteRowSyncDropdownCustomerRef.current = true;
-                quoteRowAwaitingLeadForCustomerRef.current = Boolean(data.leadJobPrefix);
+
+                const pendingListCustomerHint =
+                    String(enq.ListQuoteDetailToName ?? enq.ListPendingCustomerName ?? '').trim();
+                if (pendingListCustomerHint) {
+                    setToName(pendingListCustomerHint);
+                    quoteRowSyncDropdownCustomerRef.current = false;
+                    quoteRowAwaitingLeadForCustomerRef.current = false;
+                } else {
+                    quoteRowSyncDropdownCustomerRef.current = true;
+                    quoteRowAwaitingLeadForCustomerRef.current = Boolean(data.leadJobPrefix);
+                }
 
                 // Final Data Update to Ensure all modifications (Lead Job Logic, etc.) are reflected in State
                 setEnquiryData({ ...data });
 
-                // "To" customer: filled by useEffect to match quoteCustomerDropdownOptions (internal parent vs EnquiryCustomer[0])
-
-                // Bootstrap pricing with empty customer, then sync effect applies first dropdown option (see quoteRowSyncDropdownCustomerRef)
+                // "To" customer: pending-list rows set ListQuoteDetailToName / ListPendingCustomerName above so the first
+                // pricing fetch uses customerName=… (no empty bootstrap). Otherwise filled by sync effect (quoteRowSyncDropdownCustomerRef).
 
                 // System defaults for Prepared By / Signatory removed per User request Step 1440
                 enquiryLoadSucceeded = true;
@@ -9282,6 +9427,7 @@ const QuoteForm = ({ openContext = null }) => {
         quoteRowDivisionLeadLockRef.current = false;
         quoteRowSyncDropdownCustomerRef.current = false;
         quoteRowAwaitingLeadForCustomerRef.current = false;
+        quotePricingAwaitingNamedCustomerRef.current = false;
         pendingPricingBootstrapRef.current = null;
         setSelectedLeadId(null);
         setBrowsePreviousQuotesRevisions(false);
@@ -10033,6 +10179,10 @@ const QuoteForm = ({ openContext = null }) => {
         })();
 
         const merged = [...base];
+        const inheritedRowIdsSeen = new Set();
+        const activeQuoteIdStr =
+            quoteId != null && String(quoteId).trim() !== '' ? String(quoteId).trim() : '';
+
         for (const st of subTabs) {
             const childLabel = (st.label || st.name || '').trim();
             const childOwnNorm = collapseSpacesLower(stripQuoteJobPrefix(childLabel));
@@ -10065,6 +10215,13 @@ const QuoteForm = ({ openContext = null }) => {
                 return ta - tb;
             })[0];
 
+            const rowIdStr = row ? String(quoteRowId(row) ?? '').trim() : '';
+            // Same EnquiryQuotes row as the one already loaded in `base` (common when subjob tab label matches OwnJob
+            // on the parent quote) — do not append duplicate inherited overlays.
+            if (activeQuoteIdStr && rowIdStr && rowIdStr === activeQuoteIdStr) continue;
+            if (rowIdStr && inheritedRowIdsSeen.has(rowIdStr)) continue;
+            if (rowIdStr) inheritedRowIdsSeen.add(rowIdStr);
+
             const childStamps = parseDigitalSignaturesFromQuoteRow(row);
             for (const s of childStamps) {
                 merged.push({
@@ -10086,6 +10243,7 @@ const QuoteForm = ({ openContext = null }) => {
         toName,
         selectedLeadId,
         pricingData?.jobs,
+        quoteId,
     ]);
 
     /** Profile menu → Manage signatures → Place on page (when Quote tab is active). */

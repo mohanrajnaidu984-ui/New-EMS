@@ -802,6 +802,32 @@ router.post('/update', async (req, res) => {
             }
         }
 
+        if (status === 'Lost') {
+            if (!lostDetails?.customer || !String(lostDetails.customer).trim()) {
+                return res.status(400).json({ error: 'Lost To is mandatory for Lost status' });
+            }
+            if (!lostDetails?.reason || !String(lostDetails.reason).trim()) {
+                return res.status(400).json({ error: 'Reason for losing is mandatory for Lost status' });
+            }
+            const lostPrice = String(lostDetails?.competitorPrice ?? '')
+                .replace(/,/g, '')
+                .replace(/BD/gi, '')
+                .trim();
+            if (lostPrice === '' || Number.isNaN(Number(lostPrice))) {
+                return res.status(400).json({ error: "Competitor's price is mandatory for Lost status" });
+            }
+            if (Number(lostPrice) < 0) {
+                return res.status(400).json({ error: "Competitor's price cannot be negative" });
+            }
+            if (lostDetails?.lostDate == null || (typeof lostDetails.lostDate === 'string' && !String(lostDetails.lostDate).trim())) {
+                return res.status(400).json({ error: 'Lost Date is mandatory for Lost status' });
+            }
+            const lostDateCheck = new Date(lostDetails.lostDate);
+            if (Number.isNaN(lostDateCheck.getTime())) {
+                return res.status(400).json({ error: 'Lost Date is invalid' });
+            }
+        }
+
         // Calculate probability int from option string if not provided (e.g. "High Chance (90%)" -> 90)
         let probability = probInput;
         if (probability === undefined || probability === null) {

@@ -9,6 +9,346 @@ const sanitizeInput = (input) => {
     return s === '' ? null : s;
 };
 
+/** Non–CC-mail users: force filters to their company / division / SE so APIs cannot be scoped wider via query string. */
+async function applySalesReportEmailScope(req) {
+    delete req.salesReportForceSeName;
+    delete req.salesReportNonCcBlock;
+    delete req.salesReportNonCcScope;
+    delete req.salesReportUserEmail;
+
+    const raw = req.query && req.query.email;
+    if (!raw || String(raw).trim() === '') return;
+    const email = String(raw)
+        .toLowerCase()
+        .replace(/@almcg\.com/g, '@almoayyedcg.com')
+        .trim();
+
+    const rq = new sql.Request();
+    rq.input('email', sql.NVarChar, email);
+    const userRes = await rq.query(`
+        SELECT TOP 1 FullName, Department
+        FROM Master_ConcernedSE
+        WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = LOWER(LTRIM(RTRIM(@email)))
+    `);
+    const user = userRes.recordset?.[0];
+    if (!user) {
+        req.salesReportNonCcBlock = true;
+        return;
+    }
+
+    const ccReq = new sql.Request();
+    ccReq.input('email', sql.NVarChar, email);
+    const ccRes = await ccReq.query(`
+        SELECT TOP 1 1 AS ok
+        FROM Master_EnquiryFor
+        WHERE ',' + REPLACE(REPLACE(ISNULL(CCMailIds, ''), ' ', ''), ';', ',') + ','
+              LIKE '%,' + REPLACE(REPLACE(@email, ' ', ''), ';', ',') + ',%'
+    `);
+    if ((ccRes.recordset || []).length > 0) return;
+
+    req.salesReportNonCcScope = true;
+    req.salesReportUserEmail = email;
+
+    const dept = String(user.Department || '').trim();
+    let company = '';
+    if (dept) {
+        const cReq = new sql.Request();
+        cReq.input('dept', sql.NVarChar, dept);
+        const cRes = await cReq.query(`
+            SELECT TOP 1 CompanyName FROM Master_EnquiryFor WHERE DepartmentName = @dept
+        `);
+        company = String(cRes.recordset?.[0]?.CompanyName || '').trim();
+    }
+    if (company) req.query.company = company;
+    if (dept) req.query.division = dept;
+    const fn = String(user.FullName || '').trim();
+    if (!fn) {
+        req.salesReportNonCcBlock = true;
+        return;
+    }
+    req.query.role = fn;
+    req.salesReportForceSeName = fn;
+}
+
+/** Latest Probability row per enquiry (by UpdatedDateTime). */
+const SQL_LATEST_PROB_CTE = `
+WITH LatestProb AS (
+    SELECT * FROM (
+        SELECT P.*,
+            ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+        FROM dbo.Probability P
+    ) __lp WHERE __lp.__rn = 1
+)
+`;
+
+/** Parse money stored as NVARCHAR on Probability (handles commas, BD prefix). */
+const SQL_PROB_JOB_VALUE = `
+CASE
+  WHEN NULLIF(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), '') IS NOT NULL
+    THEN TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(P.FinalJobValueBooked)), ',', ''), 'BD', ''), ' ', ''))
+  ELSE TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.TotalQuotedValue, '0'))), ',', ''), 'BD', ''), ' ', ''))
+END`;
+
+/** Won (sales KPI): FinalJobValueBooked only — no fallback to TotalQuotedValue. */
+const SQL_PROB_WON_VALUE = `
+ISNULL(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), ',', ''), 'BD', ''), ' ', '')), 0)`;
+
+/** MIN(TotalAmount) per enquiry — least quote when multiple customers. */
+const SQL_MIN_QUOTE_AMOUNT = `(SELECT MIN(ISNULL(TotalAmount, 0)) FROM dbo.EnquiryQuotes Q_M WHERE Q_M.RequestNo = P.RequestNo)`;
+
+const SQL_PROB_NETQUOTED_PARSED = `
+NULLIF(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, ''))), ',', ''), 'BD', ''), ' ', '')), 0)`;
+
+/**
+ * Lost / Follow-up (Won/Lost section): least EnquiryQuotes.TotalAmount per project,
+ * else Probability.NetQuotedValue (parsed).
+ */
+const SQL_PROB_LOST_FOLLOW_VALUE = `
+COALESCE(${SQL_MIN_QUOTE_AMOUNT}, ${SQL_PROB_NETQUOTED_PARSED}, CAST(0 AS DECIMAL(18,2)))`;
+
+/**
+ * Status treated as Won (UI uses exact "Won" — avoid LIKE '%won%' which matches "Not Won", etc.).
+ */
+const SQL_PROB_STATUS_WON_STRICT = `(
+  LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won'
+  OR (
+    LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE 'won %'
+    AND LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) NOT LIKE '%follow%'
+    AND LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) NOT LIKE '%lost%'
+  )
+)`;
+
+/** FinalJobValueBooked present and non-zero after parse. */
+const SQL_PROB_HAS_FINAL_BOOKED_MONEY = `(
+  NULLIF(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), '') IS NOT NULL
+  AND ISNULL(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), ',', ''), 'BD', ''), ' ', '')), 0) <> 0
+)`;
+
+/** Booked / Won KPIs: explicit Won status AND captured final job value (not Follow-up with stray booked amount). */
+const SQL_PROB_WON_FOR_METRICS = `${SQL_PROB_STATUS_WON_STRICT} AND ${SQL_PROB_HAS_FINAL_BOOKED_MONEY}`;
+
+/** Non–CC: Probability.Status must be exactly Won (case-insensitive) + FinalJobValueBooked per business rule. */
+const SQL_PROB_WON_NON_CC_METRICS =
+    `LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won' AND ${SQL_PROB_HAS_FINAL_BOOKED_MONEY}`;
+
+function getProbWonMetricsSql(req) {
+    return req.salesReportNonCcScope === true ? SQL_PROB_WON_NON_CC_METRICS : SQL_PROB_WON_FOR_METRICS;
+}
+
+/** Whitelist → SQL fragment for Top Jobs table — EnquiryMaster (legacy). */
+const TOP_JOB_BOOKED_STATUS_SQL = {
+    Won: "E.Status = 'Won'",
+    Lost: "E.Status = 'Lost'",
+    Pending: "E.Status = 'Pending'",
+    'Follow Up': "(E.Status IN ('Follow-up', 'FollowUp', 'Follow Up'))",
+    'On Hold': "(E.Status IN ('On Hold', 'Hold', 'OnHold'))",
+    Cancelled: "E.Status = 'Cancelled'",
+    Retendered: "E.Status = 'Retendered'"
+};
+
+/** Top jobs / filters using latest Probability.Status (case-insensitive keywords). Won branch uses getProbWonMetricsSql(req). */
+const TOP_JOB_PROB_STATUS_SQL = {
+    Won: SQL_PROB_WON_FOR_METRICS,
+    Lost: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%')",
+    Pending: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%pending%' OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%quote%')",
+    'Follow Up': "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')",
+    'On Hold': "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%hold%')",
+    Cancelled: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%cancel%')",
+    Retendered: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%retender%')"
+};
+
+function getTopJobBookedStatusWhere(raw) {
+    const key = sanitizeInput(raw);
+    if (key && TOP_JOB_BOOKED_STATUS_SQL[key]) return TOP_JOB_BOOKED_STATUS_SQL[key];
+    return TOP_JOB_BOOKED_STATUS_SQL.Won;
+}
+
+function getTopJobProbStatusWhere(raw, req) {
+    const key = sanitizeInput(raw);
+    if (key === 'Won') return getProbWonMetricsSql(req || {});
+    if (key && TOP_JOB_PROB_STATUS_SQL[key]) return TOP_JOB_PROB_STATUS_SQL[key];
+    return getProbWonMetricsSql(req || {});
+}
+
+/** Job column for Top Jobs from Probability — aligns with Won/Lost dollar rules. */
+function getTopJobProbValueExpr(topJobStatus) {
+    const key = sanitizeInput(topJobStatus);
+    if (key === 'Won') return `(${SQL_PROB_WON_VALUE})`;
+    if (key === 'Lost' || key === 'Follow Up') return `(${SQL_PROB_LOST_FOLLOW_VALUE})`;
+    return `(${SQL_PROB_JOB_VALUE})`;
+}
+
+/**
+ * EnquiryMaster scope: non–CC → company + latest Probability.OwnJobName = division + ConcernedSE↔Master email;
+ * CC / others → EnquiryFor division/company + optional ConcernedSE by name.
+ */
+function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole) {
+    let filterClause = '';
+    const isNonCcSalesScope = req.salesReportNonCcScope === true;
+    const srUserEmail = req.salesReportUserEmail ? String(req.salesReportUserEmail).trim() : '';
+
+    if (isNonCcSalesScope) {
+        if (srUserEmail) {
+            request.input('srUserEmail', sql.NVarChar, srUserEmail);
+        }
+        if (req.salesReportNonCcBlock === true) {
+            filterClause += ' AND 1=0 ';
+        } else if (!srUserEmail) {
+            filterClause += ' AND 1=0 ';
+        } else {
+            if (safeCompany && safeCompany !== 'All') {
+                request.input('company', sql.NVarChar, safeCompany);
+                filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.CompanyName)) = @company) `;
+            }
+            if (safeDivision && safeDivision !== 'All') {
+                request.input('division', sql.NVarChar, safeDivision);
+                filterClause += `
+                  AND EXISTS (
+                    SELECT 1
+                    FROM (
+                      SELECT P2.RequestNo, P2.OwnJobName,
+                        ROW_NUMBER() OVER (PARTITION BY P2.RequestNo ORDER BY P2.UpdatedDateTime DESC) AS __rn
+                      FROM dbo.Probability P2
+                    ) lp
+                    WHERE lp.__rn = 1
+                      AND lp.RequestNo = E.RequestNo
+                      AND UPPER(LTRIM(RTRIM(ISNULL(lp.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                  ) `;
+            }
+            filterClause += `
+                  AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cs
+                    INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+                    WHERE cs.RequestNo = E.RequestNo
+                      AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com'))))
+                       = LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(@srUserEmail, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com'))))
+                  ) `;
+        }
+    } else if (safeDivision && safeDivision !== 'All') {
+        request.input('division', sql.NVarChar, safeDivision);
+        filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.DepartmentName)) = @division) `;
+    } else if (safeCompany && safeCompany !== 'All') {
+        request.input('company', sql.NVarChar, safeCompany);
+        filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.CompanyName)) = @company) `;
+    }
+
+    if (!isNonCcSalesScope) {
+        if (req.salesReportNonCcBlock === true) {
+            filterClause += ' AND 1=0 ';
+        } else if (req.salesReportForceSeName) {
+            const seF = String(req.salesReportForceSeName).trim();
+            request.input('se', sql.NVarChar, seF);
+            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND LTRIM(RTRIM(cse.SEName)) = LTRIM(RTRIM(@se))) `;
+        } else if (safeRole && safeRole !== 'All') {
+            request.input('se', sql.NVarChar, safeRole);
+            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND LTRIM(RTRIM(cse.SEName)) = LTRIM(RTRIM(@se))) `;
+        }
+    }
+
+    return filterClause;
+}
+
+/**
+ * Shared request + item-value FROM clause for top-job table and /summary EnquiryMaster queries.
+ * @returns {object|null}
+ */
+function buildSalesReportItemValueContext(req) {
+    const { year, company, division, role } = req.query;
+    if (!year) return null;
+
+    const request = new sql.Request();
+    const safeYear = year ? parseInt(year, 10) : null;
+    const safeCompany = company ? String(company).trim() : null;
+    const safeDivision = division ? String(division).trim() : null;
+    const safeRole = role ? String(role).trim() : null;
+    const safeQuarter = (req.query.quarter && req.query.quarter !== 'All') ? String(req.query.quarter).trim() : null;
+    let quarterNum = null;
+    if (safeQuarter) quarterNum = parseInt(safeQuarter.replace('Q', ''), 10);
+
+    request.input('year', sql.Int, safeYear);
+    if (safeQuarter) {
+        request.input('quarterNums', sql.Int, quarterNum);
+        request.input('quarterStrs', sql.NVarChar, safeQuarter);
+    }
+
+    const filterClause = appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole);
+
+    const effectiveSeForTarget =
+        (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
+        || (safeRole && safeRole !== 'All' ? safeRole : null);
+
+    /** SalesTargets filters use @se — non–CC scope uses email on ConcernedSE only, so @se was never bound. */
+    if (effectiveSeForTarget && req.salesReportNonCcScope === true) {
+        request.input('se', sql.NVarChar, effectiveSeForTarget);
+    }
+
+    const selectedCustomerApply = `
+            OUTER APPLY (
+                SELECT TOP 1 ToName 
+                FROM EnquiryQuotes 
+                WHERE RequestNo = E.RequestNo 
+                ORDER BY 
+                    CASE WHEN QuoteNumber = E.WonQuoteRef THEN 0 ELSE 1 END, 
+                    UpdatedAt DESC
+            ) SC
+        `;
+
+    let itemValueSQL = '';
+    if (safeDivision && safeDivision !== 'All') {
+        itemValueSQL = `
+                 OUTER APPLY (
+                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                     FROM EnquiryFor EF_Inner
+                     JOIN Master_EnquiryFor MEF_Inner ON (EF_Inner.ItemName = MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '%- ' + MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '%-' + MEF_Inner.ItemName)
+                     OUTER APPLY (
+                         SELECT SUM(ISNULL(Price, 0)) as Price
+                         FROM EnquiryPricingValues EPV
+                         WHERE EPV.RequestNo = EF_Inner.RequestNo 
+                           AND (EPV.EnquiryForID = EF_Inner.ID OR EPV.EnquiryForItem = EF_Inner.ItemName)
+                           AND (EPV.CustomerName = SC.ToName OR SC.ToName IS NULL)
+                     ) EPV
+                     WHERE EF_Inner.RequestNo = E.RequestNo
+                       AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division
+                 ) ItemValue
+             `;
+    } else {
+        itemValueSQL = `
+                 OUTER APPLY (
+                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
+                     FROM EnquiryFor EF_Inner
+                     OUTER APPLY (
+                         SELECT SUM(ISNULL(Price, 0)) as Price
+                         FROM EnquiryPricingValues EPV
+                         WHERE EPV.RequestNo = EF_Inner.RequestNo 
+                           AND (EPV.EnquiryForID = EF_Inner.ID OR EPV.EnquiryForItem = EF_Inner.ItemName)
+                           AND (EPV.CustomerName = SC.ToName OR SC.ToName IS NULL)
+                     ) EPV
+                     WHERE EF_Inner.RequestNo = E.RequestNo
+                       AND (EF_Inner.ParentID IS NULL OR EF_Inner.ParentID = 0)
+                 ) ItemValue
+             `;
+    }
+    const itemValueApply = selectedCustomerApply + itemValueSQL;
+    const itemValueCol = 'ISNULL(ItemValue.Total, 0)';
+
+    return {
+        request,
+        filterClause,
+        itemValueApply,
+        itemValueCol,
+        safeYear,
+        safeCompany,
+        safeDivision,
+        safeRole,
+        effectiveSeForTarget,
+        nonCcBlock: req.salesReportNonCcBlock === true,
+        salesReportNonCcScope: req.salesReportNonCcScope === true,
+        safeQuarter,
+        quarterNum
+    };
+}
+
 router.get('/company-by-division', async (req, res) => {
     try {
         const { division } = req.query;
@@ -136,16 +476,21 @@ router.get('/filters', async (req, res) => {
             }
             divisionSQL += ` ORDER BY DepartmentName ASC`;
 
+            // SE list: match company (when set) and division (when set) via Master_EnquiryFor → Department
             let roleSQL = `
-                SELECT DISTINCT FullName 
-                FROM Master_ConcernedSE 
-                WHERE FullName IS NOT NULL AND FullName <> ''
+                SELECT DISTINCT SE.FullName 
+                FROM Master_ConcernedSE SE
+                INNER JOIN Master_EnquiryFor M ON LTRIM(RTRIM(M.DepartmentName)) = LTRIM(RTRIM(SE.Department))
+                WHERE SE.FullName IS NOT NULL AND SE.FullName <> ''
             `;
+            if (company && company !== 'All') {
+                roleSQL += ` AND M.CompanyName = @company `;
+            }
             if (division && division !== 'All') {
-                roleSQL += ` AND Department = @division `;
+                roleSQL += ` AND SE.Department = @division `;
                 request.input('division', sql.NVarChar, division);
             }
-            roleSQL += ` ORDER BY FullName ASC`;
+            roleSQL += ` ORDER BY SE.FullName ASC`;
 
             const [companies, divisions, roles] = await Promise.all([
                 new sql.Request().query(companyQuery),
@@ -207,17 +552,35 @@ router.get('/filters', async (req, res) => {
             division: (r.DepartmentName || '').trim()
         })).filter(r => r.company || r.division);
 
-        let allowed = scopedPairs;
-        if (company && company !== 'All') allowed = allowed.filter(r => r.company === company);
-        if (division && division !== 'All') allowed = allowed.filter(r => r.division === division);
+        const safeQCompany = company && String(company).trim() !== '' && company !== 'All' ? String(company).trim() : null;
+        const safeQDivision = division && String(division).trim() !== '' && division !== 'All' ? String(division).trim() : null;
 
-        const companies = [...new Set((allowed.length ? allowed : scopedPairs).map(r => r.company).filter(Boolean))].sort();
-        const divisions = [...new Set((allowed.length ? allowed : scopedPairs).map(r => r.division).filter(Boolean))].sort();
+        // Always return every company the user can access (CC list from master).
+        const companies = [...new Set(scopedPairs.map(r => r.company).filter(Boolean))].sort();
+
+        // Divisions: only those for the selected company; if no company, all CC-scoped divisions.
+        const divisionSource = safeQCompany
+            ? scopedPairs.filter((p) => p.company === safeQCompany)
+            : scopedPairs;
+        const divisions = [...new Set(divisionSource.map((r) => r.division).filter(Boolean))].sort();
+
+        // SE names: Master_ConcernedSE in the relevant department(s) for the selected company/division.
+        let departmentsForRoles = [];
+        if (safeQDivision) {
+            const okPair = scopedPairs.some(
+                (p) => p.division === safeQDivision && (!safeQCompany || p.company === safeQCompany)
+            );
+            if (okPair) departmentsForRoles = [safeQDivision];
+        } else if (safeQCompany) {
+            departmentsForRoles = [...new Set(divisionSource.map((r) => r.division).filter(Boolean))];
+        } else {
+            departmentsForRoles = [...new Set(scopedPairs.map((r) => r.division).filter(Boolean))];
+        }
 
         let roles = [];
-        if (divisions.length > 0) {
+        if (departmentsForRoles.length > 0) {
             const roleReq = new sql.Request();
-            const divisionList = divisions.map((d, i) => {
+            const divisionList = departmentsForRoles.map((d, i) => {
                 const key = `d${i}`;
                 roleReq.input(key, sql.NVarChar, d);
                 return `@${key}`;
@@ -248,52 +611,38 @@ router.get('/filters', async (req, res) => {
 
 router.get('/summary', async (req, res) => {
     try {
-        const { year, company, division, role } = req.query;
-        if (!year) return res.status(400).json({ error: 'Year is required' });
+        await applySalesReportEmailScope(req);
+        const ctx = buildSalesReportItemValueContext(req);
+        if (!ctx) return res.status(400).json({ error: 'Year is required' });
 
-        const request = new sql.Request();
+        const {
+            request,
+            filterClause,
+            itemValueApply,
+            itemValueCol,
+            safeYear,
+            safeCompany,
+            safeDivision,
+            safeRole,
+            effectiveSeForTarget,
+            nonCcBlock,
+            safeQuarter,
+            quarterNum
+        } = ctx;
 
-        // Sanitize inputs
-        const safeYear = year ? parseInt(year) : null;
-        const safeCompany = company ? String(company).trim() : null;
-        const safeDivision = division ? String(division).trim() : null;
-        const safeRole = role ? String(role).trim() : null;
-        const safeQuarter = (req.query.quarter && req.query.quarter !== 'All') ? String(req.query.quarter).trim() : null;
-        let quarterNum = null;
-        if (safeQuarter) quarterNum = parseInt(safeQuarter.replace('Q', ''));
+        const probDateExpr =
+            'COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, E.EnquiryDate)';
 
-        console.log("!!! EXECUTING SUMMARY ROUTE - NEW CODE !!!");
-        console.log(`[DEBUG] safeDivision: '${safeDivision}' (Type: ${typeof safeDivision})`);
-        if (safeDivision === 'All') console.log("[DEBUG] safeDivision is 'All'");
+        const wonMetricsSql = getProbWonMetricsSql(req);
 
-
-        console.log('[DEBUG-SUMMARY] Sanitized Params:', { safeYear, safeCompany, safeDivision, safeRole });
-
-        request.input('year', sql.Int, safeYear);
-        if (safeQuarter) {
-            request.input('quarterNums', sql.Int, quarterNum);
-            request.input('quarterStrs', sql.NVarChar, safeQuarter);
-        }
-
-        let filterClause = '';
-        if (safeDivision && safeDivision !== 'All') {
-            request.input('division', sql.NVarChar, safeDivision);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.DepartmentName)) = @division) `;
-        } else if (safeCompany && safeCompany !== 'All') {
-            request.input('company', sql.NVarChar, safeCompany);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.CompanyName)) = @company) `;
-        }
-
-        if (safeRole && safeRole !== 'All') {
-            request.input('se', sql.NVarChar, safeRole);
-            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND cse.SEName = @se) `;
-        }
-
-        // 1. Target vs Job Booked
-        // Target from SalesTargets
+        // 1. Target vs Job Booked — target from SalesTargets (All SE = sum every SalesEngineer row in division)
         let targetFilter = ' WHERE FinancialYear = @year ';
-        if (safeDivision && safeDivision !== 'All') targetFilter += ' AND Division = @division ';
-        if (safeRole && safeRole !== 'All') targetFilter += ' AND SalesEngineer = @se ';
+        if (nonCcBlock) {
+            targetFilter += ' AND 1=0 ';
+        } else {
+            if (safeDivision && safeDivision !== 'All') targetFilter += ' AND Division = @division ';
+            if (effectiveSeForTarget) targetFilter += ' AND SalesEngineer = @se ';
+        }
         if (safeQuarter) targetFilter += ' AND Quarter = @quarterStrs ';
 
         const targetRes = await request.query(`
@@ -303,124 +652,112 @@ router.get('/summary', async (req, res) => {
             GROUP BY Quarter
         `);
 
-        // Check if Division is active to switch to explicit Item Sum logic
-        // This ensures restricted users (e.g. BMS) only see the value of their own items, not the whole project.
-        // NOTE: If no division filter, we use the global WonOrderValue from EnquiryMaster as it is the official record.
-        // Attempting to sum items dynamically for everything resulted in 0s where granular data was missing/mismatched.
-
-        // Unified Item Value Logic (Global vs Division)
-        // This identifies the selected quote's customer (SelectedCustomer) and filters pricing accordingly.
-        const selectedCustomerApply = `
-            OUTER APPLY (
-                SELECT TOP 1 ToName 
-                FROM EnquiryQuotes 
-                WHERE RequestNo = E.RequestNo 
-                ORDER BY 
-                    CASE WHEN QuoteNumber = E.WonQuoteRef THEN 0 ELSE 1 END, 
-                    UpdatedAt DESC
-            ) SC
-        `;
-
-        // We'll use these to avoid duplication in sub-queries
-        let itemValueSQL = '';
-        if (safeDivision && safeDivision !== 'All') {
-            itemValueSQL = `
-                 OUTER APPLY (
-                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
-                     FROM EnquiryFor EF_Inner
-                     JOIN Master_EnquiryFor MEF_Inner ON (EF_Inner.ItemName = MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '%- ' + MEF_Inner.ItemName OR EF_Inner.ItemName LIKE '%-' + MEF_Inner.ItemName)
-                     OUTER APPLY (
-                         SELECT SUM(ISNULL(Price, 0)) as Price
-                         FROM EnquiryPricingValues EPV
-                         WHERE EPV.RequestNo = EF_Inner.RequestNo 
-                           AND (EPV.EnquiryForID = EF_Inner.ID OR EPV.EnquiryForItem = EF_Inner.ItemName)
-                           AND (EPV.CustomerName = SC.ToName OR SC.ToName IS NULL)
-                     ) EPV
-                     WHERE EF_Inner.RequestNo = E.RequestNo
-                       AND LTRIM(RTRIM(MEF_Inner.DepartmentName)) = @division
-                 ) ItemValue
-             `;
-        } else {
-            itemValueSQL = `
-                 OUTER APPLY (
-                     SELECT SUM(ISNULL(EPV.Price, 0)) as Total
-                     FROM EnquiryFor EF_Inner
-                     OUTER APPLY (
-                         SELECT SUM(ISNULL(Price, 0)) as Price
-                         FROM EnquiryPricingValues EPV
-                         WHERE EPV.RequestNo = EF_Inner.RequestNo 
-                           AND (EPV.EnquiryForID = EF_Inner.ID OR EPV.EnquiryForItem = EF_Inner.ItemName)
-                           AND (EPV.CustomerName = SC.ToName OR SC.ToName IS NULL)
-                     ) EPV
-                     WHERE EF_Inner.RequestNo = E.RequestNo
-                       AND (EF_Inner.ParentID IS NULL OR EF_Inner.ParentID = 0)
-                 ) ItemValue
-             `;
-        }
-        const itemValueApply = selectedCustomerApply + itemValueSQL;
-        const itemValueCol = 'ISNULL(ItemValue.Total, 0)';
-        // GLOBAL VIEW: Default (WonOrderValue) applies. Do NOT override with potentially incomplete item sums.
-
-
-        // Actual from EnquiryMaster (Status = 'Won')
-        let actualQuery = '';
-        // Universal actualQuery
-        actualQuery = `
+        // Actual job booking from latest Probability per enquiry (won / booked value)
+        let actualRes = { recordset: [] };
+        try {
+            actualRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
+            SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime)) AS Q,
+                SUM(${SQL_PROB_WON_VALUE}) AS TotalActual
+            FROM LatestProb P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE ${wonMetricsSql}
+              AND YEAR(${probDateExpr}) = @year ${filterClause}
+              ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+            GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime))
+            `);
+        } catch (e) {
+            console.warn('[Sales Report] Probability actual fallback:', e.message);
+            actualRes = await request.query(`
                 SELECT DATEPART(QUARTER, ExpectedOrderDate) as Q, SUM(${itemValueCol}) as TotalActual
                 FROM EnquiryMaster E
                 ${itemValueApply}
                 WHERE Status = 'Won' AND YEAR(ExpectedOrderDate) = @year ${filterClause}
                 ${safeQuarter ? 'AND DATEPART(QUARTER, ExpectedOrderDate) = @quarterNums' : ''}
                 GROUP BY DATEPART(QUARTER, ExpectedOrderDate)
-            `;
-        const actualRes = await request.query(actualQuery);
+            `);
+        }
 
-        // 1b. Gross margin target vs actual (SalesTargets.GrossProfitTarget vs EnquiryMaster.WonGrossProfit by quarter)
         let gmTargetRes = { recordset: [] };
         let gmActualRes = { recordset: [] };
         try {
             gmTargetRes = await request.query(`
-                SELECT Quarter, SUM(ISNULL(GrossProfitTarget, 0)) as TotalTarget
+                SELECT
+                    Quarter,
+                    SUM(ISNULL(TargetValue, 0) * ISNULL(GrossProfitTarget, 0) / 100.0) AS TotalTarget,
+                    SUM(ISNULL(TargetValue, 0)) AS TotalSalesTarget
                 FROM SalesTargets
                 ${targetFilter}
                 GROUP BY Quarter
             `);
             gmActualRes = await request.query(`
-                SELECT DATEPART(QUARTER, E.ExpectedOrderDate) as Q, SUM(ISNULL(E.WonGrossProfit, 0)) as TotalActual
-                FROM EnquiryMaster E
-                WHERE E.Status = 'Won' AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
-                ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
-                GROUP BY DATEPART(QUARTER, E.ExpectedOrderDate)
+            ${SQL_LATEST_PROB_CTE}
+                SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime)) AS Q,
+                    SUM((${SQL_PROB_WON_VALUE}) * ISNULL(P.GrossMargin, 0) / 100.0) AS TotalActual
+                FROM LatestProb P
+                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                WHERE ${wonMetricsSql}
+                  AND YEAR(${probDateExpr}) = @year ${filterClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+                GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime))
             `);
         } catch (gmErr) {
             console.warn('[Sales Report] Gross margin summary skipped:', gmErr.message);
         }
 
-        // 2. Win-Loss Ratio (Count)
-        const winLossQuery = `
-            SELECT 
-                Status, 
-                COUNT(*) as Count,
-                SUM(${itemValueCol}) as TotalValue
+        let winLossRes = { recordset: [] };
+        try {
+            winLossRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
+            SELECT sg.StatusGrp AS Status, COUNT(*) AS Count, SUM(sg.JobVal) AS TotalValue
+            FROM (
+                SELECT
+                    CASE
+                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%' THEN 'Lost'
+                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%' THEN 'Follow-up'
+                        WHEN ${wonMetricsSql} THEN 'Won'
+                        ELSE NULL
+                    END AS StatusGrp,
+                    CASE
+                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%' THEN ${SQL_PROB_LOST_FOLLOW_VALUE}
+                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%' THEN ${SQL_PROB_LOST_FOLLOW_VALUE}
+                        WHEN ${wonMetricsSql} THEN ${SQL_PROB_WON_VALUE}
+                        ELSE CAST(0 AS DECIMAL(18,2))
+                    END AS JobVal
+                FROM LatestProb P
+                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                WHERE YEAR(${probDateExpr}) = @year ${filterClause}
+                ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+            ) sg
+            WHERE sg.StatusGrp IS NOT NULL
+            GROUP BY sg.StatusGrp
+            `);
+        } catch (wlErr) {
+            console.warn('[Sales Report] Win-loss Probability fallback:', wlErr.message);
+            winLossRes = await request.query(`
+            SELECT Status, COUNT(*) as Count, SUM(${itemValueCol}) as TotalValue
             FROM EnquiryMaster E
             ${itemValueApply}
             WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
               AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
               ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
             GROUP BY Status
-        `;
-        const winLossRes = await request.query(winLossQuery);
+        `);
+        }
 
-        // 2b. Quoted / pre-award pipeline (for Won–Lost pie “Quoted” slice)
+        // Quoted slice: least TotalAmount per enquiry across EnquiryQuotes (multi-customer), then sum in scope
         const quotedRes = await request.query(`
             SELECT 
-                COUNT(*) as Cnt, 
-                SUM(${itemValueCol}) as TotalValue
+                COUNT(DISTINCT E.RequestNo) as Cnt, 
+                SUM(ISNULL(Q.MinQuote, 0)) as TotalValue
             FROM EnquiryMaster E
-            ${itemValueApply}
-            WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
-              AND Status IN ('Quote', 'Quoted', 'Priced', 'Estimated', 'Enquiry', 'Pending')
-              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
+            INNER JOIN (
+                SELECT RequestNo, MIN(ISNULL(TotalAmount, 0)) AS MinQuote
+                FROM EnquiryQuotes
+                GROUP BY RequestNo
+            ) Q ON Q.RequestNo = E.RequestNo
+            WHERE YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause}
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums' : ''}
         `);
 
         // 3. Top 10 Customers
@@ -462,11 +799,41 @@ router.get('/summary', async (req, res) => {
         `;
         const topClientsRes = await request.query(topClientsQuery);
 
-        // 5b. Top 10 job-booked rows (for Sales Report table)
-        const topJobBookedRes = await request.query(`
+        const topJobProbWhere = getTopJobProbStatusWhere('Won', req);
+        let topJobBookedRes = { recordset: [] };
+        try {
+            topJobBookedRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
             SELECT TOP 10
                 x.ProjectName,
                 x.JobValue,
+                x.WonGrossProfit,
+                x.CustomerName,
+                x.ClientName,
+                x.ConsultantName
+            FROM (
+                SELECT
+                    E.ProjectName,
+                    (${SQL_PROB_WON_VALUE}) AS JobValue,
+                    P.GrossMargin AS WonGrossProfit,
+                    LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
+                    E.ClientName,
+                    E.ConsultantName
+                FROM LatestProb P
+                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                WHERE ${topJobProbWhere}
+                  AND YEAR(${probDateExpr}) = @year ${filterClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+            ) x
+            ORDER BY x.JobValue DESC
+            `);
+        } catch (tjErr) {
+            console.warn('[Sales Report] Top jobs Probability fallback:', tjErr.message);
+            topJobBookedRes = await request.query(`
+            SELECT TOP 10
+                x.ProjectName,
+                x.JobValue,
+                x.WonGrossProfit,
                 x.CustomerName,
                 x.ClientName,
                 x.ConsultantName
@@ -474,20 +841,46 @@ router.get('/summary', async (req, res) => {
                 SELECT
                     E.ProjectName,
                     ${itemValueCol} AS JobValue,
+                    E.WonGrossProfit AS WonGrossProfit,
                     LTRIM(RTRIM(ISNULL(E.WonCustomerName, E.CustomerName))) AS CustomerName,
                     E.ClientName,
                     E.ConsultantName
                 FROM EnquiryMaster E
                 ${itemValueApply}
-                WHERE E.Status = 'Won'
+                WHERE ${TOP_JOB_BOOKED_STATUS_SQL.Won}
                   AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
                   ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
             ) x
             ORDER BY x.JobValue DESC
         `);
+        }
 
-        // 6. Probability Funnel (5 Stages)
-        const probabilityFunnelRes = await request.query(`
+        let probabilityFunnelRes = { recordset: [] };
+        try {
+            probabilityFunnelRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
+            SELECT 
+                LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) AS ProbabilityName,
+                MAX(CASE
+                    WHEN PATINDEX('%[0-9]%', P.ProbabilityChance) > 0
+                    THEN TRY_CONVERT(INT, LEFT(LTRIM(P.ProbabilityChance), PATINDEX('%[^0-9]%', LTRIM(P.ProbabilityChance) + 'x') - 1))
+                    ELSE NULL
+                END) AS ProbabilityPercentage,
+                SUM(${SQL_PROB_JOB_VALUE}) AS TotalValue,
+                COUNT(*) AS Count
+            FROM LatestProb P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE YEAR(${probDateExpr}) = @year ${filterClause}
+              ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+              AND LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) <> ''
+              AND NOT (${wonMetricsSql})
+              AND LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) NOT LIKE '%lost%'
+            GROUP BY LTRIM(RTRIM(ISNULL(P.ProbabilityChance, '')))
+            ORDER BY ProbabilityPercentage ASC
+            `);
+        } catch (pfErr) {
+            console.warn('[Sales Report] Funnel Probability fallback:', pfErr.message);
+            probabilityFunnelRes = await request.query(`
             SELECT 
                 ProbabilityOption as ProbabilityName,
                 MAX(Probability) as ProbabilityPercentage,
@@ -502,6 +895,7 @@ router.get('/summary', async (req, res) => {
             GROUP BY ProbabilityOption
             ORDER BY MAX(Probability) ASC
         `);
+        }
 
         // Formatting data for frontend
         const quarters = [
@@ -519,14 +913,19 @@ router.get('/summary', async (req, res) => {
         });
 
         const gmQuarters = [
-            { name: 'Q1', target: 0, actual: 0 },
-            { name: 'Q2', target: 0, actual: 0 },
-            { name: 'Q3', target: 0, actual: 0 },
-            { name: 'Q4', target: 0, actual: 0 }
+            { name: 'Q1', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 },
+            { name: 'Q2', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 },
+            { name: 'Q3', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 },
+            { name: 'Q4', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 }
         ];
         (gmTargetRes.recordset || []).forEach(r => {
             const idx = parseInt(String(r.Quarter || '').replace('Q', ''), 10) - 1;
-            if (gmQuarters[idx]) gmQuarters[idx].target = r.TotalTarget;
+            if (!gmQuarters[idx]) return;
+            const gpMoney = Number(r.TotalTarget) || 0;
+            const salesBase = Number(r.TotalSalesTarget) || 0;
+            gmQuarters[idx].target = gpMoney;
+            gmQuarters[idx].targetSalesBase = salesBase;
+            gmQuarters[idx].targetGpPct = salesBase > 0 ? (gpMoney / salesBase) * 100 : 0;
         });
         (gmActualRes.recordset || []).forEach(r => {
             if (gmQuarters[r.Q - 1]) gmQuarters[r.Q - 1].actual = r.TotalActual;
@@ -540,10 +939,8 @@ router.get('/summary', async (req, res) => {
             lostValue: 0,
             followUpValue: 0
         };
-        console.log('[Sales Report] Win-Loss Raw Data:', winLossRes.recordset);
         winLossRes.recordset.forEach(r => {
             const s = r.Status.toLowerCase().replace('-', '');
-            console.log(`[Sales Report] Processing Status: "${r.Status}" -> "${s}", Count: ${r.Count}, Value: ${r.TotalValue}`);
             if (s === 'won') { winLoss.won = r.Count; winLoss.wonValue = r.TotalValue; }
             else if (s === 'lost') { winLoss.lost = r.Count; winLoss.lostValue = r.TotalValue; }
             else if (s === 'followup') { winLoss.followUp = r.Count; winLoss.followUpValue = r.TotalValue; }
@@ -551,7 +948,6 @@ router.get('/summary', async (req, res) => {
         const q0 = (quotedRes.recordset && quotedRes.recordset[0]) || {};
         winLoss.quoted = q0.Cnt || 0;
         winLoss.quotedValue = q0.TotalValue || 0;
-        console.log('[Sales Report] Final winLoss object:', winLoss);
 
 
         // 7. Item Wise Stats (Target vs Actual vs Breakdown)
@@ -599,7 +995,7 @@ router.get('/summary', async (req, res) => {
 
         // Get Targets by ItemName (instead of just Division) to support granular breakdown logic
         const requestTarget = new sql.Request();
-        requestTarget.input('year', sql.Int, year);
+        requestTarget.input('year', sql.Int, safeYear);
         if (safeQuarter) {
             requestTarget.input('quarterStr', sql.NVarChar, safeQuarter);
         }
@@ -616,10 +1012,14 @@ router.get('/summary', async (req, res) => {
                 GROUP BY ItemName
             `;
         } else {
+            if (safeDivision && safeDivision !== 'All') {
+                requestTarget.input('division', sql.NVarChar, safeDivision);
+            }
             targetQuery = `
                 SELECT Division as Name, SUM(ISNULL(TargetValue, 0)) as Target
                 FROM SalesTargets
                 WHERE FinancialYear = @year
+                ${safeDivision && safeDivision !== 'All' ? 'AND Division = @division ' : ''}
                 ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
                 GROUP BY Division
             `;
@@ -660,6 +1060,7 @@ router.get('/summary', async (req, res) => {
             topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
                 ProjectName: r.ProjectName,
                 JobValue: r.JobValue,
+                WonGrossProfit: r.WonGrossProfit,
                 CustomerName: r.CustomerName,
                 ClientName: r.ClientName,
                 ConsultantName: r.ConsultantName
@@ -672,9 +1073,95 @@ router.get('/summary', async (req, res) => {
     }
 });
 
+/** Top Jobs table only — same filters as /summary; optional topJobStatus (Won, Lost, …). No full dashboard payload. */
+router.get('/top-job-booked', async (req, res) => {
+    try {
+        await applySalesReportEmailScope(req);
+        const ctx = buildSalesReportItemValueContext(req);
+        if (!ctx) return res.status(400).json({ error: 'Year is required' });
+
+        const { request, filterClause, itemValueApply, itemValueCol, safeQuarter } = ctx;
+        const probDateExpr =
+            'COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, E.EnquiryDate)';
+        const topJobProbWhere = getTopJobProbStatusWhere(req.query.topJobStatus, req);
+        const topJobValueExpr = getTopJobProbValueExpr(req.query.topJobStatus);
+
+        let topJobBookedRes = { recordset: [] };
+        try {
+            topJobBookedRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
+            SELECT TOP 10
+                x.ProjectName,
+                x.JobValue,
+                x.WonGrossProfit,
+                x.CustomerName,
+                x.ClientName,
+                x.ConsultantName
+            FROM (
+                SELECT
+                    E.ProjectName,
+                    ${topJobValueExpr} AS JobValue,
+                    P.GrossMargin AS WonGrossProfit,
+                    LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
+                    E.ClientName,
+                    E.ConsultantName
+                FROM LatestProb P
+                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                WHERE ${topJobProbWhere}
+                  AND YEAR(${probDateExpr}) = @year ${filterClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+            ) x
+            ORDER BY x.JobValue DESC
+            `);
+        } catch (e) {
+            console.warn('[Sales Report] top-job-booked Probability fallback:', e.message);
+            const topJobStatusWhereLegacy = getTopJobBookedStatusWhere(req.query.topJobStatus);
+            topJobBookedRes = await request.query(`
+            SELECT TOP 10
+                x.ProjectName,
+                x.JobValue,
+                x.WonGrossProfit,
+                x.CustomerName,
+                x.ClientName,
+                x.ConsultantName
+            FROM (
+                SELECT
+                    E.ProjectName,
+                    ${itemValueCol} AS JobValue,
+                    E.WonGrossProfit AS WonGrossProfit,
+                    LTRIM(RTRIM(ISNULL(E.WonCustomerName, E.CustomerName))) AS CustomerName,
+                    E.ClientName,
+                    E.ConsultantName
+                FROM EnquiryMaster E
+                ${itemValueApply}
+                WHERE ${topJobStatusWhereLegacy}
+                  AND YEAR(E.ExpectedOrderDate) = @year ${filterClause}
+                  ${safeQuarter ? 'AND DATEPART(QUARTER, E.ExpectedOrderDate) = @quarterNums' : ''}
+            ) x
+            ORDER BY x.JobValue DESC
+            `);
+        }
+
+        res.json({
+            topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
+                ProjectName: r.ProjectName,
+                JobValue: r.JobValue,
+                WonGrossProfit: r.WonGrossProfit,
+                CustomerName: r.CustomerName,
+                ClientName: r.ClientName,
+                ConsultantName: r.ConsultantName
+            }))
+        });
+    } catch (err) {
+        console.error('Error fetching top job booked:', err);
+        res.status(500).json({ error: 'Failed to fetch top jobs' });
+    }
+});
+
 
 router.get('/item-wise-stats', async (req, res) => {
     try {
+        await applySalesReportEmailScope(req);
         const { year, company, division, role, quarter } = req.query;
         if (!year) return res.status(400).json({ error: 'Year is required' });
 
@@ -695,26 +1182,18 @@ router.get('/item-wise-stats', async (req, res) => {
             request.input('quarterStrs', sql.NVarChar, safeQuarter);
         }
 
-        let filterClause = '';
-        if (safeDivision && safeDivision !== 'All') {
-            request.input('division', sql.NVarChar, safeDivision);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.DepartmentName = @division) `;
-        } else if (safeCompany && safeCompany !== 'All') {
-            request.input('company', sql.NVarChar, safeCompany);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.CompanyName = @company) `;
-        }
+        const filterClause = appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole);
 
-        if (safeRole && safeRole !== 'All') {
-            request.input('se', sql.NVarChar, safeRole);
-            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND cse.SEName = @se) `;
-        }
+        const effectiveSeForItemWise =
+            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
+            || (safeRole && safeRole !== 'All' ? safeRole : null);
 
         // Determine Grouping
         let itemWiseGroupBy = 'mef.DepartmentName';
         let itemWiseSelect = 'mef.DepartmentName as ItemName';
         let itemWiseWhere = '';
 
-        if (safeRole && safeRole !== 'All') {
+        if (effectiveSeForItemWise) {
             itemWiseGroupBy = 'mef.ItemName';
             itemWiseSelect = 'mef.ItemName as ItemName';
         }
@@ -762,10 +1241,15 @@ router.get('/item-wise-stats', async (req, res) => {
         if (safeQuarter) {
             requestTarget.input('quarterStr', sql.NVarChar, safeQuarter);
         }
-        if (safeRole && safeRole !== 'All') requestTarget.input('se', sql.NVarChar, safeRole);
+        if (effectiveSeForItemWise) requestTarget.input('se', sql.NVarChar, effectiveSeForItemWise);
 
         let targetQuery = '';
-        if (safeRole && safeRole !== 'All') {
+        if (req.salesReportNonCcBlock === true) {
+            targetQuery = `
+                SELECT Division as Name, CAST(0 AS DECIMAL(18,2)) as Target
+                FROM SalesTargets WHERE 1=0
+            `;
+        } else if (effectiveSeForItemWise) {
             targetQuery = `
                 SELECT ItemName as Name, SUM(ISNULL(TargetValue, 0)) as Target
                 FROM SalesTargets
@@ -774,10 +1258,14 @@ router.get('/item-wise-stats', async (req, res) => {
                 GROUP BY ItemName
             `;
         } else {
+            if (safeDivision && safeDivision !== 'All') {
+                requestTarget.input('division', sql.NVarChar, safeDivision);
+            }
             targetQuery = `
                 SELECT Division as Name, SUM(ISNULL(TargetValue, 0)) as Target
                 FROM SalesTargets
                 WHERE FinancialYear = @year
+                ${safeDivision && safeDivision !== 'All' ? 'AND Division = @division ' : ''}
                 ${safeQuarter ? 'AND Quarter = @quarterStr ' : ''}
                 GROUP BY Division
             `;
@@ -813,6 +1301,7 @@ router.get('/item-wise-stats', async (req, res) => {
 
 router.get('/funnel-details', async (req, res) => {
     try {
+        await applySalesReportEmailScope(req);
         const { year, company, division, role, probabilityName, quarter } = req.query;
         if (!year || !probabilityName) return res.status(400).json({ error: 'Year and Probability Name are required' });
 
@@ -827,19 +1316,10 @@ router.get('/funnel-details', async (req, res) => {
             request.input('quarterNum', sql.Int, quarterNum);
         }
 
-        let filterClause = '';
-        if (division && division !== 'All') {
-            request.input('division', sql.NVarChar, division);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.DepartmentName = @division) `;
-        } else if (company && company !== 'All') {
-            request.input('company', sql.NVarChar, company);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.CompanyName = @company) `;
-        }
-
-        if (role && role !== 'All') {
-            request.input('se', sql.NVarChar, role);
-            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND cse.SEName = @se) `;
-        }
+        const safeCompanyFd = company ? String(company).trim() : null;
+        const safeDivisionFd = division ? String(division).trim() : null;
+        const safeRoleFd = role ? String(role).trim() : null;
+        const filterClause = appendSalesReportEnquiryFilters(req, request, safeCompanyFd, safeDivisionFd, safeRoleFd);
 
         // Define required SQL snippets locally (these are not in scope from /summary)
         const localSelectedCustomerApply = `
@@ -1021,6 +1501,7 @@ router.get('/funnel-details', async (req, res) => {
 
 router.get('/drilldown-details', async (req, res) => {
     try {
+        await applySalesReportEmailScope(req);
         const { year, company, division, role, metric, label, status, quarter } = req.query;
         if (!year || !metric) return res.status(400).json({ error: 'Year and Metric are required' });
 
@@ -1043,19 +1524,7 @@ router.get('/drilldown-details', async (req, res) => {
             request.input('quarterNum', sql.Int, quarterNum);
         }
 
-        let filterClause = '';
-        if (safeDivision && safeDivision !== 'All') {
-            request.input('division', sql.NVarChar, safeDivision);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.DepartmentName = @division) `;
-        } else if (safeCompany && safeCompany !== 'All') {
-            request.input('company', sql.NVarChar, safeCompany);
-            filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND mef.CompanyName = @company) `;
-        }
-
-        if (safeRole && safeRole !== 'All') {
-            request.input('se', sql.NVarChar, safeRole);
-            filterClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = E.RequestNo AND cse.SEName = @se) `;
-        }
+        const filterClause = appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole);
 
         let baseQuery = `
             SELECT 

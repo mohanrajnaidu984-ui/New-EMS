@@ -1,19 +1,31 @@
 /* Sales Report — mock layout: 2×2 + pipeline column; single viewport; pipeline dark */
 
+/* Amount suffixes “k” / “M” and percent “%” render at 50% of surrounding digit size */
+.sales-report-page .sr-money-thousands__k,
+.sales-report-page .sr-money-thousands__M,
+.sales-report-page .sr-pct-sym {
+    font-size: 0.5em;
+    vertical-align: 0.08em;
+}
+
 .sales-report-page {
     color: #0f172a;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     padding: 0.4rem 0.5rem 0.35rem;
     box-sizing: border-box;
+    --sr-header-font-scale: 1.1;
     /* Shared blue bar height: prior 1.35rem + 25% */
-    --sr-section-header-min-height: 1.6875rem;
+    /* Single fixed row height for Won/Lost, JB, GM, Pipeline, Top Jobs toolbar */
+    --sr-section-header-min-height: 1.75rem;
     --sr-bg-smoke: #f5f5f5;
+    /* Canvas behind the grid only — gutters between cards; panels keep --sr-bg-smoke */
+    --sr-page-bg: #94a3b8;
     --sr-blue: #6a73ae;
     --sr-blue-light: #abc3e4;
     --sr-header-bar-bg: var(--sr-blue);
     --sr-header-bar-border: #5c648f;
     --sr-header-bar-text: #fff;
-    background-color: var(--sr-bg-smoke);
+    background-color: var(--sr-page-bg);
 }
 
 /* Data theme: primary blue + light blue (matches charts) */
@@ -26,11 +38,11 @@
 }
 
 /* Won/Lost summary only — semantic green / red (overrides blue theme above) */
-.sr-cell-won-text .text-success {
+.sr-cell-won-combined .text-success {
     color: #15803d !important;
 }
 
-.sr-cell-won-text .text-danger {
+.sr-cell-won-combined .text-danger {
     color: #dc2626 !important;
 }
 
@@ -54,7 +66,7 @@
 
 .sr-filter-label {
     display: block;
-    font-size: 0.65rem;
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.02em;
@@ -72,15 +84,16 @@
 }
 
 /* Main grid:
-   Row1: [ Won | Target | Gross margin | Pipeline ]
-   Row2: [ Won chart | Target chart | GM chart | Pipeline ]
-   Row3: [ Table span 3 cols                      | Pipeline ]
-   Pipeline column width unchanged (minmax 200px / 22vw); cols 1–3 share space evenly.
+   Cols 1–3 row1–2: merged summary+chart stacks; col4: pipeline rows 1–3; row3: table.
+   [ Won+pie | Target+bar | GM+bar | Pipeline ]
+   [  span2  |   span2   | span2  |  span3  ]
+   [  table span 3       |         |  span   ]
 */
 .sr-dashboard-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(200px, 22vw);
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1.08fr);
+    /* Row2+3 flex split: was 1 : 1.08; table row −20% → 0.864fr, remainder to row2 → 1.216fr (total 2.08fr). */
+    grid-template-rows: auto minmax(0, 1.216fr) minmax(0, 0.864fr);
     gap: 0.45rem;
     min-height: 0;
     flex: 1 1 0;
@@ -93,34 +106,20 @@
     overflow: hidden;
 }
 
-.sr-cell-won-text {
+/* Won/Lost: single card spanning former summary + chart rows */
+.sr-cell-won-combined {
     grid-column: 1;
-    grid-row: 1;
+    grid-row: 1 / span 2;
 }
 
-.sr-cell-target-text {
+.sr-cell-target-combined {
     grid-column: 2;
-    grid-row: 1;
+    grid-row: 1 / span 2;
 }
 
-.sr-cell-won-chart {
-    grid-column: 1;
-    grid-row: 2;
-}
-
-.sr-cell-target-chart {
-    grid-column: 2;
-    grid-row: 2;
-}
-
-.sr-cell-gm-text {
+.sr-cell-gm-combined {
     grid-column: 3;
-    grid-row: 1;
-}
-
-.sr-cell-gm-chart {
-    grid-column: 3;
-    grid-row: 2;
+    grid-row: 1 / span 2;
 }
 
 .sr-cell-pipeline {
@@ -135,12 +134,14 @@
 
 /* Long title in Gross margin summary card */
 .sr-gm-section .sr-summary-title {
-    font-size: 0.65rem;
-    line-height: 1.2;
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
+    line-height: 1.15;
     padding-left: 0.25rem;
     padding-right: 0.25rem;
-    font-weight: 400 !important;
+    font-weight: 500 !important;
     min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+    box-sizing: border-box;
 }
 
 /* Summary text blocks (screenshot: rounded grey panels) */
@@ -151,20 +152,25 @@
     width: 100%;
 }
 
-/* Section headers: tinted bar + dark title */
+/* Section headers: gradient bar, inset shine — shared fixed height */
 .sr-summary-compact .sr-summary-title {
     text-align: center;
-    font-size: 0.72rem;
-    font-weight: 400 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
+    font-weight: 500 !important;
     min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0.19rem 0.35rem;
-    line-height: 1.2;
-    background: var(--sr-header-bar-bg);
-    border-bottom: 1px solid var(--sr-header-bar-border);
+    padding: 0 0.35rem;
+    line-height: 1.15;
     color: var(--sr-header-bar-text);
+    letter-spacing: 0.035em;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
+    background: linear-gradient(180deg, #949dc9 0%, #6d76a4 40%, #4a5278 100%);
+    border-bottom: 1px solid rgba(30, 41, 59, 0.35);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
 }
 
 .sr-summary-compact .sr-summary-body {
@@ -174,18 +180,75 @@
     min-height: 0;
 }
 
-/* Row 1: all three summary cards share the same track height (set by the tallest).
-   Shorter cards stretch; body grows so card bottom aligns with neighbors. */
-.sr-cell-won-text .sr-summary-body.sr-target-body,
-.sr-cell-target-text .sr-summary-body.sr-target-body,
-.sr-cell-gm-text .sr-summary-body.sr-target-body {
-    flex: 1 1 auto;
+/* Below purple header: summary band 40% / chart 60% (flex grow 2 : 3) */
+.sr-cell-won-combined .sr-metric-stack,
+.sr-cell-target-combined .sr-metric-stack,
+.sr-cell-gm-combined .sr-metric-stack {
+    flex: 1 1 0;
     min-height: 0;
 }
 
-.sr-cell-target-text .sr-summary-body.sr-target-body,
-.sr-cell-gm-text .sr-summary-body.sr-target-body {
+.sr-cell-won-combined .sr-stack-top,
+.sr-cell-target-combined .sr-stack-top,
+.sr-cell-gm-combined .sr-stack-top {
+    flex: 2 1 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.sr-cell-won-combined .sr-stack-top .sr-summary-body.sr-target-body,
+.sr-cell-target-combined .sr-stack-top .sr-summary-body.sr-target-body,
+.sr-cell-gm-combined .sr-stack-top .sr-summary-body.sr-target-body {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: auto;
     justify-content: flex-start;
+}
+
+/* Job Booking + Gross Profit: same 2 : 3 split as chart — no inner vertical scrollbar (clip if extreme) */
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-summary-body.sr-target-body,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-summary-body.sr-target-body {
+    overflow: hidden;
+}
+
+.sr-cell-won-combined .sr-stack-top .sr-won-stack-divider,
+.sr-cell-won-combined .sr-stack-top .sr-stack-divider,
+.sr-cell-target-combined .sr-stack-top .sr-stack-divider,
+.sr-cell-gm-combined .sr-stack-top .sr-stack-divider {
+    flex-shrink: 0;
+}
+
+/* Merged panels — no rule under purple header */
+.sr-cell-won-combined .sr-summary-title,
+.sr-cell-target-combined .sr-summary-title,
+.sr-cell-gm-combined .sr-summary-title {
+    border-bottom: none;
+}
+
+.sr-stack-divider,
+.sr-won-stack-divider {
+    margin: 0;
+    border: 0;
+    border-top: 1px solid #d1d5db;
+    opacity: 1;
+}
+
+.sr-cell-won-combined .sr-won-chart-stack {
+    flex: 3.35 1 0;
+    min-height: 10.5rem;
+    background: var(--sr-bg-smoke);
+}
+
+/* Won/Lost: give the donut a bit more room vs the summary band */
+.sr-cell-won-combined .sr-stack-top {
+    flex: 1.65 1 0;
+}
+
+.sr-cell-target-combined .sr-ta-chart-stack,
+.sr-cell-gm-combined .sr-ta-chart-stack {
+    flex: 3 1 0;
+    min-height: 0;
+    background: var(--sr-bg-smoke);
 }
 
 .sr-won-summary {
@@ -226,6 +289,32 @@
     letter-spacing: -0.03em;
 }
 
+/* Won/Lost left — rate digits +40% vs base; “%” −40% vs prior 0.98×1.42rem; inline-flex keeps chart layout stable */
+.sales-report-page .sr-cell-won-combined .sr-won-rates .sr-rate-pct {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.04em;
+}
+
+.sales-report-page .sr-cell-won-combined .sr-won-rates .sr-rate-pct__val {
+    font-size: calc(1.42rem * 1.4);
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.03em;
+}
+
+.sales-report-page .sr-cell-won-combined .sr-won-rates .sr-rate-pct .sr-pct-sym {
+    font-size: calc(1.42rem * 0.98 * 0.6);
+    font-weight: 800;
+    line-height: 1;
+}
+
+/* Won/Lost right — Won/Lost/Quoted amounts: “k” / “M” 50% larger than default (0.5em → 0.75em) */
+.sales-report-page .sr-cell-won-combined .sr-won-values .sr-money-thousands__k,
+.sales-report-page .sr-cell-won-combined .sr-won-values .sr-money-thousands__M {
+    font-size: 0.75em;
+}
+
 .sr-won-values {
     flex: 1 1 auto;
     min-width: 0;
@@ -237,7 +326,7 @@
 }
 
 /* Won / Lost right column: label left-centre, value centred in remaining width */
-.sr-cell-won-text .sr-won-values .sr-kpi-line {
+.sr-cell-won-combined .sr-won-values .sr-kpi-line {
     flex: 1 1 0;
     display: grid;
     grid-template-columns: auto 1fr;
@@ -277,7 +366,7 @@
 }
 
 /* Won/Lost right column: label left + vertically centred; value +50% font, centred in second column */
-.sr-cell-won-text .sr-won-values .sr-kpi-label {
+.sr-cell-won-combined .sr-won-values .sr-kpi-label {
     font-size: 0.825rem !important;
     line-height: 1.15;
     margin-bottom: 0;
@@ -287,7 +376,7 @@
     align-self: center;
 }
 
-.sr-cell-won-text .sr-won-values .sr-kpi-num {
+.sr-cell-won-combined .sr-won-values .sr-kpi-num {
     font-size: 1.02rem !important;
     line-height: 1.15;
     width: 100%;
@@ -297,13 +386,13 @@
 }
 
 .sr-quoted-strong {
-    color: var(--sr-blue);
+    color: #000;
 }
 
 /* —— Target vs Actual (reference layout) —— */
 .sr-target-card .sr-summary-title {
     color: var(--sr-header-bar-text);
-    font-weight: 400 !important;
+    font-weight: 500 !important;
 }
 
 .sr-target-card .sr-summary-body.sr-target-body {
@@ -383,31 +472,68 @@
     opacity: 1;
 }
 
-/* Four quarters in one row (explicit grid — avoids Bootstrap row/col stacking) */
-.sr-quarter-grid-4 {
+/* Quarter matrix: fixed Actual/Target rail + four equal bands (same total width as Recharts plot area when inset math matches). */
+.sr-quarter-matrix {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: var(--sr-q-matrix-label-rail, 2.45rem) repeat(4, minmax(0, 1fr));
+    grid-auto-rows: auto;
+    column-gap: 0;
+    row-gap: 0;
     width: 100%;
     box-sizing: border-box;
-    background: var(--sr-bg-smoke);
-    border: 1px solid #e5e7eb;
-    border-radius: 4px;
-    overflow: hidden;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    overflow: visible;
     margin-top: 0.05rem;
+    align-items: center;
 }
 
-.sr-quarter-grid-4 > .sr-quarter-col {
-    padding: 0.28rem 0.2rem;
+/* Quarter table only: “k” / “M” and “%” 50% larger than default report suffixes (0.5em → 0.75em of parent) */
+.sales-report-page .sr-quarter-matrix .sr-money-thousands__k,
+.sales-report-page .sr-quarter-matrix .sr-money-thousands__M,
+.sales-report-page .sr-quarter-matrix .sr-pct-sym {
+    font-size: 0.75em;
+}
+
+.sr-q-matrix__cell--vsep {
+    border-right: 1px solid #cbd5e1;
+}
+
+.sr-q-matrix__rule {
+    grid-column: 1 / -1;
+    border: 0;
+    margin: 0.08rem 0;
+    padding: 0;
+    height: 0;
+    border-top: 1px solid #d1d5db;
+    box-sizing: border-box;
+}
+
+.sr-q-matrix__lab {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+    font-weight: 600;
+    color: #64748b;
+    line-height: 1.15;
+    text-align: left;
+    padding-left: 0;
+    padding-right: 0.06rem;
+    box-sizing: border-box;
     min-width: 0;
-    border-right: 1px solid #e5e7eb;
 }
 
-.sr-quarter-grid-4 > .sr-quarter-col:last-child {
-    border-right: none;
+.sr-q-matrix__lab--actual,
+.sr-q-matrix__lab--target {
+    align-self: center;
+}
+
+.sr-q-matrix__corner {
+    min-height: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1) * 1.35);
+    pointer-events: none;
 }
 
 .sr-quarter-header {
-    font-size: 0.62rem;
+    font-size: calc(0.62rem * var(--sr-header-font-scale, 1.1));
     line-height: 1.25;
     margin-bottom: 0.12rem;
 }
@@ -423,74 +549,432 @@
 }
 
 .sr-quarter-actual {
-    font-size: 0.62rem;
+    font-size: calc(0.62rem * var(--sr-header-font-scale, 1.1));
     font-weight: 600;
     line-height: 1.2;
 }
 
 .sr-quarter-target {
-    font-size: 0.62rem;
+    font-size: calc(0.62rem * var(--sr-header-font-scale, 1.1));
     font-weight: 600;
     line-height: 1.2;
     color: var(--sr-blue-light);
 }
 
 /* Target vs Actual + Gross margin summary: dark grey body copy; darker target/actual tints (matches bar fills) */
-.sr-cell-target-text,
-.sr-cell-gm-text {
-    --sr-ta-copy: #374151;
-    --sr-ta-actual: #4f5782;
-    --sr-ta-target: #7c94c8;
+.sr-cell-target-combined,
+.sr-cell-gm-combined {
+    --sr-ta-copy: #1f2937;
+    --sr-ta-actual: #3d4566;
+    --sr-ta-target: #7392c7;
+    --sr-ta-text-scale: 1.15;
+    --sr-achieved-pct-color: #dc2626;
+    /* Q1–Q4 block: prior scale × 0.95 (−5%) */
+    --sr-quarter-font-scale: 0.94392;
+    /* Actual / Target summary stack (Job Booking + GP): was 1.2× base, then −10% */
+    --sr-summary-kpi-scale: 1.08;
 }
 
-.sr-cell-target-text .sr-target-achieved-label,
-.sr-cell-gm-text .sr-target-achieved-label {
+.sr-cell-target-combined .sr-target-achieved-label,
+.sr-cell-gm-combined .sr-target-achieved-label {
     color: var(--sr-ta-copy);
 }
 
-.sr-cell-target-text .sr-achieved-pct.text-success,
-.sr-cell-gm-text .sr-achieved-pct.text-success {
-    color: var(--sr-ta-copy) !important;
+.sr-cell-target-combined .sr-achieved-pct.text-success,
+.sr-cell-gm-combined .sr-achieved-pct.text-success {
+    color: var(--sr-achieved-pct-color) !important;
 }
 
-.sr-cell-target-text .sr-quarter-name,
-.sr-cell-gm-text .sr-quarter-name {
+.sr-cell-target-combined .sr-quarter-name,
+.sr-cell-gm-combined .sr-quarter-name {
     color: var(--sr-ta-copy);
 }
 
-.sr-cell-target-text .sr-quarter-pct.text-success,
-.sr-cell-gm-text .sr-quarter-pct.text-success {
-    color: var(--sr-ta-copy) !important;
+.sr-cell-target-combined .sr-quarter-pct.text-success,
+.sr-cell-gm-combined .sr-quarter-pct.text-success {
+    color: var(--sr-achieved-pct-color) !important;
 }
 
-.sr-cell-target-text .sr-quarter-actual.text-success,
-.sr-cell-gm-text .sr-quarter-actual.text-success {
+.sr-cell-target-combined .sr-quarter-actual.text-success,
+.sr-cell-gm-combined .sr-quarter-actual.text-success,
+.sr-cell-target-combined .sr-q-matrix__actual.text-success,
+.sr-cell-gm-combined .sr-q-matrix__actual.text-success {
     color: var(--sr-ta-actual) !important;
 }
 
-.sr-cell-target-text .sr-quarter-target,
-.sr-cell-gm-text .sr-quarter-target {
+.sr-cell-target-combined .sr-quarter-target,
+.sr-cell-gm-combined .sr-quarter-target {
     color: var(--sr-ta-target) !important;
 }
 
-.sr-cell-target-text .sr-fraction-actual .sr-fraction-value.text-success,
-.sr-cell-gm-text .sr-fraction-actual .sr-fraction-value.text-success {
+/* Gross margin quarters: GP actual + (achievement %) */
+.sr-cell-gm-combined .sr-quarter-gp-val {
     color: var(--sr-ta-actual) !important;
 }
 
-.sr-cell-target-text .sr-fraction-actual .sr-fraction-suffix,
-.sr-cell-gm-text .sr-fraction-actual .sr-fraction-suffix {
+.sr-cell-gm-combined .sr-quarter-gp-pct {
+    color: var(--sr-achieved-pct-color) !important;
+    font-weight: 600;
+}
+
+.sr-cell-gm-combined .sr-gp-summary-actual-pct {
+    color: var(--sr-achieved-pct-color) !important;
+    font-weight: 700;
+}
+
+.sr-cell-gm-combined .sr-gp-quarter-target {
+    font-size: calc(0.62rem * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.sr-cell-gm-combined .sr-gp-quarter-target .sr-quarter-target-k {
+    color: var(--sr-ta-target) !important;
+}
+
+.sr-cell-gm-combined .sr-gp-quarter-target .sr-quarter-target-gp-pct {
+    color: var(--sr-ta-target) !important;
+    font-weight: 600;
+}
+
+.sr-cell-gm-combined .sr-fraction-target-val .sr-fraction-target-gp-pct {
+    color: var(--sr-ta-target) !important;
+    font-weight: 600;
+}
+
+.sr-cell-target-combined .sr-fraction-actual .sr-fraction-value.text-success,
+.sr-cell-gm-combined .sr-fraction-actual .sr-fraction-value.text-success {
+    color: var(--sr-ta-actual) !important;
+}
+
+.sr-cell-target-combined .sr-fraction-actual .sr-fraction-suffix,
+.sr-cell-gm-combined .sr-fraction-actual .sr-fraction-suffix {
     color: var(--sr-ta-actual);
 }
 
-.sr-cell-target-text .sr-fraction-target-val,
-.sr-cell-gm-text .sr-fraction-target-val {
+.sr-cell-target-combined .sr-fraction-target-val,
+.sr-cell-gm-combined .sr-fraction-target-val {
     color: var(--sr-ta-target);
 }
 
-.sr-cell-target-text .sr-fraction-target .sr-fraction-suffix,
-.sr-cell-gm-text .sr-fraction-target .sr-fraction-suffix {
+.sr-cell-target-combined .sr-fraction-target .sr-fraction-suffix,
+.sr-cell-gm-combined .sr-fraction-target .sr-fraction-suffix {
     color: var(--sr-ta-target);
+}
+
+/* Target + GM: +15% typography (header + 40% summary stack); tighter spacing so layout stays contained */
+.sr-cell-target-combined.sr-jb-section.sr-summary-compact .sr-summary-title {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1));
+    line-height: 1.15;
+    padding-left: 0.22rem;
+    padding-right: 0.22rem;
+    min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+}
+
+/* Job Booking: Achieved left; Actual above Target on the right — taller band; quarter margin tracks height so Q-table position stays stable */
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top {
+    min-height: 6.88rem;
+    padding-top: 0.45rem;
+    padding-bottom: 0.82rem;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-fraction-stack {
+    gap: 0.09rem;
+    min-width: 0;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-fraction-cell {
+    flex: 0 1 auto;
+    min-width: 0;
+    line-height: 1.35;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-fraction-stack .sr-jb-fraction-stack-rule {
+    margin: 0.09rem 0;
+    width: 100%;
+    max-width: 11rem;
+    align-self: flex-end;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-target-hr {
+    margin-top: 0.18rem;
+    margin-bottom: 0.1rem;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-quarter-align {
+    margin-top: -0.08rem;
+}
+
+/* Gross margin: match Job Booking — Actual above Target */
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top {
+    min-height: 6.88rem;
+    padding-top: 0.45rem;
+    padding-bottom: 0.82rem;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-stack {
+    gap: 0.09rem;
+    min-width: 0;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-cell {
+    flex: 0 1 auto;
+    min-width: 0;
+    line-height: 1.35;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-stack .sr-gm-fraction-stack-rule {
+    margin: 0.09rem 0;
+    width: 100%;
+    max-width: 13rem;
+    align-self: flex-end;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-target-hr {
+    margin-top: 0.18rem;
+    margin-bottom: 0.1rem;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-gm-quarter-align {
+    margin-top: -0.08rem;
+}
+
+/* Larger type for Total Target vs Actual row (Achieved + fractions) */
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-target-achieved-label,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-target-achieved-label {
+    font-size: calc(0.74rem * 0.8 * var(--sr-ta-text-scale));
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-jb-fraction-stack .sr-fraction-actual,
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-jb-fraction-stack .sr-fraction-target,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-gm-fraction-stack .sr-fraction-actual,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-gm-fraction-stack .sr-fraction-target {
+    font-size: calc(0.74rem * var(--sr-ta-text-scale) * var(--sr-summary-kpi-scale));
+}
+
+/* KPI row: Actual/Target label (~30% smaller via 0.7em) before amounts */
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-fraction-kpi-row,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-kpi-row {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.28rem;
+    flex-wrap: nowrap;
+    max-width: 100%;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-fraction-suffix--lead,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-suffix--lead {
+    font-size: 0.7em;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-fraction-actual .sr-fraction-suffix--lead,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-actual .sr-fraction-suffix--lead {
+    color: #64748b;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-fraction-target .sr-fraction-suffix--lead,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-target .sr-fraction-suffix--lead {
+    color: var(--sr-ta-target);
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-target-top .sr-fraction-kpi-row .sr-fraction-value,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-kpi-row .sr-fraction-value {
+    font-size: 1.3em;
+}
+
+.sr-cell-gm-combined.sr-gm-section .sr-gm-target-top .sr-fraction-kpi-row .sr-gp-summary-actual-pct {
+    font-size: 1.3em;
+}
+
+/*
+ * Q1–Q4 centres vs bar chart: Recharts plot inner width = row − offset.left − offset.right (section sets --sr-ta-plot-offset-*).
+ * Padding-left = plotOffsetLeft − labelRail so (padding-left + label rail) == plotOffsetLeft; four fr columns then span the plot width.
+ */
+.sr-jb-quarter-align {
+    --sr-q-matrix-label-rail: 2.45rem;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding-left: calc(var(--sr-ta-plot-offset-left, 55px) - var(--sr-q-matrix-label-rail));
+    padding-right: var(--sr-ta-plot-offset-right, 6px);
+}
+
+.sr-jb-quarter-align .sr-quarter-matrix {
+    width: 100%;
+    min-width: 0;
+}
+
+/* Same horizontal inset as summary body — chart used p-1 (0.25rem) vs body 0.38rem and skewed bar vs grid alignment */
+.sr-jb-section .sr-jb-chart-stack {
+    padding: 0.25rem 0.38rem 0.28rem;
+    box-sizing: border-box;
+}
+
+/* Gross margin: same inset math as Job Booking */
+.sr-gm-quarter-align {
+    --sr-q-matrix-label-rail: 2.45rem;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding-left: calc(var(--sr-ta-plot-offset-left, 55px) - var(--sr-q-matrix-label-rail));
+    padding-right: var(--sr-ta-plot-offset-right, 6px);
+}
+
+.sr-gm-quarter-align .sr-quarter-matrix {
+    width: 100%;
+    min-width: 0;
+}
+
+.sr-gm-section .sr-gm-chart-stack {
+    padding: 0.25rem 0.38rem 0.28rem;
+    box-sizing: border-box;
+}
+
+.sr-cell-gm-combined.sr-gm-section.sr-summary-compact .sr-summary-title {
+    font-size: calc(0.58rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1));
+    line-height: 1.15;
+    padding-left: 0.18rem;
+    padding-right: 0.18rem;
+    min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+}
+
+.sr-cell-target-combined.sr-target-card .sr-summary-body.sr-target-body,
+.sr-cell-gm-combined.sr-target-card .sr-summary-body.sr-target-body {
+    padding: 0.26rem 0.38rem 0.3rem;
+}
+
+.sr-cell-target-combined.sr-jb-section.sr-target-card .sr-summary-body.sr-target-body,
+.sr-cell-gm-combined.sr-gm-section.sr-target-card .sr-summary-body.sr-target-body {
+    padding: 0.12rem 0.38rem 0.14rem;
+}
+
+.sr-cell-target-combined .sr-target-top,
+.sr-cell-gm-combined .sr-target-top {
+    gap: 0.28rem;
+}
+
+.sr-cell-target-combined .sr-target-hr,
+.sr-cell-gm-combined .sr-target-hr {
+    margin: 0.26rem 0;
+}
+
+.sr-cell-target-combined .sr-quarter-matrix,
+.sr-cell-gm-combined .sr-quarter-matrix {
+    margin-top: 0.02rem;
+}
+
+.sr-cell-target-combined .sr-jb-quarter-align .sr-q-matrix__qh,
+.sr-cell-target-combined .sr-jb-quarter-align .sr-q-matrix__actual,
+.sr-cell-target-combined .sr-jb-quarter-align .sr-q-matrix__target,
+.sr-cell-gm-combined .sr-gm-quarter-align .sr-q-matrix__qh,
+.sr-cell-gm-combined .sr-gm-quarter-align .sr-q-matrix__actual,
+.sr-cell-gm-combined .sr-gm-quarter-align .sr-q-matrix__target {
+    padding-left: 0.18rem;
+    padding-right: 0.18rem;
+    padding-top: 0.09rem;
+    padding-bottom: 0.09rem;
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-target-achieved-label,
+.sr-cell-gm-combined .sr-stack-top .sr-target-achieved-label {
+    font-size: calc(0.68rem * var(--sr-ta-text-scale));
+}
+
+/* Achieved %: digits +40% vs prior scale; “%” symbol half that size — quarter margin/min-height tuned so Q-table stays put */
+.sr-cell-target-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct,
+.sr-cell-gm-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.04em;
+    font-size: unset;
+    line-height: 1;
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct .sr-achieved-pct__num,
+.sr-cell-gm-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct .sr-achieved-pct__num {
+    font-size: calc(1.22rem * 1.4 * 1.4 * var(--sr-ta-text-scale));
+    font-weight: 700;
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct .sr-achieved-pct__sym,
+.sr-cell-gm-combined .sr-stack-top .sr-target-achieved .sr-achieved-pct .sr-achieved-pct__sym {
+    font-size: calc(1.22rem * 1.4 * 1.4 * var(--sr-ta-text-scale) * 0.5);
+    font-weight: 700;
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-target-achieved .sr-achieved-pct,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-target-achieved .sr-achieved-pct {
+    line-height: 1;
+    margin-top: 0.04rem;
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-fraction-actual,
+.sr-cell-target-combined .sr-stack-top .sr-fraction-target,
+.sr-cell-gm-combined .sr-stack-top .sr-fraction-actual,
+.sr-cell-gm-combined .sr-stack-top .sr-fraction-target {
+    font-size: calc(0.68rem * var(--sr-ta-text-scale));
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-jb-fraction-stack .sr-fraction-actual,
+.sr-cell-target-combined.sr-jb-section .sr-jb-fraction-stack .sr-fraction-target,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-stack .sr-fraction-actual,
+.sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-stack .sr-fraction-target {
+    font-size: calc(0.68rem * var(--sr-ta-text-scale) * var(--sr-summary-kpi-scale));
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-quarter-header,
+.sr-cell-gm-combined .sr-stack-top .sr-quarter-header {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-quarter-actual,
+.sr-cell-gm-combined .sr-stack-top .sr-quarter-actual,
+.sr-cell-target-combined .sr-stack-top .sr-q-matrix__actual,
+.sr-cell-gm-combined .sr-stack-top .sr-q-matrix__actual {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-cell-target-combined .sr-stack-top .sr-quarter-target,
+.sr-cell-gm-combined .sr-stack-top .sr-quarter-target,
+.sr-cell-target-combined .sr-stack-top .sr-q-matrix__target,
+.sr-cell-gm-combined .sr-stack-top .sr-q-matrix__target {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-cell-gm-combined .sr-stack-top .sr-gp-quarter-target {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-quarter-header,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-quarter-header,
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-quarter-actual,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-quarter-actual,
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-quarter-target,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-quarter-target,
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-q-matrix__actual,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-q-matrix__actual,
+.sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-q-matrix__target,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-q-matrix__target,
+.sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-gp-quarter-target {
+    line-height: 1.15;
+}
+
+/* Q1–Q4 label slightly larger; nudge row up (net height ~unchanged via ± margin) */
+.sr-jb-quarter-align .sr-quarter-header .sr-quarter-name,
+.sr-gm-quarter-align .sr-quarter-header .sr-quarter-name {
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-quarter-font-scale) * 1.2 * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-jb-quarter-align .sr-quarter-header,
+.sr-gm-quarter-align .sr-quarter-header {
+    margin-top: -0.07rem;
+    margin-bottom: 0.07rem;
 }
 
 /* Chart-only panels */
@@ -517,66 +1001,82 @@
     flex: 1 1 0;
 }
 
-/* Pipeline funnel: fill cell + center the graphic */
+/* Target vs Actual / GM bar charts — depth on columns */
+.sales-report-page .sr-jb-chart-stack .recharts-bar-rectangle,
+.sales-report-page .sr-gm-chart-stack .recharts-bar-rectangle {
+    filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.1));
+}
+
+.sales-report-page .sr-jb-chart-stack .recharts-surface,
+.sales-report-page .sr-gm-chart-stack .recharts-surface {
+    overflow: visible;
+}
+
+/* Won/Lost donut — concentric ring, soft depth; surface overflow so drop-shadow isn’t clipped */
+.sr-cell-won-combined .sr-chart-pie.sr-donut-chart {
+    padding: 2px 4px 0;
+    box-sizing: border-box;
+}
+
+.sr-cell-won-combined .sr-chart-pie.sr-donut-chart .recharts-surface {
+    overflow: visible;
+}
+
+.sr-cell-won-combined .sr-chart-pie.sr-donut-chart .recharts-pie-sector {
+    filter: drop-shadow(0 2px 8px rgba(15, 23, 42, 0.12));
+}
+
+/* Pipeline funnel: stretch to fill column — avoids vertical letterboxing from align-items:center */
 .sr-chart-funnel {
     min-height: 0;
     flex: 1 1 0;
     display: flex;
-    align-items: center;
+    align-items: stretch;
     justify-content: center;
 }
 
-/* Custom Sales Pipeline funnel — labels left, inverted triangle segments */
+/* Custom Sales Pipeline funnel — % labels in SVG (viewBox includes vertical pad for 10%) */
 .sales-pipeline-funnel-visual {
     width: 100%;
-    max-width: min(100%, 22rem);
+    max-width: 100%;
     min-height: 0;
-    align-self: center;
-    align-items: stretch;
-}
-
-.sr-funnel-labels-col {
-    display: flex;
-    flex-direction: column;
-    flex: 0 0 auto;
-    width: 22%;
-    max-width: 3.25rem;
-    min-width: 2.25rem;
-    align-self: stretch;
-}
-
-.sr-funnel-label-cell {
     flex: 1 1 0;
     display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding-right: 0.35rem;
-    border-right: 1px solid #1e293b;
-    min-height: 0;
+    flex-direction: column;
+    align-self: stretch;
+    /* Minimal horizontal inset — vbPadX in SVG still guards % labels */
+    padding-left: 1px;
+    padding-right: 1px;
     box-sizing: border-box;
-}
-
-.sr-funnel-label-text {
-    font-size: 0.58rem;
-    line-height: 1.15;
-    color: #0f172a;
-    text-align: right;
 }
 
 .sr-funnel-svg-wrap {
     flex: 1 1 0;
     min-width: 0;
-    min-height: 140px;
-    aspect-ratio: 1 / 1.15;
-    max-height: min(55vh, 360px);
+    min-height: 184px;
+    width: 100%;
     display: flex;
-    align-items: stretch;
-    align-self: stretch;
+    align-items: center;
+    justify-content: center;
 }
 
 .sr-funnel-svg {
     width: 100%;
     height: 100%;
+    max-height: 100%;
+    display: block;
+    overflow: visible;
+    filter: drop-shadow(0 1px 3px rgba(15, 23, 42, 0.06));
+}
+
+.sr-funnel-label-text-svg {
+    fill: #0f172a;
+    font-weight: 600;
+    pointer-events: none;
+}
+
+.sr-funnel-block-value-svg {
+    pointer-events: none;
 }
 
 /* Sales Pipeline — same white card + blue header as other sections */
@@ -590,18 +1090,22 @@
 .sr-pipeline-header {
     flex-shrink: 0;
     text-align: center;
-    font-size: 0.72rem;
-    font-weight: 400 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
+    font-weight: 500 !important;
     min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--sr-header-bar-text);
-    letter-spacing: 0.02em;
-    background: var(--sr-header-bar-bg);
-    border-bottom: 1px solid var(--sr-header-bar-border);
-    padding-top: 0.19rem;
-    padding-bottom: 0.19rem;
+    letter-spacing: 0.035em;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
+    background: linear-gradient(180deg, #949dc9 0%, #6d76a4 40%, #4a5278 100%);
+    border-bottom: 1px solid rgba(30, 41, 59, 0.35);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
+    padding: 0 0.35rem;
+    line-height: 1.15;
 }
 
 .sr-pipeline-body {
@@ -624,6 +1128,12 @@
     border-top: 1px solid #d1d9e6;
     background: var(--sr-bg-smoke);
     padding: 0.25rem 0.35rem 0.35rem;
+}
+
+/* Pipeline probability rows: “k” / “M” 50% larger than page default suffix */
+.sales-report-page .sr-pipeline-summary .sr-money-thousands__k,
+.sales-report-page .sr-pipeline-summary .sr-money-thousands__M {
+    font-size: 0.75em;
 }
 
 .sr-pipeline-summary-row {
@@ -654,14 +1164,20 @@
 .sr-pipeline-summary-legend {
     font-size: 0.725rem;
     font-weight: 500;
-    color: #334155;
+    color: #374151;
     min-width: 0;
+}
+
+/* Recharts — legend labels dark grey (matches SR_CHART_LEGEND_GREY in SalesReport.jsx) */
+.sales-report-page .recharts-legend-item-text {
+    fill: #374151 !important;
+    color: #374151 !important;
 }
 
 .sr-pipeline-summary-value {
     font-size: 0.775rem;
     font-weight: 600;
-    color: var(--sr-blue);
+    color: #4169e1;
     font-variant-numeric: tabular-nums;
 }
 
@@ -671,22 +1187,57 @@
 }
 
 .sr-report-table-title {
-    background: var(--sr-header-bar-bg) !important;
-    border-bottom: 1px solid var(--sr-header-bar-border) !important;
+    background: linear-gradient(180deg, #949dc9 0%, #6d76a4 40%, #4a5278 100%) !important;
+    border-bottom: 1px solid rgba(30, 41, 59, 0.35) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14) !important;
     color: var(--sr-header-bar-text) !important;
-    font-weight: 400 !important;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38) !important;
+    letter-spacing: 0.035em !important;
+    font-weight: 500 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
     min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    padding-top: 0.19rem !important;
-    padding-bottom: 0.19rem !important;
+    padding: 0 0.35rem !important;
+    line-height: 1.15;
+}
+
+.sr-report-table-title--toolbar {
+    justify-content: stretch;
+    min-height: var(--sr-section-header-min-height);
+    height: var(--sr-section-header-min-height);
+}
+
+.sr-report-table-heading {
+    color: var(--sr-header-bar-text) !important;
+    font-weight: 500 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
+}
+
+.sr-top-jobs-status-select {
+    max-width: 9.25rem;
+    min-width: 6.5rem;
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
+    padding-top: 0.16rem;
+    padding-bottom: 0.16rem;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background-color: rgba(255, 255, 255, 0.95);
+    color: #1e293b;
+}
+
+.sr-top-jobs-status-select:focus {
+    border-color: #fff;
+    box-shadow: 0 0 0 0.12rem rgba(255, 255, 255, 0.35);
 }
 
 /* Bootstrap card-header can force semibold on table section title */
 .sales-report-page .sr-report-table-title.card-header {
-    font-weight: 400 !important;
+    font-weight: 500 !important;
 }
 
 .sr-table-inner {
@@ -697,13 +1248,19 @@
 }
 
 .sr-detail-table thead th {
-    font-size: 0.68rem;
+    font-size: calc(0.68rem * var(--sr-header-font-scale, 1.1));
     padding: 0.25rem 0.35rem;
     line-height: 1.15;
     position: sticky;
     top: 0;
     z-index: 1;
     border-color: #cbd5e1 !important;
+}
+
+.sr-detail-table tbody.sr-detail-table__body-loading {
+    opacity: 0.5;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
 }
 
 .sr-detail-table tbody td {
@@ -714,11 +1271,19 @@
     border-color: #e2e8f0 !important;
 }
 
+/* Top Jobs table: “k” / “M” and “%” same size as Job Value / Gross Margin numerals (override global 0.5em suffix) */
+.sales-report-page .sr-detail-table .sr-money-thousands__k,
+.sales-report-page .sr-detail-table .sr-money-thousands__M,
+.sales-report-page .sr-detail-table .sr-pct-sym {
+    font-size: inherit;
+    vertical-align: baseline;
+}
+
 .sr-detail-table .sr-job-bar-th {
     width: 1%;
     min-width: 11.55rem;
     white-space: nowrap;
-    font-size: 0.65rem;
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
 }
 
 .sr-job-bar-cell {
@@ -731,17 +1296,24 @@
     height: 0.55rem;
     min-width: 9.45rem;
     max-width: 14.7rem;
-    background: #e2e8f0;
-    border-radius: 3px;
+    background: linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%);
+    border-radius: 4px;
     overflow: hidden;
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.65);
 }
 
 .sr-job-bar-fill {
     height: 100%;
     min-width: 0;
-    background: var(--sr-blue);
-    border-radius: 2px;
+    border-radius: 3px;
     transition: width 0.2s ease;
+    background: linear-gradient(
+        180deg,
+        #8b97d4 0%,
+        var(--sr-blue, #6a73ae) 42%,
+        #4d5580 100%
+    );
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 
 .recharts-responsive-container {
@@ -789,6 +1361,7 @@
 
     .sales-report-page {
         overflow: visible !important;
+        background: #fff !important;
     }
 
     .sr-table-inner {
