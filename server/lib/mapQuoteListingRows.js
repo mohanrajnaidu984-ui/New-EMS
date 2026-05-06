@@ -33,40 +33,25 @@ function jsTupleOwnJobMatch(quoteOwn, pvEnquiryForItem) {
     );
 }
 
-/** EnquiryQuotes.LeadJob vs pricing LeadJobName (same shape as sqlTupleLeadJobMatch). */
+/**
+ * EnquiryQuotes.LeadJob vs pricing LeadJobName — strict only:
+ * if both sides yield an L-code, codes must match; else full normalized string equality.
+ * No prefix / substring / fuzzy lead matching (per product requirement).
+ */
 function jsTupleLeadJobMatch(quoteLead, pvLeadName) {
+    const lq = extractLCodeFromLeadJobName(quoteLead || '');
+    const lp = extractLCodeFromLeadJobName(pvLeadName || '');
+    if (lq && lp) return lq === lp;
     const eqL = jsNormKey(quoteLead);
     const pvL = jsNormKey(pvLeadName);
-    if (!eqL || !pvL) return false;
-    if (eqL === pvL) return true;
-    if (pvL.startsWith(`${eqL}-`) || pvL.startsWith(`${eqL} `)) return true;
-    if (eqL.startsWith(`${pvL}-`) || eqL.startsWith(`${pvL} `)) return true;
-    if (eqL.length >= 2 && eqL.length <= 14 && /^l\d+/.test(eqL) && pvL.includes(eqL + ')')) return true;
-    /** Same L-code on both strings (e.g. quote "L1 - Civil" vs PV "Civil Project (L1)"). */
-    const lq = extractLCodeFromLeadJobName(quoteLead);
-    const lp = extractLCodeFromLeadJobName(pvLeadName);
-    if (lq && lp && lq === lp) return true;
-    /**
-     * Quotes persist root label only ("Civil Project"); PV often has "Civil Project (L1)".
-     * jsNormKey keeps spaces, so prefix match is safe for longer root names.
-     */
-    if (eqL.length >= 5 && pvL.startsWith(eqL)) return true;
-    if (pvL.length >= 5 && eqL.startsWith(pvL)) return true;
-    return false;
+    return Boolean(eqL && pvL && eqL === pvL);
 }
 
-/**
- * Quote ToName vs pricing / list customer label (align with `sqlTupleCustomerKey` + rollup helpers).
- * Exact `jsNormKey` equality missed real rows (trailing ".", "W.L.L" vs "WLL", minor punctuation).
- */
+/** Quote ToName vs list/pricing customer — exact normalized alnum key only (no fuzzy / prefix). */
 function jsTupleCustomerMatch(quoteToName, pvCustomerName) {
     const ka = normCustomerKeyForRollup(quoteToName);
     const kb = normCustomerKeyForRollup(pvCustomerName);
-    if (!ka || !kb) return false;
-    if (ka === kb) return true;
-    return (
-        pricingCustomerRowMatchesKeyQuote(quoteToName, kb) || pricingCustomerRowMatchesKeyQuote(pvCustomerName, ka)
-    );
+    return Boolean(ka && kb && ka === kb);
 }
 
 function normalizeDeptKey(s) {
@@ -98,7 +83,7 @@ function quoteRowMatchesTuple(q, pvOwn, pvLeadName, pvCust) {
     );
 }
 
-/** EMS QuoteNumber paths include the lead segment, e.g. AAC/BMP/9-L1/1-R0 — use when LeadJob text omits L#. */
+/** EMS QuoteNumber paths include the lead segment, e.g. AAC/BMP/9-L1/1-R0 — only when LeadJob has no L-code. */
 function quoteNumberEmbedsLeadCode(quoteNumber, lineLeadCode) {
     const qn = String(quoteNumber || '').toUpperCase();
     const lc = String(lineLeadCode || '').trim().toUpperCase();
@@ -106,7 +91,21 @@ function quoteNumberEmbedsLeadCode(quoteNumber, lineLeadCode) {
     return qn.includes(`-${lc}/`) || qn.includes(`-${lc}-`) || qn.includes(`/${lc}/`);
 }
 
-/** Quotes may use ToName = parent job (HVAC) while pending tuple customer is AAC/BMS — try several names. */
+/**
+ * Match list line lead to saved quote using EnquiryQuotes.LeadJob first (extracted L-code, then strict LeadJob vs PV lead).
+ * QuoteNumber L-segment is a last resort when LeadJob carries no L# (legacy rows).
+ */
+function quoteMatchesLeadLine(q, lineLeadCode, pvLeadName) {
+    const wantLc = String(lineLeadCode || '').trim().toUpperCase();
+    const lq = extractLCodeFromLeadJobName(String(q.LeadJob || ''));
+    if (wantLc && /^L\d+$/.test(wantLc) && lq && lq === wantLc) return true;
+    const pv = String(pvLeadName || '').trim();
+    if (pv && jsTupleLeadJobMatch(q.LeadJob, pvLeadName)) return true;
+    if (wantLc && /^L\d+$/.test(wantLc) && !lq && quoteNumberEmbedsLeadCode(q.QuoteNumber, wantLc)) return true;
+    return false;
+}
+
+/** Resolve saved quote row for one list line: prefer EnquiryQuotes.LeadJob (+ exact ToName), not QuoteNumber parsing. */
 function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandidates, lineLeadCode) {
     const cands = (customerCandidates || [])
         .map((c) => jsStripCustomerLeadSuffix(String(c || '').trim()))
@@ -122,6 +121,19 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
     const customersRequired = uniq.length > 0;
     const matchesAnyCustomer = (q) => uniq.some((c) => jsTupleCustomerMatch(quoteRowToName(q), c));
 
+    /** Multi-customer same L#: use EnquiryQuotes.LeadJob (and ToName), not QuoteNumber L-segment. */
+    if (pvOwn && quotesForReq.length && (lineLeadCode || pvLeadName)) {
+        const byLead = quotesForReq.filter(
+            (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && quoteMatchesLeadLine(q, lineLeadCode, pvLeadName)
+        );
+        if (uniq.length) {
+            const narrowed = byLead.filter(matchesAnyCustomer);
+            if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
+        } else if (byLead.length >= 1) {
+            return pickLatestQuoteRow(byLead);
+        }
+    }
+
     const strict = quotesForReq.filter(
         (q) =>
             jsTupleOwnJobMatch(q.OwnJob, pvOwn) &&
@@ -136,82 +148,46 @@ function findQuoteRowForLeadLine(quotesForReq, pvOwn, pvLeadName, customerCandid
     if (loose.length === 1) {
         const only = loose[0];
         if (!customersRequired || matchesAnyCustomer(only)) return only;
-        return null;
     }
     if (loose.length > 1) {
         const narrowed = loose.filter(matchesAnyCustomer);
         if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
-        return customersRequired ? null : pickLatestQuoteRow(loose);
-    }
-    /** LeadJob in DB is often root-only ("Civil Project"); extract L# from PV and match saved quotes. */
-    if (lineLeadCode && pvOwn) {
-        const byL = quotesForReq.filter((q) => {
-            if (!jsTupleOwnJobMatch(q.OwnJob, pvOwn)) return false;
-            const lq = extractLCodeFromLeadJobName(q.LeadJob || '');
-            if (lq && lq === lineLeadCode) return true;
-            return jsTupleLeadJobMatch(q.LeadJob, pvLeadName);
-        });
-        if (byL.length >= 1) {
-            const narrowed = byL.filter(matchesAnyCustomer);
-            if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
-            if (customersRequired) return null;
-            return pickLatestQuoteRow(byL);
-        }
-    }
-    /** Quote LeadJob may be root-only ("Civil Project") while PV/pricing pvLead is another branch label — match via QuoteNumber. */
-    if (lineLeadCode && pvOwn && quotesForReq.length) {
-        const byRef = quotesForReq.filter(
-            (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && quoteNumberEmbedsLeadCode(q.QuoteNumber, lineLeadCode)
-        );
-        if (byRef.length >= 1) {
-            const narrowed = byRef.filter((q) => !uniq.length || matchesAnyCustomer(q));
-            if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
-            if (!uniq.length) return pickLatestQuoteRow(byRef);
-            return null;
-        }
-    }
-    /**
-     * QuoteNumber may embed the wrong L segment (e.g. AAC/.../9-L1/3-R0 for L3 + BEMCO).
-     * When QuoteNo matches the lead index (L3 → 3), resolve by own job + optional ToName candidates.
-     */
-    if ((!best || !String(best.QuoteNumber || '').trim()) && lineLeadCode && pvOwn && quotesForReq.length) {
-        const lm = String(lineLeadCode).trim().match(/^L(\d+)$/i);
-        const wantNo = lm ? parseInt(lm[1], 10) : 0;
-        if (wantNo > 0) {
-            const pool = quotesForReq.filter((q) => {
-                if (!jsTupleOwnJobMatch(q.OwnJob, pvOwn)) return false;
-                const qn = parseInt(String(q.QuoteNo ?? q.quoteNo ?? ''), 10) || 0;
-                return qn === wantNo;
-            });
-            if (pool.length) {
-                if (uniq.length) {
-                    const narrowed = pool.filter(matchesAnyCustomer);
-                    if (narrowed.length >= 1) return pickLatestQuoteRow(narrowed);
-                    return null;
-                }
-                return pickLatestQuoteRow(pool);
-            }
-        }
+        if (!customersRequired) return pickLatestQuoteRow(loose);
     }
     /**
      * Do not fall back to a quote that only matches customer+lead: another department (e.g. HVAC) can share the same
      * L# on a different top-level root — that quote must not satisfy this row’s `pvOwn` (e.g. Electrical).
      */
     if ((!best || !String(best.QuoteNumber || '').trim()) && customersRequired && uniq.length && quotesForReq.length) {
-        const wantLc = lineLeadCode ? String(lineLeadCode).trim().toUpperCase() : '';
-        const matchesLeadForLine = (q) => {
-            if (wantLc && /^L\d+$/.test(wantLc)) {
-                const lq = extractLCodeFromLeadJobName(q.LeadJob || '');
-                if (lq && lq === wantLc) return true;
-                if (quoteNumberEmbedsLeadCode(q.QuoteNumber, wantLc)) return true;
-            }
-            return pvLeadName ? jsTupleLeadJobMatch(q.LeadJob, pvLeadName) : !wantLc;
-        };
+        const matchesLeadForLine = (q) => quoteMatchesLeadLine(q, lineLeadCode, pvLeadName);
         const fb = quotesForReq.filter(
             (q) => matchesAnyCustomer(q) && matchesLeadForLine(q) && jsTupleOwnJobMatch(q.OwnJob, pvOwn)
         );
         if (fb.length >= 1) {
             return pickLatestQuoteRow(fb);
+        }
+    }
+    /**
+     * Data correction fallback: some saved quotes carry a different LeadJob/L# than pricing rows
+     * for the same OwnJob + customer (example: quote saved under HVAC/L1 while pricing line is L2).
+     * If there is exactly one quote-ref family for OwnJob + customer, use it.
+     */
+    if ((!best || !String(best.QuoteNumber || '').trim()) && customersRequired && uniq.length && pvOwn) {
+        const byOwnAndCustomer = quotesForReq.filter(
+            (q) => jsTupleOwnJobMatch(q.OwnJob, pvOwn) && matchesAnyCustomer(q)
+        );
+        const quoteFamilyKey = (q) => {
+            const qno = Number(q?.QuoteNo ?? q?.quoteNo);
+            if (!Number.isNaN(qno) && qno > 0) return `qno:${qno}`;
+            const qref = String(q?.QuoteNumber || '').trim();
+            if (!qref) return '';
+            return qref.replace(/-R\d+\s*$/i, '');
+        };
+        const refSet = new Set(
+            byOwnAndCustomer.map((q) => quoteFamilyKey(q)).filter(Boolean)
+        );
+        if (refSet.size === 1 && byOwnAndCustomer.length >= 1) {
+            return pickLatestQuoteRow(byOwnAndCustomer);
         }
     }
     return best;
@@ -371,12 +347,17 @@ function pickQuoteRowFromMultiLeadRefs(mergedRefs, lineLeadCode, quotesForReq, p
     if (!/^L\d+$/.test(lc)) return null;
     let entry = mergedRefs.find((e) => extractLCodeFromLeadJobName(String(e.leadName || '')) === lc);
     if (!entry && pvLeadForLine) {
-        entry = mergedRefs.find((e) => jsTupleLeadJobMatch(String(e.leadName || ''), String(pvLeadForLine || '')));
+        const lp = extractLCodeFromLeadJobName(String(pvLeadForLine || ''));
+        if (lp) {
+            entry = mergedRefs.find((e) => extractLCodeFromLeadJobName(String(e.leadName || '')) === lp);
+        }
     }
     if (!entry || !String(entry.quoteNumber || '').trim()) return null;
     const qn = String(entry.quoteNumber).trim();
     const matches = (quotesForReq || []).filter((q) => String(q.QuoteNumber ?? q.quoteNumber ?? '').trim() === qn);
-    return pickLatestQuoteRow(matches);
+    if (matches.length === 0) return null;
+    const leadOk = matches.filter((q) => quoteMatchesLeadLine(q, lineLeadCode, pvLeadForLine));
+    return leadOk.length ? pickLatestQuoteRow(leadOk) : null;
 }
 
 function fmtRowDetailDate(raw) {
@@ -421,13 +402,7 @@ function normCustomerKeyForRollup(s) {
 
 function pricingCustomerRowMatchesKeyQuote(cnRaw, wantKey) {
     if (!wantKey) return false;
-    const n = normCustomerKeyForRollup(cnRaw);
-    if (!n) return false;
-    if (n === wantKey) return true;
-    const shorter = n.length <= wantKey.length ? n : wantKey;
-    const longer = n.length <= wantKey.length ? wantKey : n;
-    if (shorter.length < 4) return false;
-    return longer.startsWith(shorter);
+    return normCustomerKeyForRollup(cnRaw) === wantKey;
 }
 
 function isInternalLeadSubmittedPricingRow(pr) {

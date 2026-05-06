@@ -4,7 +4,7 @@ const router = express.Router();
 const { sql } = require('../dbConfig');
 
 // --- Helper: Format RequestNo for SQL LIKE if needed, or simple exact match ---
-const normalizeUserEmail = (email) => (email || '').toString().toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
+const normalizeUserEmail = (email) => (email || '').toString().toLowerCase().trim();
 const norm = (s) => (s || '').toString().trim().toLowerCase();
 let probabilityTableReady = false;
 
@@ -15,7 +15,7 @@ const resolveCurrentUser = async (userEmail) => {
     const userRes = await sql.query`
         SELECT TOP 1 FullName, Roles
         FROM Master_ConcernedSE
-        WHERE LOWER(REPLACE(EmailId, '@almcg.com', '@almoayyedcg.com')) = ${normalizedEmail}
+        WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = ${normalizedEmail}
     `;
     if (!userRes.recordset?.length) return null;
 
@@ -33,7 +33,7 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
     const userRes = await sql.query`
         SELECT TOP 1 FullName, Roles, Department
         FROM Master_ConcernedSE
-        WHERE LOWER(REPLACE(EmailId, '@almcg.com', '@almoayyedcg.com')) = ${normalizedEmail}
+        WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = ${normalizedEmail}
     `;
     if (!userRes.recordset?.length) return null;
 
@@ -62,9 +62,14 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
 
     const reqDiv = String(requestedDivision || '').trim();
     const reqDivNorm = norm(reqDiv);
-    const chosenDivision =
-        (reqDiv && divisions.find((d) => norm(d) === reqDivNorm || norm(d).includes(reqDivNorm) || reqDivNorm.includes(norm(d)))) ||
-        divisions[0];
+    const matchedRequestedDivision = reqDiv && divisions.find((d) => norm(d) === reqDivNorm);
+    const chosenDivision = reqDiv ? (matchedRequestedDivision || '') : divisions[0];
+    // Enforce strict own-job division from dropdown only (no fuzzy fallback).
+    const ownJobDivision = chosenDivision;
+
+    if (!chosenDivision) {
+        return null;
+    }
 
     return {
         email: normalizedEmail,
@@ -73,6 +78,7 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
         isCcUser,
         divisions,
         division: chosenDivision,
+        ownJobDivision,
     };
 };
 
@@ -90,7 +96,10 @@ const hasEnquiryDivisionAccess = async (requestNo, division) => {
             OR ef.ItemName LIKE '%-' + mef.ItemName
           )
         WHERE LTRIM(RTRIM(ISNULL(ef.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
-          AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+          AND (
+                UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                OR UPPER(LTRIM(RTRIM(ISNULL(mef.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+          )
     `);
     return (result.recordset?.length || 0) > 0;
 };
@@ -160,11 +169,23 @@ const fetchQuoteRowByQuoteNumber = async (quoteNumber) => {
             LeadJob,
             OwnJob,
             ToName,
-            PreparedBy
+            PreparedBy,
+            TotalAmount
         FROM EnquiryQuotes
         WHERE LTRIM(RTRIM(ISNULL(QuoteNumber, ''))) = LTRIM(RTRIM(ISNULL(@qn, '')))
     `);
     return r.recordset?.[0] || null;
+};
+
+const parseMoneyToDecimalString = (value) => {
+    const raw = String(value ?? '')
+        .replace(/,/g, '')
+        .replace(/BD/gi, '')
+        .trim();
+    if (!raw) return '';
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return '';
+    return String(n);
 };
 
 /** Last path segment: ACC/CIP/9-L1/12-R0 → quoteNo "12", revision "0" */
@@ -218,6 +239,11 @@ const insertProbabilityHistory = async ({
         qRow && String(qRow.PreparedBy || '').trim() ? String(qRow.PreparedBy).trim() : null;
     const quoteOwnJobIns =
         qRow && String(qRow.OwnJob || '').trim() ? String(qRow.OwnJob).trim() : null;
+    const netQuotedFromQuote =
+        qRow && qRow.TotalAmount != null
+            ? parseMoneyToDecimalString(qRow.TotalAmount)
+            : '';
+    const netQuotedIns = netQuotedFromQuote || String(netQuotedValue || '').trim() || null;
 
     const req = new sql.Request();
     req.input('RequestNo', sql.NVarChar, String(enquiryNo || '').trim() || null);
@@ -227,7 +253,7 @@ const insertProbabilityHistory = async ({
     req.input('ToName', sql.NVarChar, toIns);
     // History: do not persist total quoted (ownjob+subjobs); keep column NULL on insert.
     req.input('TotalQuotedValue', sql.NVarChar, null);
-    req.input('NetQuotedValue', sql.NVarChar, String(netQuotedValue || '').trim() || null);
+    req.input('NetQuotedValue', sql.NVarChar, netQuotedIns);
     req.input('QuoteNo', sql.NVarChar, quoteNoIns);
     req.input('QuoteRevision', sql.NVarChar, revIns);
     req.input('QuoteRef', sql.NVarChar, String(quoteRef || '').trim() || null);
@@ -310,10 +336,10 @@ router.get('/list', async (req, res) => {
     try {
         await ensureProbabilityTable();
         const { mode, fromDate, toDate, probability, userEmail: rawEmail, userDepartment, division: requestedDivision } = req.query;
-        const userEmail = rawEmail ? rawEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim() : '';
+        const userEmail = rawEmail ? rawEmail.toLowerCase().trim() : '';
         const divisionScope = await resolveProbabilityDivisionScope(userEmail, requestedDivision);
         const currentUserFullName = divisionScope?.fullName || '';
-        const effectiveDivision = String(divisionScope?.division || '').trim();
+        const effectiveDivision = String(divisionScope?.ownJobDivision || divisionScope?.division || '').trim();
         const isCcUser = !!divisionScope?.isCcUser;
         if (!isCcUser && !currentUserFullName) {
             return res.json([]);
@@ -322,12 +348,36 @@ router.get('/list', async (req, res) => {
             return res.json([]);
         }
         console.log(`[Probability API V5] Fetching list. Mode: ${mode}, User: ${userEmail}, Division: ${effectiveDivision}`);
+        const concernedSeClause = `
+              AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cs
+                    WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                      AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
+              )
+    `;
+
         let query = `
             SELECT
-                LTRIM(RTRIM(E.RequestNo)) as RequestNo, E.ProjectName, E.EnquiryDate, E.Status,
-                E.Probability, E.ProbabilityOption, E.ExpectedOrderDate, E.ProbabilityRemarks,
-                E.WonOrderValue, E.WonJobNo, E.WonCustomerName, E.CustomerPreferredPrice, E.WonQuoteRef, E.WonOption, E.WonGrossProfit,
-                E.LostCompetitor, E.LostReason, E.LostCompetitorPrice, E.LostDate,
+                LTRIM(RTRIM(E.RequestNo)) as RequestNo,
+                E.ProjectName,
+                E.EnquiryDate,
+                COALESCE(NULLIF(LTRIM(RTRIM(ISNULL(P.Status, ''))), ''), 'Pending') as Status,
+                TRY_CONVERT(INT, NULLIF(LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))), '')) as Probability,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))), '') as ProbabilityOption,
+                P.ExpectedDate as ExpectedOrderDate,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.Remarks, ''))), '') as ProbabilityRemarks,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), '') as WonOrderValue,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.ERPJobNo, ''))), '') as WonJobNo,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.ToName, ''))), '') as WonCustomerName,
+                E.CustomerPreferredPrice,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.QuoteRef, ''))), '') as WonQuoteRef,
+                E.WonOption,
+                P.GrossMargin as WonGrossProfit,
+                NULL as LostCompetitor,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.ReasonForLoosing, ''))), '') as LostReason,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.CompetitorPrice, ''))), '') as LostCompetitorPrice,
+                P.LostDate as LostDate,
                 (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) ORDER BY QuoteDate DESC) as LastQuoteDate,
                 (
                     SELECT 
@@ -421,37 +471,40 @@ router.get('/list', async (req, res) => {
                             ), 0) AS NVARCHAR(50))
                         END
                 ) as TotalQuotedValue,
-                (
-                    SELECT 
-                        CASE 
-                            WHEN EXISTS (
-                                SELECT 1 FROM EnquiryPricingValues pv
-                                JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
-                                AND (UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTION%' OR UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTIONAL%')
-                                AND ISNULL(pv.Price, 0) <> 0
-                            ) THEN 'Refer quote'
-                            ELSE CAST(ISNULL((
-                                SELECT SUM(MaxItemPrice)
-                                FROM (
-                                    SELECT MAX(pv.Price) as MaxItemPrice
-                                    FROM EnquiryPricingValues pv
+                COALESCE(
+                    NULLIF(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, ''))), ''),
+                    (
+                        SELECT 
+                            CASE 
+                                WHEN EXISTS (
+                                    SELECT 1 FROM EnquiryPricingValues pv
                                     JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
-                                    JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '%- ' + mef.ItemName OR pv.EnquiryForItem LIKE '%-' + mef.ItemName)
                                     WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
-                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
-                                    AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
-                                    AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                                    AND (
-                                        -- Net Quoted: ONLY strict user affiliation
-                                        ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                        OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
-                                        OR mef.ItemName = @userDepartment
-                                    )
-                                    GROUP BY pv.EnquiryForItem
-                                ) t
-                            ), 0) AS NVARCHAR(50))
-                        END
+                                    AND (UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTION%' OR UPPER(LTRIM(RTRIM(po.OptionName))) LIKE '%OPTIONAL%')
+                                    AND ISNULL(pv.Price, 0) <> 0
+                                ) THEN 'Refer quote'
+                                ELSE CAST(ISNULL((
+                                    SELECT SUM(MaxItemPrice)
+                                    FROM (
+                                        SELECT MAX(pv.Price) as MaxItemPrice
+                                        FROM EnquiryPricingValues pv
+                                        JOIN EnquiryPricingOptions po ON pv.OptionID = po.ID
+                                        JOIN Master_EnquiryFor mef ON (pv.EnquiryForItem = mef.ItemName OR pv.EnquiryForItem LIKE '%- ' + mef.ItemName OR pv.EnquiryForItem LIKE '%-' + mef.ItemName)
+                                        WHERE LTRIM(RTRIM(pv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                                        AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTION%' 
+                                        AND UPPER(LTRIM(RTRIM(po.OptionName))) NOT LIKE '%OPTIONAL%'
+                                        AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                                        AND (
+                                            -- Net Quoted fallback: strict user affiliation
+                                            ',' + REPLACE(REPLACE(ISNULL(mef.CommonMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                            OR ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE '%,' + ISNULL(@userEmail, '') + ',%'
+                                            OR mef.ItemName = @userDepartment
+                                        )
+                                        GROUP BY pv.EnquiryForItem
+                                    ) t
+                                ), 0) AS NVARCHAR(50))
+                            END
+                    )
                 ) as NetQuotedValue,
                 (
                     SELECT STUFF((
@@ -472,7 +525,11 @@ router.get('/list', async (req, res) => {
                                 AND UPPER(LTRIM(RTRIM(ISNULL(mef.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                                 AND mef.DivisionCode IS NOT NULL
                                 AND LEN(LTRIM(RTRIM(mef.DivisionCode))) > 0
-                                AND CHARINDEX('/' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '/', UPPER(Q.QuoteNumber)) > 0
+                                AND (
+                                    CHARINDEX('/' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '/', UPPER(Q.QuoteNumber)) > 0
+                                    OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '/', UPPER(Q.QuoteNumber)) > 0
+                                    OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(mef.DivisionCode))) + '-', UPPER(Q.QuoteNumber)) > 0
+                                )
                             )
                             /* 3. Admin Fallback */
                             OR EXISTS (SELECT 1 FROM Master_ConcernedSE u WHERE LTRIM(RTRIM(UPPER(u.EmailId))) = LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) AND UPPER(u.Roles) LIKE '%ADMIN%')
@@ -507,73 +564,140 @@ router.get('/list', async (req, res) => {
                     ).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
                 ) as QuoteOptions
             FROM EnquiryMaster E
+            OUTER APPLY (
+                SELECT TOP 1 *
+                FROM dbo.Probability P0
+                WHERE LTRIM(RTRIM(ISNULL(P0.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                  AND (
+                        UPPER(LTRIM(RTRIM(ISNULL(P0.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR (
+                            LTRIM(RTRIM(ISNULL(P0.OwnJobName, ''))) = ''
+                            AND UPPER(LTRIM(RTRIM(ISNULL(P0.QuoteOwnJob, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        )
+                  )
+                ORDER BY P0.UpdatedDateTime DESC, P0.ID DESC
+            ) P
             WHERE 1 = 1
-              AND EXISTS (
+              AND (
+                  @mode = 'Pending'
+                  OR (
+                      EXISTS (
                     SELECT 1
                     FROM EnquiryFor efDiv
                     JOIN Master_EnquiryFor mefDiv
-                      ON (
-                        efDiv.ItemName = mefDiv.ItemName
-                        OR efDiv.ItemName LIKE '%- ' + mefDiv.ItemName
-                        OR efDiv.ItemName LIKE '%-' + mefDiv.ItemName
-                      )
+                      ON UPPER(LTRIM(RTRIM(ISNULL(efDiv.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(mefDiv.ItemName, ''))))
                     WHERE LTRIM(RTRIM(ISNULL(efDiv.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
-                      AND UPPER(LTRIM(RTRIM(ISNULL(mefDiv.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-              )
-              AND EXISTS (
+                      AND (
+                            UPPER(LTRIM(RTRIM(ISNULL(mefDiv.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                            OR UPPER(LTRIM(RTRIM(ISNULL(mefDiv.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                      )
+                      )
+                      OR EXISTS (
                     SELECT 1
-                    FROM ConcernedSE cs
-                    WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
-                      AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
+                    FROM EnquiryQuotes qDiv
+                    JOIN Master_EnquiryFor mefDivQ
+                      ON (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefDivQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefDivQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                      )
+                    WHERE LTRIM(RTRIM(ISNULL(qDiv.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                      AND LTRIM(RTRIM(ISNULL(mefDivQ.DivisionCode, ''))) <> ''
+                      AND (
+                            CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefDivQ.DivisionCode, '')))) + '/', UPPER(ISNULL(qDiv.QuoteNumber, ''))) > 0
+                            OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefDivQ.DivisionCode, '')))) + '/', UPPER(ISNULL(qDiv.QuoteNumber, ''))) > 0
+                            OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefDivQ.DivisionCode, '')))) + '-', UPPER(ISNULL(qDiv.QuoteNumber, ''))) > 0
+                      )
+                      )
+                  )
               )
+              ${concernedSeClause}
     `;
+        // CC users should not be restricted by ConcernedSE rows.
+        // For Pending mode we apply explicit assignment logic below.
         if (isCcUser) {
-            query = query.replace(
-                `
-              AND EXISTS (
-                    SELECT 1
-                    FROM ConcernedSE cs
-                    WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
-                      AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
-              )
-    `,
-                '\n'
-            );
+            query = query.replace(concernedSeClause, '\n');
         }
 
         // Filter Logic
         if (mode === 'Pending') {
-            // Show only enquiries that:
-            // 1. Have no status OR status is 'Pending' or 'Enquiry'
-            // 2. OR have status 'Follow-up'/'FollowUp' but MISSING probability details
-            // Once a status like Won, Lost, Cancelled, etc. is set, it's no longer "pending update"
+            // Pending logic (strictly for selected division):
+            // 1) enquiry must be assigned to current user
+            // 2) at least one quote must exist for selected division
+            // 3) probability for selected division is not fully updated yet
             query += `
                 AND (
-                    (E.Status IS NULL OR E.Status = '' OR E.Status IN ('Pending', 'Enquiry', 'Priced', 'Estimated', 'Quote', 'Quoted'))
-                    OR (E.Status IN('FollowUp', 'Follow-up') AND (E.ProbabilityOption IS NULL OR E.ProbabilityOption = ''))
+                    EXISTS (
+                        SELECT 1
+                        FROM ConcernedSE cs
+                        WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                          AND UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserFullName, ''))))
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM EnquiryFor efAssign
+                        JOIN Master_EnquiryFor mefAssign
+                          ON UPPER(LTRIM(RTRIM(ISNULL(efAssign.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(mefAssign.ItemName, ''))))
+                        WHERE LTRIM(RTRIM(ISNULL(efAssign.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                          AND (
+                                UPPER(LTRIM(RTRIM(ISNULL(mefAssign.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                                OR UPPER(LTRIM(RTRIM(ISNULL(mefAssign.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                          )
+                          AND (
+                                CHARINDEX(
+                                    ',' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',',
+                                    ',' + REPLACE(REPLACE(ISNULL(UPPER(mefAssign.CommonMailIds), ''), ' ', ''), ';', ',') + ','
+                                ) > 0
+                                OR CHARINDEX(
+                                    ',' + LTRIM(RTRIM(UPPER(NULLIF(@userEmail, '')))) + ',',
+                                    ',' + REPLACE(REPLACE(ISNULL(UPPER(mefAssign.CCMailIds), ''), ' ', ''), ';', ',') + ','
+                                ) > 0
+                          )
+                    )
                 )
-                AND (E.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR E.Status IS NULL OR E.Status = '')
+                AND (
+                    (P.ID IS NULL)
+                    OR (
+                        P.Status IS NULL
+                        OR LTRIM(RTRIM(P.Status)) = ''
+                        OR LOWER(LTRIM(RTRIM(P.Status))) = 'pending'
+                        OR P.Status IN ('Enquiry', 'Priced', 'Estimated', 'Quote', 'Quoted')
+                    )
+                    OR (P.Status IN('FollowUp', 'Follow-up') AND (P.ProbabilityChance IS NULL OR LTRIM(RTRIM(P.ProbabilityChance)) = ''))
+                )
+                AND (P.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR P.Status IS NULL OR LTRIM(RTRIM(P.Status)) = '')
                 AND EXISTS(
-                    SELECT 1 FROM EnquiryQuotes Q 
-                    WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+                    SELECT 1
+                    FROM EnquiryQuotes Q
+                    JOIN Master_EnquiryFor mefQ
+                      ON (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                      )
+                    WHERE LTRIM(RTRIM(ISNULL(Q.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+                      AND (
+                            CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                            OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                            OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                      )
                 )
             `;
         } else if (mode === 'Won') {
-            query += ` AND E.Status = 'Won'`;
+            query += ` AND P.Status = 'Won'`;
         } else if (mode === 'Lost') {
-            query += ` AND E.Status = 'Lost'`;
+            query += ` AND P.Status = 'Lost'`;
         } else if (mode === 'OnHold') {
-            query += ` AND (E.Status = 'OnHold' OR E.Status = 'On Hold')`;
+            query += ` AND (P.Status = 'OnHold' OR P.Status = 'On Hold')`;
         } else if (mode === 'Cancelled') {
-            query += ` AND E.Status = 'Cancelled'`; // Assuming 'Cancelled' is mapped
+            query += ` AND P.Status = 'Cancelled'`; // Assuming 'Cancelled' is mapped
         } else if (mode === 'FollowUp') {
-            query += ` AND (E.Status = 'Follow-up' OR E.Status = 'FollowUp')`;
+            query += ` AND (P.Status = 'Follow-up' OR P.Status = 'FollowUp')`;
         } else if (mode === 'Retendered') {
             // Assuming 'Retendered' is tracked via RetenderDate or specific Status if exists?
             // Since user asked for "Retendered details", let's assume it's a status or we check RetenderDate existence
             // For now, let's assume it's a Status 'Retendered' based on common patterns, or fallback to date check logic if needed.
             // Given schema has RetenderDate, maybe status is 'Retendered'. Let's stick to Status for consistency first.
-            query += ` AND(E.Status = 'Retendered' OR E.RetenderDate IS NOT NULL)`;
+            query += ` AND(P.Status = 'Retendered' OR E.RetenderDate IS NOT NULL)`;
         }
 
         // Date Range Filters (Applies to all except maybe Pending if strict)
@@ -591,21 +715,21 @@ router.get('/list', async (req, res) => {
             // Let's filter on the relevant date column for the mode.
 
             let dateCol = 'E.EnquiryDate';
-            if (mode === 'Won') dateCol = 'E.ExpectedOrderDate'; // Or a new WonDate? let's use ExpectedOrderDate as proxy for "Order Date"
+            if (mode === 'Won') dateCol = 'P.ExpectedDate'; // division-scoped probability row date
             if (mode === 'Retendered') dateCol = 'E.RetenderDate';
             if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
             if (mode === 'Cancelled') dateCol = 'E.CancelDate';
-            if (mode === 'Lost') dateCol = 'E.LostDate';
+            if (mode === 'Lost') dateCol = 'P.LostDate';
 
             query += ` AND ${dateCol} >= @fromDate`;
         }
         if (toDate) {
             let dateCol = 'E.EnquiryDate';
-            if (mode === 'Won') dateCol = 'E.ExpectedOrderDate';
+            if (mode === 'Won') dateCol = 'P.ExpectedDate';
             if (mode === 'Retendered') dateCol = 'E.RetenderDate';
             if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
             if (mode === 'Cancelled') dateCol = 'E.CancelDate';
-            if (mode === 'Lost') dateCol = 'E.LostDate';
+            if (mode === 'Lost') dateCol = 'P.LostDate';
 
             query += ` AND ${dateCol} <= @toDate`;
         }
@@ -615,7 +739,7 @@ router.get('/list', async (req, res) => {
             // probability is string like "High Chance (90%)"
             // Database stores 'Probability' int and 'ProbabilityOption' string.
             // Filter by Option string for exact match
-            query += ` AND E.ProbabilityOption = @probability`;
+            query += ` AND P.ProbabilityChance = @probability`;
         }
 
         // Default Sorting: Newest Enquiry Date first, then highest Enquiry No.
@@ -630,6 +754,7 @@ router.get('/list', async (req, res) => {
         request.input('userDepartment', sql.NVarChar, userDepartment || '');
         request.input('currentUserFullName', sql.NVarChar, currentUserFullName);
         request.input('division', sql.NVarChar, effectiveDivision);
+        request.input('mode', sql.NVarChar, String(mode || '').trim());
         request.input('now', sql.DateTime, now);
 
         const result = await request.query(query.replace(/GETDATE\(\)/g, '@now'));
@@ -677,7 +802,7 @@ router.get('/history/:requestNo', async (req, res) => {
         }
         const reqSql = new sql.Request();
         reqSql.input('requestNo', sql.NVarChar, requestNo);
-        reqSql.input('division', sql.NVarChar, scope.division);
+        reqSql.input('division', sql.NVarChar, String(scope.ownJobDivision || scope.division || '').trim());
         const result = await reqSql.query(`
             SELECT
                 p.ID, p.RequestNo, p.ProjectName, p.OwnJobName, p.ToName, p.TotalQuotedValue, p.NetQuotedValue,
@@ -690,8 +815,8 @@ router.get('/history/:requestNo', async (req, res) => {
                 qdt.QuoteDate AS QuoteRefQuoteDate
             FROM dbo.Probability p
             LEFT JOIN Master_ConcernedSE u
-              ON LOWER(REPLACE(LTRIM(RTRIM(ISNULL(u.EmailId, N''))), N'@almcg.com', N'@almoayyedcg.com'))
-               = LOWER(REPLACE(LTRIM(RTRIM(ISNULL(p.UpdatedBy, N''))), N'@almcg.com', N'@almoayyedcg.com'))
+              ON LOWER(LTRIM(RTRIM(ISNULL(u.EmailId, N''))))
+               = LOWER(LTRIM(RTRIM(ISNULL(p.UpdatedBy, N''))))
             OUTER APPLY (
                 SELECT TOP 1 Q.QuoteDate
                 FROM EnquiryQuotes Q
@@ -752,13 +877,7 @@ router.post('/update', async (req, res) => {
             status,
             probabilityOption,
             probability: probInput,
-            aacQuotedContractor,
-            customerPreferredPrice,
-            preferredPrices,
             expectedDate,
-            cancellationDate,
-            onHoldDate,
-            retenderDate,
             remarks,
             wonDetails,
             lostDetails
@@ -835,76 +954,13 @@ router.post('/update', async (req, res) => {
             probability = match ? parseInt(match[0]) : 0;
         }
 
-        const request = new sql.Request();
-        request.input('reqNo', sql.NVarChar, String(enquiryNo || ''));
-        request.input('Status', sql.NVarChar, status || '');
-        request.input('ProbabilityOption', sql.VarChar, probabilityOption || '');
-        request.input('Probability', sql.Int, probability);
-        request.input('AACQuotedContractor', sql.VarChar, aacQuotedContractor || '');
-        request.input('CustomerPreferredPrice', sql.VarChar, customerPreferredPrice || '');
-        request.input('PreferredPriceOption1', sql.VarChar, preferredPrices?.option1 || '');
-        request.input('PreferredPriceOption2', sql.VarChar, preferredPrices?.option2 || '');
-        request.input('PreferredPriceOption3', sql.VarChar, preferredPrices?.option3 || '');
-        request.input('ExpectedOrderDate', sql.DateTime, expectedDate ? new Date(expectedDate) : null);
-        request.input('ProbabilityRemarks', sql.NVarChar, remarks || '');
-
-        request.input('RetenderDate', sql.DateTime, retenderDate ? new Date(retenderDate) : null);
-        request.input('OnHoldDate', sql.DateTime, onHoldDate ? new Date(onHoldDate) : null);
-        request.input('CancelDate', sql.DateTime, cancellationDate ? new Date(cancellationDate) : null);
-
-        request.input('WonOrderValue', sql.VarChar, String(wonDetails?.orderValue || '').replace(/,/g, '').trim() || null);
-        request.input('WonJobNo', sql.VarChar, wonDetails?.jobNo || null);
-        request.input('WonCustomerName', sql.VarChar, wonDetails?.customerName || null);
-        request.input('WonContactName', sql.VarChar, wonDetails?.contactName || null);
-        request.input('WonContactNo', sql.VarChar, wonDetails?.contactNo || null);
-        request.input('WonQuoteRef', sql.NVarChar, wonDetails?.wonQuoteRef || null);
-        request.input('WonOption', sql.NVarChar, wonDetails?.wonOption || null);
-        request.input('WonGrossProfit', sql.Decimal(5, 2), wonDetails?.grossProfit != null && wonDetails.grossProfit !== '' ? parseFloat(wonDetails.grossProfit) : null);
-
-        request.input('LostCompetitor', sql.VarChar, lostDetails?.customer || null);
-        request.input('LostReason', sql.VarChar, lostDetails?.reason || null);
-        request.input('LostCompetitorPrice', sql.VarChar, String(lostDetails?.competitorPrice || '').replace(/,/g, '').trim() || null);
-        request.input('LostDate', sql.DateTime, lostDetails?.lostDate ? new Date(lostDetails.lostDate) : null);
-
-        const updateQuery = `
-            UPDATE EnquiryMaster
-SET
-Status = @Status,
-    ProbabilityOption = @ProbabilityOption,
-    Probability = @Probability,
-    AACQuotedContractor = @AACQuotedContractor,
-    CustomerPreferredPrice = @CustomerPreferredPrice,
-    PreferredPriceOption1 = @PreferredPriceOption1,
-    PreferredPriceOption2 = @PreferredPriceOption2,
-    PreferredPriceOption3 = @PreferredPriceOption3,
-    ExpectedOrderDate = @ExpectedOrderDate,
-    ProbabilityRemarks = @ProbabilityRemarks,
-
-    WonOrderValue = @WonOrderValue,
-    WonJobNo = @WonJobNo,
-    WonCustomerName = @WonCustomerName,
-    WonContactName = @WonContactName,
-                WonContactNo = @WonContactNo,
-                WonQuoteRef = @WonQuoteRef,
-                WonOption = @WonOption,
-    WonGrossProfit = @WonGrossProfit,
-                LostCompetitor = @LostCompetitor,
-    LostReason = @LostReason,
-    LostCompetitorPrice = @LostCompetitorPrice,
-    LostDate = @LostDate,
-
-    RetenderDate = @RetenderDate,
-    OnHoldDate = @OnHoldDate,
-    CancelDate = @CancelDate
-            WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(@reqNo))
-    `;
-
-        await request.query(updateQuery);
+        // IMPORTANT: Probability module must NEVER update EnquiryMaster.
+        // Persist only to dbo.Probability history (division-scoped via OwnJobName).
         await insertProbabilityHistory({
             enquiryNo,
             projectName,
             leadJobName,
-            division: scope.division,
+            division: String(scope.ownJobDivision || scope.division || '').trim(),
             toName,
             totalQuotedValue,
             netQuotedValue,
@@ -1020,6 +1076,7 @@ router.get('/quote-details/:quoteNumber', async (req, res) => {
                 ), 0) AS DECIMAL(18,3)) AS NetQuotedValue
         `);
         const totals = totalsRes.recordset?.[0] || {};
+        const quoteTotalAmount = parseMoneyToDecimalString(quote.TotalAmount);
 
         // Fetch optional prices
         const optionsRes = await sql.query`
@@ -1038,7 +1095,7 @@ router.get('/quote-details/:quoteNumber', async (req, res) => {
             customerName: quote.ToName,
             totalAmount: quote.TotalAmount,
             totalQuotedValue: totals.TotalQuotedValue ?? 0,
-            netQuotedValue: totals.NetQuotedValue ?? 0,
+            netQuotedValue: quoteTotalAmount || (totals.NetQuotedValue ?? 0),
             quoteNo: quote.QuoteNo,
             revisionNo: quote.RevisionNo,
             leadJob: quote.LeadJob,

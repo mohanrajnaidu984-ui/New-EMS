@@ -516,6 +516,11 @@ const extractTaggedLeadCodeFromCustomerLabel = (label) => {
     const m = String(label || '').trim().match(/\(\s*(L\d+)\s*\)\s*$/i);
     return m ? m[1].toUpperCase() : '';
 };
+const stripTaggedLeadCodeFromCustomerLabel = (label) =>
+    String(label || '').trim().replace(/\s*\(\s*L\d+\s*\)\s*$/i, '').trim();
+/** Dropdown-equivalence key: treat "Name" and "Name (L2)" as the same customer label. */
+const normalizeCustomerDisplayKey = (s) =>
+    normalizeCustomerKey(stripTaggedLeadCodeFromCustomerLabel(String(s || '').trim()));
 
 /**
  * Map selected customer (often typed without suffix) to L-code using enquiry customerOptions
@@ -2047,6 +2052,11 @@ const QuoteForm = ({ openContext = null }) => {
         () =>
             !!(toName || '').trim() || pricingSummaryBusy || leadSwitchShellHold,
         [toName, pricingSummaryBusy, leadSwitchShellHold]
+    );
+    /** Strict UI gate requested: sections render only when customer (To) is selected. */
+    const hasSelectedCustomer = React.useMemo(
+        () => !!String(toName || '').trim(),
+        [toName]
     );
 
     React.useEffect(() => {
@@ -4095,9 +4105,9 @@ const QuoteForm = ({ openContext = null }) => {
         const t = (toName || '').trim();
         if (t) {
             const tn = normalize(t);
-            const tk = normalizeCustomerKey(t);
+            const tk = normalizeCustomerDisplayKey(t);
             const has = filteredOptions.some(
-                (o) => normalize(o.value) === tn || normalizeCustomerKey(o.value) === tk
+                (o) => normalize(o.value) === tn || normalizeCustomerDisplayKey(o.value) === tk
             );
             const isInternalName = allJobNamesNormSet.has(tn);
             const allowExternalAppend = leadIsOwnJob || isAdmin || !!pricingData?.access?.hasLeadAccess;
@@ -4113,9 +4123,9 @@ const QuoteForm = ({ openContext = null }) => {
         if (!(toName || '').trim()) return null;
         const t = toName.trim();
         const tn = normalize(t);
-        const tk = normalizeCustomerKey(t);
+        const tk = normalizeCustomerDisplayKey(t);
         const hit = quoteCustomerDropdownOptions.find(
-            (o) => normalize(o.value) === tn || normalizeCustomerKey(o.value) === tk
+            (o) => normalize(o.value) === tn || normalizeCustomerDisplayKey(o.value) === tk
         );
         return { label: hit?.label ?? t, value: hit?.value ?? t };
     }, [toName, quoteCustomerDropdownOptions]);
@@ -4286,6 +4296,38 @@ const QuoteForm = ({ openContext = null }) => {
                 );
                 if (exactTuple.length > 0) return exactTuple;
                 /**
+                 * Own-job tab fallback:
+                 * allow LeadJob drift only, but keep RequestNo + ToName + OwnJob aligned so we never
+                 * show another customer's quote ref under the current customer selection.
+                 */
+                if (activeTabObj?.isOwnJobTab) {
+                    const ownFallback = (existingQuotes || []).filter((q) => {
+                        if (String(q.RequestNo ?? '').trim() !== rn) return false;
+                        const clean = (s) =>
+                            String(s || '')
+                                .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                                .replace(/\s+/g, ' ')
+                                .trim();
+                        const toRow = normalize(q.ToName || '');
+                        const toP = normalize(scopedEnquiryQuotesParams?.toName || '');
+                        const toRowClean = normalize(clean(q.ToName || ''));
+                        const toPClean = normalize(clean(scopedEnquiryQuotesParams?.toName || ''));
+                        const toKeyRow = normalizeCustomerDisplayKey(q.ToName || '');
+                        const toKeyP = normalizeCustomerDisplayKey(scopedEnquiryQuotesParams?.toName || '');
+                        const toMatch =
+                            toRow === toP ||
+                            toRowClean === toPClean ||
+                            (toKeyRow && toKeyP && toKeyRow === toKeyP);
+                        if (!toMatch) return false;
+                        return matchOwnJobForQuoteScope(
+                            q.OwnJob,
+                            scopedEnquiryQuotesParams.ownJobName || '',
+                            false
+                        );
+                    });
+                    if (ownFallback.length > 0) return ownFallback;
+                }
+                /**
                  * Direct subjob tabs: historical rows often drift only in ToName while LeadJob + OwnJob are correct.
                  * If strict tuple yields none, relax ToName but keep RequestNo + LeadJob + OwnJob exact scope.
                  */
@@ -4314,11 +4356,40 @@ const QuoteForm = ({ openContext = null }) => {
                     !!requestNoScope;
                 const firstTabId = String(tabs?.[0]?.id ?? '');
                 const isFirstTabActive = String(activeTabObj?.id ?? '') === firstTabId;
+                const tupleMatchesIgnoringLeadForOwnTab = () => {
+                    if (!isFirstTabActive) return false;
+                    if (String(q.RequestNo ?? '').trim() !== String(requestNoScope ?? '').trim()) return false;
+                    const clean = (s) =>
+                        String(s || '')
+                            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                    const toRow = normalize(q.ToName || '');
+                    const toP = normalize(scopedEnquiryQuotesParams?.toName || '');
+                    const toRowClean = normalize(clean(q.ToName || ''));
+                    const toPClean = normalize(clean(scopedEnquiryQuotesParams?.toName || ''));
+                    const toKeyRow = normalizeCustomerDisplayKey(q.ToName || '');
+                    const toKeyP = normalizeCustomerDisplayKey(scopedEnquiryQuotesParams?.toName || '');
+                    const toMatch =
+                        toRow === toP ||
+                        toRowClean === toPClean ||
+                        (toKeyRow && toKeyP && toKeyRow === toKeyP);
+                    if (!toMatch) return false;
+                    return matchOwnJobForQuoteScope(
+                        q.OwnJob,
+                        scopedEnquiryQuotesParams?.ownJobName || '',
+                        !!scopedEnquiryQuotesParams?.useDepartmentForOwnJob,
+                        scopedEnquiryQuotesParams?.divisionOwnJob || ''
+                    );
+                };
 
                 // Hard rule for Previous Quotes checkbox ON:
                 // show only rows that match the current tab tuple (request + lead + to + ownjob).
                 if (strictBrowseTuple) {
-                    if (!quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope)) {
+                    if (
+                        !quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope) &&
+                        !tupleMatchesIgnoringLeadForOwnTab()
+                    ) {
                         return false;
                     }
                     const qOwn = collapseSpacesLower(stripQuoteJobPrefix(q.OwnJob || ''));
@@ -4378,7 +4449,9 @@ const QuoteForm = ({ openContext = null }) => {
 
                 if (scopedPanel) {
                     if (!scopedEnquiryQuotesParams || !requestNoScope) return false;
-                    if (!quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope)) {
+                    const scopedStrictHit = quoteRowMatchesEnquiryScopedParams(q, scopedEnquiryQuotesParams, requestNoScope);
+                    const scopedOwnTabFallback = tupleMatchesIgnoringLeadForOwnTab();
+                    if (!scopedStrictHit && !scopedOwnTabFallback) {
                         return false;
                     }
                     if (activeTabObj?.isOwnJobTab) {
@@ -5317,6 +5390,88 @@ const QuoteForm = ({ openContext = null }) => {
             loadPricingData(req, '');
         }
     }, [enquiryData, toName, quoteListDivision]);
+
+    // Safety net for pending-list/context opens:
+    // if customer name is present but recipient contact block is blank, hydrate from master/enquiry data.
+    useEffect(() => {
+        const tn = String(toName || '').trim();
+        if (!tn) return;
+
+        const hasAnyContact =
+            String(toAddress || '').trim() ||
+            String(toPhone || '').trim() ||
+            String(toEmail || '').trim() ||
+            String(toFax || '').trim();
+        if (hasAnyContact) return;
+
+        const tnNorm = normalize(tn);
+        const tnKey = normalizeCustomerKey(tn);
+        const matchedCustomer = (customersList || []).find((c) => {
+            const name = String(c?.CompanyName || '').trim();
+            if (!name) return false;
+            const nNorm = normalize(name);
+            const nKey = normalizeCustomerKey(name);
+            return (
+                nNorm === tnNorm ||
+                nKey === tnKey ||
+                (nNorm && tnNorm && (nNorm.includes(tnNorm) || tnNorm.includes(nNorm)))
+            );
+        });
+
+        if (matchedCustomer) {
+            const addr = [matchedCustomer.Address1, matchedCustomer.Address2].filter(Boolean).join('\n').trim();
+            if (addr) setToAddress(addr);
+            const ph = `${matchedCustomer.Phone1 || ''} ${matchedCustomer.Phone2 ? '/ ' + matchedCustomer.Phone2 : ''}`.trim();
+            if (ph) setToPhone(ph);
+            if (matchedCustomer.EmailId) setToEmail(String(matchedCustomer.EmailId).trim());
+            if (matchedCustomer.FaxNo) setToFax(String(matchedCustomer.FaxNo).trim());
+            return;
+        }
+
+        // Internal recipient fallback (e.g. "Civil Project", "HVAC Project") from profiles/jobs.
+        const cleanTarget = collapseSpacesLower(stripQuoteJobPrefix(tn));
+        const profileMatch = (enquiryData?.availableProfiles || []).find((p) => {
+            const name = collapseSpacesLower(stripQuoteJobPrefix(p?.itemName || p?.name || ''));
+            return name && (name === cleanTarget || name.includes(cleanTarget) || cleanTarget.includes(name));
+        });
+        if (profileMatch) {
+            const addr = String(profileMatch.address || profileMatch.Address || '').trim();
+            const ph = String(profileMatch.phone || profileMatch.Phone || '').trim();
+            const em = String(profileMatch.email || profileMatch.Email || '').trim();
+            const fx = String(profileMatch.fax || profileMatch.Fax || '').trim();
+            if (addr) setToAddress(addr);
+            if (ph) setToPhone(ph);
+            if (em) setToEmail(em.split(',')[0].trim());
+            if (fx) setToFax(fx);
+            return;
+        }
+
+        const pricingJobMatch = (pricingData?.jobs || []).find((j) => {
+            const name = collapseSpacesLower(stripQuoteJobPrefix(j?.itemName || j?.ItemName || j?.DivisionName || ''));
+            return name && (name === cleanTarget || name.includes(cleanTarget) || cleanTarget.includes(name));
+        });
+        if (pricingJobMatch) {
+            const addr = String(pricingJobMatch.address || pricingJobMatch.Address || '').trim();
+            const ph = String(pricingJobMatch.phone || pricingJobMatch.Phone || '').trim();
+            const em = String(pricingJobMatch.email || pricingJobMatch.Email || '').trim();
+            const fx = String(pricingJobMatch.fax || pricingJobMatch.Fax || '').trim();
+            if (addr) setToAddress(addr);
+            if (ph) setToPhone(ph);
+            if (em) setToEmail(em.split(',')[0].trim());
+            if (fx) setToFax(fx);
+            return;
+        }
+
+        const details = enquiryData?.customerDetails;
+        if (details) {
+            const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+            if (addr) setToAddress(addr);
+            const ph = `${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''}`.trim();
+            if (ph) setToPhone(ph);
+            if (details.EmailId) setToEmail(String(details.EmailId).trim());
+            if (details.FaxNo) setToFax(String(details.FaxNo).trim());
+        }
+    }, [toName, toAddress, toPhone, toEmail, toFax, customersList, enquiryData, pricingData]);
 
     // Pick pricing root for lead dropdown after list-row enquiry load (searchTerm / pending click).
     useEffect(() => {
@@ -6480,13 +6635,28 @@ const QuoteForm = ({ openContext = null }) => {
             expandBranchIdsFromSeeds([String(rootJob.id || rootJob.ItemID || rootJob.ID)]);
         }
 
-        // Quote tab can point at a subjob (e.g. HVAC) while Division dropdown is the own job (e.g. BMS Project).
-        // Branch isolation above would drop the own-job node from branchIds → wrong Base Price in PRICING SUMMARY.
-        if (!browsePreviousQuotesRevisions && jobsPool.length > 0) {
-            const divLabel = String(quoteListDivision || '').trim();
-            if (divLabel) {
-                const divNorm = collapseSpacesLower(stripQuoteJobPrefix(divLabel));
-                let divJob =
+        // Quote tab can point at a subjob while Division dropdown is the own job.
+        // Include own-job branch for normal editing AND pending-quote browse opens
+        // (right-side Pending list opens in browse mode and previously skipped this block).
+        const shouldIncludeOwnJobBranch =
+            !browsePreviousQuotesRevisions || quoteListCategory === QUOTE_LIST_CATEGORY.PENDING;
+        const ownJobCandidates = shouldIncludeOwnJobBranch
+            ? [
+                String(quoteListDivision || '').trim(),
+                String(loadedEnquiryQuoteRowForPreview?.OwnJob || '').trim(),
+                String(scopedEnquiryQuotesParams?.ownJobName || '').trim(),
+            ].filter(Boolean)
+            : [];
+        const ownJobNorms = new Set(
+            ownJobCandidates.map((s) => collapseSpacesLower(stripQuoteJobPrefix(s))).filter(Boolean)
+        );
+
+        if (ownJobCandidates.length > 0 && jobsPool.length > 0) {
+
+            ownJobCandidates.forEach((label) => {
+                const divNorm = collapseSpacesLower(stripQuoteJobPrefix(label));
+                if (!divNorm) return;
+                const divJob =
                     jobsPool.find((j) => {
                         const nm = collapseSpacesLower(
                             stripQuoteJobPrefix(j.itemName || j.ItemName || j.DivisionName || '')
@@ -6502,7 +6672,7 @@ const QuoteForm = ({ openContext = null }) => {
                 if (divJob) {
                     expandBranchIdsFromSeeds([String(divJob.id || divJob.ItemID || divJob.ID)]);
                 }
-            }
+            });
         }
 
         if (import.meta.env.DEV) {
@@ -6688,7 +6858,17 @@ const QuoteForm = ({ openContext = null }) => {
             const activeCust = normalizeCust(activeCustomer);
             const mainCust = normalizeCust(enquiryData?.customerName || enquiryData?.CustomerName || '');
 
-            const isCustomerMatch = (!activeCust || !opt.customerName || optCust === activeCust || optCust === 'main' || optCust === mainCust || optionHasScopedValueKey(opt) || (() => {
+            const ownJobRowMatch = (() => {
+                if (ownJobNorms.size === 0) return false;
+                const optItemNorm = collapseSpacesLower(stripQuoteJobPrefix(opt.itemName || ''));
+                const optCustNorm = collapseSpacesLower(stripQuoteJobPrefix(opt.customerName || ''));
+                return (
+                    (optItemNorm && ownJobNorms.has(optItemNorm)) ||
+                    (optCustNorm && ownJobNorms.has(optCustNorm))
+                );
+            })();
+
+            const isCustomerMatch = (!activeCust || !opt.customerName || optCust === activeCust || optCust === 'main' || optCust === mainCust || ownJobRowMatch || optionHasScopedValueKey(opt) || (() => {
                 const activeJob = jobsPool.find(j => normalizeCust(j.itemName || j.DivisionName) === activeCust);
                 if (activeJob) {
                     const optJob = jobsPool.find(j => normalizeCust(j.itemName || j.DivisionName) === optCust);
@@ -7500,6 +7680,17 @@ const QuoteForm = ({ openContext = null }) => {
             setToPhone(String(quote.ToPhone ?? quote.tophone ?? '').trim());
             setToEmail(String(quote.ToEmail ?? quote.toemail ?? '').trim());
             setToFax(String(quote.ToFax ?? quote.tofax ?? '').trim());
+        } else if (preserveRecipient) {
+            // Pending-list / context opens preserve the dropdown customer, but still need address/contact hydration.
+            // Fill only missing fields so manual edits are not overridden.
+            const rowAddr = String(quote.ToAddress ?? quote.toaddress ?? '').trim();
+            const rowPhone = String(quote.ToPhone ?? quote.tophone ?? '').trim();
+            const rowEmail = String(quote.ToEmail ?? quote.toemail ?? '').trim();
+            const rowFax = String(quote.ToFax ?? quote.tofax ?? '').trim();
+            if (rowAddr && !String(toAddress || '').trim()) setToAddress(rowAddr);
+            if (rowPhone && !String(toPhone || '').trim()) setToPhone(rowPhone);
+            if (rowEmail && !String(toEmail || '').trim()) setToEmail(rowEmail);
+            if (rowFax && !String(toFax || '').trim()) setToFax(rowFax);
         }
 
         // Do not merge profiles onto a persisted EnquiryQuotes row — that replaced subjob "To" block with parent HVAC profile.
@@ -8899,7 +9090,48 @@ const QuoteForm = ({ openContext = null }) => {
                 const pendingListCustomerHint =
                     String(enq.ListQuoteDetailToName ?? enq.ListPendingCustomerName ?? '').trim();
                 if (pendingListCustomerHint) {
-                    setToName(pendingListCustomerHint);
+                    const internalNamesNorm = new Set(
+                        (data?.divisionsHierarchy || [])
+                            .map((j) => normalize(stripQuoteJobPrefix(j?.itemName || j?.ItemName || j?.DivisionName || '')))
+                            .filter(Boolean)
+                    );
+                    const hintStripped = stripTaggedLeadCodeFromCustomerLabel(pendingListCustomerHint);
+                    const hintNorm = normalize(hintStripped);
+                    const toNameForLoad =
+                        internalNamesNorm.has(hintNorm) && hintStripped
+                            ? hintStripped
+                            : pendingListCustomerHint;
+                    setToName(toNameForLoad);
+                    // Pending-list auto-open sets ToName directly (bypasses handleCustomerChange).
+                    // Mirror manual customer-selection hydration for To-address/contact block.
+                    const hintKey = normalizeCustomerDisplayKey(toNameForLoad);
+                    const matchedCustomer =
+                        (customersList || []).find((c) => {
+                            const nm = String(c?.CompanyName || '').trim();
+                            if (!nm) return false;
+                            const nNorm = normalize(nm);
+                            const nKey = normalizeCustomerDisplayKey(nm);
+                            return (
+                                nNorm === hintNorm ||
+                                nKey === hintKey ||
+                                (nNorm && hintNorm && (nNorm.includes(hintNorm) || hintNorm.includes(nNorm)))
+                            );
+                        }) || null;
+
+                    if (matchedCustomer) {
+                        const addr = [matchedCustomer.Address1, matchedCustomer.Address2].filter(Boolean).join('\n').trim();
+                        setToAddress(addr);
+                        setToPhone(`${matchedCustomer.Phone1 || ''} ${matchedCustomer.Phone2 ? '/ ' + matchedCustomer.Phone2 : ''} `.trim());
+                        setToEmail(matchedCustomer.EmailId || '');
+                        setToFax(matchedCustomer.FaxNo || '');
+                    } else if (data?.customerDetails) {
+                        const details = data.customerDetails;
+                        const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+                        setToAddress(addr);
+                        setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
+                        setToEmail(details.EmailId || '');
+                        setToFax(details.FaxNo || '');
+                    }
                     quoteRowSyncDropdownCustomerRef.current = false;
                     quoteRowAwaitingLeadForCustomerRef.current = false;
                 } else {
@@ -11858,7 +12090,7 @@ const QuoteForm = ({ openContext = null }) => {
                                 )}
                             </div>
 
-                            {enquiryData && enquiryData.leadJobPrefix && quotePreviewCustomerGate && (
+                            {enquiryData && enquiryData.leadJobPrefix && hasSelectedCustomer && (
                             <>
                             {/* Save: enabled only when no persisted quote for this enquiry+lead+tab tuple+customer; Revision only when one exists */}
                             <button
@@ -11939,7 +12171,7 @@ const QuoteForm = ({ openContext = null }) => {
 
 
                 {/* Scrollable Content Area: Pricing & Information */}
-                {enquiryData && enquiryData.leadJobPrefix && quotePreviewCustomerGate ? (
+                {enquiryData && enquiryData.leadJobPrefix && hasSelectedCustomer ? (
                     <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0 }}>
 
 
@@ -13196,7 +13428,7 @@ const QuoteForm = ({ openContext = null }) => {
                             </div>
                             {quoteListSummaryBody}
                         </div>
-                    ) : (!enquiryData.leadJobPrefix || !quotePreviewCustomerGate) ? (
+                    ) : (!enquiryData.leadJobPrefix || !hasSelectedCustomer) ? (
                         <div style={{
                             height: '100%',
                             display: 'flex',

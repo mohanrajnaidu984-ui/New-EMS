@@ -2076,12 +2076,49 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         };
 
         /**
+         * Pricing list Division dropdown = ownjob. When that ownjob is a subjob (has ParentID), "Customer Name &
+         * Total Price" should show the **parent** job name (same pattern as compactMixedAnchorsSummary / subjob-only
+         * summary columns), not the subjob ItemName.
+         */
+        const divAnchorIdsForCustomerTotals = (() => {
+            const d = String(divisionTrim || '').trim();
+            if (!d) return new Set();
+            return new Set(
+                getDepartmentPricingAnchors(enqJobs, d)
+                    .map((j) => String(jobIdOf(j)))
+                    .filter((id) => id && id !== 'undefined')
+            );
+        })();
+        const customerTotalLabelOverrideForDivisionSubjob = (rootNode, currentLabel) => {
+            if (!divisionTrim || !rootNode) return null;
+            const jid = String(rootNode.jobId ?? '').trim();
+            if (!jid || jid === 'undefined' || !divAnchorIdsForCustomerTotals.has(jid)) return null;
+            const jobRec = jobMap[jid];
+            if (!jobRec || jobRec.ParentID == null || String(jobRec.ParentID) === '0' || jobRec.ParentID === 0) {
+                return null;
+            }
+            const baseLbl = String(currentLabel || '')
+                .replace(/\s*\(L\d+\)\s*$/i, '')
+                .replace(/\s*\(optional\)\s*$/i, '')
+                .trim();
+            if (baseLbl && isExternalPricingCustomer(baseLbl)) return null;
+            const par = jobMap[String(jobRec.ParentID)];
+            if (!par || !par.ItemName) return null;
+            const pid = jobIdOf(par);
+            const lc =
+                (pid != null && jobLeadMap[String(pid)]) || jobLeadMap[jid] || 'L1';
+            return withLeadCode(stripLeadName(par.ItemName) || String(par.ItemName).trim(), lc);
+        };
+
+        /**
          * Keep left column fully consistent with right column:
          * build "Customer Name & Total Price" strictly from the same deduped job-forest roots.
          * This avoids label drift / duplicates (e.g. HVAC/BMS mismatch while right side shows BEMCO/TEMCO roots).
          */
         const pricingListCustomerTotalsAligned = pricingJobForestScoped.map((rootNode) => {
-            const lbl = String(rootNode?.label || '').trim();
+            let lbl = String(rootNode?.label || '').trim();
+            const subLblOverride = customerTotalLabelOverrideForDivisionSubjob(rootNode, lbl);
+            if (subLblOverride) lbl = subLblOverride;
             const t = sumTreeNodeBasesForTotals(rootNode);
             const ownJobPriced =
                 !!(rootNode && rootNode.hasPrice && parsePriceNum(rootNode.price) > 0.01);

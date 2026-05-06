@@ -113,6 +113,44 @@ router.get('/calendar', async (req, res) => {
         // Apply Access Control
         const accessFilter = applyAccessControl(request, { userRole, userName: effectiveUserName, userEmail, accessMode: resolved.accessMode });
         baseFilter += accessFilter;
+        let quoteScopeFilter = `
+            AND (
+                NULLIF(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))), '') IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))))
+                OR UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserName, ''))))
+            )
+        `;
+        if (division && division !== 'All') {
+            quoteScopeFilter += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM Master_EnquiryFor mefQ
+                    WHERE (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                    )
+                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+                      AND (
+                        CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                      )
+                )
+            `;
+        }
+        if (salesEngineer && salesEngineer !== 'All') {
+            quoteScopeFilter += `
+                AND (
+                    UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                    OR EXISTS (
+                        SELECT 1
+                        FROM Master_ConcernedSE mcs
+                        WHERE UPPER(LTRIM(RTRIM(ISNULL(mcs.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                          AND LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(mcs.EmailId, ''))))
+                    )
+                )
+            `;
+        }
         console.log('Calendar Access Filter:', accessFilter);
         console.log('Calendar Params:', { month, year, division, salesEngineer, userEmail, userName, userRole });
         console.log('Calendar baseFilter:', baseFilter);
@@ -135,18 +173,22 @@ router.get('/calendar', async (req, res) => {
                 SELECT eq.CreatedAt, eq.QuoteDate, eq.RequestNo
                 FROM EnquiryQuotes eq
                 JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
-                WHERE 1=1 ${baseFilter}
+                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
             ),
             Dates AS (
                 SELECT EnquiryDate as DateVal, 'Enquiry' as Type FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year
                 UNION ALL
-                SELECT DueDate as DateVal, 'Due' as Type FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year
+                SELECT fe.DueDate as DateVal, 'Due' as Type
+                FROM FilteredEnquiries fe
+                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                  AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)
                 UNION ALL
-                SELECT DueDate as DateVal, 'Lapsed' as Type 
-                FROM FilteredEnquiries 
-                WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year
-                AND CAST(DueDate AS DATE) < CAST(@today AS DATE)
+                SELECT fe.DueDate as DateVal, 'Lapsed' as Type 
+                FROM FilteredEnquiries fe
+                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
                 AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
+                AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)
                 UNION ALL
                 SELECT SiteVisitDate as DateVal, 'SiteVisit' as Type FROM FilteredEnquiries WHERE MONTH(SiteVisitDate) = @month AND YEAR(SiteVisitDate) = @year
                 UNION ALL
@@ -185,8 +227,16 @@ router.get('/calendar', async (req, res) => {
             )
             SELECT 
                 (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
-                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year) as due,
-                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year AND CAST(DueDate AS DATE) < CAST(@today AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))) as lapsed,
+                (SELECT COUNT(DISTINCT fe.RequestNo)
+                 FROM FilteredEnquiries fe
+                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                   AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)) as due,
+                (SELECT COUNT(DISTINCT fe.RequestNo)
+                 FROM FilteredEnquiries fe
+                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                   AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
+                   AND (fe.Status IS NULL OR fe.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
+                   AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)) as lapsed,
                 (SELECT COUNT(DISTINCT RequestNo) FROM FilteredQuotes WHERE MONTH(ISNULL(QuoteDate, CreatedAt)) = @month AND YEAR(ISNULL(QuoteDate, CreatedAt)) = @year) as quoted
         `;
         const totalsResult = await request.query(totalsQuery);
@@ -235,15 +285,63 @@ router.get('/summary', async (req, res) => {
 
         // Apply Access Control
         baseFilter += applyAccessControl(request, { userRole, userName: effectiveUserName, userEmail, accessMode: resolved.accessMode });
+        let quoteScopeFilter = `
+            AND (
+                NULLIF(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))), '') IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))))
+                OR UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserName, ''))))
+            )
+        `;
+        if (division && division !== 'All') {
+            quoteScopeFilter += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM Master_EnquiryFor mefQ
+                    WHERE (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                    )
+                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+                      AND (
+                        CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                      )
+                )
+            `;
+        }
+        if (salesEngineer && salesEngineer !== 'All') {
+            quoteScopeFilter += `
+                AND (
+                    UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                    OR EXISTS (
+                        SELECT 1
+                        FROM Master_ConcernedSE mcs
+                        WHERE UPPER(LTRIM(RTRIM(ISNULL(mcs.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                          AND LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(mcs.EmailId, ''))))
+                    )
+                )
+            `;
+        }
 
         const today = new Date();
         const query = `
             SELECT
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), EnquiryDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as EnquiriesToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as DueToday,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) > CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as UpcomingDues,
+                (SELECT COUNT(*) FROM EnquiryMaster em
+                 WHERE CONVERT(VARCHAR(10), DueDate, 23) = CONVERT(VARCHAR(10), @today, 23)
+                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   ${baseFilter}) as DueToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em
+                 WHERE CONVERT(VARCHAR(10), DueDate, 23) > CONVERT(VARCHAR(10), @today, 23)
+                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   ${baseFilter}) as UpcomingDues,
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE Status IN ('Quoted', 'Quote', 'Submitted') ${baseFilter}) as QuotedCount,
-                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
+                (SELECT COUNT(*) FROM EnquiryMaster em
+                 WHERE CONVERT(VARCHAR(10), DueDate, 23) < CONVERT(VARCHAR(10), @today, 23)
+                   AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
+                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   ${baseFilter}) as LapsedCount
         `;
 
         const todayStr = today.toISOString().split('T')[0];
@@ -272,6 +370,13 @@ router.get('/enquiries', async (req, res) => {
         const effectiveUserName = (resolved.fullName || userName || '').toString().trim();
         const isDeptMode = resolved.accessMode === 'department';
         whereClause += applyAccessControl(request, { userRole, userName: effectiveUserName, userEmail, accessMode: resolved.accessMode });
+        let quoteScopeFilter = `
+            AND (
+                NULLIF(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))), '') IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(@currentUserEmail, ''))))
+                OR UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@currentUserName, ''))))
+            )
+        `;
 
         const isSearchActive = search && search.trim().length > 0;
 
@@ -294,6 +399,35 @@ router.get('/enquiries', async (req, res) => {
         if (salesEngineer && salesEngineer !== 'All' && !isSearchActive) {
             whereClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
             request.input('salesEngineer', sql.NVarChar, salesEngineer);
+            quoteScopeFilter += `
+                AND (
+                    UPPER(LTRIM(RTRIM(ISNULL(eq.PreparedBy, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                    OR EXISTS (
+                        SELECT 1
+                        FROM Master_ConcernedSE mcs
+                        WHERE UPPER(LTRIM(RTRIM(ISNULL(mcs.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@salesEngineer, ''))))
+                          AND LOWER(LTRIM(RTRIM(ISNULL(eq.PreparedByEmail, '')))) = LOWER(LTRIM(RTRIM(ISNULL(mcs.EmailId, ''))))
+                    )
+                )
+            `;
+        }
+        if (division && division !== 'All' && !isSearchActive) {
+            quoteScopeFilter += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM Master_EnquiryFor mefQ
+                    WHERE (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                    )
+                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+                      AND (
+                        CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                      )
+                )
+            `;
         }
         const today = new Date();
         const todayStr = today.toISOString().split('T')[0];
@@ -320,6 +454,7 @@ router.get('/enquiries', async (req, res) => {
 
             if (type === 'Due Date') {
                 whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
+                whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
             } else if (type === 'Quote Date') {
                 whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(eq.QuoteDate, eq.CreatedAt), 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23)) `;
             } else {
@@ -349,8 +484,10 @@ router.get('/enquiries', async (req, res) => {
                     CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) OR
                     CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @today, 23)
                 ) `;
+                whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
             } else if (currentMode === 'future') {
                 whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) >= CONVERT(VARCHAR(10), @today, 23) `;
+                whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
             }
         }
 

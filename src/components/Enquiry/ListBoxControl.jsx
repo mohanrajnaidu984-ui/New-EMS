@@ -34,7 +34,10 @@ const ListBoxControl = ({
         }
         if (idx >= 0 && idx < listBoxItems.length) {
             onRemove(idx);
+            return;
         }
+        // Allow consumer fallback logic when list is empty or nothing is selected.
+        onRemove(-1);
     };
 
     return (

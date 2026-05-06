@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import Select from 'react-select';
 import AsyncSelect from 'react-select/async'; // START_OF_FILE_MODIFICATION
 import DatePicker from 'react-datepicker';
@@ -50,6 +50,7 @@ const ProbabilityForm = () => {
     const [fromDate, setFromDate] = useState(() => localStorage.getItem('prob_fromDate') || '');
     const [toDate, setToDate] = useState(() => localStorage.getItem('prob_toDate') || '');
     const [filterProbability, setFilterProbability] = useState(() => localStorage.getItem('prob_filterProbability') || '');
+    const [viewSearchText, setViewSearchText] = useState(() => localStorage.getItem('prob_viewSearchText') || '');
 
     const [loadingList, setLoadingList] = useState(false);
     const [updatingReqNo, setUpdatingReqNo] = useState(null); // Track which row is being updated
@@ -79,7 +80,8 @@ const ProbabilityForm = () => {
         localStorage.setItem('prob_fromDate', fromDate);
         localStorage.setItem('prob_toDate', toDate);
         localStorage.setItem('prob_filterProbability', filterProbability);
-    }, [selectedDivision, listMode, fromDate, toDate, filterProbability]);
+        localStorage.setItem('prob_viewSearchText', viewSearchText);
+    }, [selectedDivision, listMode, fromDate, toDate, filterProbability, viewSearchText]);
     const [enquiriesList, setEnquiriesList] = useState([]);
     // Removed viewMode and detail states as per request
 
@@ -285,7 +287,14 @@ const ProbabilityForm = () => {
     const quoteRefLabelWithDate = (ref, dateVal) => {
         const r = String(ref || '').trim();
         if (!r) return '';
-        const d = formatHistoryDateTime(dateVal);
+        const d = (() => {
+            if (!dateVal) return '';
+            try {
+                return format(new Date(dateVal), 'dd-MMM-yy', { locale: enUS });
+            } catch {
+                return '';
+            }
+        })();
         return d ? `${r} (${d})` : r;
     };
 
@@ -636,6 +645,15 @@ const ProbabilityForm = () => {
 
     const filteredSortedRows = useMemo(() => {
         let rows = [...enquiriesList];
+        const q = String(viewSearchText || '').trim().toLowerCase();
+        if (q) {
+            rows = rows.filter((r) => {
+                const enquiryNo = String(r.RequestNo ?? '').toLowerCase();
+                const proj = String(r.ProjectName ?? '').toLowerCase();
+                const cust = customerKey(r).toLowerCase();
+                return enquiryNo.includes(q) || proj.includes(q) || cust.includes(q);
+            });
+        }
         if (colFEnquiry !== null) {
             rows = rows.filter((r) => colFEnquiry.has(String(r.RequestNo ?? '')));
         }
@@ -705,17 +723,20 @@ const ProbabilityForm = () => {
             });
         }
         return rows;
-    }, [enquiriesList, colFEnquiry, colFProject, colFCustomer, colFStatus, colFNet, sortCol, sortAsc, currentUser]);
+    }, [enquiriesList, viewSearchText, colFEnquiry, colFProject, colFCustomer, colFStatus, colFNet, sortCol, sortAsc, currentUser]);
 
     const listAggregates = useMemo(() => {
         let sumNet = 0;
         let sumJob = 0;
         let gpSum = 0;
         let gpCount = 0;
+        let sumLost = 0;
+        let sumFollowup = 0;
         for (const item of filteredSortedRows) {
             const n = getRowNetQuotedNumber(item, currentUser);
             if (n !== null && !Number.isNaN(n)) sumNet += n;
-            if (item.Status === 'Won') {
+            const statusNorm = String(item.Status || '').trim().toLowerCase();
+            if (statusNorm === 'won') {
                 const rawJv = String(item.WonOrderValue ?? '').replace(/,/g, '').replace(/BD/g, '').trim();
                 const jv = parseFloat(rawJv);
                 if (!Number.isNaN(jv)) sumJob += jv;
@@ -725,13 +746,43 @@ const ProbabilityForm = () => {
                     gpCount += 1;
                 }
             }
+            if (statusNorm === 'lost') {
+                const rawLost = String(item.LostCompetitorPrice ?? '').replace(/,/g, '').replace(/BD/g, '').trim();
+                const lostVal = parseFloat(rawLost);
+                if (!Number.isNaN(lostVal)) sumLost += lostVal;
+            }
+            if (statusNorm === 'followup' || statusNorm === 'follow-up') {
+                const rawFollow = String(item.WonOrderValue ?? '').replace(/,/g, '').replace(/BD/g, '').trim();
+                const followVal = parseFloat(rawFollow);
+                if (!Number.isNaN(followVal)) {
+                    sumFollowup += followVal;
+                } else if (n !== null && !Number.isNaN(n)) {
+                    sumFollowup += n;
+                }
+            }
         }
         return {
             sumNet,
             sumJob,
             avgGp: gpCount > 0 ? gpSum / gpCount : null,
+            sumLost,
+            sumFollowup,
         };
     }, [filteredSortedRows, currentUser]);
+
+    const formatSummaryAmountCompact = useCallback((value) => {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        if (n >= 1000000) return `BD ${(n / 1000000).toFixed(2)} M`;
+        return `BD ${(n / 1000).toFixed(2)} K`;
+    }, []);
+
+    const parseIsoDate = useCallback((value) => {
+        const raw = String(value || '').trim();
+        if (!raw) return null;
+        const d = new Date(`${raw}T00:00:00`);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }, []);
 
     useEffect(() => {
         if (!openColFilter) return undefined;
@@ -1104,6 +1155,7 @@ const ProbabilityForm = () => {
                                             setFilterProbability('');
                                         }}
                                     >
+                                        <option value="All">ALL</option>
                                         <option value="Pending">Pending Update</option>
                                         <option value="Won">Won</option>
                                         <option value="Lost">Lost</option>
@@ -1113,17 +1165,119 @@ const ProbabilityForm = () => {
                                         <option value="Retendered">Retendered</option>
                                     </select>
                                 </div>
+                                <div style={{ width: '280px' }}>
+                                    <label className="small text-muted fw-bold mb-1">Search</label>
+                                    <input
+                                        type="text"
+                                        className="form-control"
+                                        value={viewSearchText}
+                                        onChange={(e) => setViewSearchText(e.target.value)}
+                                        placeholder="Enquiry No, Project Name, Customer Name"
+                                    />
+                                </div>
 
                                 {/* Date Filters (Not for Pending) */}
                                 {listMode !== 'Pending' && listMode !== 'FollowUp' && (
                                     <>
-                                        <div>
-                                            <label className="small text-muted fw-bold mb-1">From</label>
-                                            <input type="date" className="form-control" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+                                        <div style={{ width: '130px' }} className="d-flex flex-column">
+                                            <label className="small text-muted fw-bold mb-1 d-block">From</label>
+                                            <div className="prob-date-picker-wrap">
+                                                <DatePicker
+                                                    selected={parseIsoDate(fromDate)}
+                                                    onChange={(date) => setFromDate(date ? format(date, 'yyyy-MM-dd') : '')}
+                                                    dateFormat="dd-MMM-yy"
+                                                    placeholderText="DD-MMM-YY"
+                                                    className="form-control prob-date-input"
+                                                    popperClassName="prob-datepicker-popper"
+                                                    todayButton="Today"
+                                                    clearButtonTitle="Clear"
+                                                    isClearable
+                                                />
+                                                <span className="prob-date-input-icon" aria-hidden="true" />
+                                            </div>
                                         </div>
-                                        <div>
-                                            <label className="small text-muted fw-bold mb-1">To</label>
-                                            <input type="date" className="form-control" value={toDate} onChange={e => setToDate(e.target.value)} />
+                                        <div style={{ width: '130px' }} className="d-flex flex-column">
+                                            <label className="small text-muted fw-bold mb-1 d-block">To</label>
+                                            <div className="prob-date-picker-wrap">
+                                                <DatePicker
+                                                    selected={parseIsoDate(toDate)}
+                                                    onChange={(date) => setToDate(date ? format(date, 'yyyy-MM-dd') : '')}
+                                                    dateFormat="dd-MMM-yy"
+                                                    placeholderText="DD-MMM-YY"
+                                                    className="form-control prob-date-input"
+                                                    popperClassName="prob-datepicker-popper"
+                                                    todayButton="Today"
+                                                    clearButtonTitle="Clear"
+                                                    isClearable
+                                                />
+                                                <span className="prob-date-input-icon" aria-hidden="true" />
+                                            </div>
+                                        </div>
+                                        <div
+                                            className="align-self-end"
+                                            style={{
+                                                minWidth: '340px',
+                                                background: '#ffffff',
+                                                border: '1px solid #d7dee8',
+                                                borderRadius: '8px',
+                                                boxShadow: '0 1px 5px rgba(15, 23, 42, 0.07)',
+                                                overflow: 'hidden',
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    padding: '4px 8px',
+                                                    fontSize: '10px',
+                                                    fontWeight: 700,
+                                                    color: '#ffffff',
+                                                    backgroundColor: '#4b5a96',
+                                                    backgroundImage: 'linear-gradient(180deg, #8c97c8 0%, #6f7db4 20%, #5a679f 52%, #4a578d 78%, #3f4c82 100%)',
+                                                    borderBottom: '1px solid rgba(22, 33, 74, 0.38)',
+                                                    lineHeight: 1.1,
+                                                    textShadow: '0 1px 1px rgba(19, 27, 58, 0.6)',
+                                                    boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.35)',
+                                                }}
+                                            >
+                                                Probability Summary
+                                            </div>
+                                            <div title="Net quoted total" style={{ color: '#0c4a6e', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                                <span>Total Net Quoted :</span>
+                                                <span style={{ textAlign: 'right' }}>
+                                                    {filteredSortedRows.length > 0
+                                                        ? formatSummaryAmountCompact(listAggregates.sumNet)
+                                                        : <span className="text-muted">—</span>}
+                                                </span>
+                                            </div>
+                                            <div title="Job Value total (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                                <span>Won Total :</span>
+                                                <span style={{ textAlign: 'right' }}>
+                                                    {listAggregates.sumJob > 0
+                                                        ? formatSummaryAmountCompact(listAggregates.sumJob)
+                                                        : <span className="text-muted">—</span>}
+                                                </span>
+                                            </div>
+                                            <div title="GP average (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                                <span>GP AVG :</span>
+                                                <span style={{ textAlign: 'right' }}>
+                                                    {listAggregates.avgGp != null ? `${listAggregates.avgGp.toFixed(2)}%` : <span className="text-muted">—</span>}
+                                                </span>
+                                            </div>
+                                            <div title="Lost total" style={{ color: '#dc3545', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                                <span>Lost Total :</span>
+                                                <span style={{ textAlign: 'right' }}>
+                                                    {listAggregates.sumLost > 0
+                                                        ? formatSummaryAmountCompact(listAggregates.sumLost)
+                                                        : <span className="text-muted">—</span>}
+                                                </span>
+                                            </div>
+                                            <div title="Followup total" style={{ color: '#4169e1', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1 }}>
+                                                <span>Followup Total :</span>
+                                                <span style={{ textAlign: 'right' }}>
+                                                    {listAggregates.sumFollowup > 0
+                                                        ? formatSummaryAmountCompact(listAggregates.sumFollowup)
+                                                        : <span className="text-muted">—</span>}
+                                                </span>
+                                            </div>
                                         </div>
                                     </>
                                 )}
@@ -1156,65 +1310,31 @@ const ProbabilityForm = () => {
                             </div>
                         </div>
 
-                        <div className="card-body p-0 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
+                        <div className="card-body p-0 d-flex flex-column" style={{ minHeight: 0 }}>
                             <div
-                                className="prob-table-scroll-wrap border-top px-3 flex-grow-1"
+                                className="prob-table-scroll-wrap border-top px-3"
                                 style={{
-                                    flex: '1 1 auto',
-                                    minHeight: 0,
-                                    overflow: 'auto',
+                                    maxHeight: 'calc(100vh - 260px)',
+                                    overflowX: 'auto',
+                                    overflowY: 'auto',
                                     scrollbarGutter: 'stable',
                                 }}
                             >
                                 <table className="table table-hover mb-0 prob-probability-list-table" style={{ minWidth: '2312px', tableLayout: 'fixed' }}>
                                     <thead>
                                         <tr className="prob-summary-row">
-                                            <th className="prob-summary-th" style={{ width: '72px' }} aria-hidden="true" />
                                             <th className="prob-summary-th" style={{ width: '50px' }} aria-hidden="true" />
+                                            <th className="prob-summary-th" style={{ width: '72px' }} aria-hidden="true" />
                                             <th className="prob-summary-th" style={{ width: '100px' }} aria-hidden="true" />
                                             <th className="prob-summary-th" style={{ width: '200px' }} aria-hidden="true" />
                                             <th className="prob-summary-th" style={{ width: '160px' }} aria-hidden="true" />
-                                            <th className="prob-summary-th prob-summary-net text-end pe-2" style={{ width: '140px' }}>
-                                                {filteredSortedRows.length === 0 ? (
-                                                    <span className="text-muted">—</span>
-                                                ) : (
-                                                    <>
-                                                        <span className="prob-summary-muted">Total </span>
-                                                        BD {listAggregates.sumNet.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                                                    </>
-                                                )}
-                                            </th>
+                                            <th className="prob-summary-th prob-summary-net text-end pe-2" style={{ width: '140px' }} aria-hidden="true" />
                                             <th className="prob-summary-th" style={{ width: '130px' }} aria-hidden="true" />
-                                            <th className="prob-summary-th prob-summary-details" style={{ width: '1300px' }}>
-                                                <div className="d-flex align-items-end" style={{ fontSize: '11px', fontWeight: 600, color: '#0c4a6e' }}>
-                                                    <div style={{ width: '320px' }} aria-hidden="true" />
-                                                    <div style={{ width: '130px' }} aria-hidden="true" />
-                                                    <div style={{ width: '140px', textAlign: 'right' }} title="Job Value total (Won)">
-                                                        {listAggregates.sumJob > 0 ? (
-                                                            <>
-                                                                <span className="prob-summary-muted">Total </span>
-                                                                BD {listAggregates.sumJob.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                                                            </>
-                                                        ) : (
-                                                            <span className="text-muted">—</span>
-                                                        )}
-                                                    </div>
-                                                    <div style={{ width: '110px', textAlign: 'right' }} title="GP % average (Won)">
-                                                        {listAggregates.avgGp != null ? (
-                                                            <>
-                                                                <span className="prob-summary-muted">Avg </span>
-                                                                {listAggregates.avgGp.toFixed(2)}%
-                                                            </>
-                                                        ) : (
-                                                            <span className="text-muted">—</span>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </th>
+                                            <th className="prob-summary-th prob-summary-details" style={{ width: '1300px' }} aria-hidden="true" />
                                         </tr>
                                         <tr className="prob-thead-labels">
-                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '72px', textAlign: 'left' }}>Update</th>
                                             <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '50px', textAlign: 'left' }}>SL</th>
+                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '72px', textAlign: 'left' }}>Update</th>
                                             <th
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
                                                 style={{ width: '100px', textAlign: 'left', cursor: 'pointer' }}
@@ -1360,8 +1480,8 @@ const ProbabilityForm = () => {
                                             >
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
                                                     <div className="d-flex flex-column align-items-start" style={{ minWidth: 0, textAlign: 'left' }}>
-                                                        <span className="fw-bold">Net Quote</span>
                                                         <span className="prob-net-quoted-sub">(Excludes Subjobs)</span>
+                                                        <span className="fw-bold">Net Quoted</span>
                                                     </div>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0 align-self-end">
                                                         <span className={`user-select-none ${filterActiveClass('net')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">
@@ -1483,21 +1603,21 @@ const ProbabilityForm = () => {
                                         ) : (
                                             filteredSortedRows.map((item, index) => (
                                                 <tr key={item.RequestNo} className="border-b hover:bg-gray-50">
+                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
+                                                        {index + 1}
+                                                    </td>
                                                     <td className="px-2 py-1 prob-td text-center">
                                                         <button
                                                             type="button"
                                                             className={`btn btn-sm px-2 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                             onClick={() => persistUpdate(item)}
                                                             disabled={updatingReqNo === item.RequestNo}
-                                                            style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '64px' }}
+                                                            style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '58px', whiteSpace: 'nowrap' }}
                                                         >
                                                             {updatingReqNo === item.RequestNo ? (
                                                                 <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
                                                             ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
                                                         </button>
-                                                    </td>
-                                                    <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
-                                                        {index + 1}
                                                     </td>
                                                     <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
                                                         <div className="d-flex align-items-center gap-2">
@@ -1559,6 +1679,9 @@ const ProbabilityForm = () => {
                                                                                 classNamePrefix="select"
                                                                                 placeholder="Quoted below — type 3+ letters to search contractors & clients"
                                                                                 isSearchable={true}
+                                                                                isClearable={true}
+                                                                                backspaceRemovesValue={true}
+                                                                                escapeClearsValue={true}
                                                                                 menuPortalTarget={document.body}
                                                                                 cacheOptions
                                                                                 value={item.LostCompetitor ? { value: item.LostCompetitor, label: item.LostCompetitor } : null}
@@ -1632,8 +1755,34 @@ const ProbabilityForm = () => {
                                                                                     control: (base) => ({
                                                                                         ...base,
                                                                                         minHeight: '31px',
-                                                                                        height: '31px',
                                                                                         fontSize: '12px'
+                                                                                    }),
+                                                                                    valueContainer: (base) => ({
+                                                                                        ...base,
+                                                                                        minHeight: '31px',
+                                                                                        paddingTop: '0',
+                                                                                        paddingBottom: '0'
+                                                                                    }),
+                                                                                    input: (base) => ({
+                                                                                        ...base,
+                                                                                        margin: '0',
+                                                                                        padding: '0'
+                                                                                    }),
+                                                                                    placeholder: (base) => ({
+                                                                                        ...base,
+                                                                                        whiteSpace: 'nowrap',
+                                                                                        overflow: 'hidden',
+                                                                                        textOverflow: 'ellipsis'
+                                                                                    }),
+                                                                                    singleValue: (base) => ({
+                                                                                        ...base,
+                                                                                        whiteSpace: 'nowrap',
+                                                                                        overflow: 'hidden',
+                                                                                        textOverflow: 'ellipsis'
+                                                                                    }),
+                                                                                    indicatorsContainer: (base) => ({
+                                                                                        ...base,
+                                                                                        minHeight: '31px'
                                                                                     }),
                                                                                     menuPortal: (base) => ({ ...base, zIndex: 9999 })
                                                                                 }}
@@ -1707,7 +1856,7 @@ const ProbabilityForm = () => {
                                                                 <>
                                                                     <div className="d-flex flex-column">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
-                                                                        <div style={{ width: '300px' }}>
+                                                                        <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
                                                                             <Select
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
@@ -1760,6 +1909,12 @@ const ProbabilityForm = () => {
                                                                                     valueContainer: (base) => ({
                                                                                         ...base,
                                                                                         padding: '0 8px'
+                                                                                    }),
+                                                                                    singleValue: (base) => ({
+                                                                                        ...base,
+                                                                                        whiteSpace: 'nowrap',
+                                                                                        overflow: 'hidden',
+                                                                                        textOverflow: 'ellipsis'
                                                                                     }),
                                                                                     indicatorsContainer: (base) => ({
                                                                                         ...base,
@@ -1898,6 +2053,12 @@ const ProbabilityForm = () => {
                                                                                     valueContainer: (base) => ({
                                                                                         ...base,
                                                                                         padding: '0 8px'
+                                                                                    }),
+                                                                                    singleValue: (base) => ({
+                                                                                        ...base,
+                                                                                        whiteSpace: 'nowrap',
+                                                                                        overflow: 'hidden',
+                                                                                        textOverflow: 'ellipsis'
                                                                                     }),
                                                                                     indicatorsContainer: (base) => ({
                                                                                         ...base,

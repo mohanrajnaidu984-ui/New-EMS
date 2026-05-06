@@ -40,6 +40,15 @@ function formatSalesAmountString(num) {
     return `${(n / 1000).toFixed(2)}k`;
 }
 
+function formatExactAmountString(num) {
+    const n = Number(num);
+    if (Number.isNaN(n)) return '0.00';
+    return n.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+
 /** Brand palette for this report only */
 const SR_BLUE = '#6a73ae';
 const SR_BLUE_LIGHT = '#abc3e4';
@@ -177,8 +186,8 @@ const FUNNEL_STAGE_DEFS = [
 ];
 
 /** Pipeline funnel: royal blue ramp — light top → dark bottom (same blend depth as before) */
-const FUNNEL_COLOR_TOP = mixHexWithWhite(SR_ROYAL_BLUE, 0.74);
-const FUNNEL_COLOR_BOTTOM = mixHexWithBlack(SR_ROYAL_BLUE, 0.58);
+const FUNNEL_COLOR_TOP = mixHexWithWhite(SR_ROYAL_BLUE, 0.42);
+const FUNNEL_COLOR_BOTTOM = mixHexWithBlack(SR_ROYAL_BLUE, 0.9);
 
 const FUNNEL_STAGES = FUNNEL_STAGE_DEFS.map((s, i) => {
     const n = FUNNEL_STAGE_DEFS.length;
@@ -285,21 +294,17 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                         const y1 = (i + 1) * bandH;
                         const cyVal = y0 + bandH * 0.62;
                         const nBands = rows.length;
-                        const lightSegment = i < Math.ceil(nBands / 2);
                         return (
                             <text
                                 key={`fval-${row.name || i}`}
                                 x={vb.w / 2}
                                 y={cyVal}
-                                fontSize={2.85}
-                                fontWeight="700"
+                                fontSize={3.75}
+                                fontWeight="800"
                                 textAnchor="middle"
                                 dominantBaseline="middle"
                                 className="sr-funnel-block-value-svg"
-                                fill={lightSegment ? '#0f172a' : '#f8fafc'}
-                                stroke={lightSegment ? 'rgba(255,255,255,0.55)' : 'rgba(15,23,42,0.35)'}
-                                strokeWidth="0.22"
-                                paintOrder="stroke fill"
+                                fill="#ffffff"
                             >
                                 {formatFullNumber(val)}
                             </text>
@@ -313,6 +318,13 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
 
 const SalesReport = () => {
     const { currentUser, storedLoginEmail } = useAuth();
+    const topJobStatusStorageKey = useMemo(() => {
+        const email = (currentUser?.EmailId || currentUser?.email || storedLoginEmail || '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        return email ? `reports_top_job_status_${email}` : 'reports_top_job_status';
+    }, [currentUser, storedLoginEmail]);
     const [filterLocks, setFilterLocks] = useState({
         company: false,
         division: false,
@@ -326,10 +338,10 @@ const SalesReport = () => {
     });
     const [division, setDivision] = useState(() => {
         const s = localStorage.getItem('reports_division');
-        return s && s !== 'All' ? s : '';
+        return s ? s : 'All';
     });
     const [role, setRole] = useState(() => localStorage.getItem('reports_role') || 'All');
-    const [topJobStatus, setTopJobStatus] = useState('Won');
+    const [topJobStatus, setTopJobStatus] = useState(() => localStorage.getItem('reports_top_job_status') || 'Won');
 
     const [loading, setLoading] = useState(false);
     const [topJobsLoading, setTopJobsLoading] = useState(false);
@@ -363,7 +375,7 @@ const SalesReport = () => {
                 if (response.ok) {
                     const data = await response.json();
                     const companies = data.companies || [];
-                    const divisions = data.divisions || [];
+                    const divisions = ['All', ...(data.divisions || [])];
                     const roles = data.roles || [];
                     setFilterOptions((prev) => ({
                         ...prev,
@@ -373,7 +385,7 @@ const SalesReport = () => {
                         roles
                     }));
                     setCompany((prev) => (companies.length ? (companies.includes(prev) ? prev : companies[0]) : prev));
-                    setDivision((prev) => (divisions.length ? (divisions.includes(prev) ? prev : divisions[0]) : prev));
+                    setDivision((prev) => (divisions.includes(prev) ? prev : 'All'));
                 }
             } catch (error) {
                 console.error('Failed to fetch sales report filters', error);
@@ -385,9 +397,27 @@ const SalesReport = () => {
     useEffect(() => {
         localStorage.setItem('reports_year', year);
         if (company) localStorage.setItem('reports_company', company);
-        if (division) localStorage.setItem('reports_division', division);
+        localStorage.setItem('reports_division', division || 'All');
         localStorage.setItem('reports_role', role);
     }, [year, company, division, role]);
+
+    useEffect(() => {
+        const saved = localStorage.getItem(topJobStatusStorageKey);
+        if (saved && TOP_JOB_STATUS_OPTIONS.some((x) => x.value === saved)) {
+            setTopJobStatus(saved);
+            return;
+        }
+        const legacy = localStorage.getItem('reports_top_job_status');
+        if (legacy && TOP_JOB_STATUS_OPTIONS.some((x) => x.value === legacy)) {
+            setTopJobStatus(legacy);
+        }
+    }, [topJobStatusStorageKey]);
+
+    useEffect(() => {
+        localStorage.setItem(topJobStatusStorageKey, topJobStatus);
+        // Backward compatibility for earlier single-key storage.
+        localStorage.setItem('reports_top_job_status', topJobStatus);
+    }, [topJobStatus, topJobStatusStorageKey]);
 
     const fetchSummary = async () => {
         setLoading(true);
@@ -501,7 +531,7 @@ const SalesReport = () => {
     const handleCompanyChange = (e) => {
         const val = e.target.value;
         setCompany(val);
-        setDivision('');
+        setDivision('All');
         setRole('All');
     };
 
@@ -511,17 +541,31 @@ const SalesReport = () => {
         setRole('All');
     };
 
-    /** Plain string for charts / tooltips (k if &lt; 1M, else M). */
-    const formatFullNumber = (num) => formatSalesAmountString(num);
+    /** Full-precision string for hover/tooltips. */
+    const formatFullNumber = (num) => formatExactAmountString(num);
 
     /** In-page amounts: suffix k or M at 50% of digit size (see `.sr-money-thousands__k` / `__M`). */
     const formatK = (num) => {
         const n = Number(num);
+        if (Number.isNaN(n)) {
+            return (
+                <span className="sr-money-thousands" title={formatExactAmountString(0)}>
+                    0.00<span className="sr-money-thousands__k">k</span>
+                </span>
+            );
+        }
         const s = formatSalesAmountString(n);
+        if (!s.endsWith('k') && !s.endsWith('M')) {
+            return (
+                <span className="sr-money-thousands" title={formatExactAmountString(n)}>
+                    {s}
+                </span>
+            );
+        }
         const isM = s.endsWith('M');
-        const digits = isM ? s.slice(0, -1) : s.slice(0, -1);
+        const digits = s.slice(0, -1);
         return (
-            <span className="sr-money-thousands">
+            <span className="sr-money-thousands" title={formatExactAmountString(n)}>
                 {digits}
                 <span className={isM ? 'sr-money-thousands__M' : 'sr-money-thousands__k'}>{isM ? 'M' : 'k'}</span>
             </span>
@@ -575,13 +619,24 @@ const SalesReport = () => {
     const gmTotalSalesTargetBase = grossMarginData.reduce((acc, curr) => acc + (Number(curr.targetSalesBase) || 0), 0);
     const gmOverallTargetGpPct = gmTotalSalesTargetBase > 0 ? (gmTotalTarget / gmTotalSalesTargetBase) * 100 : 0;
     const gmOverallRatio = gmTotalTarget > 0 ? Math.round((gmTotalActual / gmTotalTarget) * 100) : 0;
+    /** Average Actual GP% (Actual GP amount / Actual booking amount). */
+    const gmOverallActualGpPct = totalActual > 0 ? (gmTotalActual / totalActual) * 100 : 0;
 
     const wl = reportData.winLoss || defaultReport().winLoss;
-    const quotedDenom = Number(wl.quotedValue) || 0;
+    const isNonCcScopedUser = filterLocks.company === true;
+    const quotedDenom = isNonCcScopedUser
+        ? (Number(wl.quoted) || 0)
+        : (Number(wl.quotedValue) || 0);
+    const winNumerator = isNonCcScopedUser
+        ? (Number(wl.won) || 0)
+        : (Number(wl.wonValue) || 0);
+    const lossNumerator = isNonCcScopedUser
+        ? (Number(wl.lost) || 0)
+        : (Number(wl.lostValue) || 0);
     const winningRate =
-        quotedDenom > 0 ? Math.round(((Number(wl.wonValue) || 0) / quotedDenom) * 100) : 0;
+        quotedDenom > 0 ? Math.round((winNumerator / quotedDenom) * 100) : 0;
     const losingRate =
-        quotedDenom > 0 ? Math.round(((Number(wl.lostValue) || 0) / quotedDenom) * 100) : 0;
+        quotedDenom > 0 ? Math.round((lossNumerator / quotedDenom) * 100) : 0;
 
     /** Donut: Won / Lost / Follow up only (Quoted stays in KPI row, not in chart). */
     const pieSlices = useMemo(() => {
@@ -823,13 +878,12 @@ const SalesReport = () => {
                                                     const fill = g
                                                         ? `url(#${g.id})`
                                                         : PIE_COLORS[entry.name] || SR_BLUE_LIGHT;
-                                                    const splitStroke = pieSlices.length > 1;
                                                     return (
                                                         <Cell
                                                             key={`cell-${index}`}
                                                             fill={fill}
-                                                            stroke={splitStroke ? '#ffffff' : 'none'}
-                                                            strokeWidth={splitStroke ? 1.5 : 0}
+                                                            stroke="none"
+                                                            strokeWidth={0}
                                                         />
                                                     );
                                                 })}
@@ -974,7 +1028,7 @@ const SalesReport = () => {
                                     <div className="sr-fraction-actual sr-gm-fraction-cell sr-fraction-kpi-row">
                                         <span className="sr-fraction-suffix sr-fraction-suffix--lead">Actual</span>
                                         <span className="sr-fraction-value text-success">{formatK(gmTotalActual)}</span>
-                                        <span className="sr-gp-summary-actual-pct"> ({gmOverallRatio}<span className="sr-pct-sym">%</span>)</span>
+                                        <span className="sr-gp-summary-actual-pct"> ({Math.round(gmOverallActualGpPct)}<span className="sr-pct-sym">%</span>)</span>
                                     </div>
                                     <div className="sr-fraction-rule sr-gm-fraction-stack-rule" role="presentation" />
                                     <div className="sr-fraction-target sr-gm-fraction-cell sr-fraction-kpi-row">
@@ -1002,9 +1056,9 @@ const SalesReport = () => {
                                     })}
                                     <div className="sr-q-matrix__lab sr-q-matrix__lab--actual">Actual</div>
                                     {grossMarginData.map((row, qi) => {
-                                        const t = Number(row.target) || 0;
                                         const a = Number(row.actual) || 0;
-                                        const pct = t > 0 ? Math.round((a / t) * 100) : 0;
+                                        const quarterActualBooking = Number(targetVsActualData[qi]?.actual) || 0;
+                                        const pct = quarterActualBooking > 0 ? Math.round((a / quarterActualBooking) * 100) : 0;
                                         const vsep = qi < 3 ? ' sr-q-matrix__cell--vsep' : '';
                                         return (
                                             <div key={`gm-qa-${row.name}`} className={`sr-q-matrix__actual sr-quarter-gp-line text-center${vsep}`}>
@@ -1121,12 +1175,13 @@ const SalesReport = () => {
                                 <thead className="table-secondary">
                                     <tr>
                                         <th style={{ width: 44 }}>Sl.No.</th>
+                                        <th>Enquiry No.</th>
                                         <th>Project Name</th>
                                         <th className="text-end">Job Value</th>
                                         <th className="sr-job-bar-th" title="Horizontal bar: job value relative to the largest value in this list">
                                             Job Value Chart
                                         </th>
-                                        <th className="text-end text-nowrap">Gross Margin</th>
+                                        <th className="text-end text-nowrap">Gross Profit (%)</th>
                                         <th>Customer Name</th>
                                         <th>Client Name</th>
                                         <th>Consultant Name</th>
@@ -1138,7 +1193,7 @@ const SalesReport = () => {
                                 >
                                     {topRows.length === 0 ? (
                                         <tr>
-                                            <td colSpan={8} className="text-center text-muted py-2">No job booked rows for the selected filters.</td>
+                                            <td colSpan={9} className="text-center text-muted py-2">No job booked rows for the selected filters.</td>
                                         </tr>
                                     ) : (
                                         topRows.map((row, idx) => {
@@ -1148,12 +1203,13 @@ const SalesReport = () => {
                                             return (
                                                 <tr key={`${row.ProjectName}-${idx}`}>
                                                     <td>{idx + 1}</td>
+                                                    <td>{row.RequestNo || row.EnquiryNo || '—'}</td>
                                                     <td>{row.ProjectName || '—'}</td>
                                                     <td className="text-end">{formatK(row.JobValue)}</td>
                                                     <td className="sr-job-bar-cell">
                                                         <div
                                                             className="sr-job-bar-track"
-                                                            title={`${pct}% of max job value in this list (${formatFullNumber(v)})`}
+                                                            title={`${pct}% of max job value in this list (${formatExactAmountString(v)})`}
                                                             role="img"
                                                             aria-label={`Job value ${pct} percent of maximum in this list`}
                                                         >

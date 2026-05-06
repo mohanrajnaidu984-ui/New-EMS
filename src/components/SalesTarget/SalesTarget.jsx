@@ -42,7 +42,7 @@ const RevenueInput = ({ value, onChange, placeholder = '0', style = {} }) => {
             ref={inputRef}
             type="text"
             inputMode="numeric"
-            className="form-control form-control-sm bg-transparent text-white border-secondary text-center"
+            className="form-control form-control-sm bg-white text-dark border-secondary text-center"
             style={{ fontSize: '13px', letterSpacing: '0.3px', ...style }}
             value={displayValue}
             onFocus={handleFocus}
@@ -194,11 +194,11 @@ const SalesTarget = () => {
         }
     };
 
-    if (loading) return <div className="p-4 text-white">Loading...</div>;
+    if (loading) return <div className="p-4 text-dark">Loading...</div>;
 
     if (!isManager) {
         return (
-            <div className="d-flex justify-content-center align-items-center h-100 text-white">
+            <div className="d-flex justify-content-center align-items-center h-100 text-dark">
                 <div className="text-center">
                     <i className="bi bi-lock-fill fs-1 text-secondary mb-3"></i>
                     <h3>Access Restricted</h3>
@@ -219,11 +219,11 @@ const SalesTarget = () => {
 
     // Inline styles for the two sub-rows
     const revenueRowStyle = {
-        borderBottom: '1px dashed #334155',
+        borderBottom: '1px dashed #ced4da',
     };
     const gpRowStyle = {
-        borderBottom: '1px solid #1e3a5f',
-        backgroundColor: 'rgba(16, 185, 129, 0.05)',
+        borderBottom: '1px solid #dee2e6',
+        backgroundColor: 'rgba(25, 135, 84, 0.06)',
     };
 
     const labelCellStyle = {
@@ -234,19 +234,20 @@ const SalesTarget = () => {
         paddingTop: '4px',
         paddingBottom: '4px',
         paddingLeft: '8px',
-        color: '#94a3b8',
+        color: '#6c757d',
         whiteSpace: 'nowrap',
     };
 
     const gpLabelStyle = {
         ...labelCellStyle,
-        color: '#34d399',
+        color: '#198754',
     };
 
     return (
-        <div className="container-fluid p-4 sales-target-container" style={{ backgroundColor: '#0f172a', minHeight: 'calc(100vh - 100px)', color: '#e0e0e0' }}>
+        <div className="container-fluid p-4 sales-target-container" style={{ backgroundColor: '#f1f3f5', minHeight: 'calc(100vh - 100px)', color: '#212529' }}>
+            <div style={{ width: '70%', margin: '0 auto' }}>
             <div className="d-flex justify-content-between align-items-center mb-4">
-                <h4 className="fw-bold text-white mb-0">
+                <h4 className="fw-bold text-dark mb-0">
                     <i className="bi bi-bullseye me-2 text-primary"></i>
                     Sales Target Settings
                 </h4>
@@ -256,23 +257,23 @@ const SalesTarget = () => {
             </div>
 
             {/* Filters */}
-            <div className="card border-0 mb-4 shadow-sm" style={{ backgroundColor: '#1e293b' }}>
+            <div className="card border mb-4 shadow-sm" style={{ backgroundColor: '#ffffff', borderColor: '#dee2e6' }}>
                 <div className="card-body d-flex gap-3 align-items-end">
                     <div className="form-group">
                         <label className="small text-muted mb-1">Financial Year</label>
-                        <select className="form-select bg-dark text-white border-secondary" value={selectedYear} onChange={e => setSelectedYear(e.target.value)}>
+                        <select className="form-select bg-white text-dark border-secondary" value={selectedYear} onChange={e => setSelectedYear(e.target.value)}>
                             {['2025', '2026', '2027'].map(y => <option key={y} value={y}>{y}</option>)}
                         </select>
                     </div>
                     <div className="form-group" style={{ minWidth: '200px' }}>
                         <label className="small text-muted mb-1">Division</label>
-                        <select className="form-select bg-dark text-white border-secondary" value={selectedDivision} onChange={e => setSelectedDivision(e.target.value)}>
+                        <select className="form-select bg-white text-dark border-secondary" value={selectedDivision} onChange={e => setSelectedDivision(e.target.value)}>
                             {managedDivisions.map(d => <option key={d} value={d}>{d}</option>)}
                         </select>
                     </div>
                     <div className="form-group" style={{ minWidth: '250px' }}>
                         <label className="small text-muted mb-1">Sales Engineer</label>
-                        <select className="form-select bg-dark text-white border-secondary" value={selectedEngineer} onChange={e => setSelectedEngineer(e.target.value)}>
+                        <select className="form-select bg-white text-dark border-secondary" value={selectedEngineer} onChange={e => setSelectedEngineer(e.target.value)}>
                             <option value="">-- Select Engineer --</option>
                             {engineers.map(e => <option key={e.EmailId} value={e.FullName}>{e.FullName}</option>)}
                         </select>
@@ -283,12 +284,12 @@ const SalesTarget = () => {
             {/* Legend */}
             {selectedEngineer && (
                 <div className="d-flex gap-4 mb-3" style={{ fontSize: '12px' }}>
-                    <span style={{ color: '#94a3b8' }}>
-                        <span style={{ display: 'inline-block', width: '10px', height: '10px', background: '#334155', borderRadius: '2px', marginRight: '6px' }}></span>
+                    <span style={{ color: '#6c757d' }}>
+                        <span style={{ display: 'inline-block', width: '10px', height: '10px', background: '#adb5bd', borderRadius: '2px', marginRight: '6px' }}></span>
                         Revenue Target (BD)
                     </span>
-                    <span style={{ color: '#34d399' }}>
-                        <span style={{ display: 'inline-block', width: '10px', height: '10px', background: 'rgba(16, 185, 129, 0.3)', borderRadius: '2px', marginRight: '6px' }}></span>
+                    <span style={{ color: '#198754' }}>
+                        <span style={{ display: 'inline-block', width: '10px', height: '10px', background: 'rgba(25, 135, 84, 0.25)', borderRadius: '2px', marginRight: '6px' }}></span>
                         Gross Profit Target (% of Revenue)
                     </span>
                 </div>
@@ -297,18 +298,18 @@ const SalesTarget = () => {
             {/* Grid */}
             {selectedEngineer ? (
                 <div className="table-responsive rounded shadow-sm">
-                    <table className="table table-dark mb-0 align-middle" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
+                    <table className="table table-bordered mb-0 align-middle bg-white" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
                         <thead>
-                            <tr style={{ background: 'linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%)' }}>
-                                <th className="text-start ps-4" style={{ width: '28%', fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#93c5fd', padding: '14px 16px' }}>
+                            <tr style={{ background: '#e9ecef' }}>
+                                <th className="text-start ps-4" style={{ width: '28%', fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#495057', padding: '14px 16px' }}>
                                     Item Name
                                 </th>
                                 {quarters.map(q => (
-                                    <th key={q} className="text-center" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#93c5fd', padding: '14px 16px' }}>
+                                    <th key={q} className="text-center" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#495057', padding: '14px 16px' }}>
                                         {q} — Target
                                     </th>
                                 ))}
-                                <th className="text-center fw-bold" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#34d399', padding: '14px 16px' }}>
+                                <th className="text-center fw-bold" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#198754', padding: '14px 16px' }}>
                                     Total
                                 </th>
                             </tr>
@@ -352,10 +353,10 @@ const SalesTarget = () => {
                                                 style={{
                                                     fontWeight: '600',
                                                     fontSize: '13px',
-                                                    color: '#e2e8f0',
+                                                    color: '#212529',
                                                     verticalAlign: 'middle',
-                                                    borderRight: '1px solid #334155',
-                                                    borderBottom: '1px solid #1e3a5f',
+                                                    borderRight: '1px solid #dee2e6',
+                                                    borderBottom: '1px solid #dee2e6',
                                                 }}
                                             >
                                                 {item}
@@ -370,8 +371,8 @@ const SalesTarget = () => {
                                                     />
                                                 </td>
                                             ))}
-                                            <td className="text-center fw-bold" style={{ color: '#60a5fa', fontSize: '13px', borderLeft: '1px solid #334155' }}>
-                                                <div style={{ ...labelCellStyle, color: '#60a5fa' }}>Revenue</div>
+                                            <td className="text-center fw-bold" style={{ color: '#0d6efd', fontSize: '13px', borderLeft: '1px solid #dee2e6' }}>
+                                                <div style={{ ...labelCellStyle, color: '#0d6efd' }}>Revenue</div>
                                                 {fmt(totalRev)}
                                             </td>
                                         </tr>
@@ -390,9 +391,9 @@ const SalesTarget = () => {
                                                             className="form-control form-control-sm text-center"
                                                             style={{
                                                                 fontSize: '13px',
-                                                                background: 'rgba(16, 185, 129, 0.08)',
-                                                                border: '1px solid rgba(52, 211, 153, 0.35)',
-                                                                color: '#34d399',
+                                                                background: '#ffffff',
+                                                                border: '1px solid #ced4da',
+                                                                color: '#212529',
                                                                 width: '70px',
                                                                 flexShrink: 0,
                                                             }}
@@ -400,13 +401,13 @@ const SalesTarget = () => {
                                                             onChange={(e) => handleInputChange(item, `${q}_GP`, e.target.value)}
                                                             placeholder="%"
                                                         />
-                                                        <span style={{ color: '#34d399', fontWeight: '700', fontSize: '13px' }}>%</span>
+                                                        <span style={{ color: '#198754', fontWeight: '700', fontSize: '13px' }}>%</span>
                                                         {qGPAmts[qi] > 0 && (
                                                             <span style={{
                                                                 fontSize: '11px',
-                                                                color: '#6ee7b7',
-                                                                background: 'rgba(16, 185, 129, 0.15)',
-                                                                border: '1px solid rgba(52, 211, 153, 0.2)',
+                                                                color: '#198754',
+                                                                background: 'rgba(25, 135, 84, 0.1)',
+                                                                border: '1px solid rgba(25, 135, 84, 0.25)',
                                                                 borderRadius: '4px',
                                                                 padding: '1px 6px',
                                                                 whiteSpace: 'nowrap',
@@ -417,7 +418,7 @@ const SalesTarget = () => {
                                                     </div>
                                                 </td>
                                             ))}
-                                            <td className="text-center fw-bold" style={{ color: '#34d399', fontSize: '13px', borderLeft: '1px solid #334155' }}>
+                                            <td className="text-center fw-bold" style={{ color: '#198754', fontSize: '13px', borderLeft: '1px solid #dee2e6' }}>
                                                 <div style={gpLabelStyle}>GP ({avgGPPct.toFixed(1)}%)</div>
                                                 {fmt(totalGPAmt)}
                                             </td>
@@ -432,15 +433,15 @@ const SalesTarget = () => {
                                 </tr>
                             )}
                         </tbody>
-                        <tfoot style={{ backgroundColor: '#0f172a', borderTop: '2px solid #1e40af' }}>
+                        <tfoot style={{ backgroundColor: '#f8f9fa', borderTop: '2px solid #ced4da' }}>
                             <tr>
-                                <th className="text-start ps-4" style={{ color: '#e2e8f0', padding: '14px 16px', fontSize: '13px' }}>Grand Total</th>
+                                <th className="text-start ps-4" style={{ color: '#212529', padding: '14px 16px', fontSize: '13px' }}>Grand Total</th>
                                 <th colSpan="4" style={{ padding: '14px 16px' }}></th>
                                 <th className="text-center" style={{ padding: '14px 16px' }}>
-                                    <div style={{ color: '#60a5fa', fontSize: '12px', fontWeight: '700' }}>
+                                    <div style={{ color: '#0d6efd', fontSize: '12px', fontWeight: '700' }}>
                                         Revenue: {fmt(grandTotalRevenue)}
                                     </div>
-                                    <div style={{ color: '#34d399', fontSize: '12px', fontWeight: '700', marginTop: '4px' }}>
+                                    <div style={{ color: '#198754', fontSize: '12px', fontWeight: '700', marginTop: '4px' }}>
                                         GP ({grandTotalRevenue > 0 ? ((grandTotalGPAmount / grandTotalRevenue) * 100).toFixed(1) : '0.0'}%): {fmt(grandTotalGPAmount)}
                                     </div>
                                 </th>
@@ -449,12 +450,13 @@ const SalesTarget = () => {
                     </table>
                 </div>
             ) : (
-                <div className="text-center text-muted py-5 border border-secondary border-dashed rounded bg-dark">
+                <div className="text-center text-muted py-5 border border-secondary border-dashed rounded bg-white">
                     <i className="bi bi-people fs-1 d-block mb-3 opacity-50"></i>
                     Please select a Sales Engineer to view and set targets.
                 </div>
             )
             }
+            </div>
         </div >
     );
 };

@@ -18,6 +18,7 @@ const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
 const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
 const { sendGeneralEmail } = require('../emailService');
+const { resolveQuoteUploadDestination } = require('../lib/attachmentsRoot');
 
 /**
  * Pending list SQL keys off priced tuples vs quote existence; JS mapping (customer / lead / OwnJob matching)
@@ -34,21 +35,25 @@ function shouldOmitFromPendingQuoteList(row) {
     return false;
 }
 
-// Configure Multer Storage for Quote Attachments
-const uploadDir = path.join(__dirname, '..', 'uploads', 'quotes');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
+// Quote attachments: same root as enquiries (ENQUIRY_ATTACHMENTS_ROOT); files under …/quotes/<quoteId>/
+const quoteAttachmentStorage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, uploadDir);
+        try {
+            const dest = resolveQuoteUploadDestination(req.params.quoteId);
+            if (!fs.existsSync(dest)) {
+                fs.mkdirSync(dest, { recursive: true });
+            }
+            cb(null, dest);
+        } catch (err) {
+            cb(err);
+        }
     },
     filename: (req, file, cb) => {
-        cb(null, Date.now() + '-' + file.originalname);
+        const safe = String(file.originalname || 'file').replace(/[/\\?%*:|"<>]/g, '_');
+        cb(null, Date.now() + '-' + safe);
     }
 });
-const upload = multer({ storage: storage });
+const upload = multer({ storage: quoteAttachmentStorage });
 
 /**
  * Master_EnquiryFor resolves creator department/div — only replace OwnJob with that department when the client

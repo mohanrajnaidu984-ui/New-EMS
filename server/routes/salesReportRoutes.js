@@ -9,6 +9,12 @@ const sanitizeInput = (input) => {
     return s === '' ? null : s;
 };
 
+function bindInputIfMissing(request, name, type, value) {
+    if (!request || !name) return;
+    if (request.parameters && Object.prototype.hasOwnProperty.call(request.parameters, name)) return;
+    request.input(name, type, value);
+}
+
 /** Non–CC-mail users: force filters to their company / division / SE so APIs cannot be scoped wider via query string. */
 async function applySalesReportEmailScope(req) {
     delete req.salesReportForceSeName;
@@ -93,11 +99,50 @@ END`;
 const SQL_PROB_WON_VALUE = `
 ISNULL(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.FinalJobValueBooked, ''))), ',', ''), 'BD', ''), ' ', '')), 0)`;
 
+/** Lost KPI: CompetitorPrice on the latest Probability row when that row is Lost. */
+const SQL_PROB_COMPETITOR_PRICE = `
+ISNULL(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.CompetitorPrice, ''))), ',', ''), 'BD', ''), ' ', '')), 0)`;
+
+/** Follow-up KPI: sum NetQuotedValue from latest row when status indicates follow-up. */
+const SQL_PROB_NETQUOTED_SUM = `
+ISNULL(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, '0'))), ',', ''), 'BD', ''), ' ', '')), 0)`;
+
 /** MIN(TotalAmount) per enquiry — least quote when multiple customers. */
 const SQL_MIN_QUOTE_AMOUNT = `(SELECT MIN(ISNULL(TotalAmount, 0)) FROM dbo.EnquiryQuotes Q_M WHERE Q_M.RequestNo = P.RequestNo)`;
 
 const SQL_PROB_NETQUOTED_PARSED = `
 NULLIF(TRY_CONVERT(DECIMAL(18,2), REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, ''))), ',', ''), 'BD', ''), ' ', '')), 0)`;
+
+/** Latest quote amount per enquiry (for Pending rows with no Probability record). */
+const SQL_LATEST_QUOTE_AMOUNT_PER_ENQUIRY = `
+(
+    SELECT TOP 1
+        ISNULL(
+            TRY_CONVERT(
+                DECIMAL(18,2),
+                REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.TotalAmount, '0'))), ',', ''), 'BD', ''), ' ', '')
+            ),
+            0
+        )
+    FROM EnquiryQuotes EQ
+    WHERE EQ.RequestNo = E.RequestNo
+    ORDER BY
+        ISNULL(EQ.QuoteNo, 0) DESC,
+        ISNULL(EQ.UpdatedAt, EQ.QuoteDate) DESC,
+        EQ.QuoteDate DESC
+)`;
+
+/** Latest quote date per enquiry (used for Pending rows without Probability). */
+const SQL_LATEST_QUOTE_DATE_PER_ENQUIRY = `
+(
+    SELECT TOP 1 COALESCE(EQ.UpdatedAt, EQ.QuoteDate)
+    FROM EnquiryQuotes EQ
+    WHERE EQ.RequestNo = E.RequestNo
+    ORDER BY
+        ISNULL(EQ.QuoteNo, 0) DESC,
+        ISNULL(EQ.UpdatedAt, EQ.QuoteDate) DESC,
+        EQ.QuoteDate DESC
+)`;
 
 /**
  * Lost / Follow-up (Won/Lost section): least EnquiryQuotes.TotalAmount per project,
@@ -148,9 +193,9 @@ const TOP_JOB_BOOKED_STATUS_SQL = {
 
 /** Top jobs / filters using latest Probability.Status (case-insensitive keywords). Won branch uses getProbWonMetricsSql(req). */
 const TOP_JOB_PROB_STATUS_SQL = {
-    Won: SQL_PROB_WON_FOR_METRICS,
+    Won: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won')",
     Lost: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%')",
-    Pending: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%pending%' OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%quote%')",
+    Pending: "((LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%pending%' OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%quote%') OR (P.RequestNo IS NULL AND EXISTS (SELECT 1 FROM EnquiryQuotes EQ WHERE EQ.RequestNo = E.RequestNo)))",
     'Follow Up': "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')",
     'On Hold': "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%hold%')",
     Cancelled: "(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%cancel%')",
@@ -165,16 +210,18 @@ function getTopJobBookedStatusWhere(raw) {
 
 function getTopJobProbStatusWhere(raw, req) {
     const key = sanitizeInput(raw);
-    if (key === 'Won') return getProbWonMetricsSql(req || {});
+    if (key === 'Won') return TOP_JOB_PROB_STATUS_SQL.Won;
     if (key && TOP_JOB_PROB_STATUS_SQL[key]) return TOP_JOB_PROB_STATUS_SQL[key];
-    return getProbWonMetricsSql(req || {});
+    return TOP_JOB_PROB_STATUS_SQL.Won;
 }
 
 /** Job column for Top Jobs from Probability — aligns with Won/Lost dollar rules. */
 function getTopJobProbValueExpr(topJobStatus) {
     const key = sanitizeInput(topJobStatus);
     if (key === 'Won') return `(${SQL_PROB_WON_VALUE})`;
-    if (key === 'Lost' || key === 'Follow Up') return `(${SQL_PROB_LOST_FOLLOW_VALUE})`;
+    if (key === 'Pending') return `COALESCE(${SQL_PROB_NETQUOTED_PARSED}, ${SQL_LATEST_QUOTE_AMOUNT_PER_ENQUIRY}, CAST(0 AS DECIMAL(18,2)))`;
+    if (key === 'Follow Up') return `ISNULL(${SQL_PROB_NETQUOTED_PARSED}, CAST(0 AS DECIMAL(18,2)))`;
+    if (key === 'Lost') return `(${SQL_PROB_COMPETITOR_PRICE})`;
     return `(${SQL_PROB_JOB_VALUE})`;
 }
 
@@ -224,6 +271,16 @@ function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision
                       AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com'))))
                        = LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(@srUserEmail, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com'))))
                   ) `;
+            if (safeRole && safeRole !== 'All') {
+                request.input('seRole', sql.NVarChar, safeRole);
+                filterClause += `
+                  AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cse
+                    WHERE cse.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(ISNULL(cse.SEName, N''))) = LTRIM(RTRIM(ISNULL(@seRole, N'')))
+                  ) `;
+            }
         }
     } else if (safeDivision && safeDivision !== 'All') {
         request.input('division', sql.NVarChar, safeDivision);
@@ -632,6 +689,74 @@ router.get('/summary', async (req, res) => {
 
         const probDateExpr =
             'COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, E.EnquiryDate)';
+        const effectiveQuotedSe =
+            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
+            || (safeRole && safeRole !== 'All' ? safeRole : null);
+        if (safeCompany && safeCompany !== 'All') {
+            bindInputIfMissing(request, 'company', sql.NVarChar, safeCompany);
+        }
+        if (safeDivision && safeDivision !== 'All') {
+            bindInputIfMissing(request, 'division', sql.NVarChar, safeDivision);
+        }
+        const quotePreparedByClause = effectiveQuotedSe
+            ? ` WHERE LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
+            : '';
+        if (effectiveQuotedSe) {
+            request.input('quotedSe', sql.NVarChar, effectiveQuotedSe);
+        }
+        let quotedFilterClause = '';
+        if (nonCcBlock) {
+            quotedFilterClause += ' AND 1=0 ';
+        } else {
+            if (safeCompany && safeCompany !== 'All') {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef
+                      ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                    WHERE ef.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(mef.CompanyName)) = @company
+                ) `;
+            }
+            if (safeDivision && safeDivision !== 'All') {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef
+                      ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                    WHERE ef.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(mef.DepartmentName)) = @division
+                ) `;
+            }
+            if (effectiveQuotedSe) {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cse
+                    WHERE cse.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(ISNULL(cse.SEName, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
+                ) `;
+            }
+        }
+
+        /** PreparedBy + enquiry scope for Probability rows (Won / Lost / snapshot). */
+        const wonPreparedByClause = effectiveQuotedSe
+            ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
+            : '';
+
+        /** Latest Probability row per enquiry by UpdatedDateTime (any status) — Won/Lost KPIs use this row only. */
+        const latestProbByUpdateCte = `
+WITH LatestProbByUpdate AS (
+    SELECT * FROM (
+        SELECT P.*,
+            ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+        FROM dbo.Probability P
+        INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+        WHERE 1 = 1
+          ${wonPreparedByClause}
+          ${quotedFilterClause}
+    ) __lr WHERE __lr.__rn = 1
+)
+`;
 
         const wonMetricsSql = getProbWonMetricsSql(req);
 
@@ -652,19 +777,19 @@ router.get('/summary', async (req, res) => {
             GROUP BY Quarter
         `);
 
-        // Actual job booking from latest Probability per enquiry (won / booked value)
+        // Actual job booking: latest row per enquiry; if Won, sum FinalJobValueBooked by quarter
         let actualRes = { recordset: [] };
         try {
             actualRes = await request.query(`
-            ${SQL_LATEST_PROB_CTE}
-            SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime)) AS Q,
+            ${latestProbByUpdateCte}
+            SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) AS Q,
                 SUM(${SQL_PROB_WON_VALUE}) AS TotalActual
-            FROM LatestProb P
+            FROM LatestProbByUpdate P
             INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
-            WHERE ${wonMetricsSql}
-              AND YEAR(${probDateExpr}) = @year ${filterClause}
-              ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
-            GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime))
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won'
+              AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+              ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
+            GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate))
             `);
         } catch (e) {
             console.warn('[Sales Report] Probability actual fallback:', e.message);
@@ -691,73 +816,109 @@ router.get('/summary', async (req, res) => {
                 GROUP BY Quarter
             `);
             gmActualRes = await request.query(`
-            ${SQL_LATEST_PROB_CTE}
-                SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime)) AS Q,
+            ${latestProbByUpdateCte}
+                SELECT DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) AS Q,
                     SUM((${SQL_PROB_WON_VALUE}) * ISNULL(P.GrossMargin, 0) / 100.0) AS TotalActual
-                FROM LatestProb P
+                FROM LatestProbByUpdate P
                 INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
-                WHERE ${wonMetricsSql}
-                  AND YEAR(${probDateExpr}) = @year ${filterClause}
-                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
-                GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime))
+                WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won'
+                  AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+                  ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
+                GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate))
             `);
         } catch (gmErr) {
             console.warn('[Sales Report] Gross margin summary skipped:', gmErr.message);
         }
 
-        let winLossRes = { recordset: [] };
+        /** Won counts/values: latest row by UpdatedDateTime; include only if that row is Won. */
+        let wonKpiRes = { recordset: [{ Cnt: 0, TotalValue: 0 }] };
         try {
-            winLossRes = await request.query(`
-            ${SQL_LATEST_PROB_CTE}
-            SELECT sg.StatusGrp AS Status, COUNT(*) AS Count, SUM(sg.JobVal) AS TotalValue
-            FROM (
-                SELECT
-                    CASE
-                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%' THEN 'Lost'
-                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%' THEN 'Follow-up'
-                        WHEN ${wonMetricsSql} THEN 'Won'
-                        ELSE NULL
-                    END AS StatusGrp,
-                    CASE
-                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%' THEN ${SQL_PROB_LOST_FOLLOW_VALUE}
-                        WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%' THEN ${SQL_PROB_LOST_FOLLOW_VALUE}
-                        WHEN ${wonMetricsSql} THEN ${SQL_PROB_WON_VALUE}
-                        ELSE CAST(0 AS DECIMAL(18,2))
-                    END AS JobVal
-                FROM LatestProb P
-                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
-                WHERE YEAR(${probDateExpr}) = @year ${filterClause}
-                ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
-            ) sg
-            WHERE sg.StatusGrp IS NOT NULL
-            GROUP BY sg.StatusGrp
+            wonKpiRes = await request.query(`
+            ${latestProbByUpdateCte}
+            SELECT COUNT(*) AS Cnt, SUM(${SQL_PROB_WON_VALUE}) AS TotalValue
+            FROM LatestProbByUpdate P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won'
+              AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+              ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
             `);
-        } catch (wlErr) {
-            console.warn('[Sales Report] Win-loss Probability fallback:', wlErr.message);
-            winLossRes = await request.query(`
-            SELECT Status, COUNT(*) as Count, SUM(${itemValueCol}) as TotalValue
-            FROM EnquiryMaster E
-            ${itemValueApply}
-            WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
-              AND Status IN ('Won', 'Lost', 'Follow-up', 'FollowUp')
-              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
-            GROUP BY Status
-        `);
+        } catch (wonKpiErr) {
+            console.warn('[Sales Report] Won KPI from Probability:', wonKpiErr.message);
         }
 
-        // Quoted slice: least TotalAmount per enquiry across EnquiryQuotes (multi-customer), then sum in scope
+        /** Lost KPI: latest row per enquiry; if status Lost, sum CompetitorPrice (not stale Lost rows). */
+        let lostKpiRes = { recordset: [{ Cnt: 0, TotalValue: 0 }] };
+        try {
+            lostKpiRes = await request.query(`
+            ${latestProbByUpdateCte}
+            SELECT COUNT(*) AS Cnt, SUM(${SQL_PROB_COMPETITOR_PRICE}) AS TotalValue
+            FROM LatestProbByUpdate P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%lost%'
+              AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+              ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
+            `);
+        } catch (lostKpiErr) {
+            console.warn('[Sales Report] Lost KPI from Probability:', lostKpiErr.message);
+        }
+
+        /** Follow-up KPI: latest row per enquiry; if status Follow-up, sum NetQuotedValue. */
+        let followUpKpiRes = { recordset: [{ Cnt: 0, TotalValue: 0 }] };
+        try {
+            followUpKpiRes = await request.query(`
+            ${latestProbByUpdateCte}
+            SELECT COUNT(*) AS Cnt, SUM(${SQL_PROB_NETQUOTED_SUM}) AS TotalValue
+            FROM LatestProbByUpdate P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%'
+              AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+              ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
+            `);
+        } catch (fuKpiErr) {
+            console.warn('[Sales Report] Follow-up KPI from Probability:', fuKpiErr.message);
+        }
+
+        // Quoted slice: latest quote per enquiry (highest QuoteNo, then newest update), then sum in scope
         const quotedRes = await request.query(`
+            WITH FilteredEnquiries AS (
+                SELECT DISTINCT E.RequestNo
+                FROM EnquiryMaster E
+                WHERE 1=1 ${quotedFilterClause}
+            )
             SELECT 
-                COUNT(DISTINCT E.RequestNo) as Cnt, 
-                SUM(ISNULL(Q.MinQuote, 0)) as TotalValue
-            FROM EnquiryMaster E
+                COUNT(DISTINCT FE.RequestNo) as Cnt, 
+                SUM(ISNULL(Q.LatestQuoteAmount, 0)) as TotalValue
+            FROM FilteredEnquiries FE
             INNER JOIN (
-                SELECT RequestNo, MIN(ISNULL(TotalAmount, 0)) AS MinQuote
-                FROM EnquiryQuotes
-                GROUP BY RequestNo
-            ) Q ON Q.RequestNo = E.RequestNo
-            WHERE YEAR(COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @year ${filterClause}
-              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums' : ''}
+                SELECT
+                    z.RequestNo,
+                    z.ParsedAmount AS LatestQuoteAmount,
+                    z.LatestQuoteDate
+                FROM (
+                    SELECT
+                        EQ.RequestNo,
+                        ISNULL(
+                            TRY_CONVERT(
+                                DECIMAL(18,2),
+                                REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.TotalAmount, '0'))), ',', ''), 'BD', ''), ' ', '')
+                            ),
+                            0
+                        ) AS ParsedAmount,
+                        COALESCE(EQ.UpdatedAt, EQ.QuoteDate) AS LatestQuoteDate,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY EQ.RequestNo
+                            ORDER BY
+                                ISNULL(EQ.QuoteNo, 0) DESC,
+                                ISNULL(EQ.UpdatedAt, EQ.QuoteDate) DESC,
+                                EQ.QuoteDate DESC
+                        ) AS __rn
+                    FROM EnquiryQuotes EQ
+                    ${quotePreparedByClause}
+                ) z
+                WHERE z.__rn = 1
+            ) Q ON Q.RequestNo = FE.RequestNo
+            WHERE YEAR(COALESCE(Q.LatestQuoteDate, GETDATE())) = @year
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(Q.LatestQuoteDate, GETDATE())) = @quarterNums' : ''}
         `);
 
         // 3. Top 10 Customers
@@ -800,11 +961,13 @@ router.get('/summary', async (req, res) => {
         const topClientsRes = await request.query(topClientsQuery);
 
         const topJobProbWhere = getTopJobProbStatusWhere('Won', req);
+        const topJobDateExpr = `COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, ${SQL_LATEST_QUOTE_DATE_PER_ENQUIRY}, E.EnquiryDate)`;
         let topJobBookedRes = { recordset: [] };
         try {
             topJobBookedRes = await request.query(`
             ${SQL_LATEST_PROB_CTE}
             SELECT TOP 10
+                x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
                 x.WonGrossProfit,
@@ -813,17 +976,18 @@ router.get('/summary', async (req, res) => {
                 x.ConsultantName
             FROM (
                 SELECT
+                    E.RequestNo,
                     E.ProjectName,
                     (${SQL_PROB_WON_VALUE}) AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
                     E.ConsultantName
-                FROM LatestProb P
-                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                FROM EnquiryMaster E
+                LEFT JOIN LatestProb P ON E.RequestNo = P.RequestNo
                 WHERE ${topJobProbWhere}
-                  AND YEAR(${probDateExpr}) = @year ${filterClause}
-                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+                  AND YEAR(${topJobDateExpr}) = @year ${filterClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${topJobDateExpr}) = @quarterNums` : ''}
             ) x
             ORDER BY x.JobValue DESC
             `);
@@ -831,6 +995,7 @@ router.get('/summary', async (req, res) => {
             console.warn('[Sales Report] Top jobs Probability fallback:', tjErr.message);
             topJobBookedRes = await request.query(`
             SELECT TOP 10
+                x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
                 x.WonGrossProfit,
@@ -839,6 +1004,7 @@ router.get('/summary', async (req, res) => {
                 x.ConsultantName
             FROM (
                 SELECT
+                    E.RequestNo,
                     E.ProjectName,
                     ${itemValueCol} AS JobValue,
                     E.WonGrossProfit AS WonGrossProfit,
@@ -855,6 +1021,10 @@ router.get('/summary', async (req, res) => {
         `);
         }
 
+        const safeDivisionForFunnel = sanitizeInput(req.query.division);
+        const funnelOwnJobClause = safeDivisionForFunnel && safeDivisionForFunnel !== 'All'
+            ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
+            : '';
         let probabilityFunnelRes = { recordset: [] };
         try {
             probabilityFunnelRes = await request.query(`
@@ -866,35 +1036,158 @@ router.get('/summary', async (req, res) => {
                     THEN TRY_CONVERT(INT, LEFT(LTRIM(P.ProbabilityChance), PATINDEX('%[^0-9]%', LTRIM(P.ProbabilityChance) + 'x') - 1))
                     ELSE NULL
                 END) AS ProbabilityPercentage,
-                SUM(${SQL_PROB_JOB_VALUE}) AS TotalValue,
+                SUM(
+                    ISNULL(
+                        TRY_CONVERT(
+                            DECIMAL(18,2),
+                            REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, '0'))), ',', ''), 'BD', ''), ' ', '')
+                        ),
+                        0
+                    )
+                ) AS TotalValue,
                 COUNT(*) AS Count
             FROM LatestProb P
             INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
             WHERE YEAR(${probDateExpr}) = @year ${filterClause}
               ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+              ${funnelOwnJobClause}
               AND LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) <> ''
-              AND NOT (${wonMetricsSql})
-              AND LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) NOT LIKE '%lost%'
+              AND REPLACE(REPLACE(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))), '-', ''), ' ', '') = 'followup'
             GROUP BY LTRIM(RTRIM(ISNULL(P.ProbabilityChance, '')))
             ORDER BY ProbabilityPercentage ASC
             `);
         } catch (pfErr) {
             console.warn('[Sales Report] Funnel Probability fallback:', pfErr.message);
             probabilityFunnelRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
             SELECT 
-                ProbabilityOption as ProbabilityName,
-                MAX(Probability) as ProbabilityPercentage,
-                SUM(${itemValueCol}) as TotalValue,
+                LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) as ProbabilityName,
+                MAX(CASE
+                    WHEN PATINDEX('%[0-9]%', P.ProbabilityChance) > 0
+                    THEN TRY_CONVERT(INT, LEFT(LTRIM(P.ProbabilityChance), PATINDEX('%[^0-9]%', LTRIM(P.ProbabilityChance) + 'x') - 1))
+                    ELSE NULL
+                END) as ProbabilityPercentage,
+                SUM(
+                    ISNULL(
+                        TRY_CONVERT(
+                            DECIMAL(18,2),
+                            REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(P.NetQuotedValue, '0'))), ',', ''), 'BD', ''), ' ', '')
+                        ),
+                        0
+                    )
+                ) as TotalValue,
                 COUNT(*) as Count
-            FROM EnquiryMaster E
-            ${itemValueApply}
-            WHERE YEAR(COALESCE(ExpectedOrderDate, EnquiryDate)) = @year ${filterClause}
-              AND Status NOT IN ('Won', 'Lost')
-              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(ExpectedOrderDate, EnquiryDate)) = @quarterNums' : ''}
-              AND ProbabilityOption IS NOT NULL AND ProbabilityOption <> ''
-            GROUP BY ProbabilityOption
-            ORDER BY MAX(Probability) ASC
+            FROM LatestProb P
+            INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+            WHERE YEAR(${probDateExpr}) = @year ${filterClause}
+              ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+              ${funnelOwnJobClause}
+              AND LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) <> ''
+              AND REPLACE(REPLACE(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))), '-', ''), ' ', '') = 'followup'
+            GROUP BY LTRIM(RTRIM(ISNULL(P.ProbabilityChance, '')))
+            ORDER BY ProbabilityPercentage ASC
         `);
+        }
+
+        /**
+         * 10% Quoted (pending probability update):
+         * Include when:
+         * 1) no Probability row exists (quoted but not updated yet), OR
+         * 2) latest Probability status is Pending with blank ProbabilityChance.
+         * Excludes any latest status identified as Won/Lost/Follow-up/Hold/Cancel/Retender.
+         */
+        let quotedPendingProbabilityRes = { recordset: [] };
+        try {
+            quotedPendingProbabilityRes = await request.query(`
+            WITH LatestProbPendingScope AS (
+                SELECT * FROM (
+                    SELECT
+                        P.*,
+                        ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+                    FROM dbo.Probability P
+                    INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                    WHERE 1 = 1
+                      ${wonPreparedByClause}
+                      ${quotedFilterClause}
+                ) __lp WHERE __lp.__rn = 1
+            )
+            , LatestQuotePerReq AS (
+                SELECT
+                    z.RequestNo,
+                    z.Amount AS LatestQuoteAmount,
+                    z.LatestQuoteDate
+                FROM (
+                    SELECT
+                        EQ.RequestNo,
+                        ISNULL(
+                            TRY_CONVERT(
+                                DECIMAL(18,2),
+                                REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.TotalAmount, '0'))), ',', ''), 'BD', ''), ' ', '')
+                            ),
+                            0
+                        ) AS Amount,
+                        COALESCE(EQ.UpdatedAt, EQ.QuoteDate) AS LatestQuoteDate,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY EQ.RequestNo
+                            ORDER BY
+                                ISNULL(EQ.QuoteNo, 0) DESC,
+                                ISNULL(EQ.UpdatedAt, EQ.QuoteDate) DESC,
+                                EQ.QuoteDate DESC
+                        ) AS __rn
+                    FROM EnquiryQuotes EQ
+                ) z
+                WHERE z.__rn = 1
+            )
+            SELECT
+                COUNT(*) AS Cnt,
+                SUM(
+                    COALESCE(
+                        ${SQL_PROB_NETQUOTED_PARSED},
+                        ISNULL(LQ.LatestQuoteAmount, 0),
+                        CAST(0 AS DECIMAL(18,2))
+                    )
+                ) AS TotalValue
+            FROM EnquiryMaster E
+            LEFT JOIN LatestProbPendingScope P ON P.RequestNo = E.RequestNo
+            LEFT JOIN LatestQuotePerReq LQ ON LQ.RequestNo = E.RequestNo
+            WHERE YEAR(COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, LQ.LatestQuoteDate, E.ExpectedOrderDate, E.EnquiryDate)) = @year ${quotedFilterClause}
+              ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, LQ.LatestQuoteDate, E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums` : ''}
+              AND (
+                    P.RequestNo IS NULL
+                    OR (
+                        REPLACE(REPLACE(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))), '-', ''), ' ', '') = 'pending'
+                        AND LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) = ''
+                    )
+                  )
+              AND LQ.RequestNo IS NOT NULL
+            `);
+        } catch (qpErr) {
+            console.warn('[Sales Report] Quoted-pending probability aggregate:', qpErr.message);
+        }
+
+        const qp0 = (quotedPendingProbabilityRes.recordset && quotedPendingProbabilityRes.recordset[0]) || {};
+        const pendingQuotedValue = Number(qp0.TotalValue) || 0;
+        const pendingQuotedCount = Number(qp0.Cnt) || 0;
+        if (pendingQuotedValue > 0 || pendingQuotedCount > 0) {
+            const rows = probabilityFunnelRes.recordset || [];
+            const tenIdx = rows.findIndex((r) => Number(r.ProbabilityPercentage) === 10);
+            if (tenIdx >= 0) {
+                rows[tenIdx].TotalValue = (Number(rows[tenIdx].TotalValue) || 0) + pendingQuotedValue;
+                rows[tenIdx].Count = (Number(rows[tenIdx].Count) || 0) + pendingQuotedCount;
+                if (!rows[tenIdx].ProbabilityName || String(rows[tenIdx].ProbabilityName).trim() === '') {
+                    rows[tenIdx].ProbabilityName = 'Quoted';
+                }
+            } else {
+                rows.push({
+                    ProbabilityName: 'Quoted',
+                    ProbabilityPercentage: 10,
+                    TotalValue: pendingQuotedValue,
+                    Count: pendingQuotedCount
+                });
+            }
+            probabilityFunnelRes.recordset = rows.sort(
+                (a, b) => (Number(a.ProbabilityPercentage) || 0) - (Number(b.ProbabilityPercentage) || 0)
+            );
         }
 
         // Formatting data for frontend
@@ -939,12 +1232,15 @@ router.get('/summary', async (req, res) => {
             lostValue: 0,
             followUpValue: 0
         };
-        winLossRes.recordset.forEach(r => {
-            const s = r.Status.toLowerCase().replace('-', '');
-            if (s === 'won') { winLoss.won = r.Count; winLoss.wonValue = r.TotalValue; }
-            else if (s === 'lost') { winLoss.lost = r.Count; winLoss.lostValue = r.TotalValue; }
-            else if (s === 'followup') { winLoss.followUp = r.Count; winLoss.followUpValue = r.TotalValue; }
-        });
+        const wonKpiRow = (wonKpiRes.recordset && wonKpiRes.recordset[0]) || {};
+        winLoss.won = Number(wonKpiRow.Cnt) || 0;
+        winLoss.wonValue = Number(wonKpiRow.TotalValue) || 0;
+        const lostKpiRow = (lostKpiRes.recordset && lostKpiRes.recordset[0]) || {};
+        winLoss.lost = Number(lostKpiRow.Cnt) || 0;
+        winLoss.lostValue = Number(lostKpiRow.TotalValue) || 0;
+        const followUpKpiRow = (followUpKpiRes.recordset && followUpKpiRes.recordset[0]) || {};
+        winLoss.followUp = Number(followUpKpiRow.Cnt) || 0;
+        winLoss.followUpValue = Number(followUpKpiRow.TotalValue) || 0;
         const q0 = (quotedRes.recordset && quotedRes.recordset[0]) || {};
         winLoss.quoted = q0.Cnt || 0;
         winLoss.quotedValue = q0.TotalValue || 0;
@@ -1058,6 +1354,7 @@ router.get('/summary', async (req, res) => {
             probabilityFunnel: probabilityFunnelRes.recordset,
             itemWiseStats: itemWiseStats,
             topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
+                RequestNo: r.RequestNo,
                 ProjectName: r.ProjectName,
                 JobValue: r.JobValue,
                 WonGrossProfit: r.WonGrossProfit,
@@ -1080,17 +1377,82 @@ router.get('/top-job-booked', async (req, res) => {
         const ctx = buildSalesReportItemValueContext(req);
         if (!ctx) return res.status(400).json({ error: 'Year is required' });
 
-        const { request, filterClause, itemValueApply, itemValueCol, safeQuarter } = ctx;
+        const { request, filterClause, itemValueApply, itemValueCol, safeQuarter, safeCompany, safeDivision, safeRole, nonCcBlock } = ctx;
         const probDateExpr =
             'COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, E.EnquiryDate)';
         const topJobProbWhere = getTopJobProbStatusWhere(req.query.topJobStatus, req);
         const topJobValueExpr = getTopJobProbValueExpr(req.query.topJobStatus);
+        const topJobDateExpr = `COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, ${SQL_LATEST_QUOTE_DATE_PER_ENQUIRY}, E.EnquiryDate)`;
+        const effectiveQuotedSe =
+            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
+            || (safeRole && safeRole !== 'All' ? safeRole : null);
+        if (safeCompany && safeCompany !== 'All') {
+            bindInputIfMissing(request, 'company', sql.NVarChar, safeCompany);
+        }
+        if (safeDivision && safeDivision !== 'All') {
+            bindInputIfMissing(request, 'division', sql.NVarChar, safeDivision);
+        }
+        const isPendingTopJob = sanitizeInput(req.query.topJobStatus) === 'Pending';
+        let pendingTopJobFilterClause = '';
+        if (isPendingTopJob) {
+            if (nonCcBlock) {
+                pendingTopJobFilterClause += ' AND 1=0 ';
+            } else {
+                if (safeCompany && safeCompany !== 'All') {
+                    pendingTopJobFilterClause += ` AND EXISTS (
+                        SELECT 1
+                        FROM EnquiryFor ef
+                        JOIN Master_EnquiryFor mef
+                          ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                        WHERE ef.RequestNo = E.RequestNo
+                          AND LTRIM(RTRIM(mef.CompanyName)) = @company
+                    ) `;
+                }
+                if (safeDivision && safeDivision !== 'All') {
+                    pendingTopJobFilterClause += ` AND EXISTS (
+                        SELECT 1
+                        FROM EnquiryFor ef
+                        JOIN Master_EnquiryFor mef
+                          ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                        WHERE ef.RequestNo = E.RequestNo
+                          AND LTRIM(RTRIM(mef.DepartmentName)) = @division
+                    ) `;
+                }
+                if (effectiveQuotedSe) {
+                    request.input('pendingSe', sql.NVarChar, effectiveQuotedSe);
+                    pendingTopJobFilterClause += ` AND EXISTS (
+                        SELECT 1
+                        FROM ConcernedSE cse
+                        WHERE cse.RequestNo = E.RequestNo
+                          AND LTRIM(RTRIM(ISNULL(cse.SEName, ''))) = LTRIM(RTRIM(ISNULL(@pendingSe, '')))
+                    ) `;
+                }
+            }
+        }
+        const topJobScopeClause = isPendingTopJob ? pendingTopJobFilterClause : filterClause;
 
         let topJobBookedRes = { recordset: [] };
         try {
-            topJobBookedRes = await request.query(`
-            ${SQL_LATEST_PROB_CTE}
+            if (isPendingTopJob) {
+                const pendingPreparedByClause = effectiveQuotedSe
+                    ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@pendingSe, '')))`
+                    : '';
+                topJobBookedRes = await request.query(`
+            WITH LatestProbPendingScope AS (
+                SELECT * FROM (
+                    SELECT
+                        P.*,
+                        ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+                    FROM dbo.Probability P
+                    INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                    WHERE 1 = 1
+                      ${pendingPreparedByClause}
+                      ${topJobScopeClause}
+                ) __lp
+                WHERE __lp.__rn = 1
+            )
             SELECT TOP 10
+                x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
                 x.WonGrossProfit,
@@ -1099,25 +1461,29 @@ router.get('/top-job-booked', async (req, res) => {
                 x.ConsultantName
             FROM (
                 SELECT
+                    E.RequestNo,
                     E.ProjectName,
                     ${topJobValueExpr} AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
                     E.ConsultantName
-                FROM LatestProb P
-                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
-                WHERE ${topJobProbWhere}
-                  AND YEAR(${probDateExpr}) = @year ${filterClause}
-                  ${safeQuarter ? `AND DATEPART(QUARTER, ${probDateExpr}) = @quarterNums` : ''}
+                FROM EnquiryMaster E
+                LEFT JOIN LatestProbPendingScope P ON E.RequestNo = P.RequestNo
+                WHERE (
+                        (P.RequestNo IS NOT NULL AND (LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%pending%' OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%quote%'))
+                        OR (P.RequestNo IS NULL AND EXISTS (SELECT 1 FROM EnquiryQuotes EQ WHERE EQ.RequestNo = E.RequestNo))
+                      )
+                  AND YEAR(${topJobDateExpr}) = @year ${topJobScopeClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${topJobDateExpr}) = @quarterNums` : ''}
             ) x
             ORDER BY x.JobValue DESC
             `);
-        } catch (e) {
-            console.warn('[Sales Report] top-job-booked Probability fallback:', e.message);
-            const topJobStatusWhereLegacy = getTopJobBookedStatusWhere(req.query.topJobStatus);
-            topJobBookedRes = await request.query(`
+            } else {
+                topJobBookedRes = await request.query(`
+            ${SQL_LATEST_PROB_CTE}
             SELECT TOP 10
+                x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
                 x.WonGrossProfit,
@@ -1126,6 +1492,37 @@ router.get('/top-job-booked', async (req, res) => {
                 x.ConsultantName
             FROM (
                 SELECT
+                    E.RequestNo,
+                    E.ProjectName,
+                    ${topJobValueExpr} AS JobValue,
+                    P.GrossMargin AS WonGrossProfit,
+                    LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
+                    E.ClientName,
+                    E.ConsultantName
+                FROM EnquiryMaster E
+                LEFT JOIN LatestProb P ON E.RequestNo = P.RequestNo
+                WHERE ${topJobProbWhere}
+                  AND YEAR(${topJobDateExpr}) = @year ${topJobScopeClause}
+                  ${safeQuarter ? `AND DATEPART(QUARTER, ${topJobDateExpr}) = @quarterNums` : ''}
+            ) x
+            ORDER BY x.JobValue DESC
+            `);
+            }
+        } catch (e) {
+            console.warn('[Sales Report] top-job-booked Probability fallback:', e.message);
+            const topJobStatusWhereLegacy = getTopJobBookedStatusWhere(req.query.topJobStatus);
+            topJobBookedRes = await request.query(`
+            SELECT TOP 10
+                x.RequestNo,
+                x.ProjectName,
+                x.JobValue,
+                x.WonGrossProfit,
+                x.CustomerName,
+                x.ClientName,
+                x.ConsultantName
+            FROM (
+                SELECT
+                    E.RequestNo,
                     E.ProjectName,
                     ${itemValueCol} AS JobValue,
                     E.WonGrossProfit AS WonGrossProfit,
@@ -1144,6 +1541,7 @@ router.get('/top-job-booked', async (req, res) => {
 
         res.json({
             topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
+                RequestNo: r.RequestNo,
                 ProjectName: r.ProjectName,
                 JobValue: r.JobValue,
                 WonGrossProfit: r.WonGrossProfit,
@@ -1714,6 +2112,155 @@ router.get('/drilldown-details', async (req, res) => {
     } catch (err) {
         console.error('Error in drilldown-details:', err);
         res.status(500).json({ error: 'Failed to fetch drilldown details' });
+    }
+});
+
+/** Enquiry-wise quoted values: latest quote vs highest quote (for audit/debug). */
+router.get('/quoted-enquiry-values', async (req, res) => {
+    try {
+        await applySalesReportEmailScope(req);
+        const ctx = buildSalesReportItemValueContext(req);
+        if (!ctx) return res.status(400).json({ error: 'Year is required' });
+
+        const { request, safeQuarter, safeCompany, safeDivision, nonCcBlock } = ctx;
+        const effectiveQuotedSe =
+            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
+            || (ctx.safeRole && ctx.safeRole !== 'All' ? ctx.safeRole : null);
+        const quotePreparedByClause = effectiveQuotedSe
+            ? ` WHERE LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
+            : '';
+        if (effectiveQuotedSe) {
+            request.input('quotedSe', sql.NVarChar, effectiveQuotedSe);
+        }
+        let quotedFilterClause = '';
+        if (nonCcBlock) {
+            quotedFilterClause += ' AND 1=0 ';
+        } else {
+            if (safeCompany && safeCompany !== 'All') {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef
+                      ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                    WHERE ef.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(mef.CompanyName)) = @company
+                ) `;
+            }
+            if (safeDivision && safeDivision !== 'All') {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef
+                      ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
+                    WHERE ef.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(mef.DepartmentName)) = @division
+                ) `;
+            }
+            if (effectiveQuotedSe) {
+                quotedFilterClause += ` AND EXISTS (
+                    SELECT 1
+                    FROM ConcernedSE cse
+                    WHERE cse.RequestNo = E.RequestNo
+                      AND LTRIM(RTRIM(ISNULL(cse.SEName, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
+                ) `;
+            }
+        }
+
+        const rowsRes = await request.query(`
+            WITH QuoteBase AS (
+                SELECT
+                    EQ.RequestNo,
+                    ISNULL(EQ.QuoteNo, 0) AS QuoteNo,
+                    EQ.QuoteNumber,
+                    COALESCE(EQ.UpdatedAt, EQ.QuoteDate) AS QuoteDate,
+                    ISNULL(
+                        TRY_CONVERT(
+                            DECIMAL(18,2),
+                            REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EQ.TotalAmount, '0'))), ',', ''), 'BD', ''), ' ', '')
+                        ),
+                        0
+                    ) AS Amount
+                FROM EnquiryQuotes EQ
+                ${quotePreparedByClause}
+            ),
+            LatestQuote AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        QB.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY QB.RequestNo
+                            ORDER BY
+                                QB.QuoteNo DESC,
+                                QB.QuoteDate DESC,
+                                QB.QuoteNumber DESC
+                        ) AS __rn
+                    FROM QuoteBase QB
+                ) x
+                WHERE x.__rn = 1
+            ),
+            HighestQuote AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        QB.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY QB.RequestNo
+                            ORDER BY
+                                QB.Amount DESC,
+                                QB.QuoteNo DESC,
+                                QB.QuoteDate DESC
+                        ) AS __rn
+                    FROM QuoteBase QB
+                ) x
+                WHERE x.__rn = 1
+            )
+            SELECT
+                E.RequestNo,
+                E.ProjectName,
+                L.QuoteNo AS LatestQuoteNo,
+                L.QuoteNumber AS LatestQuoteNumber,
+                L.QuoteDate AS LatestQuoteDate,
+                L.Amount AS LatestQuoteAmount,
+                H.QuoteNo AS HighestQuoteNo,
+                H.QuoteNumber AS HighestQuoteNumber,
+                H.QuoteDate AS HighestQuoteDate,
+                H.Amount AS HighestQuoteAmount
+            FROM EnquiryMaster E
+            INNER JOIN LatestQuote L ON L.RequestNo = E.RequestNo
+            INNER JOIN HighestQuote H ON H.RequestNo = E.RequestNo
+            WHERE YEAR(COALESCE(L.QuoteDate, E.ExpectedOrderDate, E.EnquiryDate)) = @year ${quotedFilterClause}
+              ${safeQuarter ? 'AND DATEPART(QUARTER, COALESCE(L.QuoteDate, E.ExpectedOrderDate, E.EnquiryDate)) = @quarterNums' : ''}
+            ORDER BY E.RequestNo DESC
+        `);
+
+        const rows = (rowsRes.recordset || []).map((r) => ({
+            RequestNo: r.RequestNo,
+            ProjectName: r.ProjectName,
+            LatestQuoteNo: r.LatestQuoteNo,
+            LatestQuoteNumber: r.LatestQuoteNumber,
+            LatestQuoteDate: r.LatestQuoteDate,
+            LatestQuoteAmount: Number(r.LatestQuoteAmount) || 0,
+            HighestQuoteNo: r.HighestQuoteNo,
+            HighestQuoteNumber: r.HighestQuoteNumber,
+            HighestQuoteDate: r.HighestQuoteDate,
+            HighestQuoteAmount: Number(r.HighestQuoteAmount) || 0
+        }));
+
+        const totals = rows.reduce((acc, r) => {
+            acc.latestTotal += r.LatestQuoteAmount || 0;
+            acc.highestTotal += r.HighestQuoteAmount || 0;
+            return acc;
+        }, { latestTotal: 0, highestTotal: 0 });
+
+        res.json({
+            count: rows.length,
+            totals,
+            rows
+        });
+    } catch (err) {
+        console.error('Error fetching quoted enquiry values:', err);
+        res.status(500).json({ error: 'Failed to fetch quoted enquiry values' });
     }
 });
 

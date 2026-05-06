@@ -12,6 +12,12 @@ const Tesseract = require('tesseract.js');
 const multerMemory = multer({ storage: multer.memoryStorage() });
 const { parseContactCardFromOcrText } = require('./parseContactOcr');
 const { computeEnquiryWorkflowStatus } = require('./services/computeEnquiryWorkflowStatus');
+const {
+    resolveEnquiryAttachmentsBase,
+    resolveEnquiryUploadDestination,
+    resolveEnquiryAttachmentVisibilityBase,
+    resolveEnquiryUploadDestinationByVisibility
+} = require('./lib/attachmentsRoot');
 
 // Configure Nodemailer Transporter
 console.log('--- Email Config ---');
@@ -299,6 +305,27 @@ const storage = multer.diskStorage({
     }
 });
 const upload = multer({ storage: storage });
+
+const enquiryAttachmentStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        try {
+            const visibility = req.query.visibility || 'Public';
+            const division = req.query.division || 'General';
+            const dest = resolveEnquiryUploadDestinationByVisibility(req.query.requestNo, visibility, division);
+            if (!fs.existsSync(dest)) {
+                fs.mkdirSync(dest, { recursive: true });
+            }
+            cb(null, dest);
+        } catch (err) {
+            cb(err);
+        }
+    },
+    filename: (req, file, cb) => {
+        const safe = String(file.originalname || 'file').replace(/[/\\?%*:|"<>]/g, '_');
+        cb(null, Date.now() + '-' + safe);
+    }
+});
+const uploadEnquiryAttachments = multer({ storage: enquiryAttachmentStorage });
 
 const { sendAcknowledgementEmail } = require('./emailService');
 const app = express();
@@ -2384,17 +2411,75 @@ app.put('/api/enquiry-items/:id', async (req, res) => {
     }
 });
 // --- Attachments API ---
+const normalizeAttachmentEmail = (raw) =>
+    String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/@almcg\.com/g, '@almoayyedcg.com');
+
+const normText = (raw) => String(raw || '').trim().toLowerCase();
+
+async function getAttachmentAccessContext(requestNo, rawUserEmail) {
+    const email = normalizeAttachmentEmail(rawUserEmail);
+    if (!email) return { allowed: false, reason: 'Missing userEmail', user: null };
+
+    const userRes = await new sql.Request()
+        .input('email', sql.NVarChar, email)
+        .query(`
+            SELECT TOP 1 FullName, Department, EmailId
+            FROM Master_ConcernedSE
+            WHERE LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(EmailId, ''), '@almcg.com', '@almoayyedcg.com'), '@ALMCG.COM', '@almoayyedcg.com'))))
+                  = LOWER(LTRIM(RTRIM(@email)))
+        `);
+    const user = userRes.recordset?.[0];
+    if (!user) return { allowed: false, reason: 'User not found', user: null };
+
+    const assignedRes = await new sql.Request()
+        .input('requestNo', sql.NVarChar, String(requestNo || '').trim())
+        .input('fullName', sql.NVarChar, String(user.FullName || '').trim())
+        .query(`
+            SELECT TOP 1 1 AS ok
+            FROM ConcernedSE
+            WHERE LTRIM(RTRIM(RequestNo)) = LTRIM(RTRIM(@requestNo))
+              AND LOWER(LTRIM(RTRIM(ISNULL(SEName, '')))) = LOWER(LTRIM(RTRIM(ISNULL(@fullName, ''))))
+        `);
+    const isAssigned = (assignedRes.recordset || []).length > 0;
+    return {
+        allowed: isAssigned,
+        reason: isAssigned ? null : 'Not assigned to enquiry',
+        user: {
+            fullName: String(user.FullName || '').trim(),
+            department: String(user.Department || '').trim(),
+            email: normalizeAttachmentEmail(user.EmailId || email)
+        }
+    };
+}
+
+function canReadAttachmentByVisibility(att, accessCtx) {
+    if (!accessCtx?.allowed) return false;
+    const visibility = normText(att.Visibility || 'Public');
+    if (visibility !== 'private') return true; // Public => any assigned SE
+    const attDivision = normText(att.Division || '');
+    const userDept = normText(accessCtx.user?.department || '');
+    if (!attDivision || !userDept) return false;
+    return attDivision === userDept; // Private => assigned SE within same department
+}
 
 // Upload Attachment - Store in DB
-// Upload Attachment - Store in Disk and DB
+// Upload Attachment - Store in Disk and DB (files land under ENQUIRY_ATTACHMENTS_ROOT/<RequestNo>/)
 app.post('/api/attachments/upload', (req, res, next) => {
-    // Ensure uploads directory exists
-    const uploadDir = 'uploads';
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir);
+    try {
+        const visibility = req.query.visibility || 'Public';
+        const base = resolveEnquiryAttachmentVisibilityBase(visibility);
+        if (!fs.existsSync(base)) {
+            fs.mkdirSync(base, { recursive: true });
+        }
+    } catch (err) {
+        console.error('[attachments/upload] Cannot create ENQUIRY_ATTACHMENTS_ROOT:', err.message);
+        return res.status(500).send('Attachment storage is not available. Check ENQUIRY_ATTACHMENTS_ROOT and server permissions.');
     }
     next();
-}, upload.array('files'), async (req, res) => {
+}, uploadEnquiryAttachments.array('files'), async (req, res) => {
     const requestNo = req.query.requestNo;
     const visibility = req.query.visibility || 'Public';
     const type = req.query.type || 'File';
@@ -2480,13 +2565,19 @@ app.get('/api/system/next-request-no', async (req, res) => {
 // Get Attachments List
 app.get('/api/attachments', async (req, res) => {
     const requestNo = req.query.requestNo;
+    const userEmail = req.query.userEmail || '';
     if (!requestNo) {
         return res.status(400).send('Request No is required');
     }
 
     try {
+        const accessCtx = await getAttachmentAccessContext(requestNo, userEmail);
+        if (!accessCtx.allowed) {
+            return res.status(403).json({ error: accessCtx.reason || 'Access denied' });
+        }
         const result = await sql.query`SELECT ID, RequestNo, FileName, UploadedAt, Visibility, AttachmentType, LinkURL, UploadedBy, Division FROM Attachments WHERE RequestNo = ${requestNo} `;
-        res.json(result.recordset);
+        const rows = (result.recordset || []).filter((r) => canReadAttachmentByVisibility(r, accessCtx));
+        res.json(rows);
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
@@ -2496,12 +2587,17 @@ app.get('/api/attachments', async (req, res) => {
 // Download Attachment
 app.get('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
+    const userEmail = req.query.userEmail || '';
     try {
-        const result = await sql.query`SELECT FileName, FilePath FROM Attachments WHERE ID = ${id} `;
+        const result = await sql.query`SELECT ID, RequestNo, FileName, FilePath, Visibility, Division FROM Attachments WHERE ID = ${id} `;
         const attachment = result.recordset[0];
 
         if (!attachment) {
             return res.status(404).send('Attachment not found');
+        }
+        const accessCtx = await getAttachmentAccessContext(attachment.RequestNo, userEmail);
+        if (!canReadAttachmentByVisibility(attachment, accessCtx)) {
+            return res.status(403).json({ error: accessCtx.reason || 'Access denied' });
         }
 
         const filePath = attachment.FilePath;
@@ -2521,11 +2617,17 @@ app.get('/api/attachments/:id', async (req, res) => {
 // Delete Attachment
 app.delete('/api/attachments/:id', async (req, res) => {
     const { id } = req.params;
+    const userEmail = req.query.userEmail || '';
     try {
         // Get file path first
-        const result = await sql.query`SELECT FilePath FROM Attachments WHERE ID = ${id} `;
+        const result = await sql.query`SELECT RequestNo, FilePath, Visibility, Division FROM Attachments WHERE ID = ${id} `;
         if (result.recordset.length > 0) {
-            const filePath = result.recordset[0].FilePath;
+            const att = result.recordset[0];
+            const accessCtx = await getAttachmentAccessContext(att.RequestNo, userEmail);
+            if (!canReadAttachmentByVisibility(att, accessCtx)) {
+                return res.status(403).json({ error: accessCtx.reason || 'Access denied' });
+            }
+            const filePath = att.FilePath;
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
             }
@@ -2899,6 +3001,7 @@ console.log('Starting server initialization...');
 console.log('PORT:', PORT);
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`EMS attachments root (enquiries): ${resolveEnquiryAttachmentsBase()}`);
 });
 server.on('error', (e) => console.error('Server Error:', e));
 

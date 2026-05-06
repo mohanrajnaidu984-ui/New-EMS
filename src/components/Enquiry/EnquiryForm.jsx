@@ -449,37 +449,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
     };
 
-    const onAddCustomerClick = () => {
-        try {
-            // alert('onAddCustomerClick called');
-            if (formData.CustomerName) {
-                if (!customerList.includes(formData.CustomerName)) {
-                    setCustomerList([...customerList, formData.CustomerName]);
-                } else {
-                    alert('Customer already added to the list');
-                }
-
-                // alert('Clearing CustomerName');
-                handleInputChange('CustomerName', '');
-
-                // alert('Clearing ReceivedFrom');
-                handleInputChange('ReceivedFrom', '');
-
-                // Clear error if exists
-                if (errors.CustomerName) {
-                    setErrors(prev => {
-                        const { CustomerName, ...rest } = prev;
-                        return rest;
-                    });
-                }
-            }
-        } catch (err) {
-            alert('Error: ' + err.message);
-        }
-    };
-
     const handleAddReceivedFrom = () => {
-        // Check if both Customer Name and Received From are selected
         if (!formData.CustomerName) {
             alert('Please select a Customer Name first');
             return;
@@ -490,25 +460,34 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
-        if (formData.ReceivedFrom && !receivedFromList.includes(formData.ReceivedFrom)) {
-            setReceivedFromList([...receivedFromList, formData.ReceivedFrom]);
+        const cust = (formData.CustomerName || '').trim();
+        const rf = formData.ReceivedFrom;
+        const pairedLen = Math.min(customerList.length, receivedFromList.length);
+        const duplicatePair = customerList.slice(0, pairedLen).some(
+            (c, i) => (c || '').trim() === cust && receivedFromList[i] === rf
+        );
+        if (duplicatePair) {
+            alert('This customer and contact pair is already in the list');
+            return;
+        }
 
-            // Auto-add customer if not present (Enforce paired insertion)
-            // We use formData.CustomerName directly as the source of truth
-            if (formData.CustomerName && !customerList.includes(formData.CustomerName)) {
-                setCustomerList(prev => [...prev, formData.CustomerName]);
-            }
+        setCustomerList((prev) => [...prev, formData.CustomerName]);
+        setReceivedFromList((prev) => [...prev, rf]);
 
-            handleInputChange('ReceivedFrom', '');
-            handleInputChange('CustomerName', ''); // Sync clear customer selection
+        handleInputChange('ReceivedFrom', '');
+        handleInputChange('CustomerName', '');
 
-            // Clear error if exists
-            if (errors.ReceivedFrom) {
-                setErrors(prev => {
-                    const { ReceivedFrom, ...rest } = prev;
-                    return rest;
-                });
-            }
+        if (errors.ReceivedFrom) {
+            setErrors((prev) => {
+                const { ReceivedFrom, ...rest } = prev;
+                return rest;
+            });
+        }
+        if (errors.CustomerName) {
+            setErrors((prev) => {
+                const { CustomerName, ...rest } = prev;
+                return rest;
+            });
         }
     };
 
@@ -533,66 +512,23 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
     };
 
-    const handleRemoveCustomer = (selectedIndex) => {
+    /** Remove one row from both Customer Name and Received From lists at the same index (paired rows). */
+    const handleRemoveCustomerPair = (selectedIndex) => {
         if (isLimitedEdit) return;
-        if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= customerList.length) return;
-
-        const removedCustomer = customerList[selectedIndex];
-        const newCustomers = customerList.filter((_, idx) => idx !== selectedIndex);
-        setCustomerList(newCustomers);
-
-        const newReceivedFromList = receivedFromList.filter(item => {
-            const [, company] = item.split('|');
-            const cleanCompany = (company || '').replace(/,\s*$/, '').trim();
-            const cleanRemoved = (removedCustomer || '').replace(/,\s*$/, '').trim();
-            return cleanCompany !== cleanRemoved;
-        });
-        setReceivedFromList(newReceivedFromList);
-    };
-
-    const handleRemoveReceivedFrom = (selectedIndex) => {
-        if (isLimitedEdit) return;
-        // Case 1: We have Received From entries – operate on that list and sync customers.
-        if (receivedFromList.length > 0) {
-            if (selectedIndex == null || selectedIndex < 0 || selectedIndex >= receivedFromList.length) return;
-
-            const removedItem = receivedFromList[selectedIndex];
-            const [, removedCompany] = removedItem.split('|');
-            const cleanRemovedCompany = (removedCompany || '').replace(/,\s*$/, '').trim();
-
-            const newReceivedFromList = receivedFromList.filter((_, idx) => idx !== selectedIndex);
-            setReceivedFromList(newReceivedFromList);
-
-            const hasOtherContacts = newReceivedFromList.some(item => {
-                const [, company] = item.split('|');
-                const cleanCompany = (company || '').replace(/,\s*$/, '').trim();
-                return cleanCompany === cleanRemovedCompany;
-            });
-
-            if (!hasOtherContacts) {
-                setCustomerList(prev => prev.filter(c => (c || '').replace(/,\s*$/, '').trim() !== cleanRemovedCompany));
-            }
+        if (isModifyMode && pricedEnquiryForIds.size > 0) {
+            alert('Pricing is already added for this enquiry. Customer/Received From rows cannot be removed.');
             return;
         }
+        const pairedLen = Math.min(customerList.length, receivedFromList.length);
+        if (pairedLen === 0) return;
 
-        // Case 2: No Received From entries but stray customers exist (legacy data) – allow cleanup.
-        if (customerList.length > 0) {
-            const removeIdx = selectedIndex != null && selectedIndex >= 0 && selectedIndex < customerList.length
-                ? selectedIndex
-                : customerList.length - 1;
-            const removedCustomer = customerList[removeIdx];
-            setCustomerList(customerList.filter((_, idx) => idx !== removeIdx));
-
-            // Also remove any matching stray contacts if they somehow exist.
-            setReceivedFromList(prev =>
-                prev.filter(item => {
-                    const [, company] = item.split('|');
-                    const cleanCompany = (company || '').replace(/,\s*$/, '').trim();
-                    const cleanRemoved = (removedCustomer || '').replace(/,\s*$/, '').trim();
-                    return cleanCompany !== cleanRemoved;
-                })
-            );
+        let idx = selectedIndex;
+        if (idx == null || idx < 0 || idx >= pairedLen) {
+            idx = pairedLen - 1;
         }
+
+        setCustomerList((prev) => prev.filter((_, i) => i !== idx));
+        setReceivedFromList((prev) => prev.filter((_, i) => i !== idx));
     };
 
     const handleRemoveItem = (list, setList, originalList = []) => {
@@ -712,9 +648,6 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                         : [...prev.existingCustomers, data.CompanyName],
                     customers: [...prev.customers, newItem]
                 }));
-                setCustomerList((prev) =>
-                    prev.includes(data.CompanyName) ? prev : [...prev, data.CompanyName]
-                );
             } else if (data.Category === 'Client') {
                 handleInputChange('ClientName', data.CompanyName);
                 updateMasters(prev => ({
@@ -790,10 +723,18 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             handleInputChange('CustomerName', data.CompanyName);
             const val = `${data.ContactName}|${data.CompanyName}`;
             handleInputChange('ReceivedFrom', val);
-            setReceivedFromList((prev) => (prev.includes(val) ? prev : [...prev, val]));
-            if (!customerList.includes(data.CompanyName)) {
-                setCustomerList((prev) => [...prev, data.CompanyName]);
+            const pairedLen = Math.min(customerList.length, receivedFromList.length);
+            const duplicatePair = customerList.slice(0, pairedLen).some(
+                (c, i) =>
+                    (c || '').trim() === (data.CompanyName || '').trim() &&
+                    receivedFromList[i] === val
+            );
+            if (duplicatePair) {
+                alert('This customer and contact pair is already in the list');
+                return;
             }
+            setCustomerList((prev) => [...prev, data.CompanyName]);
+            setReceivedFromList((prev) => [...prev, val]);
         } else {
             if (data.ID) {
                 const success = await updateMaster('contact', data.ID, data);
@@ -1329,12 +1270,15 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             setOriginalEnqForList([...loadedEnqForList]); // Store original for comparison
 
             const loadedCustomers = enq.SelectedCustomers || (enq.CustomerName ? enq.CustomerName.split(',').filter(Boolean) : []);
-            setCustomerList(loadedCustomers);
-            setOriginalCustomerList([...loadedCustomers]);
-
             const loadedReceivedFrom = enq.SelectedReceivedFroms || (enq.ReceivedFrom ? enq.ReceivedFrom.split(',').filter(Boolean) : []);
-            setReceivedFromList(loadedReceivedFrom);
-            setOriginalReceivedFromList([...loadedReceivedFrom]);
+            const pairedCount = Math.min(loadedCustomers.length, loadedReceivedFrom.length);
+            const customersSynced = loadedCustomers.slice(0, pairedCount);
+            const receivedSynced = loadedReceivedFrom.slice(0, pairedCount);
+            setCustomerList(customersSynced);
+            setOriginalCustomerList([...customersSynced]);
+
+            setReceivedFromList(receivedSynced);
+            setOriginalReceivedFromList([...receivedSynced]);
 
             const seList = enq.SelectedConcernedSEs || (enq.ConcernedSE ? enq.ConcernedSE.split(',').filter(Boolean) : []);
             setSeList(seList);
@@ -1630,8 +1574,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     !item.isGroup && (
                                         type === 'File' ? (
                                             <>
-                                                <a href={`/api/attachments/${item.ID}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="View"><i className="bi bi-eye"></i></a>
-                                                <a href={`/api/attachments/${item.ID}?download=true`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-primary p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="Download"><i className="bi bi-download"></i></a>
+                                                <a href={`/api/attachments/${item.ID}?userEmail=${encodeURIComponent(currentUser?.EmailId || currentUser?.email || '')}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-info p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="View"><i className="bi bi-eye"></i></a>
+                                                <a href={`/api/attachments/${item.ID}?download=true&userEmail=${encodeURIComponent(currentUser?.EmailId || currentUser?.email || '')}`} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-primary p-0 d-flex align-items-center justify-content-center" style={{ width: '28px', height: '28px' }} title="Download"><i className="bi bi-download"></i></a>
                                             </>
                                         ) : (
                                             <a
@@ -1722,7 +1666,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
 
         try {
-            const res = await fetch(`/api/attachments/${attachmentId}`, {
+            const res = await fetch(`/api/attachments/${attachmentId}?userEmail=${encodeURIComponent(currentUser?.EmailId || currentUser?.email || '')}`, {
                 method: 'DELETE'
             });
 
@@ -1740,7 +1684,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         setAttachments([]);
         try {
             // Send RequestNo as query parameter
-            const res = await fetch(`/api/attachments?requestNo=${encodeURIComponent(requestNo)}`);
+            const res = await fetch(`/api/attachments?requestNo=${encodeURIComponent(requestNo)}&userEmail=${encodeURIComponent(currentUser?.EmailId || currentUser?.email || '')}`);
             if (res.ok) {
                 const data = await res.json();
                 setAttachments(data);
@@ -2295,6 +2239,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                 handleInputChange('ReceivedFrom', '');
                                                             }}
                                                             listBoxItems={customerList}
+                                                            onRemove={handleRemoveCustomerPair}
                                                             showNew={true}
                                                             showEdit={true}
                                                             canEdit={!!formData.CustomerName}
@@ -2305,7 +2250,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             error={errors.CustomerName}
                                                             minSearchLength={3}
                                                             disabled={!canEdit}
-                                                            canRemove={!isLimitedEdit}
+                                                            canRemove={false}
                                                         />
                                                     </div>
                                                     <div className="col-md-6">
@@ -2316,13 +2261,16 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onOptionChange={(val) => handleInputChange('ReceivedFrom', val)}
                                                             listBoxItems={receivedFromList}
                                                             onAdd={handleAddReceivedFrom}
-                                                            onRemove={handleRemoveReceivedFrom}
+                                                            onRemove={handleRemoveCustomerPair}
                                                             showNew={true}
                                                             showEdit={true}
                                                             canEdit={!!formData.ReceivedFrom}
                                                             renderOption={renderContactOption}
                                                             renderListBoxItem={renderContactListBoxItem}
-                                                            canRemove={!isLimitedEdit && (receivedFromList.length > 0 || customerList.length > 0)}
+                                                            canRemove={
+                                                                !isLimitedEdit &&
+                                                                Math.min(customerList.length, receivedFromList.length) > 0
+                                                            }
                                                             onNew={() => openNewModal(setShowContactModal, null, { CompanyName: formData.CustomerName })}
                                                             onEdit={handleEditContact}
                                                             selectedItemDetails={renderContactCard()}
