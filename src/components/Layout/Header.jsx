@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import emsoLogo from '../../assets/ems_logo_new.png';
 import almoayyedLogo from '../../assets/almoayyed-logo.png';
+import emsMarkLogo from '../../assets/ems_logo2.png';
 import NotificationDropdown from './NotificationDropdown';
 import UserProfile from './UserProfile';
 
@@ -9,6 +9,8 @@ import { useAuth } from '../../context/AuthContext';
 const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
   const { currentUser } = useAuth();
   const [isScrolled, setIsScrolled] = useState(false);
+  const headerLineDark = '#1E3F7A';
+  const headerLineLight = '#2B5FAE';
 
   useEffect(() => {
     const handleScroll = () => {
@@ -26,6 +28,8 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
     { id: 'Quote', label: 'Quote', icon: 'bi-file-earmark-text' },
     { id: 'Probability', label: 'Probability', icon: 'bi-graph-up' },
     { id: 'Sales Report', label: 'Sales Report', icon: 'bi-file-earmark-bar-graph' },
+    { id: 'Help', label: 'Help', icon: 'bi-question-circle' },
+    { id: 'About', label: 'About', icon: 'bi-info-circle' },
     { id: 'Reports', label: 'Sales Target', icon: 'bi-bullseye' }
   ];
 
@@ -37,6 +41,8 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
 
   const visibleItems = navItems.filter(item => {
     if (item.id === 'Dashboard') return true;
+    if (item.id === 'Help') return true;
+    if (item.id === 'About') return true;
 
     // Grant Admin access to everything
     if (userRoles.includes('admin')) return true;
@@ -55,12 +61,12 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
   return (
     <>
       <nav className="navbar navbar-light" style={{
-        backgroundColor: 'rgba(255, 255, 255, 0.72)',
+        backgroundColor: '#ffffff',
         backdropFilter: 'saturate(180%) blur(20px)',
         WebkitBackdropFilter: 'saturate(180%) blur(20px)',
         padding: '0',
-        height: '100px',
-        borderBottom: '1px solid rgba(0, 0, 0, 0.16)',
+        height: '72px',
+        borderBottom: 'none',
         position: 'fixed',
         top: 0,
         zIndex: 9999,
@@ -71,51 +77,34 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
         margin: '0 auto',
         left: 0,
         right: 0,
-        boxShadow: isScrolled ? '0 4px 6px -1px rgba(0, 0, 0, 0.1)' : 'none'
+        boxShadow: `${isScrolled ? '0 4px 6px -1px rgba(0, 0, 0, 0.1), ' : ''}inset 0 -0.5px 0 ${headerLineLight}, inset 0 -1.5px 0 ${headerLineDark}`
       }}>
         <div className="container-fluid h-100" style={{
           width: '100%',
           transition: 'width 0.4s ease',
           margin: '0 auto',
-          padding: '0 24px'
+          padding: '0 14px'
         }}>
-          <div className="d-flex align-items-end w-100 h-100 pb-0">
-            {/* Left: EMSO Logo */}
+          <div className="d-flex align-items-end w-100 h-100">
+            {/* Left: EMS Text */}
             <div className="d-flex align-items-center logo-container" style={{ animation: 'fadeInLeft 1s ease-out' }}>
-              <img
-                src={emsoLogo}
-                alt="EMS"
-                style={{ height: '85px', width: 'auto', display: 'block' }}
-              />
+              <span className="ems-brand-text d-flex align-items-center">
+                <img src={emsMarkLogo} alt="" className="ems-brand-mark me-1" aria-hidden="true" />
+                <span>EMS</span>
+              </span>
             </div>
 
-            {/* Centered: Navigation Links + User Controls */}
-            <div className="flex-grow-1 d-flex justify-content-center align-items-center">
-              <ul className="nav d-flex align-items-center gap-4 m-0">
+            {/* Centered: Navigation Links aligned to header bottom */}
+            <div className="flex-grow-1 d-flex justify-content-center align-items-end pb-0">
+              <ul className="nav d-flex align-items-center gap-2 m-0 ems-top-nav">
                 {visibleItems.map(item => (
                   <li className="nav-item" key={item.id}>
                     <button
-                      className="nav-link bg-transparent border-0 p-0 d-flex align-items-center shadow-none"
+                      className={`nav-link bg-transparent border-0 d-flex align-items-center shadow-none ems-top-nav-link${activeTab === item.id ? ' active' : ''}`}
                       onClick={() => onNavigate(item.id)}
-                      style={{
-                        fontSize: '14px',
-                        color: activeTab === item.id ? '#1d1d1f' : '#6e6e73',
-                        fontWeight: activeTab === item.id ? '600' : '400',
-                        opacity: activeTab === item.id ? 1 : 0.8,
-                        transition: 'all 0.2s ease',
-                        letterSpacing: '-0.01em',
-                        cursor: 'pointer'
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.color = '#1d1d1f';
-                        e.currentTarget.style.opacity = '1';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.color = activeTab === item.id ? '#1d1d1f' : '#6e6e73';
-                        e.currentTarget.style.opacity = activeTab === item.id ? '1' : '0.8';
-                      }}
+                      aria-current={activeTab === item.id ? 'page' : undefined}
                     >
-                      <i className={`bi ${item.icon} me-2`} style={{ fontSize: '16px' }}></i>
+                      <i className={`bi ${item.icon} me-2 ems-top-nav-link__icon`}></i>
                       {item.label}
                     </button>
                   </li>
@@ -130,7 +119,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
                 src={almoayyedLogo}
                 alt="ACG"
                 className="mb-1"
-                style={{ height: '35px', width: 'auto', objectFit: 'contain', opacity: 0.9 }}
+                style={{ height: '26px', width: 'auto', objectFit: 'contain', opacity: 0.9, transform: 'translateY(6px)' }}
               />
 
               {/* Bottom: User Controls */}

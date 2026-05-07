@@ -11545,7 +11545,7 @@ const QuoteForm = ({ openContext = null }) => {
 
     return (
         <>
-            <div style={{ display: 'flex', height: 'calc(100vh - 100px)', background: '#f5f7fa' }}>
+            <div style={{ display: 'flex', height: 'calc(100vh - 72px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
             <div style={{ width: `${sidebarWidth}px`, background: 'white', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'visible' }}>
                 {/* Search Section */}

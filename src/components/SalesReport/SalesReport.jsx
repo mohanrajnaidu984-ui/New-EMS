@@ -4,7 +4,7 @@ import {
     BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
     PieChart, Pie, Cell, CartesianGrid
 } from 'recharts';
-import { Printer, Mail } from 'lucide-react';
+import { Printer, Mail, Maximize2, Minimize2 } from 'lucide-react';
 import './SalesReport.css';
 
 const defaultReport = () => ({
@@ -56,7 +56,7 @@ const SR_BLUE_LIGHT = '#abc3e4';
 const WON_GREEN = '#15803d';
 const LOST_RED = '#dc2626';
 /** Won/Lost card: Follow up KPI + donut segment */
-const SR_ROYAL_BLUE = '#4169E1';
+const SR_ROYAL_BLUE = '#20396D';
 
 const PIE_COLORS = {
     Won: WON_GREEN,
@@ -73,7 +73,7 @@ const SR_DONUT_GRADIENTS = {
 
 /** Target vs Actual / GM charts — actual darker slate; target lighter periwinkle */
 const BAR_TARGET_FILL = '#a3b8db';
-const BAR_ACTUAL_FILL = '#4f5782';
+const BAR_ACTUAL_FILL = '#20396D';
 
 /** SVG fill URLs (unique per chart so two BarCharts can coexist) */
 const SR_BAR_JB = { target: 'url(#srBarJbTarget)', actual: 'url(#srBarJbActual)' };
@@ -167,14 +167,51 @@ const SR_TA_QUARTER_CHART_ALIGN_STYLE = {
 
 /** Top Jobs table — must match server whitelist in `salesReportRoutes.js` */
 const TOP_JOB_STATUS_OPTIONS = [
+    { value: 'Quoted', label: 'Quoted' },
     { value: 'Won', label: 'Won' },
     { value: 'Lost', label: 'Lost' },
-    { value: 'Pending', label: 'Pending' },
-    { value: 'Follow Up', label: 'Follow Up' },
-    { value: 'On Hold', label: 'On Hold' },
-    { value: 'Cancelled', label: 'Cancelled' },
-    { value: 'Retendered', label: 'Retendered' }
+    { value: 'Follow Up', label: 'Follow up' },
+    { value: 'Pending', label: 'Pending' }
 ];
+
+const TOP_JOB_TABLE_CONFIG = {
+    Quoted: {
+        valueHeader: 'Net Quoted Value',
+        chartHeader: 'Net Quoted Value Chart',
+        metricHeader: 'Quote Ref',
+        extraHeader: null
+    },
+    Won: {
+        valueHeader: 'Booked Value',
+        chartHeader: 'Booked Value Chart',
+        metricHeader: 'Gross Profit (%)',
+        extraHeader: null
+    },
+    Lost: {
+        valueHeader: 'Lost Value',
+        chartHeader: 'Lost Value Chart',
+        metricHeader: 'Lost To Whom',
+        extraHeader: 'Reason For Lost'
+    },
+    Pending: {
+        valueHeader: 'Net Quoted Value',
+        chartHeader: 'Net Quoted Value Chart',
+        metricHeader: 'Status',
+        extraHeader: null
+    },
+    'Follow Up': {
+        valueHeader: 'Net Quoted Value',
+        chartHeader: 'Net Quoted Value Chart',
+        metricHeader: 'Chance % & Expected Date',
+        extraHeader: 'Follow Up Remarks'
+    },
+    Pending: {
+        valueHeader: 'Net Quoted Value',
+        chartHeader: 'Net Quoted Value Chart',
+        metricHeader: 'Status',
+        extraHeader: null
+    }
+};
 
 const FUNNEL_STAGE_DEFS = [
     { name: 'Quoted', probability: 10 },
@@ -185,9 +222,9 @@ const FUNNEL_STAGE_DEFS = [
     { name: 'Very High Chance', probability: 99 }
 ];
 
-/** Pipeline funnel: royal blue ramp — light top → dark bottom (same blend depth as before) */
-const FUNNEL_COLOR_TOP = mixHexWithWhite(SR_ROYAL_BLUE, 0.42);
-const FUNNEL_COLOR_BOTTOM = mixHexWithBlack(SR_ROYAL_BLUE, 0.9);
+/** Pipeline funnel: requested blue gradient ramp — dark top -> lighter bottom */
+const FUNNEL_COLOR_TOP = '#203f75';
+const FUNNEL_COLOR_BOTTOM = '#3f68ad';
 
 const FUNNEL_STAGES = FUNNEL_STAGE_DEFS.map((s, i) => {
     const n = FUNNEL_STAGE_DEFS.length;
@@ -338,13 +375,18 @@ const SalesReport = () => {
     });
     const [division, setDivision] = useState(() => {
         const s = localStorage.getItem('reports_division');
-        return s ? s : 'All';
+        return s && s !== 'All' ? s : '';
     });
     const [role, setRole] = useState(() => localStorage.getItem('reports_role') || 'All');
-    const [topJobStatus, setTopJobStatus] = useState(() => localStorage.getItem('reports_top_job_status') || 'Won');
+    const [topJobStatus, setTopJobStatus] = useState(() => {
+        const saved = localStorage.getItem('reports_top_job_status');
+        if (saved && TOP_JOB_STATUS_OPTIONS.some((x) => x.value === saved)) return saved;
+        return 'Won';
+    });
 
     const [loading, setLoading] = useState(false);
     const [topJobsLoading, setTopJobsLoading] = useState(false);
+    const [tableExpanded, setTableExpanded] = useState(false);
     const [summaryError, setSummaryError] = useState(null);
     const [reportData, setReportData] = useState(defaultReport);
 
@@ -375,7 +417,7 @@ const SalesReport = () => {
                 if (response.ok) {
                     const data = await response.json();
                     const companies = data.companies || [];
-                    const divisions = ['All', ...(data.divisions || [])];
+                    const divisions = data.divisions || [];
                     const roles = data.roles || [];
                     setFilterOptions((prev) => ({
                         ...prev,
@@ -385,7 +427,7 @@ const SalesReport = () => {
                         roles
                     }));
                     setCompany((prev) => (companies.length ? (companies.includes(prev) ? prev : companies[0]) : prev));
-                    setDivision((prev) => (divisions.includes(prev) ? prev : 'All'));
+                    setDivision((prev) => (divisions.length ? (divisions.includes(prev) ? prev : divisions[0]) : prev));
                 }
             } catch (error) {
                 console.error('Failed to fetch sales report filters', error);
@@ -397,7 +439,7 @@ const SalesReport = () => {
     useEffect(() => {
         localStorage.setItem('reports_year', year);
         if (company) localStorage.setItem('reports_company', company);
-        localStorage.setItem('reports_division', division || 'All');
+        if (division) localStorage.setItem('reports_division', division);
         localStorage.setItem('reports_role', role);
     }, [year, company, division, role]);
 
@@ -531,7 +573,7 @@ const SalesReport = () => {
     const handleCompanyChange = (e) => {
         const val = e.target.value;
         setCompany(val);
-        setDivision('All');
+        setDivision('');
         setRole('All');
     };
 
@@ -570,6 +612,14 @@ const SalesReport = () => {
                 <span className={isM ? 'sr-money-thousands__M' : 'sr-money-thousands__k'}>{isM ? 'M' : 'k'}</span>
             </span>
         );
+    };
+
+    /** Funnel summary: keep exact values for small numbers; k/M for larger values. */
+    const formatFunnelSummaryValue = (num) => {
+        const n = Number(num);
+        if (Number.isNaN(n)) return formatK(0);
+        if (Math.abs(n) < 1000) return formatExactAmountString(n);
+        return formatK(n);
     };
 
     const formatShort = (num) => formatSalesAmountString(num);
@@ -623,16 +673,10 @@ const SalesReport = () => {
     const gmOverallActualGpPct = totalActual > 0 ? (gmTotalActual / totalActual) * 100 : 0;
 
     const wl = reportData.winLoss || defaultReport().winLoss;
-    const isNonCcScopedUser = filterLocks.company === true;
-    const quotedDenom = isNonCcScopedUser
-        ? (Number(wl.quoted) || 0)
-        : (Number(wl.quotedValue) || 0);
-    const winNumerator = isNonCcScopedUser
-        ? (Number(wl.won) || 0)
-        : (Number(wl.wonValue) || 0);
-    const lossNumerator = isNonCcScopedUser
-        ? (Number(wl.lost) || 0)
-        : (Number(wl.lostValue) || 0);
+    /** Winning/Losing % always project-count based: won/lost projects over quoted enquiries. */
+    const quotedDenom = Number(wl.quoted) || 0;
+    const winNumerator = Number(wl.won) || 0;
+    const lossNumerator = Number(wl.lost) || 0;
     const winningRate =
         quotedDenom > 0 ? Math.round((winNumerator / quotedDenom) * 100) : 0;
     const losingRate =
@@ -684,6 +728,36 @@ const SalesReport = () => {
         return o ? o.label : 'Won';
     }, [topJobStatus]);
 
+    const topJobsTableConfig = useMemo(() => {
+        return TOP_JOB_TABLE_CONFIG[topJobStatus] || TOP_JOB_TABLE_CONFIG.Won;
+    }, [topJobStatus]);
+
+    const formatDateShort = (v) => {
+        if (!v) return '—';
+        const d = new Date(v);
+        if (Number.isNaN(d.getTime())) return '—';
+        const day = String(d.getDate()).padStart(2, '0');
+        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const mon = MONTHS[d.getMonth()] || '';
+        const yy = String(d.getFullYear()).slice(-2);
+        return `${day}-${mon}-${yy}`;
+    };
+
+    const renderTopJobsMetricCell = (row) => {
+        if (topJobStatus === 'Won') {
+            return formatJobBookedGrossMargin(row);
+        }
+        if (topJobStatus === 'Lost') {
+            return row.LostToWhom || row.CustomerName || '—';
+        }
+        if (topJobStatus === 'Follow Up') {
+            const chance = row.ProbabilityChance || '—';
+            const expectedDate = formatDateShort(row.ExpectedDate);
+            return `${chance} / ${expectedDate}`;
+        }
+        return row.Status || topJobsHeadingWord;
+    };
+
     const handlePrint = () => {
         const container = document.querySelector('.sales-report-page');
         if (container) {
@@ -710,7 +784,7 @@ const SalesReport = () => {
 
     return (
         <div
-            className="container-fluid sales-report-page sales-report-fit d-flex flex-column"
+            className={`container-fluid sales-report-page sales-report-fit d-flex flex-column${tableExpanded ? ' sr-table-expanded' : ''}`}
             style={{
                 width: '100vw',
                 marginLeft: 'calc(50% - 50vw)',
@@ -771,11 +845,25 @@ const SalesReport = () => {
                     <div className="d-flex align-items-center gap-3 flex-wrap pb-1">
                         <span className="text-muted small mb-0">* All values in BHD</span>
                         <div className="d-flex gap-2 no-print">
-                            <button type="button" className="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1" onClick={handlePrint} title="Print / Save as PDF">
-                                <Printer size={14} /> <span className="d-none d-md-inline">Print</span>
+                            <button
+                                type="button"
+                                className="btn btn-sm btn-outline-secondary d-flex align-items-center justify-content-center"
+                                style={{ width: 32, height: 32, padding: 0 }}
+                                onClick={handlePrint}
+                                title="Print / Save as PDF"
+                                aria-label="Print / Save as PDF"
+                            >
+                                <Printer size={14} />
                             </button>
-                            <button type="button" className="btn btn-sm btn-outline-primary d-flex align-items-center gap-1" onClick={handleEmail} title="Email">
-                                <Mail size={14} /> <span className="d-none d-md-inline">Email</span>
+                            <button
+                                type="button"
+                                className="btn btn-sm btn-outline-primary d-flex align-items-center justify-content-center"
+                                style={{ width: 32, height: 32, padding: 0 }}
+                                onClick={handleEmail}
+                                title="Email"
+                                aria-label="Email"
+                            >
+                                <Mail size={14} />
                             </button>
                         </div>
                     </div>
@@ -1137,7 +1225,7 @@ const SalesReport = () => {
                                                 <span className="sr-pipeline-swatch" style={{ backgroundColor: stage.color }} title={stage.name} aria-hidden />
                                                 <span className="sr-pipeline-summary-legend text-truncate">{stage.name}</span>
                                             </div>
-                                            <span className="sr-pipeline-summary-value text-end">{formatK(v)}</span>
+                                            <span className="sr-pipeline-summary-value text-end">{formatFunnelSummaryValue(v)}</span>
                                         </div>
                                     );
                                 })}
@@ -1152,6 +1240,15 @@ const SalesReport = () => {
                                 Top Jobs {topJobsHeadingWord} details
                             </span>
                             <div className="flex-grow-1 d-flex justify-content-end align-items-center">
+                                <button
+                                    type="button"
+                                    className="btn btn-sm btn-outline-light sr-table-expand-btn me-2"
+                                    onClick={() => setTableExpanded((prev) => !prev)}
+                                    title={tableExpanded ? 'Collapse table view' : 'Expand table view'}
+                                    aria-label={tableExpanded ? 'Collapse table view' : 'Expand table view'}
+                                >
+                                    {tableExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                                </button>
                                 <label className="visually-hidden" htmlFor="sr-top-jobs-status">
                                     Filter top jobs by status
                                 </label>
@@ -1177,14 +1274,23 @@ const SalesReport = () => {
                                         <th style={{ width: 44 }}>Sl.No.</th>
                                         <th>Enquiry No.</th>
                                         <th>Project Name</th>
-                                        <th className="text-end">Job Value</th>
-                                        <th className="sr-job-bar-th" title="Horizontal bar: job value relative to the largest value in this list">
-                                            Job Value Chart
-                                        </th>
-                                        <th className="text-end text-nowrap">Gross Profit (%)</th>
                                         <th>Customer Name</th>
+                                        <th className="text-end">{topJobsTableConfig.valueHeader}</th>
+                                        <th className="sr-job-bar-th" title="Horizontal bar: job value relative to the largest value in this list">
+                                            {topJobsTableConfig.chartHeader}
+                                        </th>
+                                        {topJobStatus === 'Quoted' ? (
+                                            <>
+                                                <th className="text-end text-nowrap">{topJobsTableConfig.metricHeader}</th>
+                                                <th className="text-nowrap">Quote Date</th>
+                                                <th className="text-nowrap">Lead Job Name</th>
+                                            </>
+                                        ) : (
+                                            <th className="text-end text-nowrap">{topJobsTableConfig.metricHeader}</th>
+                                        )}
                                         <th>Client Name</th>
                                         <th>Consultant Name</th>
+                                        {topJobsTableConfig.extraHeader ? <th>{topJobsTableConfig.extraHeader}</th> : null}
                                     </tr>
                                 </thead>
                                 <tbody
@@ -1193,18 +1299,38 @@ const SalesReport = () => {
                                 >
                                     {topRows.length === 0 ? (
                                         <tr>
-                                            <td colSpan={9} className="text-center text-muted py-2">No job booked rows for the selected filters.</td>
+                                            <td
+                                                colSpan={
+                                                    9 +
+                                                    (topJobStatus === 'Quoted' ? 2 : 0) +
+                                                    (topJobsTableConfig.extraHeader ? 1 : 0)
+                                                }
+                                                className="text-center text-muted py-2"
+                                            >
+                                                No job booked rows for the selected filters.
+                                            </td>
                                         </tr>
                                     ) : (
                                         topRows.map((row, idx) => {
                                             const v = Math.abs(Number(row.JobValue)) || 0;
                                             const pct = topJobValueMax > 0 ? Math.round((v / topJobValueMax) * 100) : 0;
                                             const barW = topJobValueMax > 0 ? Math.min(100, (v / topJobValueMax) * 100) : 0;
+                                            const groupClass = idx === 0
+                                                ? 'sr-enquiry-strip-a'
+                                                : (topRows[idx - 1].RequestNo === row.RequestNo
+                                                    ? topRows[idx - 1].__stripClass || 'sr-enquiry-strip-a'
+                                                    : (topRows[idx - 1].__stripClass === 'sr-enquiry-strip-a'
+                                                        ? 'sr-enquiry-strip-b'
+                                                        : 'sr-enquiry-strip-a'));
+                                            // Store computed class on the row object for subsequent comparisons.
+                                            // eslint-disable-next-line no-param-reassign
+                                            row.__stripClass = groupClass;
                                             return (
-                                                <tr key={`${row.ProjectName}-${idx}`}>
+                                                <tr key={`${row.ProjectName}-${idx}`} className={groupClass}>
                                                     <td>{idx + 1}</td>
                                                     <td>{row.RequestNo || row.EnquiryNo || '—'}</td>
                                                     <td>{row.ProjectName || '—'}</td>
+                                                    <td>{row.CustomerName || '—'}</td>
                                                     <td className="text-end">{formatK(row.JobValue)}</td>
                                                     <td className="sr-job-bar-cell">
                                                         <div
@@ -1216,10 +1342,26 @@ const SalesReport = () => {
                                                             <div className="sr-job-bar-fill" style={{ width: `${barW}%` }} />
                                                         </div>
                                                     </td>
-                                                    <td className="text-end small text-nowrap">{formatJobBookedGrossMargin(row)}</td>
-                                                    <td>{row.CustomerName || '—'}</td>
+                                                    {topJobStatus === 'Quoted' ? (
+                                                        <>
+                                                            <td className="text-end small text-nowrap">
+                                                                {row.QuoteRef || '—'}
+                                                            </td>
+                                                            <td className="text-nowrap">
+                                                                {formatDateShort(row.QuoteDate)}
+                                                            </td>
+                                                            <td>{row.LeadJob || '—'}</td>
+                                                        </>
+                                                    ) : (
+                                                        <td className="text-end small text-nowrap">
+                                                            {renderTopJobsMetricCell(row)}
+                                                        </td>
+                                                    )}
                                                     <td>{row.ClientName || '—'}</td>
                                                     <td>{row.ConsultantName || '—'}</td>
+                                                    {topJobsTableConfig.extraHeader ? (
+                                                        <td>{row.ReasonForLost || row.FollowUpRemarks || '—'}</td>
+                                                    ) : null}
                                                 </tr>
                                             );
                                         })

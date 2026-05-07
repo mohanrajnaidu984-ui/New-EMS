@@ -51,8 +51,8 @@
 }
 
 .sales-report-page.sales-report-fit {
-    height: calc(100vh - var(--sr-header-offset, 100px));
-    max-height: calc(100vh - var(--sr-header-offset, 100px));
+    height: calc(100vh - var(--sr-header-offset, 72px));
+    max-height: calc(100vh - var(--sr-header-offset, 72px));
     overflow: hidden;
 }
 
@@ -205,10 +205,26 @@
     justify-content: flex-start;
 }
 
+/* Won/Lost only: keep KPI table visible without inner scrollbar. */
+.sr-cell-won-combined .sr-stack-top .sr-summary-body.sr-target-body {
+    overflow: hidden;
+}
+
 /* Job Booking + Gross Profit: same 2 : 3 split as chart — no inner vertical scrollbar (clip if extreme) */
 .sr-cell-target-combined.sr-jb-section .sr-stack-top .sr-summary-body.sr-target-body,
 .sr-cell-gm-combined.sr-gm-section .sr-stack-top .sr-summary-body.sr-target-body {
-    overflow: hidden;
+    overflow: visible;
+}
+
+/* After header compaction, give JB/GM top summary a little more height so quarter table isn't clipped */
+.sr-cell-target-combined .sr-stack-top,
+.sr-cell-gm-combined .sr-stack-top {
+    flex: 2.35 1 0;
+}
+
+.sr-cell-target-combined .sr-ta-chart-stack,
+.sr-cell-gm-combined .sr-ta-chart-stack {
+    flex: 2.65 1 0;
 }
 
 .sr-cell-won-combined .sr-stack-top .sr-won-stack-divider,
@@ -234,14 +250,14 @@
 }
 
 .sr-cell-won-combined .sr-won-chart-stack {
-    flex: 3.35 1 0;
-    min-height: 10.5rem;
+    flex: 2.7 1 0;
+    min-height: 9rem;
     background: var(--sr-bg-smoke);
 }
 
 /* Won/Lost: give the donut a bit more room vs the summary band */
 .sr-cell-won-combined .sr-stack-top {
-    flex: 1.65 1 0;
+    flex: 2.3 1 0;
 }
 
 .sr-cell-target-combined .sr-ta-chart-stack,
@@ -674,9 +690,9 @@
 
 /* Job Booking: Achieved left; Actual above Target on the right — taller band; quarter margin tracks height so Q-table position stays stable */
 .sr-cell-target-combined.sr-jb-section .sr-jb-target-top {
-    min-height: 6.88rem;
-    padding-top: 0.45rem;
-    padding-bottom: 0.82rem;
+    min-height: 5.95rem;
+    padding-top: 0.28rem;
+    padding-bottom: 0.48rem;
 }
 
 .sr-cell-target-combined.sr-jb-section .sr-jb-fraction-stack {
@@ -698,19 +714,19 @@
 }
 
 .sr-cell-target-combined.sr-jb-section .sr-target-hr {
-    margin-top: 0.18rem;
-    margin-bottom: 0.1rem;
+    margin-top: 0.1rem;
+    margin-bottom: 0.06rem;
 }
 
 .sr-cell-target-combined.sr-jb-section .sr-jb-quarter-align {
-    margin-top: -0.08rem;
+    margin-top: -0.2rem;
 }
 
 /* Gross margin: match Job Booking — Actual above Target */
 .sr-cell-gm-combined.sr-gm-section .sr-gm-target-top {
-    min-height: 6.88rem;
-    padding-top: 0.45rem;
-    padding-bottom: 0.82rem;
+    min-height: 5.95rem;
+    padding-top: 0.28rem;
+    padding-bottom: 0.48rem;
 }
 
 .sr-cell-gm-combined.sr-gm-section .sr-gm-fraction-stack {
@@ -732,12 +748,12 @@
 }
 
 .sr-cell-gm-combined.sr-gm-section .sr-target-hr {
-    margin-top: 0.18rem;
-    margin-bottom: 0.1rem;
+    margin-top: 0.1rem;
+    margin-bottom: 0.06rem;
 }
 
 .sr-cell-gm-combined.sr-gm-section .sr-gm-quarter-align {
-    margin-top: -0.08rem;
+    margin-top: -0.2rem;
 }
 
 /* Larger type for Total Target vs Actual row (Achieved + fractions) */
@@ -1014,7 +1030,7 @@
 
 /* Won/Lost donut — concentric ring, soft depth; surface overflow so drop-shadow isn’t clipped */
 .sr-cell-won-combined .sr-chart-pie.sr-donut-chart {
-    padding: 2px 4px 0;
+    padding: 0 2px 0;
     box-sizing: border-box;
 }
 
@@ -1235,9 +1251,35 @@
     box-shadow: 0 0 0 0.12rem rgba(255, 255, 255, 0.35);
 }
 
+.sr-table-expand-btn {
+    width: 1.75rem;
+    height: 1.35rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-color: rgba(255, 255, 255, 0.45);
+}
+
+.sr-table-expand-btn:hover {
+    border-color: #fff;
+}
+
 /* Bootstrap card-header can force semibold on table section title */
 .sales-report-page .sr-report-table-title.card-header {
     font-weight: 500 !important;
+}
+
+/* Expanded table mode: left side fully table, pipeline unchanged */
+.sales-report-page.sr-table-expanded .sr-cell-won-combined,
+.sales-report-page.sr-table-expanded .sr-cell-target-combined,
+.sales-report-page.sr-table-expanded .sr-cell-gm-combined {
+    display: none !important;
+}
+
+.sales-report-page.sr-table-expanded .sr-cell-table {
+    grid-column: 1 / span 3;
+    grid-row: 1 / span 3;
 }
 
 .sr-table-inner {
@@ -1269,6 +1311,15 @@
     line-height: 1.15;
     vertical-align: middle;
     border-color: #e2e8f0 !important;
+}
+
+/* Top Jobs table: alternate soft background per enquiry (RequestNo group) */
+.sr-detail-table tbody tr.sr-enquiry-strip-a td {
+    background-color: #f8fafc;
+}
+
+.sr-detail-table tbody tr.sr-enquiry-strip-b td {
+    background-color: #eef2ff;
 }
 
 /* Top Jobs table: “k” / “M” and “%” same size as Job Value / Gross Margin numerals (override global 0.5em suffix) */

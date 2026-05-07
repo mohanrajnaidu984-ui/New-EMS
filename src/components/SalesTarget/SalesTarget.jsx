@@ -244,7 +244,7 @@ const SalesTarget = () => {
     };
 
     return (
-        <div className="container-fluid p-4 sales-target-container" style={{ backgroundColor: '#f1f3f5', minHeight: 'calc(100vh - 100px)', color: '#212529' }}>
+        <div className="container-fluid p-4 sales-target-container" style={{ backgroundColor: '#f1f3f5', minHeight: 'calc(100vh - 72px)', color: '#212529' }}>
             <div style={{ width: '70%', margin: '0 auto' }}>
             <div className="d-flex justify-content-between align-items-center mb-4">
                 <h4 className="fw-bold text-dark mb-0">

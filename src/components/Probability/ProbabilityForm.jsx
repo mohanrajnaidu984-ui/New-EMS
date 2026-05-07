@@ -5,6 +5,7 @@ import DatePicker from 'react-datepicker';
 import "react-datepicker/dist/react-datepicker.css";
 import { format } from 'date-fns';
 import { enUS } from 'date-fns/locale';
+import { FilterX, RefreshCw } from 'lucide-react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 
@@ -1121,9 +1122,18 @@ const ProbabilityForm = () => {
                     <div className="card border-0 shadow-sm rounded-3 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
                         {/* Header & Filters */}
                         <div className="card-header bg-white border-bottom py-3" style={{ flexShrink: 0 }}>
-                            <div className="d-flex flex-wrap align-items-center gap-3">
+                            <div
+                                className="d-flex align-items-end gap-2"
+                                style={{
+                                    flexWrap: 'nowrap',
+                                    overflowX: 'auto',
+                                    overflowY: 'hidden',
+                                    scrollbarGutter: 'stable',
+                                    WebkitOverflowScrolling: 'touch',
+                                }}
+                            >
                                 {/* Division Selector */}
-                                <div style={{ width: '250px' }}>
+                                <div style={{ width: '200px', flex: '0 0 auto' }}>
                                     <label className="small text-muted fw-bold mb-1">Division</label>
                                     <select
                                         className="form-select"
@@ -1142,7 +1152,7 @@ const ProbabilityForm = () => {
                                 </div>
 
                                 {/* Mode Selector */}
-                                <div style={{ width: '250px' }}>
+                                <div style={{ width: '180px', flex: '0 0 auto' }}>
                                     <label className="small text-muted fw-bold mb-1">View Mode</label>
                                     <select
                                         className="form-select"
@@ -1165,7 +1175,7 @@ const ProbabilityForm = () => {
                                         <option value="Retendered">Retendered</option>
                                     </select>
                                 </div>
-                                <div style={{ width: '280px' }}>
+                                <div style={{ width: '260px', flex: '0 0 auto' }}>
                                     <label className="small text-muted fw-bold mb-1">Search</label>
                                     <input
                                         type="text"
@@ -1179,14 +1189,14 @@ const ProbabilityForm = () => {
                                 {/* Date Filters (Not for Pending) */}
                                 {listMode !== 'Pending' && listMode !== 'FollowUp' && (
                                     <>
-                                        <div style={{ width: '130px' }} className="d-flex flex-column">
+                                        <div style={{ width: '120px', flex: '0 0 auto' }} className="d-flex flex-column">
                                             <label className="small text-muted fw-bold mb-1 d-block">From</label>
                                             <div className="prob-date-picker-wrap">
                                                 <DatePicker
                                                     selected={parseIsoDate(fromDate)}
                                                     onChange={(date) => setFromDate(date ? format(date, 'yyyy-MM-dd') : '')}
-                                                    dateFormat="dd-MMM-yy"
-                                                    placeholderText="DD-MMM-YY"
+                                                    dateFormat="dd-MM-yy"
+                                                    placeholderText="DD-MM-YY"
                                                     className="form-control prob-date-input"
                                                     popperClassName="prob-datepicker-popper"
                                                     todayButton="Today"
@@ -1196,14 +1206,14 @@ const ProbabilityForm = () => {
                                                 <span className="prob-date-input-icon" aria-hidden="true" />
                                             </div>
                                         </div>
-                                        <div style={{ width: '130px' }} className="d-flex flex-column">
+                                        <div style={{ width: '120px', flex: '0 0 auto' }} className="d-flex flex-column">
                                             <label className="small text-muted fw-bold mb-1 d-block">To</label>
                                             <div className="prob-date-picker-wrap">
                                                 <DatePicker
                                                     selected={parseIsoDate(toDate)}
                                                     onChange={(date) => setToDate(date ? format(date, 'yyyy-MM-dd') : '')}
-                                                    dateFormat="dd-MMM-yy"
-                                                    placeholderText="DD-MMM-YY"
+                                                    dateFormat="dd-MM-yy"
+                                                    placeholderText="DD-MM-YY"
                                                     className="form-control prob-date-input"
                                                     popperClassName="prob-datepicker-popper"
                                                     todayButton="Today"
@@ -1216,7 +1226,8 @@ const ProbabilityForm = () => {
                                         <div
                                             className="align-self-end"
                                             style={{
-                                                minWidth: '340px',
+                                                minWidth: '300px',
+                                                flex: '0 0 auto',
                                                 background: '#ffffff',
                                                 border: '1px solid #d7dee8',
                                                 borderRadius: '8px',
@@ -1284,7 +1295,7 @@ const ProbabilityForm = () => {
 
                                 {/* FollowUp Probability Filter */}
                                 {listMode === 'FollowUp' && (
-                                    <div style={{ width: '200px' }}>
+                                    <div style={{ width: '180px', flex: '0 0 auto' }}>
                                         <label className="small text-muted fw-bold mb-1">Probability</label>
                                         <select className="form-select" value={filterProbability} onChange={e => setFilterProbability(e.target.value)}>
                                             <option value="">All</option>
@@ -1299,12 +1310,26 @@ const ProbabilityForm = () => {
                                 )}
 
                                 {/* Refresh & table column filters */}
-                                <div className="ms-auto align-self-end d-flex gap-2">
-                                    <button type="button" className="btn btn-outline-secondary btn-sm" onClick={clearAllColumnFilters} title="Clear column filters and sort">
-                                        Clear table filters
+                                <div className="ms-auto align-self-end d-flex gap-2" style={{ flex: '0 0 auto' }}>
+                                    <button
+                                        type="button"
+                                        className="btn btn-outline-secondary btn-sm d-flex align-items-center justify-content-center"
+                                        style={{ width: '36px', height: '36px', padding: 0 }}
+                                        onClick={clearAllColumnFilters}
+                                        title="Clear table filters"
+                                        aria-label="Clear table filters"
+                                    >
+                                        <FilterX size={16} />
                                     </button>
-                                    <button className="btn btn-outline-primary" onClick={fetchList} disabled={loadingList}>
-                                        {loadingList ? 'Loading...' : 'Refresh'}
+                                    <button
+                                        className="btn btn-outline-primary btn-sm d-flex align-items-center justify-content-center"
+                                        style={{ width: '36px', height: '36px', padding: 0 }}
+                                        onClick={fetchList}
+                                        disabled={loadingList}
+                                        title="Refresh"
+                                        aria-label="Refresh"
+                                    >
+                                        <RefreshCw size={16} />
                                     </button>
                                 </div>
                             </div>
@@ -1668,12 +1693,12 @@ const ProbabilityForm = () => {
                                                         </select>
                                                     </td>
                                                     <td className="px-2 py-1 prob-td">
-                                                        <div className="d-flex align-items-end gap-2 flex-wrap">
+                                                        <div className="d-flex align-items-end gap-2 flex-wrap prob-detail-controls">
                                                             {item.Status === 'Lost' && (
                                                                 <>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-1">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Lost To</span>
-                                                                        <div style={{ width: '220px' }}>
+                                                                        <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
                                                                             <AsyncSelect
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
@@ -1790,7 +1815,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-2">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Reason for losing</span>
                                                                         <div style={{ width: '180px' }}>
                                                                             <select
@@ -1809,7 +1834,7 @@ const ProbabilityForm = () => {
                                                                             </select>
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-3">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Competitor's price</span>
                                                                         <div className="input-group input-group-sm" style={{ width: '120px' }}>
                                                                             <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>BD</span>
@@ -1823,7 +1848,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-4">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Lost Date</span>
                                                                         <div style={{ width: '130px' }}>
                                                                             <input
@@ -1836,7 +1861,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-5">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Remarks</span>
                                                                         <div style={{ width: '200px' }}>
                                                                             <textarea
@@ -1854,7 +1879,7 @@ const ProbabilityForm = () => {
                                                             {/* Follow Up UI in 7th Column */}
                                                             {item.Status === 'FollowUp' && (
                                                                 <>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-1">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
                                                                         <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
                                                                             <Select
@@ -1891,13 +1916,29 @@ const ProbabilityForm = () => {
                                                                                     });
                                                                                 }}
                                                                                 options={buildQuoteRefOptions(item)}
-                                                                                formatOptionLabel={({ label, customer, leadJob }) => (
-                                                                                    <div style={{ lineHeight: '1.2', padding: '2px 0' }}>
-                                                                                        <div style={{ fontWeight: 'bold', fontSize: '13px' }}>{label}</div>
-                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>
-                                                                                            {customer}{leadJob ? ` (Leadjob-${leadJob})` : ''}
-                                                                                        </div>
-                                                                                    </div>
+                                                                                formatOptionLabel={(opt, { context }) => (
+                                                                                    context === 'value'
+                                                                                        ? (
+                                                                                            <div
+                                                                                                style={{
+                                                                                                    fontSize: '11px',
+                                                                                                    fontWeight: 400,
+                                                                                                    whiteSpace: 'nowrap',
+                                                                                                    overflow: 'hidden',
+                                                                                                    textOverflow: 'ellipsis'
+                                                                                                }}
+                                                                                                title={opt.label}
+                                                                                            >
+                                                                                                {opt.label}
+                                                                                            </div>
+                                                                                        ) : (
+                                                                                            <div style={{ lineHeight: '1.15', padding: '2px 0' }}>
+                                                                                                <div style={{ fontWeight: 400, fontSize: '11px' }}>{opt.label}</div>
+                                                                                                <div style={{ fontSize: '10px', color: '#666' }}>
+                                                                                                    {opt.customer}{opt.leadJob ? ` (Leadjob-${opt.leadJob})` : ''}
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        )
                                                                                 )}
                                                                                 styles={{
                                                                                     control: (base) => ({
@@ -1929,7 +1970,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-2">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Probability</span>
                                                                         <div style={{ width: '180px' }}>
                                                                             <select
@@ -1949,7 +1990,7 @@ const ProbabilityForm = () => {
                                                                         </div>
                                                                     </div>
                                                                     {item.ProbabilityOption && (item.ProbabilityOption.includes('90%') || item.ProbabilityOption.includes('99%')) && (
-                                                                        <div className="d-flex flex-column">
+                                                                        <div className="d-flex flex-column prob-detail-col-3">
                                                                             <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Expected Date</span>
                                                                             <div style={{ width: '130px' }}>
                                                                                 <DatePicker
@@ -1968,7 +2009,13 @@ const ProbabilityForm = () => {
                                                                             </div>
                                                                         </div>
                                                                     )}
-                                                                    <div className="d-flex flex-column">
+                                                                    {(!item.ProbabilityOption || (!item.ProbabilityOption.includes('90%') && !item.ProbabilityOption.includes('99%'))) && (
+                                                                        <div className="d-flex flex-column prob-detail-col-3" aria-hidden="true">
+                                                                            <span style={{ fontSize: '10px', color: 'transparent', marginBottom: '2px' }}>Expected Date</span>
+                                                                            <div style={{ width: '130px', minHeight: '1.35rem' }} />
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="d-flex flex-column prob-detail-col-4">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Remarks</span>
                                                                         <div style={{ width: '250px' }}>
                                                                             <textarea
@@ -1981,7 +2028,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-5">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Prepared by</span>
                                                                         <div style={{ width: '200px' }}>
                                                                             <input
@@ -1997,9 +2044,9 @@ const ProbabilityForm = () => {
                                                             )}                                                                      {/* Won UI in 7th Column */}
                                                             {item.Status === 'Won' && (
                                                                 <>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-1">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
-                                                                        <div style={{ width: '320px' }}>
+                                                                        <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
                                                                             <Select
                                                                                 className="basic-single"
                                                                                 classNamePrefix="select"
@@ -2035,13 +2082,29 @@ const ProbabilityForm = () => {
                                                                                     });
                                                                                 }}
                                                                                 options={buildQuoteRefOptions(item)}
-                                                                                formatOptionLabel={({ label, customer, leadJob }) => (
-                                                                                    <div style={{ lineHeight: '1.2', padding: '2px 0' }}>
-                                                                                        <div style={{ fontWeight: 'bold', fontSize: '13px' }}>{label}</div>
-                                                                                        <div style={{ fontSize: '11px', color: '#666' }}>
-                                                                                            {customer}{leadJob ? ` (Leadjob-${leadJob})` : ''}
-                                                                                        </div>
-                                                                                    </div>
+                                                                                formatOptionLabel={(opt, { context }) => (
+                                                                                    context === 'value'
+                                                                                        ? (
+                                                                                            <div
+                                                                                                style={{
+                                                                                                    fontSize: '11px',
+                                                                                                    fontWeight: 400,
+                                                                                                    whiteSpace: 'nowrap',
+                                                                                                    overflow: 'hidden',
+                                                                                                    textOverflow: 'ellipsis'
+                                                                                                }}
+                                                                                                title={opt.label}
+                                                                                            >
+                                                                                                {opt.label}
+                                                                                            </div>
+                                                                                        ) : (
+                                                                                            <div style={{ lineHeight: '1.15', padding: '2px 0' }}>
+                                                                                                <div style={{ fontWeight: 400, fontSize: '11px' }}>{opt.label}</div>
+                                                                                                <div style={{ fontSize: '10px', color: '#666' }}>
+                                                                                                    {opt.customer}{opt.leadJob ? ` (Leadjob-${opt.leadJob})` : ''}
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        )
                                                                                 )}
                                                                                 styles={{
                                                                                     control: (base) => ({
@@ -2076,7 +2139,7 @@ const ProbabilityForm = () => {
 
 
 
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-2">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>ERP Job No.</span>
                                                                         <div style={{ width: '130px' }}>
                                                                             <input
@@ -2089,7 +2152,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-field-num">
+                                                                    <div className="d-flex flex-column prob-detail-field-num prob-detail-col-3">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Job Value</span>
                                                                         <div className="input-group input-group-sm" style={{ width: '140px' }}>
                                                                             <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>BD</span>
@@ -2103,7 +2166,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-field-num">
+                                                                    <div className="d-flex flex-column prob-detail-field-num prob-detail-col-4">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>GP % <span className="text-danger">*</span></span>
                                                                         <div className="input-group input-group-sm" style={{ width: '110px' }}>
                                                                             <input
@@ -2120,7 +2183,7 @@ const ProbabilityForm = () => {
                                                                             <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>%</span>
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-5">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Booked Date</span>
                                                                         <div style={{ width: '130px' }}>
                                                                             <DatePicker
@@ -2138,7 +2201,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-6">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Remarks</span>
                                                                         <div style={{ width: '250px' }}>
                                                                             <textarea
@@ -2151,7 +2214,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-7">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Prepared by</span>
                                                                         <div style={{ width: '200px' }}>
                                                                             <input
@@ -2169,7 +2232,11 @@ const ProbabilityForm = () => {
                                                             {/* OnHold/Cancelled/Retendered UI */}
                                                             {(item.Status === 'OnHold' || item.Status === 'Cancelled' || item.Status === 'Retendered') && (
                                                                 <>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-1" aria-hidden="true">
+                                                                        <span style={{ fontSize: '10px', color: 'transparent', marginBottom: '2px' }}>Spacer</span>
+                                                                        <div style={{ width: '320px', minHeight: '1.35rem' }} />
+                                                                    </div>
+                                                                    <div className="d-flex flex-column prob-detail-col-2">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Reason</span>
                                                                         <div style={{ width: '220px' }}>
                                                                             <input
@@ -2182,7 +2249,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column">
+                                                                    <div className="d-flex flex-column prob-detail-col-3">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Remarks</span>
                                                                         <div style={{ width: '250px' }}>
                                                                             <textarea

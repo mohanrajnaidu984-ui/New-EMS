@@ -8,6 +8,8 @@ import ProbabilityForm from './Probability/ProbabilityForm';
 
 import SalesReport from './SalesReport/SalesReport';
 import SalesTarget from './SalesTarget/SalesTarget';
+import About from './About/About';
+import Help from './Help/Help';
 
 const Main = ({ activeTab, onNavigate, enquiryToOpen, openContext, onOpenEnquiry }) => {
     return (
@@ -16,6 +18,9 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, openContext, onOpenEnquiry
             <div className="tab-content">
                 {activeTab === 'Dashboard' && (
                     <Dashboard onNavigate={onNavigate} onOpenEnquiry={onOpenEnquiry} />
+                )}
+                {activeTab === 'About' && (
+                    <About />
                 )}
                 {activeTab === 'Enquiry' && (
                     <EnquiryForm requestNoToOpen={enquiryToOpen} />
@@ -31,6 +36,9 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, openContext, onOpenEnquiry
                 )}
                 {activeTab === 'Sales Report' && (
                     <SalesReport />
+                )}
+                {activeTab === 'Help' && (
+                    <Help />
                 )}
                 {activeTab === 'Reports' && (
                     <SalesTarget />

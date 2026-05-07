@@ -6,8 +6,8 @@ import DateInput from '../Enquiry/DateInput';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
-/** Sticky list/toolbars sit below fixed `Header` (height ≈ 100px; see MainLayout marginTop). */
-const PRICING_STICKY_TOP = '100px';
+/** Sticky list/toolbars sit below fixed `Header` (height ≈ 72px; see MainLayout marginTop). */
+const PRICING_STICKY_TOP = '72px';
 
 /** Price entry grid: quarter view width, capped to parent on small screens. */
 const PRICING_INPUT_SECTION_STYLE = {

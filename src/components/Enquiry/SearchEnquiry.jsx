@@ -308,11 +308,11 @@ const SearchEnquiry = ({ onOpen }) => {
             className="px-3 px-lg-4"
             style={{ position: 'relative', zIndex: 100, boxSizing: 'border-box' }}
         >
-            {/* Sticky under app header (100px) so this bar stays visible while scrolling results */}
+            {/* Sticky under compact app header (72px) so this bar stays visible while scrolling results */}
             <div
                 style={{
                     position: 'sticky',
-                    top: '100px',
+                    top: '72px',
                     zIndex: 200,
                     backgroundColor: '#ffffff',
                     paddingTop: '4px',
