@@ -1265,6 +1265,25 @@
     border-color: #fff;
 }
 
+.sr-table-clear-filters-btn {
+    width: 1.75rem;
+    height: 1.35rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-color: rgba(255, 255, 255, 0.45);
+}
+
+.sr-table-clear-filters-btn:hover:not(:disabled) {
+    border-color: #fff;
+}
+
+.sr-table-clear-filters-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 /* Bootstrap card-header can force semibold on table section title */
 .sales-report-page .sr-report-table-title.card-header {
     font-weight: 500 !important;
@@ -1313,13 +1332,127 @@
     border-color: #e2e8f0 !important;
 }
 
+.sr-detail-table__total-row td {
+    background: #6f8ee8 !important;
+    color: #ffffff !important;
+    border-color: #5f7dd6 !important;
+    font-weight: 600;
+}
+
 /* Top Jobs table: alternate soft background per enquiry (RequestNo group) */
 .sr-detail-table tbody tr.sr-enquiry-strip-a td {
-    background-color: #f8fafc;
+    background-color: #f5f5f5;
 }
 
 .sr-detail-table tbody tr.sr-enquiry-strip-b td {
-    background-color: #eef2ff;
+    background-color: #dde5f6;
+}
+
+.sr-filterable-th {
+    position: sticky;
+}
+
+.sr-th-filter-btn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.25rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    padding: 0;
+}
+
+.sr-th-filter-caret {
+    font-size: 0.58rem;
+    opacity: 0.75;
+}
+
+.sr-th-filter-caret--active {
+    color: #4f46e5;
+    opacity: 1;
+}
+
+.sr-th-filter-popover {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    min-width: 220px;
+    max-width: 280px;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.22);
+    padding: 0.45rem;
+    z-index: 20;
+}
+
+.sr-th-filter-popover--value {
+    min-width: 190px;
+}
+
+.sr-th-value-op-select {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.16rem 0.3rem;
+    font-size: 0.65rem;
+    margin-bottom: 0.35rem;
+}
+
+.sr-th-filter-search {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.18rem 0.35rem;
+    font-size: 0.65rem;
+}
+
+.sr-th-filter-actions,
+.sr-th-filter-footer {
+    display: flex;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+}
+
+.sr-th-filter-actions button,
+.sr-th-filter-footer button {
+    border: 1px solid #94a3b8;
+    background: #f8fafc;
+    border-radius: 4px;
+    padding: 0.08rem 0.38rem;
+    font-size: 0.64rem;
+}
+
+.sr-th-filter-options {
+    max-height: 170px;
+    overflow: auto;
+    margin-top: 0.35rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 0.22rem 0.3rem;
+}
+
+.sr-th-filter-option {
+    display: flex;
+    align-items: center;
+    gap: 0.33rem;
+    font-size: 0.67rem;
+    line-height: 1.2;
+    padding: 0.08rem 0;
+}
+
+.sr-th-filter-footer {
+    justify-content: flex-end;
+}
+
+.sr-th-filter-footer .sr-th-filter-apply {
+    background: #6366f1;
+    border-color: #6366f1;
+    color: #fff;
 }
 
 /* Top Jobs table: “k” / “M” and “%” same size as Job Value / Gross Margin numerals (override global 0.5em suffix) */

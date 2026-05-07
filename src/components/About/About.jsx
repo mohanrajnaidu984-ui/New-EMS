@@ -55,6 +55,9 @@ const About = () => {
           </div>
 
           <hr className="my-3" />
+          <p className="mb-1 text-secondary">
+            This product is the property of Almoayyed Contracting Group.
+          </p>
           <p className="mb-0" style={{ color: '#20396D', fontWeight: 600 }}>
             Developed by Mohan Naidu
           </p>

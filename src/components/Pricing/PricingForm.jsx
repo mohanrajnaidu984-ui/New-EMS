@@ -936,6 +936,7 @@ const PricingForm = ({ openContext = null }) => {
         valuesRef.current = values;
     }, [values]);
     const [newOptionNames, setNewOptionNames] = useState({});
+    const [showNewOptionInputs, setShowNewOptionInputs] = useState({});
     const [focusedCell, setFocusedCell] = useState(null); // tracks which price input is focused
 
     // Customer state
@@ -2209,8 +2210,10 @@ const PricingForm = ({ openContext = null }) => {
     /** `scopeJobId`: EnquiryFor row for this section — required when UI `targetScope` is a display key (e.g. `L1 - Name`) that does not equal `ItemName`. */
     const addOption = async (targetScope, explicitName = null, explicitCustomer = null, scopeJobId = null) => {
         const currentValues = { ...values }; // Capture current state
-        const optionName = explicitName || newOptionNames[targetScope] || '';
-        if (!optionName.trim() || !pricingData) return;
+        const typedName = String(newOptionNames[targetScope] || '').trim();
+        const optionName = String(explicitName || typedName || '').trim();
+        if (!pricingData) return false;
+        if (!optionName) return false;
 
         let targetItemName = targetScope ? targetScope.trim() : '';
         const currentActiveLeadJob = (pricingData.jobs || []).find(j => j.id == selectedLeadId);
@@ -2328,6 +2331,7 @@ const PricingForm = ({ openContext = null }) => {
                 setNewOptionNames(prev => ({ ...prev, [targetScope]: '' }));
                 // Reload with the newly active customer
                 loadPricing(pricingData.enquiry.requestNo, explicitCustomer || selectedCustomer, currentValues);
+                return true;
             } else {
                 let detail = '';
                 try {
@@ -2338,10 +2342,12 @@ const PricingForm = ({ openContext = null }) => {
                 }
                 console.error('Add Option: Failed', res.status, res.statusText, detail);
                 alert(`Could not add option (${res.status}). ${detail || res.statusText}`);
+                return false;
             }
         } catch (err) {
             console.error('Error adding option:', err);
             alert('Could not add option: ' + (err?.message || err));
+            return false;
         }
     };
 
@@ -3538,8 +3544,8 @@ const PricingForm = ({ openContext = null }) => {
             {/* Sticky: list filters (always) + when editing prices: Back, project, Lead Job, customers */}
             <div
                 style={{
-                    position: 'sticky',
-                    top: PRICING_STICKY_TOP,
+                    position: pricingData && !loading ? 'relative' : 'sticky',
+                    top: pricingData && !loading ? undefined : PRICING_STICKY_TOP,
                     zIndex: 100,
                     background: '#f5f7fa',
                     ...(listFillsViewport ? { flexShrink: 0 } : {}),
@@ -5340,38 +5346,51 @@ const PricingForm = ({ openContext = null }) => {
                                                             {canEditSection && (
                                                                 <tr style={{ background: '#f8fafc' }}>
                                                                     <td style={{ padding: '4px 12px', verticalAlign: 'middle' }}>
-                                                                        <input
-                                                                            type="text"
-                                                                            placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
-                                                                            value={newOptionNames[groupName] || ''}
-                                                                            onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
-                                                                            onKeyDown={(e) => {
-                                                                                if (e.key === 'Enter') {
-                                                                                    addOption(groupName, null, null, job.id);
-                                                                                }
-                                                                            }}
-                                                                            style={{
-                                                                                width: '100%',
-                                                                                padding: '4px 8px',
-                                                                                border: '1px solid #cbd5e1',
-                                                                                borderRadius: '4px',
-                                                                                fontSize: '13px'
-                                                                            }}
-                                                                        />
+                                                                        {showNewOptionInputs[groupName] ? (
+                                                                            <input
+                                                                                type="text"
+                                                                                placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
+                                                                                value={newOptionNames[groupName] || ''}
+                                                                                onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
+                                                                                onKeyDown={async (e) => {
+                                                                                    if (e.key === 'Enter') {
+                                                                                        const ok = await addOption(groupName, null, null, job.id);
+                                                                                        if (ok) {
+                                                                                            setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                        }
+                                                                                    }
+                                                                                }}
+                                                                                style={{
+                                                                                    width: '100%',
+                                                                                    padding: '4px 8px',
+                                                                                    border: '1px solid #cbd5e1',
+                                                                                    borderRadius: '4px',
+                                                                                    fontSize: '13px'
+                                                                                }}
+                                                                            />
+                                                                        ) : null}
                                                                     </td>
                                                                     <td style={{ padding: '8px 12px', textAlign: 'right', width: '168px', verticalAlign: 'middle' }}>
                                                                         <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', width: '100%' }}>
                                                                             <button
                                                                                 type="button"
-                                                                                onClick={() => addOption(groupName, null, null, job.id)}
-                                                                                disabled={!newOptionNames[groupName]}
+                                                                                onClick={async () => {
+                                                                                    if (!showNewOptionInputs[groupName]) {
+                                                                                        setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: true }));
+                                                                                        return;
+                                                                                    }
+                                                                                    const ok = await addOption(groupName, null, null, job.id);
+                                                                                    if (ok) {
+                                                                                        setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                    }
+                                                                                }}
                                                                                 style={{
                                                                                     padding: '6px 12px',
-                                                                                    background: newOptionNames[groupName] ? 'white' : '#f1f5f9',
-                                                                                    color: newOptionNames[groupName] ? '#0284c7' : '#94a3b8',
+                                                                                    background: 'white',
+                                                                                    color: '#0284c7',
                                                                                     border: '1px solid #cbd5e1',
                                                                                     borderRadius: '4px',
-                                                                                    cursor: newOptionNames[groupName] ? 'pointer' : 'default',
+                                                                                    cursor: 'pointer',
                                                                                     display: 'inline-flex',
                                                                                     alignItems: 'center',
                                                                                     gap: '4px',

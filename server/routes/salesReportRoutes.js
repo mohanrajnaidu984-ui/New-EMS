@@ -1201,11 +1201,9 @@ WITH LatestProbByUpdate AS (
               AND (
                     P.RequestNo IS NULL
                     OR (
-                        REPLACE(REPLACE(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))), '-', ''), ' ', '') = 'pending'
-                        AND LTRIM(RTRIM(ISNULL(P.ProbabilityChance, ''))) = ''
+                        REPLACE(REPLACE(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))), '-', ''), ' ', '') IN ('pending', 'quote', 'quoted')
                     )
                   )
-              AND LQ.RequestNo IS NOT NULL
             `);
         } catch (qpErr) {
             console.warn('[Sales Report] Quoted-pending probability aggregate:', qpErr.message);

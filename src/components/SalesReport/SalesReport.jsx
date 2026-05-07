@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import {
     BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
     PieChart, Pie, Cell, CartesianGrid
 } from 'recharts';
-import { Printer, Mail, Maximize2, Minimize2 } from 'lucide-react';
+import { Printer, Mail, Maximize2, Minimize2, FilterX } from 'lucide-react';
 import './SalesReport.css';
 
 const defaultReport = () => ({
@@ -72,7 +72,7 @@ const SR_DONUT_GRADIENTS = {
 };
 
 /** Target vs Actual / GM charts — actual darker slate; target lighter periwinkle */
-const BAR_TARGET_FILL = '#a3b8db';
+const BAR_TARGET_FILL = '#8fa9d2';
 const BAR_ACTUAL_FILL = '#20396D';
 
 /** SVG fill URLs (unique per chart so two BarCharts can coexist) */
@@ -246,6 +246,8 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
     const hwAt = (y) => hwTop + ((hwBot - hwTop) * y) / vb.h;
     const n = Math.max(rows?.length || 0, 1);
     const bandH = vb.h / n;
+    /** Small visual separation only between 10% and 25% bands. */
+    const topBandGap = 2.4;
 
     return (
         <div className="sales-pipeline-funnel-visual d-flex flex-column flex-grow-1 min-h-0 w-100">
@@ -278,8 +280,8 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                     </defs>
                     <g filter="url(#srFunnelDrop)">
                     {rows.map((row, i) => {
-                        const y0 = i * bandH;
-                        const y1 = (i + 1) * bandH;
+                        const y0 = i * bandH + (i === 1 ? topBandGap / 2 : 0);
+                        const y1 = (i + 1) * bandH - (i === 0 ? topBandGap / 2 : 0);
                         const xLT = vb.w / 2 - hwAt(y0);
                         const xRT = vb.w / 2 + hwAt(y0);
                         const xLB = vb.w / 2 - hwAt(y1);
@@ -303,11 +305,12 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                     {rows.map((row, i) => {
                         const stage = FUNNEL_STAGES[i];
                         if (!stage) return null;
-                        const y0 = i * bandH;
-                        const y1 = (i + 1) * bandH;
+                        const y0 = i * bandH + (i === 1 ? topBandGap / 2 : 0);
+                        const y1 = (i + 1) * bandH - (i === 0 ? topBandGap / 2 : 0);
+                        const bandMid = (y0 + y1) / 2;
                         /* Top band: label a bit lower so “10%” clears viewBox padding; others slightly above mid-band */
                         const cy =
-                            i === 0 ? y0 + bandH * 0.48 : y0 + bandH * 0.38;
+                            i === 0 ? y0 + (y1 - y0) * 0.5 : bandMid - (y1 - y0) * 0.12;
                         const xLeftAtCy = vb.w / 2 - hwAt(cy);
                         const labelX = xLeftAtCy - 1.15;
                         return (
@@ -327,10 +330,9 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                     {rows.map((row, i) => {
                         const val = Number(row.value) || 0;
                         if (val <= 0) return null;
-                        const y0 = i * bandH;
-                        const y1 = (i + 1) * bandH;
-                        const cyVal = y0 + bandH * 0.62;
-                        const nBands = rows.length;
+                        const y0 = i * bandH + (i === 1 ? topBandGap / 2 : 0);
+                        const y1 = (i + 1) * bandH - (i === 0 ? topBandGap / 2 : 0);
+                        const cyVal = y0 + (y1 - y0) * 0.62;
                         return (
                             <text
                                 key={`fval-${row.name || i}`}
@@ -343,7 +345,7 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                                 className="sr-funnel-block-value-svg"
                                 fill="#ffffff"
                             >
-                                {formatFullNumber(val)}
+                                {formatSalesAmountString(val)}
                             </text>
                         );
                     })}
@@ -387,6 +389,13 @@ const SalesReport = () => {
     const [loading, setLoading] = useState(false);
     const [topJobsLoading, setTopJobsLoading] = useState(false);
     const [tableExpanded, setTableExpanded] = useState(false);
+    const [topJobColumnFilters, setTopJobColumnFilters] = useState({});
+    const [topJobValueFilter, setTopJobValueFilter] = useState(null);
+    const [topJobValueFilterDraft, setTopJobValueFilterDraft] = useState({ mode: 'gt', v1: '', v2: '' });
+    const [activeHeaderFilter, setActiveHeaderFilter] = useState(null);
+    const [headerFilterSearch, setHeaderFilterSearch] = useState('');
+    const [headerFilterDraft, setHeaderFilterDraft] = useState([]);
+    const headerFilterRef = useRef(null);
     const [summaryError, setSummaryError] = useState(null);
     const [reportData, setReportData] = useState(defaultReport);
 
@@ -718,10 +727,169 @@ const SalesReport = () => {
         return [...rows].sort((a, b) => (Number(b.JobValue) || 0) - (Number(a.JobValue) || 0));
     }, [reportData.topJobBooked]);
 
+    const getTopJobMetricFilterValue = (row) => {
+        if (topJobStatus === 'Quoted') return String(row.QuoteRef || '—');
+        if (topJobStatus === 'Won') return String(Math.round(Number(row.WonGrossProfit) || 0));
+        if (topJobStatus === 'Lost') return String(row.LostToWhom || row.CustomerName || '—');
+        if (topJobStatus === 'Follow Up') return String(row.ProbabilityChance || '—');
+        return String(row.Status || '—');
+    };
+
+    const getTopJobFilterValue = (row, key) => {
+        if (key === 'requestNo') return String(row.RequestNo || row.EnquiryNo || '—');
+        if (key === 'projectName') return String(row.ProjectName || '—');
+        if (key === 'customerName') return String(row.CustomerName || '—');
+        if (key === 'jobValue') return String(Number(row.JobValue) || 0);
+        if (key === 'metric') return getTopJobMetricFilterValue(row);
+        if (key === 'quoteDate') {
+            if (!row.QuoteDate) return '—';
+            const d = new Date(row.QuoteDate);
+            if (Number.isNaN(d.getTime())) return '—';
+            const day = String(d.getDate()).padStart(2, '0');
+            const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const mon = MONTHS[d.getMonth()] || '';
+            const yy = String(d.getFullYear()).slice(-2);
+            return `${day}-${mon}-${yy}`;
+        }
+        if (key === 'leadJob') return String(row.LeadJob || '—');
+        if (key === 'clientName') return String(row.ClientName || '—');
+        if (key === 'consultantName') return String(row.ConsultantName || '—');
+        if (key === 'extra') return String(row.ReasonForLost || row.FollowUpRemarks || '—');
+        return '';
+    };
+
+    const filterableTopJobColumns = useMemo(() => {
+        const cols = [
+            { key: 'requestNo', label: 'Enquiry No.' },
+            { key: 'projectName', label: 'Project Name' },
+            { key: 'customerName', label: 'Customer Name' },
+            { key: 'metric', label: topJobStatus === 'Quoted' ? 'Quote Ref' : 'Metric' },
+            { key: 'clientName', label: 'Client Name' },
+            { key: 'consultantName', label: 'Consultant Name' }
+        ];
+        if (topJobStatus === 'Quoted') {
+            cols.splice(4, 0, { key: 'quoteDate', label: 'Quote Date' }, { key: 'leadJob', label: 'Lead Job Name' });
+        }
+        if ((TOP_JOB_TABLE_CONFIG[topJobStatus] || TOP_JOB_TABLE_CONFIG.Won)?.extraHeader) {
+            cols.push({ key: 'extra', label: 'Extra' });
+        }
+        return cols;
+    }, [topJobStatus]);
+
+    const topJobFilterOptions = useMemo(() => {
+        const out = {};
+        filterableTopJobColumns.forEach((c) => {
+            out[c.key] = Array.from(new Set(topRows.map((r) => getTopJobFilterValue(r, c.key)))).sort((a, b) =>
+                a.localeCompare(b, undefined, { sensitivity: 'base' })
+            );
+        });
+        return out;
+    }, [topRows, filterableTopJobColumns]);
+
+    const topRowsFiltered = useMemo(() => {
+        const passesValueFilter = (jobValue) => {
+            if (!topJobValueFilter) return true;
+            const value = Number(jobValue) || 0;
+            const n1 = Number(topJobValueFilter.v1);
+            const n2 = Number(topJobValueFilter.v2);
+            if (topJobValueFilter.mode === 'gt') return Number.isFinite(n1) ? value > n1 : true;
+            if (topJobValueFilter.mode === 'lt') return Number.isFinite(n1) ? value < n1 : true;
+            if (topJobValueFilter.mode === 'eq') return Number.isFinite(n1) ? value === n1 : true;
+            if (topJobValueFilter.mode === 'between') {
+                if (!Number.isFinite(n1) || !Number.isFinite(n2)) return true;
+                const min = Math.min(n1, n2);
+                const max = Math.max(n1, n2);
+                return value >= min && value <= max;
+            }
+            return true;
+        };
+        return topRows.filter((row) => {
+            const columnOk = filterableTopJobColumns.every((col) => {
+                const selected = topJobColumnFilters[col.key];
+                if (selected === undefined) return true;
+                const value = getTopJobFilterValue(row, col.key);
+                return selected.includes(value);
+            });
+            return columnOk && passesValueFilter(row.JobValue);
+        });
+    }, [topRows, topJobColumnFilters, filterableTopJobColumns, topJobValueFilter]);
+
+    useEffect(() => {
+        const onDocDown = (e) => {
+            if (!headerFilterRef.current) return;
+            if (!headerFilterRef.current.contains(e.target)) {
+                setActiveHeaderFilter(null);
+            }
+        };
+        document.addEventListener('mousedown', onDocDown);
+        return () => document.removeEventListener('mousedown', onDocDown);
+    }, []);
+
+    const openHeaderFilter = (key) => {
+        if (key === 'jobValue') {
+            setHeaderFilterSearch('');
+            setTopJobValueFilterDraft(
+                topJobValueFilter
+                    ? { ...topJobValueFilter }
+                    : { mode: 'gt', v1: '', v2: '' }
+            );
+            setActiveHeaderFilter((prev) => (prev === key ? null : key));
+            return;
+        }
+        const options = topJobFilterOptions[key] || [];
+        const applied = topJobColumnFilters[key];
+        setHeaderFilterDraft(Array.isArray(applied) ? [...applied] : [...options]);
+        setHeaderFilterSearch('');
+        setActiveHeaderFilter((prev) => (prev === key ? null : key));
+    };
+
     const topJobValueMax = useMemo(() => {
-        const vals = topRows.map((r) => Math.abs(Number(r.JobValue)) || 0);
+        const vals = topRowsFiltered.map((r) => Math.abs(Number(r.JobValue)) || 0);
         return vals.length ? Math.max(...vals) : 0;
-    }, [topRows]);
+    }, [topRowsFiltered]);
+    const topRowsFilteredTotalValue = useMemo(
+        () => topRowsFiltered.reduce((acc, row) => acc + (Number(row.JobValue) || 0), 0),
+        [topRowsFiltered]
+    );
+    const topRowsFilteredQuotedMaxPerEnquiryTotal = useMemo(() => {
+        const maxByEnquiry = new Map();
+        topRowsFiltered.forEach((row) => {
+            const enquiryNo = String(row.RequestNo || row.EnquiryNo || '').trim();
+            if (!enquiryNo) return;
+            const value = Number(row.JobValue) || 0;
+            const currentMax = maxByEnquiry.get(enquiryNo);
+            if (currentMax === undefined || value > currentMax) {
+                maxByEnquiry.set(enquiryNo, value);
+            }
+        });
+        let total = 0;
+        maxByEnquiry.forEach((v) => {
+            total += Number(v) || 0;
+        });
+        return total;
+    }, [topRowsFiltered]);
+    const topRowsFilteredWonGpTotal = useMemo(
+        () =>
+            topRowsFiltered.reduce((acc, row) => {
+                const jv = Number(row.JobValue) || 0;
+                const gpPct = Number(row.WonGrossProfit);
+                if (!Number.isFinite(gpPct)) return acc;
+                return acc + (jv * gpPct) / 100;
+            }, 0),
+        [topRowsFiltered]
+    );
+    const topRowsFilteredWonAvgGpPct = useMemo(() => {
+        const gpRows = topRowsFiltered
+            .map((row) => Number(row.WonGrossProfit))
+            .filter((v) => Number.isFinite(v));
+        if (!gpRows.length) return 0;
+        const sum = gpRows.reduce((acc, v) => acc + v, 0);
+        return Math.round(sum / gpRows.length);
+    }, [topRowsFiltered]);
+    const hasAnyTopJobFilters = useMemo(
+        () => Object.keys(topJobColumnFilters).length > 0 || !!topJobValueFilter,
+        [topJobColumnFilters, topJobValueFilter]
+    );
 
     const topJobsHeadingWord = useMemo(() => {
         const o = TOP_JOB_STATUS_OPTIONS.find((x) => x.value === topJobStatus);
@@ -780,6 +948,165 @@ const SalesReport = () => {
         const subject = 'Sales Report';
         const body = 'Please find the Sales Report attached. (Note: Please save the report as PDF using the Print option before attaching)';
         window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    };
+
+    const renderFilterableHeader = (key, label, className = '') => {
+        const options = topJobFilterOptions[key] || [];
+        const applied = topJobColumnFilters[key];
+        const isFiltered = Array.isArray(applied);
+        const searchQ = String(headerFilterSearch || '').trim().toLowerCase();
+        const visible = options.filter((o) => String(o).toLowerCase().includes(searchQ));
+        const allChecked = visible.length > 0 && visible.every((o) => headerFilterDraft.includes(o));
+        return (
+            <th className={`sr-filterable-th ${className}`.trim()}>
+                <button type="button" className="sr-th-filter-btn" onClick={() => openHeaderFilter(key)}>
+                    <span>{label}</span>
+                    <span className={`sr-th-filter-caret${isFiltered ? ' sr-th-filter-caret--active' : ''}`}>▼</span>
+                </button>
+                {activeHeaderFilter === key && (
+                    <div className="sr-th-filter-popover" ref={headerFilterRef}>
+                        <input
+                            className="sr-th-filter-search"
+                            value={headerFilterSearch}
+                            onChange={(e) => {
+                                const q = String(e.target.value || '');
+                                setHeaderFilterSearch(q);
+                                const nq = q.trim().toLowerCase();
+                                const matched = options.filter((o) =>
+                                    String(o).toLowerCase().includes(nq)
+                                );
+                                setHeaderFilterDraft(matched);
+                            }}
+                            placeholder="Search..."
+                        />
+                        <div className="sr-th-filter-actions">
+                            <button type="button" onClick={() => setHeaderFilterDraft(visible)}>Select All</button>
+                            <button type="button" onClick={() => setHeaderFilterDraft([])}>Unselect All</button>
+                        </div>
+                        <div className="sr-th-filter-options">
+                            {visible.map((opt) => (
+                                <label key={opt} className="sr-th-filter-option">
+                                    <input
+                                        type="checkbox"
+                                        checked={headerFilterDraft.includes(opt)}
+                                        onChange={(e) =>
+                                            setHeaderFilterDraft((prev) =>
+                                                e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt)
+                                            )
+                                        }
+                                    />
+                                    <span>{opt || '—'}</span>
+                                </label>
+                            ))}
+                        </div>
+                        <div className="sr-th-filter-footer">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setTopJobColumnFilters((prev) => {
+                                        const next = { ...prev };
+                                        delete next[key];
+                                        return next;
+                                    });
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Clear
+                            </button>
+                            <button
+                                type="button"
+                                className="sr-th-filter-apply"
+                                onClick={() => {
+                                    setTopJobColumnFilters((prev) => {
+                                        const next = { ...prev };
+                                        if (headerFilterDraft.length === options.length) {
+                                            delete next[key];
+                                        } else {
+                                            next[key] = [...headerFilterDraft];
+                                        }
+                                        return next;
+                                    });
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Apply
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </th>
+        );
+    };
+
+    const renderValueFilterHeader = (label) => {
+        const isFiltered = !!topJobValueFilter;
+        return (
+            <th className="sr-filterable-th text-end">
+                <button type="button" className="sr-th-filter-btn" onClick={() => openHeaderFilter('jobValue')}>
+                    <span>{label}</span>
+                    <span className={`sr-th-filter-caret${isFiltered ? ' sr-th-filter-caret--active' : ''}`}>▼</span>
+                </button>
+                {activeHeaderFilter === 'jobValue' && (
+                    <div className="sr-th-filter-popover sr-th-filter-popover--value" ref={headerFilterRef}>
+                        <select
+                            className="sr-th-value-op-select"
+                            value={topJobValueFilterDraft.mode}
+                            onChange={(e) => setTopJobValueFilterDraft((p) => ({ ...p, mode: e.target.value }))}
+                        >
+                            <option value="gt">Greater than</option>
+                            <option value="lt">Less than</option>
+                            <option value="eq">Equal</option>
+                            <option value="between">Between</option>
+                        </select>
+                        <input
+                            className="sr-th-filter-search"
+                            placeholder="Value"
+                            value={topJobValueFilterDraft.v1}
+                            onChange={(e) => setTopJobValueFilterDraft((p) => ({ ...p, v1: e.target.value }))}
+                        />
+                        {topJobValueFilterDraft.mode === 'between' ? (
+                            <input
+                                className="sr-th-filter-search"
+                                placeholder="And value"
+                                value={topJobValueFilterDraft.v2}
+                                onChange={(e) => setTopJobValueFilterDraft((p) => ({ ...p, v2: e.target.value }))}
+                            />
+                        ) : null}
+                        <div className="sr-th-filter-footer">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setTopJobValueFilter(null);
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Clear
+                            </button>
+                            <button
+                                type="button"
+                                className="sr-th-filter-apply"
+                                onClick={() => {
+                                    const n1 = Number(topJobValueFilterDraft.v1);
+                                    const n2 = Number(topJobValueFilterDraft.v2);
+                                    const valid =
+                                        topJobValueFilterDraft.mode === 'between'
+                                            ? Number.isFinite(n1) && Number.isFinite(n2)
+                                            : Number.isFinite(n1);
+                                    if (!valid) {
+                                        setTopJobValueFilter(null);
+                                    } else {
+                                        setTopJobValueFilter({ ...topJobValueFilterDraft });
+                                    }
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Apply
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </th>
+        );
     };
 
     return (
@@ -1242,6 +1569,20 @@ const SalesReport = () => {
                             <div className="flex-grow-1 d-flex justify-content-end align-items-center">
                                 <button
                                     type="button"
+                                    className="btn btn-sm btn-outline-light sr-table-clear-filters-btn me-2"
+                                    onClick={() => {
+                                        setTopJobColumnFilters({});
+                                        setTopJobValueFilter(null);
+                                        setActiveHeaderFilter(null);
+                                    }}
+                                    title="Clear all table filters"
+                                    aria-label="Clear all table filters"
+                                    disabled={!hasAnyTopJobFilters}
+                                >
+                                    <FilterX size={13} />
+                                </button>
+                                <button
+                                    type="button"
                                     className="btn btn-sm btn-outline-light sr-table-expand-btn me-2"
                                     onClick={() => setTableExpanded((prev) => !prev)}
                                     title={tableExpanded ? 'Collapse table view' : 'Expand table view'}
@@ -1272,32 +1613,32 @@ const SalesReport = () => {
                                 <thead className="table-secondary">
                                     <tr>
                                         <th style={{ width: 44 }}>Sl.No.</th>
-                                        <th>Enquiry No.</th>
-                                        <th>Project Name</th>
-                                        <th>Customer Name</th>
-                                        <th className="text-end">{topJobsTableConfig.valueHeader}</th>
+                                        {renderFilterableHeader('requestNo', 'Enquiry No.')}
+                                        {renderFilterableHeader('projectName', 'Project Name')}
+                                        {renderFilterableHeader('customerName', 'Customer Name')}
+                                        {renderValueFilterHeader(topJobsTableConfig.valueHeader)}
                                         <th className="sr-job-bar-th" title="Horizontal bar: job value relative to the largest value in this list">
                                             {topJobsTableConfig.chartHeader}
                                         </th>
                                         {topJobStatus === 'Quoted' ? (
                                             <>
-                                                <th className="text-end text-nowrap">{topJobsTableConfig.metricHeader}</th>
-                                                <th className="text-nowrap">Quote Date</th>
-                                                <th className="text-nowrap">Lead Job Name</th>
+                                                {renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')}
+                                                {renderFilterableHeader('quoteDate', 'Quote Date', 'text-nowrap')}
+                                                {renderFilterableHeader('leadJob', 'Lead Job Name', 'text-nowrap')}
                                             </>
                                         ) : (
-                                            <th className="text-end text-nowrap">{topJobsTableConfig.metricHeader}</th>
+                                            renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')
                                         )}
-                                        <th>Client Name</th>
-                                        <th>Consultant Name</th>
-                                        {topJobsTableConfig.extraHeader ? <th>{topJobsTableConfig.extraHeader}</th> : null}
+                                        {renderFilterableHeader('clientName', 'Client Name')}
+                                        {renderFilterableHeader('consultantName', 'Consultant Name')}
+                                        {topJobsTableConfig.extraHeader ? renderFilterableHeader('extra', topJobsTableConfig.extraHeader) : null}
                                     </tr>
                                 </thead>
                                 <tbody
                                     className={topJobsLoading ? 'sr-detail-table__body-loading' : undefined}
                                     aria-busy={topJobsLoading}
                                 >
-                                    {topRows.length === 0 ? (
+                                    {topRowsFiltered.length === 0 ? (
                                         <tr>
                                             <td
                                                 colSpan={
@@ -1311,15 +1652,47 @@ const SalesReport = () => {
                                             </td>
                                         </tr>
                                     ) : (
-                                        topRows.map((row, idx) => {
+                                        <>
+                                        <tr className="sr-detail-table__total-row">
+                                            <td />
+                                            <td colSpan={3} className="text-end fw-semibold">Total</td>
+                                            <td className="text-end fw-semibold">
+                                                {formatK(
+                                                    topJobStatus === 'Quoted'
+                                                        ? topRowsFilteredQuotedMaxPerEnquiryTotal
+                                                        : topRowsFilteredTotalValue
+                                                )}
+                                            </td>
+                                            <td />
+                                            {topJobStatus === 'Quoted' ? (
+                                                <>
+                                                    <td />
+                                                    <td />
+                                                    <td />
+                                                </>
+                                            ) : (
+                                                <td className="text-end fw-semibold">
+                                                    {topJobStatus === 'Won' ? (
+                                                        <>
+                                                            {formatK(topRowsFilteredWonGpTotal)} ({topRowsFilteredWonAvgGpPct}
+                                                            <span className="sr-pct-sym">%</span>)
+                                                        </>
+                                                    ) : null}
+                                                </td>
+                                            )}
+                                            <td />
+                                            <td />
+                                            {topJobsTableConfig.extraHeader ? <td /> : null}
+                                        </tr>
+                                        {topRowsFiltered.map((row, idx) => {
                                             const v = Math.abs(Number(row.JobValue)) || 0;
                                             const pct = topJobValueMax > 0 ? Math.round((v / topJobValueMax) * 100) : 0;
                                             const barW = topJobValueMax > 0 ? Math.min(100, (v / topJobValueMax) * 100) : 0;
                                             const groupClass = idx === 0
                                                 ? 'sr-enquiry-strip-a'
-                                                : (topRows[idx - 1].RequestNo === row.RequestNo
-                                                    ? topRows[idx - 1].__stripClass || 'sr-enquiry-strip-a'
-                                                    : (topRows[idx - 1].__stripClass === 'sr-enquiry-strip-a'
+                                                : (topRowsFiltered[idx - 1].RequestNo === row.RequestNo
+                                                    ? topRowsFiltered[idx - 1].__stripClass || 'sr-enquiry-strip-a'
+                                                    : (topRowsFiltered[idx - 1].__stripClass === 'sr-enquiry-strip-a'
                                                         ? 'sr-enquiry-strip-b'
                                                         : 'sr-enquiry-strip-a'));
                                             // Store computed class on the row object for subsequent comparisons.
@@ -1364,7 +1737,8 @@ const SalesReport = () => {
                                                     ) : null}
                                                 </tr>
                                             );
-                                        })
+                                        })}
+                                        </>
                                     )}
                                 </tbody>
                             </table>

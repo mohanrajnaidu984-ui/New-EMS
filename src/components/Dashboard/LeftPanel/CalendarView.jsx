@@ -62,9 +62,13 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
         <div className="bg-white rounded shadow-sm border border-light overflow-hidden">
             {/* Header */}
             <div className="d-flex justify-content-between align-items-center p-3 border-bottom" style={{ backgroundColor: '#eff6ff', minHeight: '86px' }}>
-                <button className="btn btn-sm btn-link text-dark" onClick={prevMonth}><ChevronLeft size={16} /></button>
+                <button className="calendar-nav-btn" onClick={prevMonth} aria-label="Previous month">
+                    <ChevronLeft size={22} />
+                </button>
                 <div className="fw-bold">{monthNames[month - 1]} {year}</div>
-                <button className="btn btn-sm btn-link text-dark" onClick={nextMonth}><ChevronRight size={16} /></button>
+                <button className="calendar-nav-btn" onClick={nextMonth} aria-label="Next month">
+                    <ChevronRight size={22} />
+                </button>
             </div>
 
             {/* Grid Header */}
@@ -166,6 +170,23 @@ const CalendarView = ({ month, year, onMonthChange, data, selectedDate, selected
                 .ring-2 { box-shadow: 0 0 0 2px currentColor; }
                 .calendar-chip { transition: transform 0.15s ease-in-out; }
                 .calendar-chip:hover { transform: scale(1.05); opacity: 0.95; box-shadow: 0 2px 4px rgba(0,0,0,0.1); z-index: 5; }
+                .calendar-nav-btn {
+                    width: 38px;
+                    height: 38px;
+                    border-radius: 999px;
+                    border: 1px solid #cbd5e1;
+                    background: #ffffff;
+                    color: #1e293b;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+                    transition: all 0.2s ease;
+                }
+                .calendar-nav-btn:hover {
+                    background: #e2e8f0;
+                    border-color: #94a3b8;
+                }
             `}</style>
         </div>
     );

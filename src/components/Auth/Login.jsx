@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import emsoLogo from '../../assets/ems_logo_new.png';
+import emsoLogo from '../../assets/ems_logo2.png';
 import almoayyedLogo from '../../assets/almoayyed-logo.png';
 import './Login.css';
 
@@ -326,16 +326,48 @@ const Login = ({ onSwitchToSignup }) => {
             <div className="login-background">
                 <div className="login-card">
                     <div className="login-header mb-4">
-                        <img
-                            src={emsoLogo}
-                            alt="EMS"
-                            className="logo-animated"
+                        <div
+                            className="logo-animated d-flex align-items-center justify-content-center gap-2"
+                            style={{ marginBottom: '2px' }}
+                        >
+                            <img
+                                src={emsoLogo}
+                                alt=""
+                                aria-hidden="true"
+                                style={{
+                                    width: '29px',
+                                    height: '29px',
+                                    objectFit: 'contain'
+                                }}
+                            />
+                            <span
+                                style={{
+                                    fontSize: '32px',
+                                    lineHeight: 1,
+                                    fontWeight: 800,
+                                    letterSpacing: '1px',
+                                    background: 'linear-gradient(180deg, #203f75 0%, #3f68ad 100%)',
+                                    WebkitBackgroundClip: 'text',
+                                    WebkitTextFillColor: 'transparent',
+                                    backgroundClip: 'text',
+                                    color: 'transparent'
+                                }}
+                            >
+                                ems
+                            </span>
+                        </div>
+                        <p
                             style={{
-                                maxWidth: '280px',
-                                height: 'auto',
-                                marginBottom: '10px'
+                                margin: 0,
+                                fontSize: '10px',
+                                fontWeight: 600,
+                                color: '#6c757d',
+                                letterSpacing: '0.5px',
+                                transform: 'translateY(-4px)'
                             }}
-                        />
+                        >
+                            Enquiry Management System
+                        </p>
                     </div>
 
                     {error && (
