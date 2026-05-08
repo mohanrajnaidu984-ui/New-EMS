@@ -327,47 +327,25 @@ const Login = ({ onSwitchToSignup }) => {
                 <div className="login-card">
                     <div className="login-header mb-4">
                         <div
-                            className="logo-animated d-flex align-items-center justify-content-center gap-2"
+                            className="logo-animated d-flex align-items-center justify-content-center"
                             style={{ marginBottom: '2px' }}
                         >
                             <img
                                 src={emsoLogo}
                                 alt=""
                                 aria-hidden="true"
-                                style={{
-                                    width: '29px',
-                                    height: '29px',
-                                    objectFit: 'contain'
-                                }}
+                                className="ems-brand-mark me-1"
                             />
-                            <span
-                                style={{
-                                    fontSize: '32px',
-                                    lineHeight: 1,
-                                    fontWeight: 800,
-                                    letterSpacing: '1px',
-                                    background: 'linear-gradient(180deg, #203f75 0%, #3f68ad 100%)',
-                                    WebkitBackgroundClip: 'text',
-                                    WebkitTextFillColor: 'transparent',
-                                    backgroundClip: 'text',
-                                    color: 'transparent'
-                                }}
-                            >
-                                ems
+                            <span className="ems-brand-text d-flex align-items-center">
+                                <span className="ems-brand-word">EMS</span>
+                                <span className="ems-brand-divider" aria-hidden="true"></span>
+                                <span className="ems-brand-subtext">
+                                    Enquiry<br />
+                                    Management<br />
+                                    System
+                                </span>
                             </span>
                         </div>
-                        <p
-                            style={{
-                                margin: 0,
-                                fontSize: '10px',
-                                fontWeight: 600,
-                                color: '#6c757d',
-                                letterSpacing: '0.5px',
-                                transform: 'translateY(-4px)'
-                            }}
-                        >
-                            Enquiry Management System
-                        </p>
                     </div>
 
                     {error && (

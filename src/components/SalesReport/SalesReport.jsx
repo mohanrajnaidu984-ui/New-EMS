@@ -202,7 +202,7 @@ const TOP_JOB_TABLE_CONFIG = {
     'Follow Up': {
         valueHeader: 'Net Quoted Value',
         chartHeader: 'Net Quoted Value Chart',
-        metricHeader: 'Chance % & Expected Date',
+        metricHeader: 'Chance %',
         extraHeader: 'Follow Up Remarks'
     },
     Pending: {
@@ -736,6 +736,16 @@ const SalesReport = () => {
     };
 
     const getTopJobFilterValue = (row, key) => {
+        const fmt = (v) => {
+            if (!v) return '—';
+            const d = new Date(v);
+            if (Number.isNaN(d.getTime())) return '—';
+            const day = String(d.getDate()).padStart(2, '0');
+            const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const mon = MONTHS[d.getMonth()] || '';
+            const yy = String(d.getFullYear()).slice(-2);
+            return `${day}-${mon}-${yy}`;
+        };
         if (key === 'requestNo') return String(row.RequestNo || row.EnquiryNo || '—');
         if (key === 'projectName') return String(row.ProjectName || '—');
         if (key === 'customerName') return String(row.CustomerName || '—');
@@ -751,9 +761,13 @@ const SalesReport = () => {
             const yy = String(d.getFullYear()).slice(-2);
             return `${day}-${mon}-${yy}`;
         }
+        if (key === 'bookedDate') return fmt(row.BookedDate);
+        if (key === 'lostDate') return fmt(row.LostDate);
+        if (key === 'expectedDate') return fmt(row.ExpectedDate);
         if (key === 'leadJob') return String(row.LeadJob || '—');
         if (key === 'clientName') return String(row.ClientName || '—');
         if (key === 'consultantName') return String(row.ConsultantName || '—');
+        if (key === 'concernSe') return String(row.ConcernSEEEQS || '—');
         if (key === 'extra') return String(row.ReasonForLost || row.FollowUpRemarks || '—');
         return '';
     };
@@ -765,8 +779,12 @@ const SalesReport = () => {
             { key: 'customerName', label: 'Customer Name' },
             { key: 'metric', label: topJobStatus === 'Quoted' ? 'Quote Ref' : 'Metric' },
             { key: 'clientName', label: 'Client Name' },
-            { key: 'consultantName', label: 'Consultant Name' }
+            { key: 'consultantName', label: 'Consultant Name' },
+            { key: 'concernSe', label: 'Concern SE/EE/TE/QS' }
         ];
+        if (topJobStatus === 'Won') cols.splice(4, 0, { key: 'bookedDate', label: 'Booked Date' });
+        if (topJobStatus === 'Lost') cols.splice(4, 0, { key: 'lostDate', label: 'Lost Date' });
+        if (topJobStatus === 'Follow Up') cols.splice(4, 0, { key: 'expectedDate', label: 'Expected Date' });
         if (topJobStatus === 'Quoted') {
             cols.splice(4, 0, { key: 'quoteDate', label: 'Quote Date' }, { key: 'leadJob', label: 'Lead Job Name' });
         }
@@ -919,9 +937,7 @@ const SalesReport = () => {
             return row.LostToWhom || row.CustomerName || '—';
         }
         if (topJobStatus === 'Follow Up') {
-            const chance = row.ProbabilityChance || '—';
-            const expectedDate = formatDateShort(row.ExpectedDate);
-            return `${chance} / ${expectedDate}`;
+            return row.ProbabilityChance || '—';
         }
         return row.Status || topJobsHeadingWord;
     };
@@ -956,7 +972,32 @@ const SalesReport = () => {
         const isFiltered = Array.isArray(applied);
         const searchQ = String(headerFilterSearch || '').trim().toLowerCase();
         const visible = options.filter((o) => String(o).toLowerCase().includes(searchQ));
-        const allChecked = visible.length > 0 && visible.every((o) => headerFilterDraft.includes(o));
+        const isDateColumn = key.toLowerCase().includes('date');
+        const monthOrder = [
+            'January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December'
+        ];
+        const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const parseShortDate = (s) => {
+            const m = String(s || '').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
+            if (!m) return null;
+            const mIdx = monthShort.findIndex((x) => x.toLowerCase() === m[2].toLowerCase());
+            if (mIdx < 0) return null;
+            const yy = Number(m[3]);
+            const year = yy >= 70 ? 1900 + yy : 2000 + yy;
+            return { year, monthName: monthOrder[mIdx], raw: String(s) };
+        };
+        const dateGroups = isDateColumn
+            ? visible
+                  .map(parseShortDate)
+                  .filter(Boolean)
+                  .reduce((acc, d) => {
+                      if (!acc[d.year]) acc[d.year] = {};
+                      if (!acc[d.year][d.monthName]) acc[d.year][d.monthName] = [];
+                      acc[d.year][d.monthName].push(d.raw);
+                      return acc;
+                  }, {})
+            : {};
         return (
             <th className={`sr-filterable-th ${className}`.trim()}>
                 <button type="button" className="sr-th-filter-btn" onClick={() => openHeaderFilter(key)}>
@@ -983,22 +1024,91 @@ const SalesReport = () => {
                             <button type="button" onClick={() => setHeaderFilterDraft(visible)}>Select All</button>
                             <button type="button" onClick={() => setHeaderFilterDraft([])}>Unselect All</button>
                         </div>
-                        <div className="sr-th-filter-options">
-                            {visible.map((opt) => (
-                                <label key={opt} className="sr-th-filter-option">
-                                    <input
-                                        type="checkbox"
-                                        checked={headerFilterDraft.includes(opt)}
-                                        onChange={(e) =>
-                                            setHeaderFilterDraft((prev) =>
-                                                e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt)
-                                            )
-                                        }
-                                    />
-                                    <span>{opt || '—'}</span>
-                                </label>
-                            ))}
-                        </div>
+                        {isDateColumn ? (
+                            <div className="sr-th-filter-options">
+                                {Object.keys(dateGroups)
+                                    .sort((a, b) => Number(b) - Number(a))
+                                    .map((y) => {
+                                        const yearValues = Object.values(dateGroups[y]).flat();
+                                        const yearChecked = yearValues.length > 0 && yearValues.every((v) => headerFilterDraft.includes(v));
+                                        return (
+                                            <div key={y}>
+                                                <label className="sr-th-filter-option">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={yearChecked}
+                                                        onChange={(e) =>
+                                                            setHeaderFilterDraft((prev) => {
+                                                                const set = new Set(prev);
+                                                                if (e.target.checked) yearValues.forEach((v) => set.add(v));
+                                                                else yearValues.forEach((v) => set.delete(v));
+                                                                return [...set];
+                                                            })
+                                                        }
+                                                    />
+                                                    <span>{y}</span>
+                                                </label>
+                                                {Object.keys(dateGroups[y])
+                                                    .sort((a, b) => monthOrder.indexOf(a) - monthOrder.indexOf(b))
+                                                    .map((mn) => {
+                                                        const monthValues = dateGroups[y][mn];
+                                                        const monthChecked = monthValues.length > 0 && monthValues.every((v) => headerFilterDraft.includes(v));
+                                                        return (
+                                                            <label key={`${y}-${mn}`} className="sr-th-filter-option sr-th-filter-option--month">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={monthChecked}
+                                                                    onChange={(e) =>
+                                                                        setHeaderFilterDraft((prev) => {
+                                                                            const set = new Set(prev);
+                                                                            if (e.target.checked) monthValues.forEach((v) => set.add(v));
+                                                                            else monthValues.forEach((v) => set.delete(v));
+                                                                            return [...set];
+                                                                        })
+                                                                    }
+                                                                />
+                                                                <span>{mn}</span>
+                                                            </label>
+                                                        );
+                                                    })}
+                                            </div>
+                                        );
+                                    })}
+                                {visible
+                                    .filter((v) => !parseShortDate(v))
+                                    .map((opt) => (
+                                        <label key={opt} className="sr-th-filter-option">
+                                            <input
+                                                type="checkbox"
+                                                checked={headerFilterDraft.includes(opt)}
+                                                onChange={(e) =>
+                                                    setHeaderFilterDraft((prev) =>
+                                                        e.target.checked ? [...new Set([...prev, opt])] : prev.filter((v) => v !== opt)
+                                                    )
+                                                }
+                                            />
+                                            <span>{opt || '—'}</span>
+                                        </label>
+                                    ))}
+                            </div>
+                        ) : (
+                            <div className="sr-th-filter-options">
+                                {visible.map((opt) => (
+                                    <label key={opt} className="sr-th-filter-option">
+                                        <input
+                                            type="checkbox"
+                                            checked={headerFilterDraft.includes(opt)}
+                                            onChange={(e) =>
+                                                setHeaderFilterDraft((prev) =>
+                                                    e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt)
+                                                )
+                                            }
+                                        />
+                                        <span>{opt || '—'}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
                         <div className="sr-th-filter-footer">
                             <button
                                 type="button"
@@ -1626,11 +1736,27 @@ const SalesReport = () => {
                                                 {renderFilterableHeader('quoteDate', 'Quote Date', 'text-nowrap')}
                                                 {renderFilterableHeader('leadJob', 'Lead Job Name', 'text-nowrap')}
                                             </>
+                                        ) : topJobStatus === 'Won' ? (
+                                            <>
+                                                {renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')}
+                                                {renderFilterableHeader('bookedDate', 'Booked Date', 'text-nowrap')}
+                                            </>
+                                        ) : topJobStatus === 'Lost' ? (
+                                            <>
+                                                {renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')}
+                                                {renderFilterableHeader('lostDate', 'Lost Date', 'text-nowrap')}
+                                            </>
+                                        ) : topJobStatus === 'Follow Up' ? (
+                                            <>
+                                                {renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')}
+                                                {renderFilterableHeader('expectedDate', 'Expected Date', 'text-nowrap')}
+                                            </>
                                         ) : (
                                             renderFilterableHeader('metric', topJobsTableConfig.metricHeader, 'text-end text-nowrap')
                                         )}
                                         {renderFilterableHeader('clientName', 'Client Name')}
                                         {renderFilterableHeader('consultantName', 'Consultant Name')}
+                                        {renderFilterableHeader('concernSe', 'Concern SE/EE/TE/QS')}
                                         {topJobsTableConfig.extraHeader ? renderFilterableHeader('extra', topJobsTableConfig.extraHeader) : null}
                                     </tr>
                                 </thead>
@@ -1644,6 +1770,7 @@ const SalesReport = () => {
                                                 colSpan={
                                                     9 +
                                                     (topJobStatus === 'Quoted' ? 2 : 0) +
+                                                    (topJobStatus === 'Won' || topJobStatus === 'Lost' || topJobStatus === 'Follow Up' ? 1 : 0) +
                                                     (topJobsTableConfig.extraHeader ? 1 : 0)
                                                 }
                                                 className="text-center text-muted py-2"
@@ -1670,16 +1797,30 @@ const SalesReport = () => {
                                                     <td />
                                                     <td />
                                                 </>
+                                            ) : topJobStatus === 'Won' ? (
+                                                <>
+                                                    <td className="text-end fw-semibold">
+                                                        {formatK(topRowsFilteredWonGpTotal)} ({topRowsFilteredWonAvgGpPct}
+                                                        <span className="sr-pct-sym">%</span>)
+                                                    </td>
+                                                    <td />
+                                                </>
+                                            ) : topJobStatus === 'Lost' ? (
+                                                <>
+                                                    <td />
+                                                    <td />
+                                                </>
+                                            ) : topJobStatus === 'Follow Up' ? (
+                                                <>
+                                                    <td />
+                                                    <td />
+                                                </>
                                             ) : (
                                                 <td className="text-end fw-semibold">
-                                                    {topJobStatus === 'Won' ? (
-                                                        <>
-                                                            {formatK(topRowsFilteredWonGpTotal)} ({topRowsFilteredWonAvgGpPct}
-                                                            <span className="sr-pct-sym">%</span>)
-                                                        </>
-                                                    ) : null}
+                                                    {null}
                                                 </td>
                                             )}
+                                            <td />
                                             <td />
                                             <td />
                                             {topJobsTableConfig.extraHeader ? <td /> : null}
@@ -1725,6 +1866,27 @@ const SalesReport = () => {
                                                             </td>
                                                             <td>{row.LeadJob || '—'}</td>
                                                         </>
+                                                    ) : topJobStatus === 'Won' ? (
+                                                        <>
+                                                            <td className="text-end small text-nowrap">
+                                                                {renderTopJobsMetricCell(row)}
+                                                            </td>
+                                                            <td className="text-nowrap">{formatDateShort(row.BookedDate)}</td>
+                                                        </>
+                                                    ) : topJobStatus === 'Lost' ? (
+                                                        <>
+                                                            <td className="text-end small text-nowrap">
+                                                                {renderTopJobsMetricCell(row)}
+                                                            </td>
+                                                            <td className="text-nowrap">{formatDateShort(row.LostDate)}</td>
+                                                        </>
+                                                    ) : topJobStatus === 'Follow Up' ? (
+                                                        <>
+                                                            <td className="text-end small text-nowrap">
+                                                                {renderTopJobsMetricCell(row)}
+                                                            </td>
+                                                            <td className="text-nowrap">{formatDateShort(row.ExpectedDate)}</td>
+                                                        </>
                                                     ) : (
                                                         <td className="text-end small text-nowrap">
                                                             {renderTopJobsMetricCell(row)}
@@ -1732,6 +1894,7 @@ const SalesReport = () => {
                                                     )}
                                                     <td>{row.ClientName || '—'}</td>
                                                     <td>{row.ConsultantName || '—'}</td>
+                                                    <td>{row.ConcernSEEEQS || '—'}</td>
                                                     {topJobsTableConfig.extraHeader ? (
                                                         <td>{row.ReasonForLost || row.FollowUpRemarks || '—'}</td>
                                                     ) : null}

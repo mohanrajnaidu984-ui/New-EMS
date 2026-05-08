@@ -9,8 +9,6 @@ import { useAuth } from '../../context/AuthContext';
 const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
   const { currentUser } = useAuth();
   const [isScrolled, setIsScrolled] = useState(false);
-  const headerLineDark = '#1E3F7A';
-  const headerLineLight = '#2B5FAE';
 
   useEffect(() => {
     const handleScroll = () => {
@@ -28,9 +26,9 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
     { id: 'Quote', label: 'Quote', icon: 'bi-file-earmark-text' },
     { id: 'Probability', label: 'Probability', icon: 'bi-graph-up' },
     { id: 'Sales Report', label: 'Sales Report', icon: 'bi-file-earmark-bar-graph' },
+    { id: 'Reports', label: 'Sales Target', icon: 'bi-bullseye' },
     { id: 'Help', label: 'Help', icon: 'bi-question-circle' },
-    { id: 'About', label: 'About', icon: 'bi-info-circle' },
-    { id: 'Reports', label: 'Sales Target', icon: 'bi-bullseye' }
+    { id: 'About', label: 'About', icon: 'bi-info-circle' }
   ];
 
   // Role Based Access
@@ -57,6 +55,8 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
 
     return false;
   });
+  const visibleMenuCount = visibleItems.length;
+  const menuStripPadding = visibleMenuCount <= 2 ? '0 10px' : visibleMenuCount <= 4 ? '0 8px' : '0 4px';
 
   return (
     <>
@@ -77,25 +77,51 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
         margin: '0 auto',
         left: 0,
         right: 0,
-        boxShadow: `${isScrolled ? '0 4px 6px -1px rgba(0, 0, 0, 0.1), ' : ''}inset 0 -0.5px 0 ${headerLineLight}, inset 0 -1.5px 0 ${headerLineDark}`
+        boxShadow: isScrolled ? '0 4px 6px -1px rgba(0, 0, 0, 0.1)' : 'none'
       }}>
         <div className="container-fluid h-100" style={{
           width: '100%',
           transition: 'width 0.4s ease',
           margin: '0 auto',
-          padding: '0 14px'
+          padding: '0 14px',
+          position: 'relative',
+          zIndex: 1
         }}>
-          <div className="d-flex align-items-end w-100 h-100">
+          <div className="d-flex align-items-end w-100 h-100" style={{ position: 'relative' }}>
             {/* Left: EMS Text */}
             <div className="d-flex align-items-center logo-container" style={{ animation: 'fadeInLeft 1s ease-out' }}>
               <span className="ems-brand-text d-flex align-items-center">
                 <img src={emsMarkLogo} alt="" className="ems-brand-mark me-1" aria-hidden="true" />
-                <span>EMS</span>
+                <span className="ems-brand-word">EMS</span>
+                <span className="ems-brand-divider" aria-hidden="true"></span>
+                <span className="ems-brand-subtext">
+                  Enquiry<br />
+                  Management<br />
+                  System
+                </span>
               </span>
             </div>
 
             {/* Centered: Navigation Links aligned to header bottom */}
-            <div className="flex-grow-1 d-flex justify-content-center align-items-end pb-0">
+            <div
+              className="d-flex justify-content-center align-items-center pb-0"
+              style={{
+                background: 'linear-gradient(180deg, #2f5fae 0%, #203f75 100%)',
+                borderTopLeftRadius: '18px',
+                borderTopRightRadius: '18px',
+                height: '35px',
+                margin: '0',
+                flexGrow: 0,
+                padding: menuStripPadding,
+                position: 'absolute',
+                left: '50%',
+                bottom: 0,
+                transform: 'translateX(-50%)',
+                boxShadow: '0 2px 8px rgba(23, 47, 99, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+                width: 'fit-content',
+                zIndex: 2
+              }}
+            >
               <ul className="nav d-flex align-items-center gap-2 m-0 ems-top-nav">
                 {visibleItems.map(item => (
                   <li className="nav-item" key={item.id}>
@@ -113,13 +139,20 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
             </div>
 
             {/* Right: Stacked ACG Logo + User Controls */}
-            <div className="d-flex flex-column align-items-end justify-content-end h-100 pb-1">
+            <div className="d-flex flex-column align-items-end justify-content-end h-100 pb-1" style={{ marginLeft: 'auto' }}>
               {/* Top: ACG Logo */}
               <img
                 src={almoayyedLogo}
                 alt="ACG"
                 className="mb-1"
-                style={{ height: '26px', width: 'auto', objectFit: 'contain', opacity: 0.9, transform: 'translateY(6px)' }}
+                style={{
+                  height: '26px',
+                  width: 'auto',
+                  objectFit: 'contain',
+                  opacity: 1,
+                  imageRendering: 'crisp-edges',
+                  transform: 'translateY(6px)'
+                }}
               />
 
               {/* Bottom: User Controls */}
@@ -132,6 +165,19 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
             </div>
           </div>
         </div>
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: '8px',
+            background: 'linear-gradient(180deg, #2f5fae 0%, #203f75 100%)',
+            zIndex: 0,
+            pointerEvents: 'none'
+          }}
+        />
       </nav>
     </>
   );

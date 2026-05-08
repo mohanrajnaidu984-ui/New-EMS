@@ -1292,12 +1292,13 @@
 /* Expanded table mode: left side fully table, pipeline unchanged */
 .sales-report-page.sr-table-expanded .sr-cell-won-combined,
 .sales-report-page.sr-table-expanded .sr-cell-target-combined,
-.sales-report-page.sr-table-expanded .sr-cell-gm-combined {
+.sales-report-page.sr-table-expanded .sr-cell-gm-combined,
+.sales-report-page.sr-table-expanded .sr-cell-pipeline {
     display: none !important;
 }
 
 .sales-report-page.sr-table-expanded .sr-cell-table {
-    grid-column: 1 / span 3;
+    grid-column: 1 / span 4;
     grid-row: 1 / span 3;
 }
 
@@ -1316,6 +1317,7 @@
     top: 0;
     z-index: 1;
     border-color: #cbd5e1 !important;
+    white-space: nowrap;
 }
 
 .sr-detail-table tbody.sr-detail-table__body-loading {
@@ -1330,6 +1332,13 @@
     line-height: 1.15;
     vertical-align: middle;
     border-color: #e2e8f0 !important;
+    white-space: nowrap;
+}
+
+.sr-detail-table {
+    width: max-content !important;
+    min-width: 100%;
+    table-layout: auto;
 }
 
 .sr-detail-table__total-row td {
@@ -1443,6 +1452,10 @@
     font-size: 0.67rem;
     line-height: 1.2;
     padding: 0.08rem 0;
+}
+
+.sr-th-filter-option--month {
+    padding-left: 1rem;
 }
 
 .sr-th-filter-footer {

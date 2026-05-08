@@ -1553,11 +1553,11 @@ router.get('/top-job-booked', async (req, res) => {
                 if (safeDivision && safeDivision !== 'All') {
                     quotedTopJobFilterClause += ` AND EXISTS (
                         SELECT 1
-                        FROM EnquiryFor ef
-                        JOIN Master_EnquiryFor mef
-                          ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
-                        WHERE ef.RequestNo = E.RequestNo
-                          AND LTRIM(RTRIM(mef.DepartmentName)) = @division
+                        FROM ConcernedSE cse
+                        JOIN Master_ConcernedSE mse
+                          ON UPPER(LTRIM(RTRIM(ISNULL(mse.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, ''))))
+                        WHERE cse.RequestNo = E.RequestNo
+                          AND UPPER(LTRIM(RTRIM(ISNULL(mse.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
                     ) `;
                 }
                 if (effectiveQuotedSe) {
@@ -1620,6 +1620,22 @@ router.get('/top-job-booked', async (req, res) => {
                 const quotedPreparedByClause = effectiveQuotedSe
                     ? ` AND LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedTopJobSe, '')))`
                     : '';
+                const quotedPreparedByDivisionClause =
+                    safeDivision && safeDivision !== 'All' && !effectiveQuotedSe
+                        ? ` AND EXISTS (
+                                SELECT 1
+                                FROM ConcernedSE cse
+                                INNER JOIN Master_ConcernedSE ms
+                                  ON UPPER(LTRIM(RTRIM(ISNULL(ms.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, ''))))
+                                WHERE cse.RequestNo = EQ.RequestNo
+                                  AND UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))))
+                                  AND UPPER(LTRIM(RTRIM(ISNULL(ms.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                            )`
+                        : '';
+                const quotedLeadJobDivisionClause =
+                    safeDivision && safeDivision !== 'All'
+                        ? ` AND UPPER(LTRIM(RTRIM(ISNULL(EQ.LeadJob, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
+                        : '';
                 topJobBookedRes = await request.query(`
             WITH LatestQuoted AS (
                 SELECT * FROM (
@@ -1653,6 +1669,8 @@ router.get('/top-job-booked', async (req, res) => {
                     INNER JOIN EnquiryMaster E ON E.RequestNo = EQ.RequestNo
                     WHERE 1 = 1
                       ${quotedPreparedByClause}
+                      ${quotedPreparedByDivisionClause}
+                      ${quotedLeadJobDivisionClause}
                       ${topJobScopeClause}
                 ) __lq
                 WHERE __lq.__rn = 1
@@ -1673,7 +1691,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.QuoteDate,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1691,7 +1711,9 @@ router.get('/top-job-booked', async (req, res) => {
                     E.ClientName,
                     E.ConsultantName,
                     LQ.QuoteRef,
-                    LQ.QuoteDate
+                    LQ.QuoteDate,
+                    CAST(NULL AS DATETIME) AS BookedDate,
+                    CAST(NULL AS DATETIME) AS LostDate
                 FROM EnquiryMaster E
                 INNER JOIN LatestQuoted LQ ON E.RequestNo = LQ.RequestNo
                 WHERE YEAR(COALESCE(LQ.QuoteDate, E.EnquiryDate)) = @year ${topJobScopeClause}
@@ -1735,7 +1757,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.FollowUpRemarks,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1750,7 +1774,9 @@ router.get('/top-job-booked', async (req, res) => {
                     LTRIM(RTRIM(ISNULL(P.Remarks, ''))) AS FollowUpRemarks,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
-                    E.ConsultantName
+                    E.ConsultantName,
+                    COALESCE(P.BookedDate, P.UpdatedDateTime) AS BookedDate,
+                    CAST(NULL AS DATETIME) AS LostDate
                 FROM EnquiryMaster E
                 LEFT JOIN LatestProbWonScope P ON E.RequestNo = P.RequestNo
                 WHERE ${wonProbWhere}
@@ -1795,7 +1821,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.FollowUpRemarks,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1810,7 +1838,9 @@ router.get('/top-job-booked', async (req, res) => {
                     LTRIM(RTRIM(ISNULL(P.Remarks, ''))) AS FollowUpRemarks,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
-                    E.ConsultantName
+                    E.ConsultantName,
+                    CAST(NULL AS DATETIME) AS BookedDate,
+                    COALESCE(P.UpdatedDateTime, P.ExpectedDate) AS LostDate
                 FROM EnquiryMaster E
                 LEFT JOIN LatestProbStatusScope P ON E.RequestNo = P.RequestNo
                 WHERE ${isFollowUpTopJob ? followUpStatusWhere : topJobProbWhere}
@@ -1858,7 +1888,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.FollowUpRemarks,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1873,7 +1905,9 @@ router.get('/top-job-booked', async (req, res) => {
                     LTRIM(RTRIM(ISNULL(P.Remarks, ''))) AS FollowUpRemarks,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
-                    E.ConsultantName
+                    E.ConsultantName,
+                    CAST(NULL AS DATETIME) AS BookedDate,
+                    COALESCE(P.UpdatedDateTime, P.ExpectedDate) AS LostDate
                 FROM EnquiryMaster E
                 LEFT JOIN LatestProbPendingScope P ON E.RequestNo = P.RequestNo
                 WHERE (
@@ -1906,7 +1940,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.FollowUpRemarks,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1921,7 +1957,9 @@ router.get('/top-job-booked', async (req, res) => {
                     LTRIM(RTRIM(ISNULL(P.Remarks, ''))) AS FollowUpRemarks,
                     LTRIM(RTRIM(ISNULL(P.ToName, ISNULL(E.WonCustomerName, E.CustomerName)))) AS CustomerName,
                     E.ClientName,
-                    E.ConsultantName
+                    E.ConsultantName,
+                    CAST(NULL AS DATETIME) AS BookedDate,
+                    COALESCE(P.UpdatedDateTime, P.ExpectedDate) AS LostDate
                 FROM EnquiryMaster E
                 LEFT JOIN LatestProb P ON E.RequestNo = P.RequestNo
                 WHERE ${isFollowUpTopJob ? followUpStatusWhere : topJobProbWhere}
@@ -1948,7 +1986,9 @@ router.get('/top-job-booked', async (req, res) => {
                 x.FollowUpRemarks,
                 x.CustomerName,
                 x.ClientName,
-                x.ConsultantName
+                x.ConsultantName,
+                x.BookedDate,
+                x.LostDate
             FROM (
                 SELECT
                     E.RequestNo,
@@ -1963,7 +2003,9 @@ router.get('/top-job-booked', async (req, res) => {
                     CAST(NULL AS NVARCHAR(MAX)) AS FollowUpRemarks,
                     LTRIM(RTRIM(ISNULL(E.WonCustomerName, E.CustomerName))) AS CustomerName,
                     E.ClientName,
-                    E.ConsultantName
+                    E.ConsultantName,
+                    CAST(NULL AS DATETIME) AS BookedDate,
+                    CAST(NULL AS DATETIME) AS LostDate
                 FROM EnquiryMaster E
                 ${itemValueApply}
                 WHERE ${topJobStatusWhereLegacy}
@@ -1974,8 +2016,44 @@ router.get('/top-job-booked', async (req, res) => {
             `);
         }
 
+        const topJobRows = topJobBookedRes.recordset || [];
+        const reqNos = [...new Set(topJobRows.map((r) => String(r.RequestNo || '').trim()).filter(Boolean))];
+        let concernSeNameMap = new Map();
+        if (reqNos.length > 0) {
+            const seReq = new sql.Request();
+            const inParams = reqNos.map((rn, i) => {
+                const key = `rq${i}`;
+                seReq.input(key, sql.NVarChar, rn);
+                return `@${key}`;
+            });
+            if (safeDivision && safeDivision !== 'All') {
+                seReq.input('division', sql.NVarChar, safeDivision);
+            }
+            const seRowsRes = await seReq.query(`
+                SELECT
+                    cse.RequestNo,
+                    LTRIM(RTRIM(ISNULL(cse.SEName, ''))) AS SEName
+                FROM ConcernedSE cse
+                LEFT JOIN Master_ConcernedSE ms
+                  ON UPPER(LTRIM(RTRIM(ISNULL(ms.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, ''))))
+                WHERE cse.RequestNo IN (${inParams.join(', ')})
+                  ${safeDivision && safeDivision !== 'All'
+                    ? `AND UPPER(LTRIM(RTRIM(ISNULL(ms.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
+                    : ''}
+            `);
+            concernSeNameMap = (seRowsRes.recordset || []).reduce((acc, row) => {
+                const k = String(row.RequestNo || '').trim();
+                if (!k) return acc;
+                const nm = String(row.SEName || '').trim();
+                if (!nm) return acc;
+                if (!acc.has(k)) acc.set(k, new Set());
+                acc.get(k).add(nm);
+                return acc;
+            }, new Map());
+        }
+
         res.json({
-            topJobBooked: (topJobBookedRes.recordset || []).map((r) => ({
+            topJobBooked: topJobRows.map((r) => ({
                 RequestNo: r.RequestNo,
                 ProjectName: r.ProjectName,
                 LeadJob: r.LeadJob,
@@ -1991,7 +2069,12 @@ router.get('/top-job-booked', async (req, res) => {
                 QuoteDate: r.QuoteDate,
                 CustomerName: r.CustomerName,
                 ClientName: r.ClientName,
-                ConsultantName: r.ConsultantName
+                ConsultantName: r.ConsultantName,
+                BookedDate: r.BookedDate,
+                LostDate: r.LostDate,
+                ConcernSEEEQS: concernSeNameMap.has(String(r.RequestNo || '').trim())
+                    ? Array.from(concernSeNameMap.get(String(r.RequestNo || '').trim())).join(', ')
+                    : '—'
             }))
         });
     } catch (err) {
