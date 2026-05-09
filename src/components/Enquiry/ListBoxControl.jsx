@@ -21,7 +21,9 @@ const ListBoxControl = ({
     canEdit = false,
     selectedItemDetails = null,
     canRemove = true,
-    minSearchLength = 3
+    minSearchLength = 3,
+    /** Outer wrapper class (default Bootstrap spacing below control). Use `mb-0` to tuck inside tight layouts. */
+    wrapperClassName = 'mb-2',
 }) => {
     const listBoxRef = React.useRef(null);
 
@@ -41,7 +43,7 @@ const ListBoxControl = ({
     };
 
     return (
-        <div className="mb-2">
+        <div className={wrapperClassName}>
             <SearchableSelectControl
                 label={label}
                 options={options}
@@ -65,7 +67,7 @@ const ListBoxControl = ({
                     ref={listBoxRef}
                     className="form-select"
                     multiple
-                    style={{ height: listBoxItems.length > 3 ? `${listBoxItems.length * 24 + 10}px` : '75px', fontSize: '13px' }}
+                    style={{ height: listBoxItems.length > 3 ? `${listBoxItems.length * 18 + 6}px` : '52px', fontSize: '11.5px', lineHeight: 1.1 }}
                     onChange={onListBoxChange}
                 >
                     {listBoxItems.map((item, idx) => (
@@ -80,7 +82,7 @@ const ListBoxControl = ({
                             <button
                                 type="button"
                                 className="btn btn-outline-success mb-1"
-                                style={{ width: '36px', padding: '0.25rem 0.5rem' }}
+                                style={{ width: '28px', height: '24px', padding: '0.05rem 0.25rem', fontSize: '11px', lineHeight: 1 }}
                                 onClick={onAdd}
                                 disabled={!selectedOption}
                             >
@@ -91,7 +93,7 @@ const ListBoxControl = ({
                             <button
                                 type="button"
                                 className="btn btn-outline-danger"
-                                style={{ width: '36px', padding: '0.25rem 0.5rem' }}
+                                style={{ width: '28px', height: '24px', padding: '0.05rem 0.25rem', fontSize: '11px', lineHeight: 1 }}
                                 onClick={handleRemoveClick}
                             >
                                 -

@@ -2,7 +2,7 @@ import React, { useRef } from 'react';
 
 import { format, parse, isValid } from 'date-fns';
 
-const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) => {
+const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", style: styleProp, disabled, min, max, ...props }) => {
     const datePickerRef = useRef(null);
 
     // Convert YYYY-MM-DD to DD-MMM-YYYY for display
@@ -52,12 +52,14 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
     };
 
     const handleCalendarIconClick = () => {
+        if (disabled) return;
         if (datePickerRef.current) {
             datePickerRef.current.showPicker();
         }
     };
 
     const handleInputClick = () => {
+        if (disabled) return;
         if (datePickerRef.current) {
             datePickerRef.current.showPicker();
         }
@@ -73,7 +75,20 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
                 onBlur={handleBlur}
                 onClick={handleInputClick}
                 placeholder={placeholder}
-                style={{ fontSize: '13px', paddingRight: '40px', cursor: 'pointer' }}
+                disabled={disabled}
+                style={{
+                    fontSize: '11.5px',
+                    boxSizing: 'border-box',
+                    minHeight: '28px',
+                    height: '28px',
+                    paddingLeft: '8px',
+                    paddingTop: '2px',
+                    paddingBottom: '2px',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.65 : 1,
+                    ...styleProp,
+                    paddingRight: '34px',
+                }}
                 readOnly
                 {...props}
             />
@@ -86,7 +101,7 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
                     top: '50%',
                     transform: 'translateY(-50%)',
                     cursor: 'pointer',
-                    fontSize: '16px',
+                    fontSize: '13px',
                     color: '#667eea',
                     pointerEvents: 'auto',
                     zIndex: 2
@@ -96,8 +111,9 @@ const DateInput = ({ value, onChange, placeholder = "DD-MMM-YYYY", ...props }) =
                 ref={datePickerRef}
                 type="date"
                 value={value}
-                min={props.min}
-                max={props.max}
+                min={min}
+                max={max}
+                disabled={disabled}
                 onChange={handleDatePickerChange}
                 style={{
                     position: 'absolute',

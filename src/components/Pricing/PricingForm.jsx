@@ -3,11 +3,16 @@ import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, ChevronLe
 import { format } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
 import DateInput from '../Enquiry/DateInput';
+import {
+    EMS_LIST_SEARCH_ENABLED_STYLE,
+    EMS_LIST_SEARCH_DISABLED_STYLE,
+    EMS_LIST_CLEAR_STYLE,
+} from '../../constants/emsSearchButtons';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
-/** Sticky list/toolbars sit below fixed `Header` (height ≈ 72px; see MainLayout marginTop). */
-const PRICING_STICKY_TOP = '72px';
+/** Parent layout already offsets content below fixed header; keep sticky bar flush. */
+const PRICING_STICKY_TOP = '0px';
 
 /** Price entry grid: quarter view width, capped to parent on small screens. */
 const PRICING_INPUT_SECTION_STYLE = {
@@ -576,6 +581,18 @@ function pricingListSpecStatusMeta(enq) {
     return { rawSpecStatus, specStatusDisplay, specStatusColor };
 }
 
+/** "{None|Partial|All} Priced" + "for Ownjob" on two lines (matches Quote list pattern). */
+function pricingListSpecStatusTwoLines(specMeta) {
+    if (!specMeta) return null;
+    const raw = specMeta.rawSpecStatus;
+    const tail = 'for Ownjob';
+    if (raw === 'None Priced') return { line1: 'None Priced', line2: tail };
+    if (raw === 'Partial Priced') return { line1: 'Partial Priced', line2: tail };
+    if (raw === 'All Priced') return { line1: 'All Priced', line2: tail };
+    const display = String(specMeta.specStatusDisplay || '').trim();
+    return display ? { line1: display, line2: '' } : null;
+}
+
 function tryParsePricingListDisplay(enq) {
     const raw = enq?.PricingListDisplayJson ?? enq?.pricingListDisplayJson;
     if (!raw || typeof raw !== 'string') return null;
@@ -645,7 +662,7 @@ function PricingListCustomerTotalsFromJson({ items, priceFixedDecimals }) {
             style={{
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '10px',
+                gap: '4px',
                 minWidth: 'max-content',
             }}
         >
@@ -679,7 +696,8 @@ function PricingListCustomerTotalsFromJson({ items, priceFixedDecimals }) {
                             flexDirection: 'row',
                             alignItems: 'center',
                             flexWrap: 'nowrap',
-                            gap: '8px',
+                            gap: '4px',
+                            lineHeight: 1.1,
                             whiteSpace: 'nowrap',
                         }}
                     >
@@ -697,7 +715,7 @@ function PricingListCustomerTotalsFromJson({ items, priceFixedDecimals }) {
                             {has ? `BD ${displayPrice}` : 'Not Updated'}
                         </span>
                         {has && displayDate && (
-                            <span style={{ color: '#94a3b8', fontSize: '10px' }}>({displayDate})</span>
+                            <span style={{ color: '#94a3b8', fontSize: '10px', lineHeight: 1.05 }}>({displayDate})</span>
                         )}
                     </div>
                 );
@@ -736,15 +754,16 @@ function PricingListJobForestFromJson({ nodes, priceFixedDecimals }) {
         const by = String(node.pricedBy ?? node.updatedBy ?? '').trim();
         const kids = Array.isArray(node.children) ? node.children : [];
         return (
-            <div key={String(node.jobId)} style={{ marginBottom: '4px' }}>
+            <div key={String(node.jobId)} style={{ marginBottom: '1px' }}>
                 <div
                     style={{
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '4px',
+                        gap: '2px',
                         flexWrap: 'nowrap',
-                        marginLeft: depth * 16,
+                        marginLeft: depth * 12,
                         fontSize: '11px',
+                        lineHeight: 1.08,
                         whiteSpace: 'nowrap',
                         minWidth: 'max-content',
                     }}
@@ -758,10 +777,10 @@ function PricingListJobForestFromJson({ nodes, priceFixedDecimals }) {
                     <span
                         style={{
                             color: has ? '#166534' : '#94a3b8',
-                            marginLeft: '4px',
+                            marginLeft: '2px',
                             fontStyle: has ? 'normal' : 'italic',
                             background: has ? '#dcfce7' : '#f1f5f9',
-                            padding: '1px 6px',
+                            padding: '1px 4px',
                             borderRadius: '4px',
                             fontSize: '10px',
                             flexShrink: 0,
@@ -772,21 +791,22 @@ function PricingListJobForestFromJson({ nodes, priceFixedDecimals }) {
                     {has && displayDate && (
                         <span
                             style={{
-                                marginLeft: '6px',
+                                marginLeft: '3px',
                                 color: '#94a3b8',
                                 fontSize: '10px',
+                                lineHeight: 1.05,
                                 whiteSpace: 'nowrap',
                                 flexShrink: 0,
                             }}
                         >
                             ({displayDate})
                             {by ? (
-                                <span style={{ color: '#800000', marginLeft: '6px', fontWeight: '500' }}>{by}</span>
+                                <span style={{ color: '#800000', marginLeft: '4px', fontWeight: '500' }}>{by}</span>
                             ) : null}
                         </span>
                     )}
                 </div>
-                {kids.length > 0 ? <div style={{ marginTop: '2px' }}>{kids.map((ch) => renderNode(ch, depth + 1))}</div> : null}
+                {kids.length > 0 ? <div style={{ marginTop: '0px' }}>{kids.map((ch) => renderNode(ch, depth + 1))}</div> : null}
             </div>
         );
     };
@@ -796,7 +816,7 @@ function PricingListJobForestFromJson({ nodes, priceFixedDecimals }) {
             style={{
                 display: 'flex',
                 flexDirection: 'column',
-                gap: forestRoots.length > 1 ? '12px' : '0',
+                gap: forestRoots.length > 1 ? '4px' : '0',
                 minWidth: 'max-content',
             }}
         >
@@ -843,12 +863,13 @@ function PricingListSubJobPriceLines({ rows, priceFixedDecimals }) {
                 key={row.key || `p-${i}`}
                 style={{
                     fontSize: '11px',
-                    marginBottom: '4px',
+                    marginBottom: '1px',
                     whiteSpace: 'nowrap',
-                    marginLeft: `${level * 20}px`,
+                    marginLeft: `${level * 12}px`,
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '4px',
+                    gap: '2px',
+                    lineHeight: 1.08,
                     flexWrap: 'nowrap',
                     minWidth: 'max-content',
                 }}
@@ -858,10 +879,10 @@ function PricingListSubJobPriceLines({ rows, priceFixedDecimals }) {
                 <span
                     style={{
                         color: isUpdated ? '#166534' : '#94a3b8',
-                        marginLeft: '4px',
+                        marginLeft: '2px',
                         fontStyle: isUpdated ? 'normal' : 'italic',
                         background: isUpdated ? '#dcfce7' : '#f1f5f9',
-                        padding: '1px 6px',
+                        padding: '1px 4px',
                         borderRadius: '4px',
                         fontSize: '10px',
                         flexShrink: 0,
@@ -870,7 +891,7 @@ function PricingListSubJobPriceLines({ rows, priceFixedDecimals }) {
                     {isUpdated ? `BD ${displayPrice}` : 'Not Updated'}
                 </span>
                 {isUpdated && displayDate && (
-                    <span style={{ marginLeft: '6px', color: '#94a3b8', fontSize: '10px', flexShrink: 0 }}>({displayDate})</span>
+                    <span style={{ marginLeft: '3px', color: '#94a3b8', fontSize: '10px', lineHeight: 1.05, flexShrink: 0 }}>({displayDate})</span>
                 )}
             </div>
         );
@@ -936,6 +957,7 @@ const PricingForm = ({ openContext = null }) => {
         valuesRef.current = values;
     }, [values]);
     const [newOptionNames, setNewOptionNames] = useState({});
+    const [newOptionPrices, setNewOptionPrices] = useState({});
     const [showNewOptionInputs, setShowNewOptionInputs] = useState({});
     const [focusedCell, setFocusedCell] = useState(null); // tracks which price input is focused
 
@@ -1265,7 +1287,8 @@ const PricingForm = ({ openContext = null }) => {
         const ignoreExistingLeadSelection = loadOptions?.ignoreExistingLeadSelection === true;
         const forcePreserveZeroKeys = new Set(loadOptions?.forcePreserveZeroKeys || []);
         const preserveSourceCustomerKey = normalizePricingCustomerKey(loadOptions?.preserveSourceCustomerKey || '');
-        setLoading(true);
+        const silentRefresh = loadOptions?.silentRefresh === true;
+        if (!silentRefresh) setLoading(true);
         setSelectedEnquiry(requestNo);
 
         try {
@@ -2178,7 +2201,7 @@ const PricingForm = ({ openContext = null }) => {
         } catch (err) {
             console.error('Error loading pricing:', err);
         } finally {
-            setLoading(false);
+            if (!silentRefresh) setLoading(false);
         }
     };
 
@@ -2208,12 +2231,19 @@ const PricingForm = ({ openContext = null }) => {
 
     // Add new option row
     /** `scopeJobId`: EnquiryFor row for this section — required when UI `targetScope` is a display key (e.g. `L1 - Name`) that does not equal `ItemName`. */
-    const addOption = async (targetScope, explicitName = null, explicitCustomer = null, scopeJobId = null) => {
+    const addOption = async (targetScope, explicitName = null, explicitCustomer = null, scopeJobId = null, explicitPrice = null) => {
         const currentValues = { ...values }; // Capture current state
         const typedName = String(newOptionNames[targetScope] || '').trim();
         const optionName = String(explicitName || typedName || '').trim();
+        const typedPriceRaw = String(newOptionPrices[targetScope] ?? '');
+        const rawPriceToUse = explicitPrice != null ? String(explicitPrice) : typedPriceRaw;
+        const priceText = rawPriceToUse.replace(/,/g, '').trim();
         if (!pricingData) return false;
-        if (!optionName) return false;
+        if (!optionName || !priceText) return false;
+        if (!/^-?\d*\.?\d+$/.test(priceText)) {
+            alert('Enter a valid price for the new option.');
+            return false;
+        }
 
         let targetItemName = targetScope ? targetScope.trim() : '';
         const currentActiveLeadJob = (pricingData.jobs || []).find(j => j.id == selectedLeadId);
@@ -2328,9 +2358,71 @@ const PricingForm = ({ openContext = null }) => {
             });
 
             if (res.ok) {
+                const created = await res.json();
+                const createdOption = created?.option || created || {};
+                const newOptionId = createdOption?.ID ?? createdOption?.id ?? null;
+                const scopedKey =
+                    newOptionId != null && targetJob?.id != null
+                        ? `${newOptionId}_${targetJob.id}`
+                        : null;
+                const nextPreserve = { ...currentValues };
+                if (scopedKey) nextPreserve[scopedKey] = priceText;
+
+                // Optimistic local insert so first click shows the row immediately.
+                if (newOptionId != null) {
+                    const optName = String(
+                        createdOption?.OptionName ??
+                        createdOption?.optionName ??
+                        optionName
+                    ).trim();
+                    const optItemName = String(
+                        createdOption?.ItemName ??
+                        createdOption?.itemName ??
+                        targetJob?.itemName ??
+                        targetItemName
+                    ).trim();
+                    const optCustomer = String(
+                        createdOption?.CustomerName ??
+                        createdOption?.customerName ??
+                        custName
+                    ).trim();
+                    const optLeadJobName = String(
+                        createdOption?.LeadJobName ??
+                        createdOption?.leadJobName ??
+                        leadJobName ??
+                        ''
+                    ).trim();
+
+                    setPricingData((prev) => {
+                        if (!prev) return prev;
+                        const prevOptions = Array.isArray(prev.options) ? prev.options : [];
+                        const exists = prevOptions.some((o) => String(o?.id) === String(newOptionId));
+                        if (exists) return prev;
+                        return {
+                            ...prev,
+                            options: [
+                                ...prevOptions,
+                                {
+                                    id: newOptionId,
+                                    name: optName,
+                                    itemName: optItemName,
+                                    customerName: optCustomer,
+                                    leadJobName: optLeadJobName || null,
+                                },
+                            ],
+                        };
+                    });
+                }
+
                 setNewOptionNames(prev => ({ ...prev, [targetScope]: '' }));
+                setNewOptionPrices(prev => ({ ...prev, [targetScope]: '' }));
                 // Reload with the newly active customer
-                loadPricing(pricingData.enquiry.requestNo, explicitCustomer || selectedCustomer, currentValues);
+                const activeCust = explicitCustomer || selectedCustomer;
+                setValues(nextPreserve);
+                loadPricing(pricingData.enquiry.requestNo, activeCust, nextPreserve, {
+                    preserveSourceCustomerKey: activeCust,
+                    silentRefresh: true,
+                });
                 return true;
             } else {
                 let detail = '';
@@ -2442,10 +2534,16 @@ const PricingForm = ({ openContext = null }) => {
                     return acc;
                 }, {});
 
-                loadPricing(pricingData.enquiry.requestNo, selectedCustomer, cleanedValues);
+                setValues(cleanedValues);
+                loadPricing(pricingData.enquiry.requestNo, selectedCustomer, cleanedValues, {
+                    preserveSourceCustomerKey: selectedCustomer,
+                    silentRefresh: true,
+                });
             } else {
                 alert('Failed to delete some option rows. They may be in use.');
-                loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
+                loadPricing(pricingData.enquiry.requestNo, selectedCustomer, null, {
+                    silentRefresh: true,
+                });
             }
         } catch (err) {
             console.error('Error deleting option:', err);
@@ -2508,6 +2606,8 @@ const PricingForm = ({ openContext = null }) => {
             const forcedKeys = Array.from(baseOptIds).map((oid) => `${String(oid)}_${String(enquiryForId)}`);
             loadPricing(pricingData.enquiry.requestNo, selectedCustomer, valuesRef.current, {
                 forcePreserveZeroKeys: forcedKeys,
+                preserveSourceCustomerKey: selectedCustomer,
+                silentRefresh: true,
             });
             refreshPendingRequests();
         } catch (err) {
@@ -2572,6 +2672,16 @@ const PricingForm = ({ openContext = null }) => {
     // Save all prices
     const saveAll = async () => {
         if (!pricingData) return;
+        const hasInvalidDraftAddRow = Object.keys(showNewOptionInputs || {}).some((groupKey) => {
+            if (!showNewOptionInputs[groupKey]) return false;
+            const n = String(newOptionNames[groupKey] || '').trim();
+            const p = String(newOptionPrices[groupKey] || '').replace(/,/g, '').trim();
+            return Boolean(n) !== Boolean(p);
+        });
+        if (hasInvalidDraftAddRow) {
+            alert('Complete both Option Name and Price in Add row, or clear both before Save All.');
+            return;
+        }
 
         const requestNo = pricingData.enquiry.requestNo;
         const userName = currentUser?.name || currentUser?.FullName || 'Unknown';
@@ -3258,11 +3368,17 @@ const PricingForm = ({ openContext = null }) => {
         leadChangeReloadPendingRef.current = false;
 
         const nextCust = tabs.includes(selectedCustomer) ? selectedCustomer : tabs[0];
+        const nextKey = normalizePricingCustomerKey(nextCust);
+        const nextDraft = (nextKey && draftValuesByCustomerRef.current[nextKey]) || {};
         if (nextCust !== selectedCustomer) {
             setSelectedCustomer(nextCust);
         }
-        void loadPricing(pricingData.enquiry.requestNo, nextCust, valuesRef.current, {
+        // Instant local switch (no blocking spinner), then silent background sync.
+        setValues(nextDraft);
+        void loadPricing(pricingData.enquiry.requestNo, nextCust, nextDraft, {
             useLeadIdForValueInit: selectedLeadId,
+            preserveSourceCustomerKey: nextCust,
+            silentRefresh: true,
         });
     }, [selectedLeadId, displayedCustomers, pricingData?.enquiry?.requestNo, loading, selectedCustomer]);
 
@@ -3521,7 +3637,7 @@ const PricingForm = ({ openContext = null }) => {
     return (
         <div
             style={{
-                padding: '20px',
+                padding: '4px 5px 10px',
                 background: '#f5f7fa',
                 minHeight: 'calc(100vh - 80px)',
                 ...(listFillsViewport
@@ -3554,14 +3670,14 @@ const PricingForm = ({ openContext = null }) => {
             {/* List filters (same pattern as Quote: category, criteria, enquiry dates, Search / Clear) */}
             <div
                 style={{
-                    background: 'white',
-                    padding: '16px 20px',
-                    borderRadius: '8px',
+                    background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
+                    padding: '5px 10px',
+                    borderRadius: '6px',
                     marginBottom:
                         (pricingData && !loading) || (pricingEditorStandalone && loading && !pricingData)
-                            ? '12px'
-                            : '20px',
-                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+                            ? '2px'
+                            : '4px',
+                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 8px rgba(71, 85, 105, 0.12)',
                 }}
             >
                 <div
@@ -3571,8 +3687,8 @@ const PricingForm = ({ openContext = null }) => {
                         flexWrap: 'wrap',
                         alignItems: 'flex-end',
                         justifyContent: 'flex-start',
-                        gap: '10px 16px',
-                        rowGap: '12px',
+                        gap: '6px 10px',
+                        rowGap: '4px',
                         width: '100%',
                     }}
                 >
@@ -3581,15 +3697,16 @@ const PricingForm = ({ openContext = null }) => {
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'flex-start',
-                            gap: '4px',
+                            gap: '2px',
                             margin: 0,
                         }}
                     >
                         <span
                             style={{
-                                fontSize: '12px',
+                                fontSize: '10.5px',
                                 fontWeight: '600',
                                 color: '#475569',
+                                lineHeight: 1.15,
                             }}
                         >
                             Division
@@ -3601,8 +3718,9 @@ const PricingForm = ({ openContext = null }) => {
                             style={{
                                 minWidth: '168px',
                                 maxWidth: '220px',
-                                padding: '6px 10px',
-                                fontSize: '12px',
+                                padding: '3px 6px',
+                                fontSize: '10.5px',
+                                minHeight: '26px',
                                 borderRadius: '6px',
                                 border: '1px solid #cbd5e1',
                                 background: pricingListDivisionsLoading ? '#f1f5f9' : '#fff',
@@ -3636,15 +3754,16 @@ const PricingForm = ({ openContext = null }) => {
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'flex-start',
-                            gap: '4px',
+                            gap: '2px',
                             margin: 0,
                         }}
                     >
                         <span
                             style={{
-                                fontSize: '12px',
+                                fontSize: '10.5px',
                                 fontWeight: '600',
                                 color: '#475569',
+                                lineHeight: 1.15,
                             }}
                         >
                             Category
@@ -3667,8 +3786,9 @@ const PricingForm = ({ openContext = null }) => {
                             }}
                             style={{
                                 minWidth: '148px',
-                                padding: '6px 10px',
-                                fontSize: '12px',
+                                padding: '3px 6px',
+                                fontSize: '10.5px',
+                                minHeight: '26px',
                                 borderRadius: '6px',
                                 border: '1px solid #cbd5e1',
                                 background: '#fff',
@@ -3685,7 +3805,7 @@ const PricingForm = ({ openContext = null }) => {
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'flex-start',
-                            gap: '4px',
+                            gap: '2px',
                             margin: 0,
                             flex: '2 1 196px',
                             minWidth: '154px',
@@ -3694,9 +3814,10 @@ const PricingForm = ({ openContext = null }) => {
                     >
                         <span
                             style={{
-                                fontSize: '12px',
+                                fontSize: '10.5px',
                                 fontWeight: '600',
                                 color: '#475569',
+                                lineHeight: 1.15,
                             }}
                         >
                             Search criteria
@@ -3722,8 +3843,10 @@ const PricingForm = ({ openContext = null }) => {
                                 }
                                 style={{
                                     width: '100%',
-                                    padding: '6px 10px',
-                                    fontSize: '12px',
+                                    padding: '3px 6px',
+                                    fontSize: '10.5px',
+                                    minHeight: '26px',
+                                    boxSizing: 'border-box',
                                     borderRadius: '6px',
                                     border: '1px solid #cbd5e1',
                                     background: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
@@ -3777,7 +3900,7 @@ const PricingForm = ({ openContext = null }) => {
                             display: 'flex',
                             flexWrap: 'wrap',
                             alignItems: 'flex-end',
-                            gap: '12px',
+                            gap: '6px',
                         }}
                     >
                         <div
@@ -3785,8 +3908,8 @@ const PricingForm = ({ openContext = null }) => {
                                 display: 'flex',
                                 flexDirection: 'column',
                                 alignItems: 'flex-start',
-                                gap: '4px',
-                                fontSize: '12px',
+                                gap: '2px',
+                                fontSize: '10.5px',
                                 fontWeight: '600',
                                 color: '#475569',
                                 opacity: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 1 : 0.65,
@@ -3801,12 +3924,24 @@ const PricingForm = ({ openContext = null }) => {
                             >
                                 <DateInput
                                     value={pricingListDateFrom}
-                                    onChange={(e) => setPricingListDateFrom(e.target.value)}
+                                    onChange={(e) => {
+                                        const nextFrom = e.target.value;
+                                        setPricingListDateFrom(nextFrom);
+                                        if (nextFrom && !pricingListDateTo) {
+                                            const today = new Date();
+                                            const yyyy = today.getFullYear();
+                                            const mm = String(today.getMonth() + 1).padStart(2, '0');
+                                            const dd = String(today.getDate()).padStart(2, '0');
+                                            setPricingListDateTo(`${yyyy}-${mm}-${dd}`);
+                                        }
+                                    }}
                                     disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
                                     placeholder="DD-MMM-YYYY"
                                     style={{
-                                        fontSize: '12px',
-                                        padding: '6px 8px',
+                                        fontSize: '10.5px',
+                                        padding: '3px 6px',
+                                        minHeight: '26px',
+                                        height: '26px',
                                         cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                     }}
                                 />
@@ -3817,8 +3952,8 @@ const PricingForm = ({ openContext = null }) => {
                                 display: 'flex',
                                 flexDirection: 'column',
                                 alignItems: 'flex-start',
-                                gap: '4px',
-                                fontSize: '12px',
+                                gap: '2px',
+                                fontSize: '10.5px',
                                 fontWeight: '600',
                                 color: '#475569',
                                 opacity: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 1 : 0.65,
@@ -3837,8 +3972,10 @@ const PricingForm = ({ openContext = null }) => {
                                     disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
                                     placeholder="DD-MMM-YYYY"
                                     style={{
-                                        fontSize: '12px',
-                                        padding: '6px 8px',
+                                        fontSize: '10.5px',
+                                        padding: '3px 6px',
+                                        minHeight: '26px',
+                                        height: '26px',
                                         cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                     }}
                                 />
@@ -3849,26 +3986,27 @@ const PricingForm = ({ openContext = null }) => {
                                 display: 'flex',
                                 flexDirection: 'column',
                                 alignItems: 'flex-start',
-                                gap: '4px',
+                                gap: '2px',
                             }}
                         >
                             <span
                                 aria-hidden
-                                style={{ display: 'block', minHeight: '16px' }}
+                                style={{ display: 'block', minHeight: '11px' }}
                             />
-                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px' }}>
                                 <button
                                     type="button"
                                     onClick={handlePricingListSearch}
                                     disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH || searching}
                                     style={{
-                                        padding: '6px 14px',
-                                        fontSize: '12px',
+                                        ...(pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && !searching
+                                            ? EMS_LIST_SEARCH_ENABLED_STYLE
+                                            : EMS_LIST_SEARCH_DISABLED_STYLE),
+                                        padding: '3px 10px',
+                                        fontSize: '10.5px',
                                         fontWeight: '600',
+                                        minHeight: '26px',
                                         borderRadius: '6px',
-                                        border: '1px solid #2563eb',
-                                        background: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
-                                        color: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
                                         cursor: pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && !searching ? 'pointer' : 'not-allowed',
                                     }}
                                 >
@@ -3878,13 +4016,12 @@ const PricingForm = ({ openContext = null }) => {
                                     type="button"
                                     onClick={handlePricingListClear}
                                     style={{
-                                        padding: '6px 14px',
-                                        fontSize: '12px',
+                                        ...EMS_LIST_CLEAR_STYLE,
+                                        padding: '3px 10px',
+                                        fontSize: '10.5px',
                                         fontWeight: '600',
+                                        minHeight: '26px',
                                         borderRadius: '6px',
-                                        border: '1px solid #cbd5e1',
-                                        background: '#fff',
-                                        color: '#475569',
                                         cursor: 'pointer',
                                     }}
                                 >
@@ -3897,26 +4034,26 @@ const PricingForm = ({ openContext = null }) => {
             </div>
 
             {pricingEditorStandalone && loading && !pricingData && (
-                <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center' }}>
+                <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'center' }}>
                     <button
                         type="button"
                         onClick={closePricingEditor}
                         style={{
                             display: 'inline-flex',
                             alignItems: 'center',
-                            gap: '6px',
-                            padding: '8px 14px',
-                            fontSize: '13px',
+                            gap: '4px',
+                            padding: '5px 10px',
+                            fontSize: '11.5px',
                             fontWeight: '600',
                             color: '#1e40af',
                             background: '#fff',
-                            border: '1px solid #cbd5e1',
-                            borderRadius: '8px',
+                            border: 'none',
+                            borderRadius: '6px',
                             cursor: 'pointer',
                             boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
                         }}
                     >
-                        <ChevronLeft size={18} aria-hidden />
+                        <ChevronLeft size={14} aria-hidden />
                         Back to pricing list
                     </button>
                 </div>
@@ -3927,7 +4064,7 @@ const PricingForm = ({ openContext = null }) => {
                     {pricingEditorStandalone && (
                         <div
                             style={{
-                                marginBottom: '12px',
+                                marginBottom: '6px',
                                 display: 'flex',
                                 alignItems: 'center',
                                 flexShrink: 0,
@@ -3939,19 +4076,19 @@ const PricingForm = ({ openContext = null }) => {
                                 style={{
                                     display: 'inline-flex',
                                     alignItems: 'center',
-                                    gap: '6px',
-                                    padding: '8px 14px',
-                                    fontSize: '13px',
+                                    gap: '4px',
+                                    padding: '5px 10px',
+                                    fontSize: '11.5px',
                                     fontWeight: '600',
                                     color: '#1e40af',
                                     background: '#fff',
-                                    border: '1px solid #cbd5e1',
-                                    borderRadius: '8px',
+                                    border: 'none',
+                                    borderRadius: '6px',
                                     cursor: 'pointer',
                                     boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
                                 }}
                             >
-                                <ChevronLeft size={18} aria-hidden />
+                                <ChevronLeft size={14} aria-hidden />
                                 Back to pricing list
                             </button>
                         </div>
@@ -3965,17 +4102,27 @@ const PricingForm = ({ openContext = null }) => {
                         }}
                     >
                         {/* Enquiry Info Header */}
-                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div
+                            style={{
+                                padding: '10px 14px',
+                                borderBottom: '1px solid #e2e8f0',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
+                                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 8px rgba(71, 85, 105, 0.12)',
+                            }}
+                        >
                             <div>
-                                <h3 style={{ margin: 0, fontSize: '16px', color: '#1e293b', fontWeight: '600' }}>
+                                <h3 style={{ margin: 0, fontSize: '13px', color: '#374151', fontWeight: '600' }}>
                                     <span style={{ fontWeight: '600', color: '#64748b' }}>Project Name: </span>
                                     {pricingData.enquiry.projectName || '—'}
-                                    <span style={{ fontWeight: '400', color: '#64748b', marginLeft: '6px' }}>
+                                    <span style={{ fontWeight: '400', color: '#64748b', marginLeft: '4px', fontSize: '12px' }}>
                                         (Enquiry {pricingData.enquiry.requestNo ?? '—'})
                                     </span>
                                 </h3>
                             </div>
-                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                                 {(() => {
                                     // Access type should depend on whether the user's "own job" is the selected Lead Job.
                                     // - If selected lead job is the same as user's assigned editable job => "Lead Job Access"
@@ -4001,9 +4148,9 @@ const PricingForm = ({ openContext = null }) => {
 
                                     return (
                                         <span style={{
-                                            padding: '4px 12px',
+                                            padding: '3px 8px',
                                             borderRadius: '12px',
-                                            fontSize: '11px',
+                                            fontSize: '10px',
                                             fontWeight: '600',
                                             background: bg,
                                             color: fg
@@ -4018,7 +4165,7 @@ const PricingForm = ({ openContext = null }) => {
                                     style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
                                     aria-label="Close pricing editor"
                                 >
-                                    <X size={20} />
+                                    <X size={16} />
                                 </button>
                             </div>
                         </div>
@@ -4063,8 +4210,8 @@ const PricingForm = ({ openContext = null }) => {
                             const selectedRoot = roots.find(r => String(r.id) === String(selectedLeadId || ''));
                             const selectedLeadCode = ((selectedRoot?.leadJobCode || selectedRoot?.LeadJobCode || '') + '').trim();
                             return (
-                                <div style={{ padding: '12px 20px', background: '#f1f5f9', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                    <span style={{ fontSize: '13px', fontWeight: '600', color: '#475569' }}>Select Lead Job:</span>
+                                <div style={{ padding: '8px 14px', background: '#f1f5f9', borderBottom: 'none', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '11.5px', fontWeight: '600', color: '#475569' }}>Select Lead Job:</span>
                                     <select
                                         disabled={false}
                                         value={selectedLeadId != null && selectedLeadId !== '' ? String(selectedLeadId) : ''}
@@ -4078,11 +4225,11 @@ const PricingForm = ({ openContext = null }) => {
                                             }
                                         }}
                                         style={{
-                                            padding: '6px 12px',
+                                            padding: '4px 8px',
                                             borderRadius: '4px',
                                             border: '1px solid #cbd5e1',
-                                            fontSize: '13px',
-                                            minWidth: '200px',
+                                            fontSize: '11.5px',
+                                            minWidth: '170px',
                                             backgroundColor: 'white',
                                             cursor: 'pointer'
                                         }}
@@ -4095,12 +4242,12 @@ const PricingForm = ({ openContext = null }) => {
                                     </select>
                                     {selectedLeadCode ? (
                                         <span style={{
-                                            padding: '4px 8px',
+                                            padding: '2px 6px',
                                             borderRadius: '999px',
                                             border: '1px solid #cbd5e1',
                                             background: '#ffffff',
                                             color: '#334155',
-                                            fontSize: '12px',
+                                            fontSize: '10.5px',
                                             fontWeight: '600'
                                         }}>
                                             {selectedLeadCode}
@@ -4112,8 +4259,21 @@ const PricingForm = ({ openContext = null }) => {
 
                         {/* Customer Selection Tabs */}
                         {selectedLeadId && (
-                            <div style={{ padding: '0 20px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', overflow: addingCustomer ? 'visible' : 'auto' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', minWidth: 'min-content' }}>
+                            <div style={{ padding: '4px 0 4px', background: '#ffffff', borderBottom: 'none', overflow: addingCustomer ? 'visible' : 'auto' }}>
+                                <div
+                                    style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'flex-start',
+                                        minWidth: 'min-content',
+                                        width: 'fit-content',
+                                        maxWidth: '100%',
+                                        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+                                        borderRadius: '12px',
+                                        padding: '2px',
+                                        boxShadow: '0 2px 8px rgba(23, 47, 99, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+                                    }}
+                                >
                                     {displayedCustomers && displayedCustomers.map((cust, idx) => (
                                         <div
                                             key={`${cust}-${idx}`}
@@ -4129,26 +4289,41 @@ const PricingForm = ({ openContext = null }) => {
                                                 const nextKey = normalizePricingCustomerKey(cust);
                                                 const nextDraft =
                                                     (nextKey && draftValuesByCustomerRef.current[nextKey]) || {};
-                                                loadPricing(pricingData.enquiry.requestNo, cust, nextDraft, {
-                                                    preserveSourceCustomerKey: cust,
-                                                });
+                                                // Fast local tab switch using already-loaded pricing data/drafts.
+                                                // Fall back to API reload only when no data is present for this tab.
+                                                const hasTabData =
+                                                    !!pricingData?.allValues
+                                                    || !!(pricingData?.values && Object.keys(pricingData.values).length > 0)
+                                                    || (nextKey && !!draftValuesByCustomerRef.current[nextKey]);
+                                                if (hasTabData) {
+                                                    setSelectedCustomer(cust);
+                                                    setValues(nextDraft);
+                                                } else {
+                                                    loadPricing(pricingData.enquiry.requestNo, cust, nextDraft, {
+                                                        preserveSourceCustomerKey: cust,
+                                                    });
+                                                }
                                             }}
                                             style={{
-                                                padding: '10px 16px',
-                                                background: selectedCustomer === cust ? 'white' : 'transparent',
-                                                color: selectedCustomer === cust ? '#0284c7' : '#64748b',
-                                                borderTop: selectedCustomer === cust ? '3px solid #0284c7' : '3px solid transparent',
-                                                borderLeft: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
-                                                borderRight: selectedCustomer === cust ? '1px solid #e2e8f0' : 'none',
+                                                padding: displayedCustomers.length > 1 && selectedCustomer === cust ? '0.08rem 0.54rem' : '0.28rem 0.52rem',
+                                                background: displayedCustomers.length > 1 && selectedCustomer === cust ? '#f5f5f5' : 'transparent',
+                                                color: displayedCustomers.length > 1 && selectedCustomer === cust ? '#203f75' : '#f5f5f5',
+                                                borderTop: 'none',
+                                                borderLeft: 'none',
+                                                borderRight: 'none',
                                                 borderBottom: 'none',
-                                                fontWeight: selectedCustomer === cust ? '600' : '500',
-                                                cursor: 'pointer',
-                                                fontSize: '13px',
-                                                marginTop: '4px',
+                                                borderRadius: displayedCustomers.length > 1 && selectedCustomer === cust ? '9999px' : '5px',
+                                                fontWeight: displayedCustomers.length > 1 && selectedCustomer === cust ? '600' : '500',
+                                                cursor: displayedCustomers.length > 1 ? 'pointer' : 'default',
+                                                fontSize: '9.7px',
+                                                marginTop: '0',
                                                 whiteSpace: 'nowrap',
                                                 display: 'flex',
                                                 alignItems: 'center',
-                                                gap: '8px'
+                                                gap: '4px',
+                                                boxShadow: displayedCustomers.length > 1 && selectedCustomer === cust
+                                                    ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
+                                                    : 'none'
                                             }}
                                         >
                                             <span>{cust || 'Default Customer'}</span>
@@ -4204,31 +4379,15 @@ const PricingForm = ({ openContext = null }) => {
                                 : {}),
                         }}
                     >
-                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
-                            <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <Search size={16} /> Search Results ({searchResults.length})
-                            </h3>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setPricingEditorStandalone(false);
-                                    setSearchResults([]);
-                                    setPricingListCategory(PRICING_LIST_CATEGORY.PENDING);
-                                    setPricingSearchAttempted(false);
-                                }}
-                                style={{ fontSize: '12px', color: '#64748b', background: 'none', border: 'none', cursor: 'pointer' }}
-                            >
-                                Close Results
-                            </button>
-                        </div>
                         <div
                             style={{
                                 flex: listFillsViewport ? 1 : undefined,
                                 minHeight: listFillsViewport ? 0 : undefined,
-                                maxHeight: listFillsViewport ? undefined : 'calc(100vh - 260px)',
+                                maxHeight: listFillsViewport ? undefined : 'calc(100vh - 218px)',
                                 overflowY: 'auto',
                                 overflowX: 'auto',
                                 WebkitOverflowScrolling: 'touch',
+                                borderRadius: '8px',
                             }}
                         >
                             <table
@@ -4239,18 +4398,18 @@ const PricingForm = ({ openContext = null }) => {
                                     tableLayout: 'auto',
                                 }}
                             >
-                                <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                <thead style={{ background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)', position: 'sticky', top: 0, zIndex: 1 }}>
                                     <tr>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Enquiry No.</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Project Name</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap', borderTopLeftRadius: '8px' }}>Enquiry No.</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Project Name</th>
                                         <th
                                             style={{
-                                                padding: '10px 16px',
+                                                padding: '6px 10px',
                                                 textAlign: 'left',
-                                                fontSize: '12px',
-                                                fontWeight: '600',
-                                                color: '#64748b',
-                                                borderBottom: '1px solid #e2e8f0',
+                                                fontSize: '11.7px',
+                                                fontWeight: '400',
+                                                color: '#ffffff',
+                                                borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
                                                 whiteSpace: 'nowrap',
                                                 minWidth: 'min(560px, 92vw)',
                                                 width: 'auto',
@@ -4258,10 +4417,10 @@ const PricingForm = ({ openContext = null }) => {
                                         >
                                             Customer Name & Total Price
                                         </th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Individual & Subjob Base prices</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Client Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Consultant Name</th>
-                                        <th style={{ padding: '10px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '600', color: '#64748b', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }}>Enquiry Date</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Individual & Subjob Base prices</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Client Name</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Consultant Name</th>
+                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap', borderTopRightRadius: '8px' }}>Enquiry Date</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -4269,18 +4428,33 @@ const PricingForm = ({ openContext = null }) => {
                                         const structured = tryParsePricingListDisplay(enq);
                                         const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
                                         const specMeta = pricingListSpecStatusMeta(enq);
+                                        const statusLines = pricingListSpecStatusTwoLines(specMeta);
+                                        const zebraBg = idx % 2 === 0 ? '#ffffff' : '#e2e8f0';
+                                        const tdPad = '10px 12px';
+                                        const tdBg = { backgroundColor: 'transparent' };
+                                        const hoverGrey = '#cbd5e1';
                                         return (
                                         <tr
                                             key={enq.RequestNo || idx}
-                                            style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                            onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                            onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                            style={{
+                                                borderBottom: '1px solid #e2e8f0',
+                                                cursor: 'pointer',
+                                                transition: 'background-color 0.12s ease',
+                                                backgroundColor: zebraBg,
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.backgroundColor = hoverGrey;
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.backgroundColor = zebraBg;
+                                            }}
                                             onClick={() => openPricingEditorForEnquiry(enq.RequestNo)}
                                         >
                                             <td
                                                 style={{
-                                                    padding: '12px 16px',
-                                                    fontSize: '13px',
+                                                    ...tdBg,
+                                                    padding: tdPad,
+                                                    fontSize: '11px',
                                                     color: '#1e293b',
                                                     fontWeight: '500',
                                                     verticalAlign: 'top',
@@ -4288,25 +4462,28 @@ const PricingForm = ({ openContext = null }) => {
                                                 }}
                                             >
                                                 <div>{enq.RequestNo}</div>
-                                                {specMeta && (
+                                                {statusLines && (
                                                     <div
                                                         style={{
-                                                            fontSize: '11px',
+                                                            marginTop: '6px',
+                                                            fontSize: '8.8px',
                                                             color: specMeta.specStatusColor,
                                                             fontWeight: 600,
-                                                            marginTop: '4px',
-                                                            lineHeight: 1.3,
+                                                            lineHeight: 1.25,
+                                                            whiteSpace: 'normal',
                                                         }}
                                                     >
-                                                        {specMeta.specStatusDisplay}
+                                                        <div>{statusLines.line1}</div>
+                                                        {statusLines.line2 ? <div>{statusLines.line2}</div> : null}
                                                     </div>
                                                 )}
                                             </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
+                                            <td style={{ ...tdBg, padding: tdPad, fontSize: '11px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
                                             <td
                                                 style={{
-                                                    padding: '12px 16px',
-                                                    fontSize: '13px',
+                                                    ...tdBg,
+                                                    padding: tdPad,
+                                                    fontSize: '11px',
                                                     color: '#64748b',
                                                     verticalAlign: 'top',
                                                     whiteSpace: 'normal',
@@ -4330,8 +4507,9 @@ const PricingForm = ({ openContext = null }) => {
                                             </td>
                                             <td
                                                 style={{
-                                                    padding: '12px 16px',
-                                                    fontSize: '13px',
+                                                    ...tdBg,
+                                                    padding: tdPad,
+                                                    fontSize: '11px',
                                                     color: '#64748b',
                                                     verticalAlign: 'top',
                                                     whiteSpace: 'normal',
@@ -4353,9 +4531,9 @@ const PricingForm = ({ openContext = null }) => {
                                                     <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>
                                                 )}
                                             </td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
-                                            <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
+                                            <td style={{ ...tdBg, padding: tdPad, fontSize: '11px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
+                                            <td style={{ ...tdBg, padding: tdPad, fontSize: '11px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
+                                            <td style={{ ...tdBg, padding: tdPad, fontSize: '11px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.EnquiryDate ? format(new Date(enq.EnquiryDate), 'dd-MMM-yyyy') : '-'}</td>
                                         </tr>
                                         );
                                     })}
@@ -4415,16 +4593,16 @@ const PricingForm = ({ openContext = null }) => {
                                         : { field, direction: 'asc' }
                                 )}
                                 style={{
-                                    padding: '10px 16px', textAlign: 'left', fontSize: '12px',
-                                    fontWeight: '600', color: isActive ? '#0284c7' : '#64748b',
-                                    borderBottom: '1px solid #e2e8f0', cursor: 'pointer',
+                                    padding: '8px 12px', textAlign: 'left', fontSize: '11.7px',
+                                    fontWeight: '400', color: '#ffffff',
+                                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)', cursor: 'pointer',
                                     userSelect: 'none', whiteSpace: 'nowrap', ...style
                                 }}
                             >
                                 {label}
                                 {isActive
                                     ? (isAsc ? ' ▲' : ' ▼')
-                                    : <span style={{ color: '#cbd5e1' }}> ⇅</span>
+                                    : <span style={{ color: '#e6efff' }}> ⇅</span>
                                 }
                             </th>
                         );
@@ -4461,7 +4639,7 @@ const PricingForm = ({ openContext = null }) => {
                                 style={{
                                     flex: listFillsViewport ? 1 : undefined,
                                     minHeight: listFillsViewport ? 0 : undefined,
-                                    maxHeight: listFillsViewport ? undefined : 'calc(100vh - 260px)',
+                                    maxHeight: listFillsViewport ? undefined : 'calc(100vh - 218px)',
                                     overflowY: 'auto',
                                     overflowX: 'auto',
                                     WebkitOverflowScrolling: 'touch',
@@ -4475,7 +4653,7 @@ const PricingForm = ({ openContext = null }) => {
                                         tableLayout: 'auto',
                                     }}
                                 >
-                                    <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                                    <thead style={{ background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)', position: 'sticky', top: 0, zIndex: 1 }}>
                                         <tr>
                                             <SortableHeader field="RequestNo" label="Enquiry No." />
                                             <SortableHeader field="ProjectName" label="Project Name" />
@@ -4486,12 +4664,12 @@ const PricingForm = ({ openContext = null }) => {
                                             />
                                             <th
                                                 style={{
-                                                    padding: '10px 16px',
+                                                    padding: '8px 12px',
                                                     textAlign: 'left',
-                                                    fontSize: '12px',
-                                                    fontWeight: '600',
-                                                    color: '#64748b',
-                                                    borderBottom: '1px solid #e2e8f0',
+                                                    fontSize: '11.7px',
+                                                    fontWeight: '400',
+                                                    color: '#ffffff',
+                                                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
                                                     whiteSpace: 'nowrap',
                                                 }}
                                             >
@@ -4507,18 +4685,33 @@ const PricingForm = ({ openContext = null }) => {
                                             const structured = tryParsePricingListDisplay(enq);
                                             const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
                                             const specMeta = pricingListSpecStatusMeta(enq);
+                                            const statusLines = pricingListSpecStatusTwoLines(specMeta);
+                                            const zebraBg = idx % 2 === 0 ? '#ffffff' : '#e2e8f0';
+                                            const tdPad = '10px 12px';
+                                            const tdBg = { backgroundColor: 'transparent' };
+                                            const hoverGrey = '#cbd5e1';
                                             return (
                                             <tr
                                                 key={enq.RequestNo || idx}
-                                                style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                                onMouseOver={(e) => e.currentTarget.style.background = '#f8fafc'}
-                                                onMouseOut={(e) => e.currentTarget.style.background = 'white'}
+                                                style={{
+                                                    borderBottom: '1px solid #e2e8f0',
+                                                    cursor: 'pointer',
+                                                    transition: 'background-color 0.12s ease',
+                                                    backgroundColor: zebraBg,
+                                                }}
+                                                onMouseEnter={(e) => {
+                                                    e.currentTarget.style.backgroundColor = hoverGrey;
+                                                }}
+                                                onMouseLeave={(e) => {
+                                                    e.currentTarget.style.backgroundColor = zebraBg;
+                                                }}
                                                 onClick={() => openPricingEditorForEnquiry(enq.RequestNo)}
                                             >
                                                 <td
                                                     style={{
-                                                        padding: '12px 16px',
-                                                        fontSize: '13px',
+                                                        ...tdBg,
+                                                        padding: tdPad,
+                                                        fontSize: '11.7px',
                                                         color: '#1e293b',
                                                         fontWeight: '500',
                                                         verticalAlign: 'top',
@@ -4526,25 +4719,28 @@ const PricingForm = ({ openContext = null }) => {
                                                     }}
                                                 >
                                                     <div>{enq.RequestNo}</div>
-                                                    {specMeta && specMeta.rawSpecStatus !== 'All Priced' && (
+                                                    {statusLines && (
                                                         <div
                                                             style={{
-                                                                fontSize: '11px',
+                                                                marginTop: '6px',
+                                                                fontSize: '8.8px',
                                                                 color: specMeta.specStatusColor,
                                                                 fontWeight: 600,
-                                                                marginTop: '4px',
-                                                                lineHeight: 1.3,
+                                                                lineHeight: 1.25,
+                                                                whiteSpace: 'normal',
                                                             }}
                                                         >
-                                                            {specMeta.specStatusDisplay}
+                                                            <div>{statusLines.line1}</div>
+                                                            {statusLines.line2 ? <div>{statusLines.line2}</div> : null}
                                                         </div>
                                                     )}
                                                 </td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
+                                                <td style={{ ...tdBg, padding: tdPad, fontSize: '11.2px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ProjectName || '-'}</td>
                                                 <td
                                                     style={{
-                                                        padding: '12px 16px',
-                                                        fontSize: '13px',
+                                                        ...tdBg,
+                                                        padding: tdPad,
+                                                        fontSize: '11.7px',
                                                         color: '#64748b',
                                                         verticalAlign: 'top',
                                                         whiteSpace: 'normal',
@@ -4568,8 +4764,9 @@ const PricingForm = ({ openContext = null }) => {
                                                 </td>
                                                 <td
                                                     style={{
-                                                        padding: '12px 16px',
-                                                        fontSize: '13px',
+                                                        ...tdBg,
+                                                        padding: tdPad,
+                                                        fontSize: '11.7px',
                                                         color: '#64748b',
                                                         verticalAlign: 'top',
                                                         whiteSpace: 'normal',
@@ -4591,9 +4788,9 @@ const PricingForm = ({ openContext = null }) => {
                                                         <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>—</span>
                                                     )}
                                                 </td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
-                                                <td style={{ padding: '12px 16px', fontSize: '13px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
+                                                <td style={{ ...tdBg, padding: tdPad, fontSize: '11.2px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ClientName || '-'}</td>
+                                                <td style={{ ...tdBg, padding: tdPad, fontSize: '11.2px', color: '#64748b', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.ConsultantName || '-'}</td>
+                                                <td style={{ ...tdBg, padding: tdPad, fontSize: '11.2px', color: '#dc2626', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap' }}>{enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}</td>
                                             </tr>
                                             );
                                         })}
@@ -5223,9 +5420,9 @@ const PricingForm = ({ openContext = null }) => {
                                                         <React.Fragment key={job.id}>
                                                             <tr style={{ background: '#e2e8f0' }}>
                                                                 <td colSpan={2} style={{
-                                                                    padding: '6px 12px',
+                                                                    padding: '4px 10px',
                                                                     fontWeight: '600',
-                                                                    fontSize: '13px',
+                                                                    fontSize: '12px',
                                                                     color: '#334155',
                                                                     paddingLeft: `${(group.level || 0) * 20 + 12}px`
                                                                 }}>
@@ -5256,14 +5453,14 @@ const PricingForm = ({ openContext = null }) => {
 
                                                                 return (
                                                                     <tr key={`${option.id}_${job.id}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
-                                                                        <td style={{ padding: '6px 12px', fontWeight: '500', color: '#1e293b', fontSize: '13px' }}>{option.name}</td>
-                                                                        <td style={{ padding: '4px 8px', textAlign: 'right', width: '168px', verticalAlign: 'middle' }}>
+                                                                        <td style={{ padding: '4px 10px', fontWeight: '500', color: '#1e293b', fontSize: '12px' }}>{option.name}</td>
+                                                                        <td style={{ padding: '2px 6px', textAlign: 'right', width: '150px', verticalAlign: 'middle' }}>
                                                                             <div
                                                                                 style={{
                                                                                     display: 'flex',
                                                                                     alignItems: 'center',
                                                                                     justifyContent: 'flex-end',
-                                                                                    gap: '6px',
+                                                                                    gap: '4px',
                                                                                     width: '100%',
                                                                                 }}
                                                                             >
@@ -5281,14 +5478,16 @@ const PricingForm = ({ openContext = null }) => {
                                                                                     disabled={!canEditRow}
                                                                                     placeholder="0"
                                                                                     style={{
-                                                                                        width: '130px',
-                                                                                        maxWidth: '130px',
+                                                                                        width: '116px',
+                                                                                        maxWidth: '116px',
                                                                                         flexShrink: 0,
                                                                                         boxSizing: 'border-box',
-                                                                                        padding: '4px 6px',
+                                                                                        padding: '2px 6px',
                                                                                         border: '1px solid #e2e8f0',
                                                                                         borderRadius: '4px',
-                                                                                        fontSize: '13px',
+                                                                                        fontSize: '12px',
+                                                                                        minHeight: '24px',
+                                                                                        height: '24px',
                                                                                         textAlign: 'right',
                                                                                         backgroundColor: canEditRow ? '#fff' : '#f1f5f9',
                                                                                         color: '#1e293b',
@@ -5298,7 +5497,7 @@ const PricingForm = ({ openContext = null }) => {
                                                                                 />
                                                                                 <span
                                                                                     style={{
-                                                                                        width: '28px',
+                                                                                        width: '22px',
                                                                                         flexShrink: 0,
                                                                                         display: 'flex',
                                                                                         alignItems: 'center',
@@ -5326,13 +5525,13 @@ const PricingForm = ({ openContext = null }) => {
                                                                                                 border: 'none',
                                                                                                 color: '#ef4444',
                                                                                                 cursor: 'pointer',
-                                                                                                padding: '4px',
+                                                                                                padding: '2px',
                                                                                                 display: 'flex',
                                                                                                 alignItems: 'center',
                                                                                                 justifyContent: 'center',
                                                                                             }}
                                                                                         >
-                                                                                            <Trash2 size={16} />
+                                                                                            <Trash2 size={13} />
                                                                                         </button>
                                                                                     ) : (
                                                                                         <span aria-hidden style={{ width: 28, height: 1 }} />
@@ -5344,66 +5543,173 @@ const PricingForm = ({ openContext = null }) => {
                                                                 );
                                                             })}
                                                             {canEditSection && (
-                                                                <tr style={{ background: '#f8fafc' }}>
-                                                                    <td style={{ padding: '4px 12px', verticalAlign: 'middle' }}>
-                                                                        {showNewOptionInputs[groupName] ? (
-                                                                            <input
-                                                                                type="text"
-                                                                                placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
-                                                                                value={newOptionNames[groupName] || ''}
-                                                                                onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
-                                                                                onKeyDown={async (e) => {
-                                                                                    if (e.key === 'Enter') {
-                                                                                        const ok = await addOption(groupName, null, null, job.id);
+                                                                <>
+                                                                    <tr style={{ background: '#f8fafc' }}>
+                                                                        <td style={{ padding: '4px 10px', verticalAlign: 'middle' }}>
+                                                                            {showNewOptionInputs[groupName] ? (
+                                                                                <input
+                                                                                    type="text"
+                                                                                    placeholder={`Add ${groupName.replace(/\/ Lead Job|Lead Job \//, '').trim()} option...`}
+                                                                                    value={newOptionNames[groupName] || ''}
+                                                                                    onChange={(e) => setNewOptionNames(prev => ({ ...prev, [groupName]: e.target.value }))}
+                                                                                    onKeyDown={async (e) => {
+                                                                                        if (e.key === 'Enter') {
+                                                                                            const nameNow = String(newOptionNames[groupName] || '').trim();
+                                                                                            const priceNow = String(newOptionPrices[groupName] || '').replace(/,/g, '').trim();
+                                                                                            const ok = await addOption(groupName, nameNow, null, job.id, priceNow);
+                                                                                            if (ok) {
+                                                                                                setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                            }
+                                                                                        }
+                                                                                    }}
+                                                                                    style={{
+                                                                                        width: '100%',
+                                                                                        padding: '2px 6px',
+                                                                                        border: '1px solid #cbd5e1',
+                                                                                        borderRadius: '4px',
+                                                                                        fontSize: '12px',
+                                                                                        minHeight: '24px',
+                                                                                        height: '24px'
+                                                                                    }}
+                                                                                />
+                                                                            ) : null}
+                                                                        </td>
+                                                                        <td style={{ padding: '2px 6px', textAlign: 'right', width: '150px', verticalAlign: 'middle' }}>
+                                                                            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '4px', width: '100%' }}>
+                                                                                {showNewOptionInputs[groupName] ? (
+                                                                                    <>
+                                                                                        <input
+                                                                                            type="text"
+                                                                                            inputMode="decimal"
+                                                                                            placeholder="Price"
+                                                                                            value={newOptionPrices[groupName] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const raw = String(e.target.value || '').replace(/,/g, '');
+                                                                                                if (raw !== '' && !/^-?\d*\.?\d*$/.test(raw)) return;
+                                                                                                setNewOptionPrices(prev => ({ ...prev, [groupName]: raw }));
+                                                                                            }}
+                                                                                            onKeyDown={async (e) => {
+                                                                                                if (e.key === 'Enter') {
+                                                                                                    const nameNow = String(newOptionNames[groupName] || '').trim();
+                                                                                                    const priceNow = String(newOptionPrices[groupName] || '').replace(/,/g, '').trim();
+                                                                                                    const ok = await addOption(groupName, nameNow, null, job.id, priceNow);
+                                                                                                    if (ok) {
+                                                                                                        setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                                    }
+                                                                                                }
+                                                                                            }}
+                                                                                            style={{
+                                                                                                width: '116px',
+                                                                                                maxWidth: '116px',
+                                                                                                flexShrink: 0,
+                                                                                                boxSizing: 'border-box',
+                                                                                                padding: '2px 6px',
+                                                                                                border: '1px solid #cbd5e1',
+                                                                                                borderRadius: '4px',
+                                                                                                fontSize: '12px',
+                                                                                                minHeight: '24px',
+                                                                                                height: '24px',
+                                                                                                textAlign: 'right'
+                                                                                            }}
+                                                                                        />
+                                                                                        <span
+                                                                                            style={{
+                                                                                                width: '22px',
+                                                                                                flexShrink: 0,
+                                                                                                display: 'flex',
+                                                                                                alignItems: 'center',
+                                                                                                justifyContent: 'center',
+                                                                                            }}
+                                                                                        >
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                onClick={() => {
+                                                                                                    setNewOptionNames((prev) => ({ ...prev, [groupName]: '' }));
+                                                                                                    setNewOptionPrices((prev) => ({ ...prev, [groupName]: '' }));
+                                                                                                    setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                                }}
+                                                                                                title="Remove draft option row"
+                                                                                                style={{
+                                                                                                    background: 'none',
+                                                                                                    border: 'none',
+                                                                                                    color: '#ef4444',
+                                                                                                    cursor: 'pointer',
+                                                                                                    padding: '2px',
+                                                                                                    display: 'flex',
+                                                                                                    alignItems: 'center',
+                                                                                                    justifyContent: 'center',
+                                                                                                }}
+                                                                                            >
+                                                                                                <Trash2 size={13} />
+                                                                                            </button>
+                                                                                        </span>
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => {
+                                                                                            setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: true }));
+                                                                                        }}
+                                                                                        style={{
+                                                                                            padding: '3px 8px',
+                                                                                            background: 'white',
+                                                                                            color: '#0284c7',
+                                                                                            border: '1px solid #cbd5e1',
+                                                                                            borderRadius: '4px',
+                                                                                            cursor: 'pointer',
+                                                                                            display: 'inline-flex',
+                                                                                            alignItems: 'center',
+                                                                                            gap: '4px',
+                                                                                            fontSize: '11px',
+                                                                                            minHeight: '24px',
+                                                                                            height: '24px'
+                                                                                        }}
+                                                                                    >
+                                                                                        <Plus size={12} /> Add
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+                                                                        </td>
+                                                                    </tr>
+                                                                    {showNewOptionInputs[groupName]
+                                                                        && String(newOptionNames[groupName] || '').trim()
+                                                                        && String(newOptionPrices[groupName] || '').replace(/,/g, '').trim() && (
+                                                                        <tr style={{ background: '#f8fafc' }}>
+                                                                            <td style={{ padding: '2px 10px' }} />
+                                                                            <td style={{ padding: '2px 6px', textAlign: 'right', width: '150px', verticalAlign: 'middle' }}>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={async () => {
+                                                                                        const nameNow = String(newOptionNames[groupName] || '').trim();
+                                                                                        const priceNow = String(newOptionPrices[groupName] || '').replace(/,/g, '').trim();
+                                                                                        const ok = await addOption(groupName, nameNow, null, job.id, priceNow);
                                                                                         if (ok) {
                                                                                             setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
                                                                                         }
-                                                                                    }
-                                                                                }}
-                                                                                style={{
-                                                                                    width: '100%',
-                                                                                    padding: '4px 8px',
-                                                                                    border: '1px solid #cbd5e1',
-                                                                                    borderRadius: '4px',
-                                                                                    fontSize: '13px'
-                                                                                }}
-                                                                            />
-                                                                        ) : null}
-                                                                    </td>
-                                                                    <td style={{ padding: '8px 12px', textAlign: 'right', width: '168px', verticalAlign: 'middle' }}>
-                                                                        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', width: '100%' }}>
-                                                                            <button
-                                                                                type="button"
-                                                                                onClick={async () => {
-                                                                                    if (!showNewOptionInputs[groupName]) {
-                                                                                        setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: true }));
-                                                                                        return;
-                                                                                    }
-                                                                                    const ok = await addOption(groupName, null, null, job.id);
-                                                                                    if (ok) {
-                                                                                        setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
-                                                                                    }
-                                                                                }}
-                                                                                style={{
-                                                                                    padding: '6px 12px',
-                                                                                    background: 'white',
-                                                                                    color: '#0284c7',
-                                                                                    border: '1px solid #cbd5e1',
-                                                                                    borderRadius: '4px',
-                                                                                    cursor: 'pointer',
-                                                                                    display: 'inline-flex',
-                                                                                    alignItems: 'center',
-                                                                                    gap: '4px',
-                                                                                    fontSize: '12px'
-                                                                                }}
-                                                                            >
-                                                                                <Plus size={14} /> Add
-                                                                            </button>
-                                                                        </div>
-                                                                    </td>
-                                                                </tr>
+                                                                                    }}
+                                                                                    style={{
+                                                                                        padding: '3px 8px',
+                                                                                        background: 'white',
+                                                                                        color: '#0284c7',
+                                                                                        border: '1px solid #cbd5e1',
+                                                                                        borderRadius: '4px',
+                                                                                        cursor: 'pointer',
+                                                                                        display: 'inline-flex',
+                                                                                        alignItems: 'center',
+                                                                                        gap: '4px',
+                                                                                        fontSize: '11px',
+                                                                                        minHeight: '24px',
+                                                                                        height: '24px'
+                                                                                    }}
+                                                                                >
+                                                                                    <Plus size={12} /> Add
+                                                                                </button>
+                                                                            </td>
+                                                                        </tr>
+                                                                    )}
+                                                                </>
                                                             )}
-                                                            <tr><td colSpan={2} style={{ height: '8px' }}></td></tr>
+                                                            <tr><td colSpan={2} style={{ height: '3px' }}></td></tr>
                                                         </React.Fragment>
                                                     );
                                                 });
@@ -5411,24 +5717,25 @@ const PricingForm = ({ openContext = null }) => {
                                         </tbody>
                                     </table>
                                     {/* Actions Footer */}
-                                    <div style={{ padding: '16px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-start', alignItems: 'center', background: '#f8fafc' }}>
+                                    <div style={{ padding: '8px 12px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-start', alignItems: 'center', background: '#f8fafc' }}>
                                         <button
                                             onClick={saveAll}
                                             disabled={saving}
                                             style={{
                                                 display: 'flex',
                                                 alignItems: 'center',
-                                                gap: '6px',
-                                                padding: '10px 20px',
+                                                gap: '4px',
+                                                padding: '5px 10px',
                                                 background: 'white',
                                                 color: '#1e293b',
                                                 border: '1px solid #cbd5e1',
                                                 borderRadius: '4px',
                                                 cursor: 'pointer',
-                                                fontWeight: '600'
+                                                fontWeight: '600',
+                                                fontSize: '11.5px'
                                             }}
                                         >
-                                            <Save size={16} /> {saving ? 'Saving...' : 'Save All Prices'}
+                                            <Save size={14} /> {saving ? 'Saving...' : 'Save All Prices'}
                                         </button>
                                     </div>
                                 </>

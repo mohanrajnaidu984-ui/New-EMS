@@ -172,7 +172,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
             left: 0,
             right: 0,
             bottom: 0,
-            height: '8px',
+            height: '6px',
             background: 'linear-gradient(180deg, #2f5fae 0%, #203f75 100%)',
             zIndex: 0,
             pointerEvents: 'none'

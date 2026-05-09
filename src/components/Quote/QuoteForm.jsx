@@ -3,6 +3,11 @@ import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2,
 import CreatableSelect from 'react-select/creatable';
 import { format, parseISO, addDays } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
+import {
+    EMS_LIST_SEARCH_ENABLED_STYLE,
+    EMS_LIST_SEARCH_DISABLED_STYLE,
+    EMS_LIST_CLEAR_STYLE,
+} from '../../constants/emsSearchButtons';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
 import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
@@ -25,7 +30,22 @@ import {
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
 console.log("QUOTE FILE LOADED");
 
-const API_BASE = '';
+/** Match Pricing/Probability: when set, all `/api/*` calls (including PDF) hit the Express host. */
+const API_BASE = String(import.meta.env?.VITE_API_BASE ?? '').replace(/\/+$/, '');
+
+/**
+ * `<base href>` + `/uploads` in PDF HTML — must match API `PORT` (see server/.env) and Vite `VITE_API_PORT` proxy.
+ * Override with `VITE_SERVER_ORIGIN` when Puppeteer runs on a different machine than the browser.
+ */
+function getQuotePdfServerOrigin() {
+    const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
+    if (envOrigin) return String(envOrigin).replace(/\/$/, '');
+    const apiPort =
+        String(import.meta.env?.VITE_API_PORT || import.meta.env?.VITE_DEV_API_PORT || '5001').trim() || '5001';
+    if (typeof window === 'undefined') return `http://127.0.0.1:${apiPort}`;
+    return `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
+}
+
 /** User requested manual-only tab behavior (disable automatic tab/preview switching). */
 const DISABLE_QUOTE_TAB_AUTOMATION = true;
 
@@ -33,6 +53,18 @@ const DISABLE_QUOTE_TAB_AUTOMATION = true;
 const QUOTE_LIST_CATEGORY = {
     PENDING: 'pending_quote',
     SEARCH: 'search_quote',
+};
+
+/** Left sidebar single-line inputs / selects — 28px row height */
+const QUOTE_LEFT_COMPACT_CONTROL = {
+    boxSizing: 'border-box',
+    height: '28px',
+    minHeight: '28px',
+    padding: '2px 8px',
+    border: '1px solid #cbd5e1',
+    borderRadius: '4px',
+    fontSize: '12px',
+    lineHeight: 1.2,
 };
 
 /** Must match server `normalizeQuoteFormDraftUserEmail` (draft list is scoped to this user only). */
@@ -243,12 +275,14 @@ function normalizeListQuoteRollupKey(raw) {
     return 'None Quoted';
 }
 
-function formatListQuoteRollupStatusLine(raw) {
+/** Two-line label under enquiry no.: "{None|Partial|All} Quoted" / "for Ownjob" */
+function formatListQuoteRollupStatusTwoLines(raw) {
     const key = normalizeListQuoteRollupKey(raw);
-    if (key === 'None Quoted') return 'None Quoted for Ownjob';
-    if (key === 'Partial Quoted') return 'Partial Quoted for Ownjob';
-    if (key === 'All Quoted') return 'All Quoted for Ownjob';
-    return 'None Quoted for Ownjob';
+    const tail = 'for Ownjob';
+    if (key === 'None Quoted') return { line1: 'None Quoted', line2: tail };
+    if (key === 'Partial Quoted') return { line1: 'Partial Quoted', line2: tail };
+    if (key === 'All Quoted') return { line1: 'All Quoted', line2: tail };
+    return { line1: 'None Quoted', line2: tail };
 }
 
 function listQuoteRollupStatusColor(raw) {
@@ -263,52 +297,52 @@ const EMPTY_CALCULATED_TABS = [];
 /** Stable empty list for department attention fetch clears. */
 const EMPTY_DEPT_ATTENTION_NAMES = [];
 
-// Default clause templates
+// Default clause templates (HTML: one block per numbered point so editors stack lines by default)
 const defaultClauses = {
-    scopeOfWork: `The detailed scope of work is provided in Annexure A, covering all tasks and responsibilities.However, a high - level summary is as follows:
-1.1. [Briefly list key scope items related to the division]
-1.2. [E.g., Civil Works: Excavation, Foundation, Structural Work, etc.]
-1.3. [E.g., MEP Works: HVAC, Electrical, Plumbing, Fire Fighting, etc.]`,
+    scopeOfWork: `<p>The detailed scope of work is provided in Annexure A, covering all tasks and responsibilities. However, a high-level summary is as follows:</p>
+<p>1.1. [Briefly list key scope items related to the division]</p>
+<p>1.2. [E.g., Civil Works: Excavation, Foundation, Structural Work, etc.]</p>
+<p>1.3. [E.g., MEP Works: HVAC, Electrical, Plumbing, Fire Fighting, etc.]</p>`,
 
-    basisOfOffer: `Our offer is based on the following documents provided along with the enquiry:
-2.1. [List of Drawings]
-2.2. [Specifications]
-2.3. [Tender Queries]
-2.4. [Conditions of Contract]`,
+    basisOfOffer: `<p>Our offer is based on the following documents provided along with the enquiry:</p>
+<p>2.1. [List of Drawings]</p>
+<p>2.2. [Specifications]</p>
+<p>2.3. [Tender Queries]</p>
+<p>2.4. [Conditions of Contract]</p>`,
 
-    exclusions: `The following items are not included in our scope:
-3.1. [List exclusions clearly, e.g., Civil Work doesn't include Waterproofing, etc.]
-3.2. [E.g., Electrical Work doesn't include Transformer Supply]
-3.3. [E.g., Cleaning Services do not include Waste Disposal]
-3.4. [List down the qualifications identified in the tender documents]`,
+    exclusions: `<p>The following items are not included in our scope:</p>
+<p>3.1. [List exclusions clearly, e.g., Civil Work doesn't include Waterproofing, etc.]</p>
+<p>3.2. [E.g., Electrical Work doesn't include Transformer Supply]</p>
+<p>3.3. [E.g., Cleaning Services do not include Waste Disposal]</p>
+<p>3.4. [List down the qualifications identified in the tender documents]</p>`,
 
-    pricingTerms: `4.1. Our [Lump sum price / total quotation amount] for the scope mentioned above shall be [Amount in figures and words].
-4.2. Our quoted amount excludes any Value Added Tax (VAT), which shall be charged additional, as applicable.
-4.3. A detailed Bill of Quantity is provided in Annexure B, detailing the Itemized Pricing.
-4.4. Payment Terms:
-4.4.1. Advance Payment: [Percentage] % upon signing the agreement
-4.4.2. Progress Payments: [Percentage] % as per completion milestones
-4.4.3. Final Payment: [Percentage] % upon project completion and acceptance`,
+    pricingTerms: `<p>4.1. Our [Lump sum price / total quotation amount] for the scope mentioned above shall be [Amount in figures and words].</p>
+<p>4.2. Our quoted amount excludes any Value Added Tax (VAT), which shall be charged additional, as applicable.</p>
+<p>4.3. A detailed Bill of Quantity is provided in Annexure B, detailing the Itemized Pricing.</p>
+<p>4.4. Payment Terms:</p>
+<p>4.4.1. Advance Payment: [Percentage] % upon signing the agreement</p>
+<p>4.4.2. Progress Payments: [Percentage] % as per completion milestones</p>
+<p>4.4.3. Final Payment: [Percentage] % upon project completion and acceptance</p>`,
 
-    schedule: `5.1.Tentative Commencement Date: [Start Date]
-5.2.Estimated Completion Date: [End Date]
-5.3.Project Duration: [Number] weeks / months`,
+    schedule: `<p>5.1. Tentative Commencement Date: [Start Date]</p>
+<p>5.2. Estimated Completion Date: [End Date]</p>
+<p>5.3. Project Duration: [Number] weeks / months</p>`,
 
-    warranty: `6.1.Warranty Period: [Specify warranty duration]
-6.2.Defects Liability Period: [Specify DLP duration]
-6.3.Scope of Warranty: Covers[Specify covered items]
-6.4.Exclusions: [Specify exclusions]`,
+    warranty: `<p>6.1. Warranty Period: [Specify warranty duration]</p>
+<p>6.2. Defects Liability Period: [Specify DLP duration]</p>
+<p>6.3. Scope of Warranty: Covers [Specify covered items]</p>
+<p>6.4. Exclusions: [Specify exclusions]</p>`,
 
-    responsibilityMatrix: `Please refer to Annexure B for a detailed responsibility matrix indicating the division of responsibilities between our company and the client.`,
+    responsibilityMatrix: `<p>Please refer to Annexure B for a detailed responsibility matrix indicating the division of responsibilities between our company and the client.</p>`,
 
-    termsConditions: `8.1.Force Majeure: Standard force majeure clause applies
-8.2.Quote Validity: [E.g., 30 / 60 / 90 days from the date of issuance]
-8.3.Commercial Terms are detailed in Appendix to Quotation`,
+    termsConditions: `<p>8.1. Force Majeure: Standard force majeure clause applies</p>
+<p>8.2. Quote Validity: [E.g., 30 / 60 / 90 days from the date of issuance]</p>
+<p>8.3. Commercial Terms are detailed in Appendix to Quotation</p>`,
 
-    acceptance: `We hope that the above is in line with your requirements.
-Should you have any further queries, please do not hesitate to contact our [designation] Mr./ Ms. [name] on [phone / email].`,
+    acceptance: `<p>We hope that the above is in line with your requirements.</p>
+<p>Should you have any further queries, please do not hesitate to contact our [designation] Mr./ Ms. [name] on [phone / email].</p>`,
 
-    billOfQuantity: `Please find the detailed Bill of Quantity below: `
+    billOfQuantity: `<p>Please find the detailed Bill of Quantity below:</p>`
 };
 
 /** Canonical section numbers baked into default clause HTML (1.x, 2.x, …). Renumber when clause order changes. */
@@ -337,6 +371,13 @@ function renumberClauseMajorInHtml(html, fromMajor, toMajor) {
 function separateClauseSubNumberLines(html) {
     let s = String(html || '');
     if (!s.trim()) return s;
+
+    const tableBlocks = [];
+    s = s.replace(/<table\b[\s\S]*?<\/table>/gi, (full) => {
+        tableBlocks.push(full);
+        return `__EMS_TABLE_BLOCK_${tableBlocks.length - 1}__`;
+    });
+
     if (!/<[a-z][\s\S]*>/i.test(s)) {
         s = s.replace(/\r?\n/g, '<br/>');
     }
@@ -344,6 +385,13 @@ function separateClauseSubNumberLines(html) {
     s = s.replace(/([:;])(?=(?<![0-9.])\d{1,2}\.\d{1,2}\.(?!\d))/g, '$1<br/>');
     s = s.replace(/(\s)(?=\d{1,2}\.\d{1,2}\.\d{1,2}\.)/g, '<br/>');
     s = s.replace(/(\s)(?=(?<![0-9.])\d{1,2}\.\d{1,2}\.(?!\d))/g, '<br/>');
+    // After closing paren (e.g. words). before next N.N.
+    s = s.replace(/(\))(?:\s|&nbsp;)*(?=(?<![0-9.])(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\.))/g, ')<br/>');
+
+    tableBlocks.forEach((block, i) => {
+        s = s.replace(`__EMS_TABLE_BLOCK_${i}__`, () => block);
+    });
+
     return s;
 }
 
@@ -386,7 +434,9 @@ function mergePricingTermsClauseHtml(prevHtml, tableFullHtml, proseFallback) {
  */
 function syncPricingTerms41LumpSumProse(html, grandTotalNum, foundPricedOptional, numberToWordsFn) {
     const raw = String(html || '');
-    if (foundPricedOptional || grandTotalNum <= 0 || !Number.isFinite(Number(grandTotalNum))) return raw;
+    if (foundPricedOptional || grandTotalNum <= 0 || !Number.isFinite(Number(grandTotalNum))) {
+        return separateClauseSubNumberLines(raw);
+    }
     const formattedTotal = Number(grandTotalNum).toLocaleString(undefined, {
         minimumFractionDigits: 3,
         maximumFractionDigits: 3,
@@ -406,7 +456,7 @@ function syncPricingTerms41LumpSumProse(html, grandTotalNum, foundPricedOptional
     } else {
         out = out.replace(new RegExp(String.raw`(\bshall be\s*)(${bdFigures})`, 'i'), `$1${totalString}`);
     }
-    return out;
+    return separateClauseSubNumberLines(out);
 }
 
 /**
@@ -417,9 +467,12 @@ function syncPricingTerms41LumpSumProse(html, grandTotalNum, foundPricedOptional
  * @returns {{ tableHtml: string, htmlGrandTotal: number }}
  */
 function buildEmsAutoPricingTableHtml(summary, activeJobs) {
-    let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-bottom:12px;">`;
+    const pad = '4px 8px';
+    const padGroup = '5px 8px';
+    const padIndent = '4px 8px 4px 14px';
+    let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-bottom:6px;font-size:11px;line-height:1.25;">`;
     tableHtml +=
-        '<thead><tr style="background:#f8fafc;"><th style="padding:10px;border:1px solid #64748b;text-align:left;">Description</th><th style="padding:10px;border:1px solid #64748b;text-align:right;">Amount (BHD)</th></tr></thead>';
+        `<thead><tr style="background:#f8fafc;"><th style="padding:${pad};border:1px solid #64748b;text-align:left;font-size:11px;">Description</th><th style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">Amount (BHD)</th></tr></thead>`;
     tableHtml += '<tbody>';
 
     let htmlGrandTotal = 0;
@@ -430,10 +483,10 @@ function buildEmsAutoPricingTableHtml(summary, activeJobs) {
 
         const cleanedName = String(grp.name).replace(/^(LEAD JOB |SUB JOB) \/ /, '');
 
-        tableHtml += `<tr><td colspan="2" style="padding:10px;border:1px solid #64748b;background-color:#f1f5f9;font-weight:bold;">${cleanedName}</td></tr>`;
+        tableHtml += `<tr><td colspan="2" style="padding:${padGroup};border:1px solid #64748b;background-color:#f1f5f9;font-weight:bold;font-size:11px;">${cleanedName}</td></tr>`;
 
         (grp.items || []).forEach((item) => {
-            tableHtml += `<tr><td style="padding:10px;border:1px solid #64748b;padding-left:20px;">${item.name}</td><td style="padding:10px;border:1px solid #64748b;text-align:right;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+            tableHtml += `<tr><td style="padding:${padIndent};border:1px solid #64748b;font-size:11px;">${item.name}</td><td style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
         });
 
         (grp.items || []).forEach((item) => {
@@ -444,7 +497,7 @@ function buildEmsAutoPricingTableHtml(summary, activeJobs) {
     });
 
     if (htmlGrandTotal > 0) {
-        tableHtml += `<tr style="background:#f8fafc;font-weight:700;"><td style="padding:10px;border:1px solid #64748b;text-align:right;">Grand Total (Base Price)</td><td style="padding:10px;border:1px solid #64748b;text-align:right;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+        tableHtml += `<tr style="background:#f8fafc;font-weight:700;"><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">Grand Total (Base Price)</td><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
     }
     tableHtml += '</tbody></table>';
 
@@ -1495,7 +1548,8 @@ const tableStyles = `
     .clause-content table {
         width: 100% !important;
         border-collapse: collapse !important;
-        margin-bottom: 8px !important;
+        margin-bottom: 4px !important;
+        margin-top: 4px !important;
         font-size: 12px !important;
         page-break-inside: auto !important;
     }
@@ -1511,16 +1565,26 @@ const tableStyles = `
         background-color: #f8fafc !important;
         font-weight: 600 !important;
     }
+    /* normal: pre-wrap preserved newline TEXT NODES between injected </p><p> — looked like huge gaps in preview/PDF */
     .clause-content {
-        white-space: pre-wrap !important;
+        white-space: normal !important;
         word-wrap: break-word !important;
+        overflow-wrap: anywhere !important;
         line-height: 1.6 !important;
     }
+    /* Stacked blocks (numbered points): adjacent siblings — not only <p> (Jodit may use <div>). */
     .clause-content p {
-        margin: 0.4em 0 !important;
+        margin: 0 !important;
         padding: 0 !important;
         line-height: 1.6 !important;
         white-space: normal !important;
+    }
+    /* Sub-clause stack spacing: 60% tighter than prior 4px → 40% of 4px */
+    .clause-content > * + * {
+        margin-top: 1.6px !important;
+    }
+    .clause-content p + p {
+        margin-top: 1.6px !important;
     }
     .clause-content p:first-child {
         margin-top: 0 !important;
@@ -1529,17 +1593,20 @@ const tableStyles = `
         margin-bottom: 0 !important;
     }
     .clause-content ul, .clause-content ol {
-        margin-top: 0.35em !important;
-        margin-bottom: 0.65em !important;
+        margin-top: 1.6px !important;
+        margin-bottom: 1.6px !important;
         padding-left: 24px !important;
         white-space: normal !important;
         line-height: 1.6 !important;
     }
     .clause-content li {
-        margin-bottom: 0.2em !important;
+        margin-bottom: 1.6px !important;
         line-height: 1.6 !important;
         display: list-item !important;
         list-style-position: outside !important;
+    }
+    .clause-content li:last-child {
+        margin-bottom: 0 !important;
     }
     .clause-content ul {
         list-style-type: disc !important;
@@ -1824,7 +1891,8 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     // Resizable Sidebar State
-    const [sidebarWidth, setSidebarWidth] = useState(480);
+    /** Default left panel width (435px + 5% ≈ 457px) */
+    const [sidebarWidth, setSidebarWidth] = useState(457);
     const splitPaneRef = useRef(null);
 
     const startResizing = React.useCallback((mouseDownEvent) => {
@@ -1834,7 +1902,7 @@ const QuoteForm = ({ openContext = null }) => {
 
         const doDrag = (mouseMoveEvent) => {
             const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
-            if (newWidth > 350 && newWidth < 1000) {
+            if (newWidth > 280 && newWidth < 1000) {
                 setSidebarWidth(newWidth);
             }
         };
@@ -3053,8 +3121,12 @@ const QuoteForm = ({ openContext = null }) => {
              * so the browser is less likely to split one `.quote-a4-sheet` across two printed pages.
              * Min usable height must stay below (sheetInnerMm - chrome) or Math.max() clamps and ignores extra chrome.
              */
-            /** Reserve for logo row + footer + margins; higher = shorter clause stacks = less print split inside one sheet. */
-            const continuationChromeMm = 96;
+            /**
+             * Reserve for logo row + page indicator/footer block (mm). Was 96 — too conservative:
+             * packer left large unused space on continuation sheets; next clauses started on the following page.
+             * Tuned to ~measured chrome + small print safety margin (A4 + header/footer positions unchanged).
+             */
+            const continuationChromeMm = 72;
             const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 118));
 
             const pageOne = [];
@@ -4134,15 +4206,90 @@ const QuoteForm = ({ openContext = null }) => {
         () => ({
             control: (base, state) => ({
                 ...base,
-                minHeight: '38px',
-                fontSize: '13px',
+                minHeight: '28px',
+                fontSize: '12px',
                 borderColor: '#e2e8f0',
                 backgroundColor: state.isDisabled ? '#f1f5f9' : 'white',
+                boxShadow: 'none',
+            }),
+            valueContainer: (base) => ({
+                ...base,
+                padding: '0 6px',
+                minHeight: '24px',
+            }),
+            input: (base) => ({
+                ...base,
+                margin: 0,
+                paddingTop: 0,
+                paddingBottom: 0,
+            }),
+            indicatorsContainer: (base) => ({
+                ...base,
+                height: '26px',
+            }),
+            dropdownIndicator: (base) => ({
+                ...base,
+                padding: '2px 6px',
+            }),
+            clearIndicator: (base) => ({
+                ...base,
+                padding: '2px 4px',
             }),
             menu: (base) => ({ ...base, zIndex: 9999 }),
         }),
         []
     );
+
+    /** Prepared By / Signatory — lock control to 28px (minHeight alone lets react-select stay taller). */
+    const quotePreparedSignatoryCreatableStyles = React.useMemo(
+        () => ({
+            control: (base) => ({
+                ...base,
+                minHeight: '28px',
+                height: '28px',
+                boxSizing: 'border-box',
+                fontSize: '13px',
+                boxShadow: 'none',
+            }),
+            valueContainer: (base) => ({
+                ...base,
+                padding: '0 6px',
+                minHeight: '26px',
+                height: '26px',
+            }),
+            indicatorsContainer: (base) => ({
+                ...base,
+                height: '26px',
+            }),
+            dropdownIndicator: (base) => ({
+                ...base,
+                padding: '2px 4px',
+            }),
+            clearIndicator: (base) => ({
+                ...base,
+                padding: '2px 4px',
+            }),
+            input: (base) => ({
+                ...base,
+                margin: 0,
+                paddingTop: 0,
+                paddingBottom: 0,
+            }),
+            placeholder: (base) => ({
+                ...base,
+                fontSize: '13px',
+                lineHeight: '24px',
+            }),
+            singleValue: (base) => ({
+                ...base,
+                lineHeight: '24px',
+                fontSize: '13px',
+            }),
+            menu: (base) => ({ ...base, zIndex: 9999 }),
+        }),
+        []
+    );
+
     const getCustomerOptionValue = React.useCallback((o) => o?.value ?? '', []);
     const getCustomerOptionLabel = React.useCallback((o) => o?.label ?? '', []);
 
@@ -9251,22 +9398,6 @@ const QuoteForm = ({ openContext = null }) => {
         });
         const quoteSortField = pendingQuotesSortConfig.field;
         const quoteSortDir = pendingQuotesSortConfig.direction;
-        const activeSortLabel =
-            quoteSortField === 'DueDate'
-                ? 'Due Date'
-                : quoteSortField === 'RequestNo'
-                  ? 'Enquiry No.'
-                  : quoteSortField === 'ProjectName'
-                    ? 'Project Name'
-                    : quoteSortField === 'ListQuoteRef'
-                      ? 'To Customer and Quote details'
-                      : quoteSortField === 'ListQuoteDate'
-                        ? 'Quote date'
-                        : quoteSortField === 'CustomerName'
-                          ? 'Customer'
-                          : quoteSortField === 'ConsultantName'
-                            ? 'Consultant Name'
-                            : quoteSortField;
         const renderQSH = (field, label, style = {}) => {
             const isActive = quoteSortField === field;
             const isAsc = quoteSortDir === 'asc';
@@ -9281,16 +9412,16 @@ const QuoteForm = ({ openContext = null }) => {
                         )
                     }
                     style={{
-                        padding: '10px 16px',
-                        textAlign: 'left',
-                        fontSize: '12px',
-                        fontWeight: '600',
-                        color: isActive ? '#0284c7' : '#64748b',
-                        borderBottom: '1px solid #e2e8f0',
+                        padding: '6px 10px',
+                        fontSize: '11.7px',
+                        fontWeight: '400',
+                        color: '#ffffff',
+                        borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
                         cursor: 'pointer',
                         userSelect: 'none',
                         whiteSpace: 'nowrap',
                         ...style,
+                        textAlign: 'left',
                     }}
                 >
                     {label}
@@ -9298,6 +9429,23 @@ const QuoteForm = ({ openContext = null }) => {
                 </th>
             );
         };
+        const quoteListColgroup = (
+            <colgroup>
+                <col style={{ width: '96px' }} />
+                <col style={{ width: '220px' }} />
+                <col />
+                <col style={{ width: '110px' }} />
+                <col style={{ minWidth: '260px', width: '260px' }} />
+            </colgroup>
+        );
+        const quoteListTableFixed = {
+            width: 'max-content',
+            minWidth: '960px',
+            borderCollapse: 'collapse',
+            tableLayout: 'fixed',
+        };
+        const quoteListTdTransparent = { backgroundColor: 'transparent' };
+        const quoteListRowHoverGrey = '#cbd5e1';
         return (
             <div
                 style={{
@@ -9313,40 +9461,41 @@ const QuoteForm = ({ openContext = null }) => {
                     minHeight: 0,
                 }}
             >
+                {/* Single table + one scroll container: header/body columns always align; both scrollbars visible */}
                 <div
                     style={{
-                        padding: '16px 24px',
-                        borderBottom: '1px solid #e2e8f0',
-                        background: '#f8fafc',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
+                        flex: 1,
+                        minHeight: 0,
+                        overflow: 'auto',
+                        WebkitOverflowScrolling: 'touch',
                     }}
                 >
-                    <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <FileText size={20} className="text-blue-600" />{' '}
-                        {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                            ? `Search results (${quoteListDisplayRows.length})`
-                            : `Pending updates (${quoteListDisplayRows.length})`}
-                    </h2>
-                    <span style={{ fontSize: '12px', color: '#64748b' }}>
-                        Sorted by <strong>{activeSortLabel}</strong>{' '}
-                        {quoteSortDir === 'asc' ? '(Soonest first)' : '(Latest first)'}
-                    </span>
-                </div>
-                <div style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', minHeight: 0 }}>
-                    <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
-                        <thead style={{ background: '#f8fafc', position: 'sticky', top: 0, zIndex: 1 }}>
+                    <table style={quoteListTableFixed}>
+                        {quoteListColgroup}
+                        <thead
+                            style={{
+                                position: 'sticky',
+                                top: 0,
+                                zIndex: 2,
+                                background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+                                boxShadow: '0 1px 0 rgba(15, 23, 42, 0.12)',
+                            }}
+                        >
                             <tr>
-                                {renderQSH('RequestNo', 'Enquiry No.', { width: '96px' })}
+                                {renderQSH('RequestNo', 'Enquiry No.', { width: '96px', borderTopLeftRadius: '8px' })}
                                 {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
                                 {renderQSH('ListQuoteRef', 'To Customer and Quote details', { minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal' })}
                                 {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                                {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '200px' })}
+                                {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '260px', borderTopRightRadius: '8px' })}
                             </tr>
                         </thead>
                         <tbody>
-                            {sortedPendingQuotes.map((enq, idx) => (
+                            {sortedPendingQuotes.map((enq, idx) => {
+                                const zebraBg = idx % 2 === 0 ? '#ffffff' : '#f1f5f9';
+                                const statusLines = formatListQuoteRollupStatusTwoLines(enq.ListQuoteRollupStatus);
+                                const statusColor = listQuoteRollupStatusColor(enq.ListQuoteRollupStatus);
+                                const tdPad = '10px 12px';
+                                return (
                                 <tr
                                     key={
                                         enq.QuoteListKind
@@ -9357,35 +9506,44 @@ const QuoteForm = ({ openContext = null }) => {
                                                       : String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`
                                               }`
                                     }
-                                    style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', transition: 'background 0.15s' }}
-                                    onMouseOver={(e) => {
-                                        e.currentTarget.style.background = '#f8fafc';
+                                    style={{
+                                        borderBottom: '1px solid #e2e8f0',
+                                        cursor: 'pointer',
+                                        transition: 'background-color 0.12s ease',
+                                        backgroundColor: zebraBg,
                                     }}
-                                    onMouseOut={(e) => {
-                                        e.currentTarget.style.background = 'white';
+                                    onMouseEnter={(e) => {
+                                        e.currentTarget.style.backgroundColor = quoteListRowHoverGrey;
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.currentTarget.style.backgroundColor = zebraBg;
                                     }}
                                     onClick={() => handleSelectEnquiry(enq)}
                                 >
-                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top' }}>
+                                    <td style={{ ...quoteListTdTransparent, padding: tdPad, fontSize: '11.7px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap', textAlign: 'left' }}>
                                         <div>{enq.RequestNo}</div>
                                         <div
                                             style={{
-                                                marginTop: '8px',
-                                                fontSize: '11px',
+                                                marginTop: '6px',
+                                                fontSize: '8.8px',
                                                 fontWeight: 700,
                                                 letterSpacing: '0.02em',
-                                                color: listQuoteRollupStatusColor(enq.ListQuoteRollupStatus),
+                                                color: statusColor,
+                                                whiteSpace: 'normal',
+                                                lineHeight: 1.25,
                                             }}
                                         >
-                                            {formatListQuoteRollupStatusLine(enq.ListQuoteRollupStatus)}
+                                            <div>{statusLines.line1}</div>
+                                            <div>{statusLines.line2}</div>
                                         </div>
                                     </td>
-                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '234px' }}>
+                                    <td style={{ ...quoteListTdTransparent, padding: tdPad, fontSize: '11.2px', color: '#64748b', verticalAlign: 'top', minWidth: '234px', whiteSpace: 'nowrap', textAlign: 'left' }}>
                                         {enq.ProjectName || '-'}
                                     </td>
                                     <td
                                         style={{
-                                            padding: '12px 16px',
+                                            ...quoteListTdTransparent,
+                                            padding: tdPad,
                                             fontSize: '11px',
                                             color: '#64748b',
                                             verticalAlign: 'top',
@@ -9393,6 +9551,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             maxWidth: '72vw',
                                             whiteSpace: 'normal',
                                             wordBreak: 'break-word',
+                                            textAlign: 'left',
                                         }}
                                     >
                                         {(() => {
@@ -9409,10 +9568,13 @@ const QuoteForm = ({ openContext = null }) => {
                                                 display: 'flex',
                                                 flexWrap: 'wrap',
                                                 alignItems: 'baseline',
+                                                justifyContent: 'flex-start',
                                                 gap: '6px',
                                                 fontSize: '11px',
-                                                lineHeight: 1.35,
+                                                lineHeight: 1.2,
                                                 color: '#334155',
+                                                textAlign: 'left',
+                                                width: '100%',
                                             };
                                             const refDateStyle = { fontSize: '11px', color: '#475569', wordBreak: 'break-word' };
                                             const bdStyle = {
@@ -9438,7 +9600,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                         ln.preparedBy ?? ln.PreparedBy ?? ''
                                                     ).trim();
                                                     return (
-                                                    <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 8 : 0 }}>
+                                                    <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 4 : 0 }}>
                                                         <span style={refDateStyle}>{ln.textLine}</span>
                                                         {ln.bdTotal != null && ln.bdTotal > 0 ? (
                                                             <span style={{ ...bdStyle, fontSize: '10px' }}>
@@ -9513,22 +9675,39 @@ const QuoteForm = ({ openContext = null }) => {
                                     </td>
                                     <td
                                         style={{
-                                            padding: '12px 16px',
-                                            fontSize: '13px',
+                                            ...quoteListTdTransparent,
+                                            padding: tdPad,
+                                            fontSize: '11.2px',
                                             color: '#dc2626',
                                             fontWeight: '500',
                                             verticalAlign: 'top',
                                             minWidth: '110px',
                                             whiteSpace: 'nowrap',
+                                            textAlign: 'left',
                                         }}
                                     >
                                         {enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}
                                     </td>
-                                    <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748b', verticalAlign: 'top', minWidth: '200px' }}>
+                                    <td
+                                        style={{
+                                            ...quoteListTdTransparent,
+                                            padding: tdPad,
+                                            fontSize: '11.2px',
+                                            color: '#64748b',
+                                            verticalAlign: 'top',
+                                            minWidth: '260px',
+                                            maxWidth: '42vw',
+                                            whiteSpace: 'normal',
+                                            wordBreak: 'break-word',
+                                            overflowWrap: 'anywhere',
+                                            textAlign: 'left',
+                                        }}
+                                    >
                                         {enq.ConsultantName || enq.consultantName || '-'}
                                     </td>
                                 </tr>
-                            ))}
+                            );
+                            })}
                         </tbody>
                     </table>
                 </div>
@@ -10505,10 +10684,7 @@ const QuoteForm = ({ openContext = null }) => {
               ? printContent.innerHTML
               : '';
         if (fragmentHtml) {
-            const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
-            const serverOrigin = envOrigin
-                ? String(envOrigin).replace(/\/$/, '')
-                : `${window.location.protocol}//${window.location.hostname}:5002`;
+            const serverOrigin = getQuotePdfServerOrigin();
             const printWindow = window.open('', '_blank');
             if (!printWindow) {
                 window.alert('Pop-up blocked — allow pop-ups for this site to print, or use the Print button in the quote panel.');
@@ -10580,10 +10756,7 @@ const QuoteForm = ({ openContext = null }) => {
               : '';
         if (!fragmentHtml) throw new Error('No quote document to export');
 
-        const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
-        const serverOrigin = envOrigin
-            ? String(envOrigin).replace(/\/$/, '')
-            : `${window.location.protocol}//${window.location.hostname}:5002`;
+        const serverOrigin = getQuotePdfServerOrigin();
 
         const html = buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, 'preview', {
             pdfAssetOriginRewriteFrom: typeof window !== 'undefined' ? window.location.origin : '',
@@ -10609,7 +10782,31 @@ const QuoteForm = ({ openContext = null }) => {
             }
             throw new Error(detail || `HTTP ${res.status}`);
         }
-        const blob = await res.blob();
+        const ab = await res.arrayBuffer();
+        const head = new Uint8Array(ab.byteLength ? ab.slice(0, 5) : ab);
+        const isPdf =
+            head.length >= 4 &&
+            head[0] === 0x25 &&
+            head[1] === 0x50 &&
+            head[2] === 0x44 &&
+            head[3] === 0x46; /* %PDF */
+        if (!isPdf) {
+            const text = new TextDecoder().decode(ab.slice(0, 1200)).trim();
+            try {
+                const j = JSON.parse(text);
+                throw new Error(
+                    String(j.message || j.error || j.hint || 'Server returned JSON instead of a PDF file.')
+                );
+            } catch (e) {
+                if (e instanceof SyntaxError) {
+                    throw new Error(
+                        'The API did not return a PDF (often an HTML error page or SPA fallback). Set VITE_API_BASE to your Express API origin if the UI and API are on different hosts, and ensure POST /api/quote-pdf/generate is proxied with a long enough timeout.'
+                    );
+                }
+                throw e;
+            }
+        }
+        const blob = new Blob([ab], { type: 'application/pdf' });
         return { blob, fileName: fname };
     };
 
@@ -11548,11 +11745,11 @@ const QuoteForm = ({ openContext = null }) => {
             <div style={{ display: 'flex', height: 'calc(100vh - 72px)', background: '#f5f7fa' }}>
             {/* Left Panel - Controls */}
             <div style={{ width: `${sidebarWidth}px`, background: 'white', borderRight: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'visible' }}>
-                {/* Search Section */}
-                <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', position: 'relative', zIndex: 2000 }}>
+                {/* Search Section (compact left strip) */}
+                <div style={{ padding: '8px 4px', borderBottom: '1px solid #e2e8f0', position: 'relative', zIndex: 2000 }}>
                     <div style={{ position: 'relative' }} ref={searchRef}>
                         {/* Row 1: Enquiry No. and Lead Job */}
-                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center', marginBottom: '5px' }}>
                             {/* 1. Enquiry Input */}
                             <div style={{ flex: '0 0 50%', position: 'relative' }}>
                                 <input
@@ -11563,11 +11760,15 @@ const QuoteForm = ({ openContext = null }) => {
                                     onFocus={() => setShowSuggestions(true)}
                                     style={{
                                         width: '100%',
-                                        padding: '8px 12px',
+                                        padding: '2px 6px',
                                         border: '1px solid #e2e8f0',
                                         borderRadius: '6px',
-                                        fontSize: '14px',
-                                        backgroundColor: '#fff'
+                                        fontSize: '12px',
+                                        backgroundColor: '#fff',
+                                        minHeight: '28px',
+                                        height: '28px',
+                                        lineHeight: 1.2,
+                                        boxSizing: 'border-box',
                                     }}
                                 />
                                 {showSuggestions && suggestions.length > 0 && (
@@ -11600,7 +11801,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             return (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
                                                     <div style={{ flex: 1, position: 'relative' }}>
-                                            <select disabled style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9' }}>
+                                            <select disabled style={{ width: '100%', padding: '2px 6px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#f1f5f9', fontSize: '12px', minHeight: '28px', height: '28px', lineHeight: 1.2, boxSizing: 'border-box' }}>
                                                 <option>Select Lead Job</option>
                                             </select>
                                                     </div>
@@ -11765,13 +11966,14 @@ const QuoteForm = ({ openContext = null }) => {
                                         ) : null;
 
                                         return (
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', width: '100%' }}>
                                                 <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
                                             <select
                                                 style={{
-                                                    width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0',
+                                                    width: '100%', padding: '2px 6px', borderRadius: '6px', border: '1px solid #e2e8f0',
                                                     background: 'white', color: '#334155', fontWeight: '500',
-                                                    fontSize: '13px', appearance: 'none', paddingRight: '30px', cursor: 'pointer'
+                                                    fontSize: '12px', appearance: 'none', paddingRight: '26px', cursor: 'pointer',
+                                                    minHeight: '28px', height: '28px', lineHeight: 1.2, boxSizing: 'border-box',
                                                 }}
                                                 value={selectedValue}
                                                 onChange={(e) => {
@@ -11841,7 +12043,7 @@ const QuoteForm = ({ openContext = null }) => {
                         </div>
 
                         {/* Row 2: Customer Dropdown and Search Button */}
-                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
                             <div style={{ flex: 1, position: 'relative' }}>
                                 <CreatableSelect
                                     isDisabled={!enquiryData}
@@ -11857,21 +12059,24 @@ const QuoteForm = ({ openContext = null }) => {
                                 />
                             </div>
 
-                            {/* Search + Clear (same row as customer select) */}
+                            {/* Search + Clear (same row as customer select) — EMS gradient / grey clear */}
                             <button
                                 type="button"
                                 onClick={() => searchTerm.trim() && handleSearchInput(searchTerm)}
                                 style={{
-                                    padding: '8px 16px',
-                                    background: '#1e293b',
-                                    color: 'white',
-                                    border: 'none',
+                                    ...(searchTerm.trim()
+                                        ? EMS_LIST_SEARCH_ENABLED_STYLE
+                                        : EMS_LIST_SEARCH_DISABLED_STYLE),
+                                    padding: '5px 10px',
                                     borderRadius: '6px',
-                                    cursor: 'pointer',
-                                    fontWeight: '500',
-                                    fontSize: '13px',
+                                    cursor: searchTerm.trim() ? 'pointer' : 'not-allowed',
+                                    fontWeight: '600',
+                                    fontSize: '11px',
                                     whiteSpace: 'nowrap',
-                                    flexShrink: 0
+                                    flexShrink: 0,
+                                    minHeight: '28px',
+                                    height: '28px',
+                                    boxSizing: 'border-box',
                                 }}
                             >
                                 Search
@@ -11880,16 +12085,17 @@ const QuoteForm = ({ openContext = null }) => {
                                 type="button"
                                 onClick={handleClear}
                                 style={{
-                                    padding: '8px 14px',
-                                    background: '#e2e8f0',
-                                    border: '1px solid #cbd5e1',
+                                    ...EMS_LIST_CLEAR_STYLE,
+                                    padding: '5px 10px',
                                     borderRadius: '6px',
                                     cursor: 'pointer',
-                                    fontSize: '13px',
-                                    color: '#475569',
+                                    fontSize: '11px',
                                     fontWeight: '600',
                                     whiteSpace: 'nowrap',
-                                    flexShrink: 0
+                                    flexShrink: 0,
+                                    minHeight: '28px',
+                                    height: '28px',
+                                    boxSizing: 'border-box',
                                 }}
                             >
                                 Clear
@@ -11899,10 +12105,22 @@ const QuoteForm = ({ openContext = null }) => {
                 </div>
 
                 {/* Action row: Draft Save always visible; Save / Revision only when enquiry + lead + customer are set */}
-                <div style={{ padding: '8px 12px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '6px', flexWrap: 'wrap' }}>
+                <div
+                    style={{
+                        padding: '6px 1px',
+                        borderBottom: '1px solid #e2e8f0',
+                        background: '#f8fafc',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'flex-start',
+                        gap: '5px',
+                        flexWrap: 'nowrap',
+                        overflowX: 'auto',
+                    }}
+                >
 
                         {/* Draft Save + load — PDF / Email / With Header / Print / Signatures are on the right panel toolbar. */}
-                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center', flexWrap: 'nowrap', flexShrink: 0 }}>
                             <div
                                 ref={formDraftMenuWrapRef}
                                 style={{ position: 'relative', display: 'inline-flex', alignItems: 'stretch' }}
@@ -11912,9 +12130,11 @@ const QuoteForm = ({ openContext = null }) => {
                                         display: 'inline-flex',
                                         alignItems: 'stretch',
                                         gap: 0,
-                                        borderRadius: '44px',
+                                        height: '28px',
+                                        borderRadius: '6px',
                                         overflow: 'hidden',
                                         border: '1px solid #cbd5e1',
+                                        boxSizing: 'border-box',
                                     }}
                                 >
                                     <button
@@ -11925,19 +12145,22 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             alignItems: 'center',
-                                            gap: '6px',
-                                            padding: '6px 12px',
+                                            gap: '4px',
+                                            height: '100%',
+                                            minHeight: 0,
+                                            padding: '0 10px',
+                                            boxSizing: 'border-box',
                                             background: !canEdit() || isEditingRestricted ? '#f1f5f9' : '#fff',
                                             color: !canEdit() || isEditingRestricted ? '#94a3b8' : '#334155',
                                             border: 'none',
                                             borderRadius: 0,
                                             cursor: !canEdit() || isEditingRestricted ? 'not-allowed' : 'pointer',
                                             fontWeight: '600',
-                                            fontSize: '12px',
+                                            fontSize: '11px',
                                             whiteSpace: 'nowrap',
                                         }}
                                     >
-                                        <FileText size={14} /> Draft Save
+                                        <FileText size={13} /> Draft Save
                                     </button>
                                     <button
                                         type="button"
@@ -11954,7 +12177,10 @@ const QuoteForm = ({ openContext = null }) => {
                                             display: 'flex',
                                             alignItems: 'center',
                                             gap: '4px',
-                                            padding: '6px 10px',
+                                            height: '100%',
+                                            minHeight: 0,
+                                            padding: '0 8px',
+                                            boxSizing: 'border-box',
                                             fontSize: '11px',
                                             fontWeight: 600,
                                             border: 'none',
@@ -11967,7 +12193,7 @@ const QuoteForm = ({ openContext = null }) => {
                                         }}
                                         title="Open list of your saved drafts (server). Other users cannot see them."
                                     >
-                                        Load draft… <ChevronDown size={12} />
+                                        Load draft… <ChevronDown size={11} />
                                     </button>
                                 </div>
                                 {formDraftPanelOpen && (
@@ -12070,7 +12296,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                                 alignItems: 'center',
                                                                 justifyContent: 'center',
                                                                 width: '28px',
-                                                                height: '28px',
+                                                                height: '26px',
                                                                 padding: 0,
                                                                 borderRadius: '6px',
                                                                 border: '1px solid #fecaca',
@@ -12099,16 +12325,20 @@ const QuoteForm = ({ openContext = null }) => {
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
-                                    gap: '6px',
-                                    padding: '6px 12px',
+                                    gap: '4px',
+                                    height: '28px',
+                                    minHeight: '28px',
+                                    padding: '0 12px',
+                                    boxSizing: 'border-box',
                                     background: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#f1f5f9' : '#1e293b',
                                     color: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? '#94a3b8' : 'white',
                                     border: 'none',
-                                    borderRadius: '44px',
+                                    borderRadius: '6px',
                                     cursor: (disableSaveRevisionInBrowse || !canEdit() || !saveButtonScopeReady || hasPersistedQuoteForScope || isEditingRestricted) ? 'not-allowed' : 'pointer',
                                     fontWeight: '600',
-                                    fontSize: '12px',
-                                    opacity: saving ? 0.7 : 1
+                                    fontSize: '11px',
+                                    opacity: saving ? 0.7 : 1,
+                                    flexShrink: 0,
                                 }}
                                 title={
                                     saving ? 'Saving…' :
@@ -12120,7 +12350,7 @@ const QuoteForm = ({ openContext = null }) => {
                                     ''
                                 }
                             >
-                                <Save size={14} /> {saving ? 'Saving...' : 'Save'}
+                                <Save size={13} /> {saving ? 'Saving...' : 'Save'}
                             </button>
 
                             {/* Revision Button */}
@@ -12131,21 +12361,25 @@ const QuoteForm = ({ openContext = null }) => {
                                     style={{
                                         display: 'flex',
                                         alignItems: 'center',
-                                        gap: '6px',
-                                        padding: '6px 12px',
+                                        gap: '4px',
+                                        height: '28px',
+                                        minHeight: '28px',
+                                        padding: '0 12px',
+                                        boxSizing: 'border-box',
                                         background:
                                             disableSaveRevisionInBrowse || !canEdit() || isEditingRestricted || !canRevisePersistedQuote
                                                 ? '#94a3b8'
                                                 : '#0284c7',
                                         color: 'white',
                                         border: 'none',
-                                        borderRadius: '4px',
+                                        borderRadius: '6px',
                                         cursor:
                                             disableSaveRevisionInBrowse || !canEdit() || isEditingRestricted || !canRevisePersistedQuote
                                                 ? 'not-allowed'
                                                 : 'pointer',
                                         fontWeight: '600',
-                                        fontSize: '12px',
+                                        fontSize: '11px',
+                                        flexShrink: 0,
                                     }}
                                     title={
                                         disableSaveRevisionInBrowse
@@ -12159,7 +12393,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                 : ''
                                     }
                                 >
-                                    <Plus size={14} /> Revision
+                                    <Plus size={13} /> Revision
                                 </button>
                             )}
                             </>
@@ -12709,232 +12943,321 @@ const QuoteForm = ({ openContext = null }) => {
                                 {/* Browsing saved quotes: left panel is only tabs + previous quotes; no form sections */}
                                 {!browsePreviousQuotesRevisions && (
                                 <>
-                                {/* Metadata Section (Quote Details) - Moved Below Pricing */}
-                                <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fafafa' }}>
+                                {/* Metadata Section (Quote Details) — compact blocks */}
+                                <div
+                                    style={{
+                                        padding: '8px',
+                                        borderBottom: '1px solid #e2e8f0',
+                                        background: '#f8fafc',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '6px',
+                                    }}
+                                >
+                                    <h4 style={{ margin: '0 0 2px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
 
-                                    <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
-
-                                    {/* Division is auto-selected based on user department - no manual selection needed */}
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Quote Date <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <DateInput
-                                            value={quoteDate}
-                                            onChange={(e) => setQuoteDate(e.target.value)}
-                                            max={format(new Date(), 'yyyy-MM-dd')}
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }}
-                                        />
-                                    </div>
-
-
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Validity (Days) <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <input type="number" value={validityDays} onChange={(e) => setValidityDays(parseInt(e.target.value) || 0)} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px' }} />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Customer Reference <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <input
-                                            type="text"
-                                            value={customerReference}
-                                            onChange={(e) => setCustomerReference(e.target.value)}
-                                            placeholder="Customer RFP or Enquiry ref"
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                        />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
-                                        {showAttentionAsSelect ? (
+                                    {/* Block 1 — dates & refs through Attention */}
+                                    <div
+                                        style={{
+                                            padding: '8px 10px',
+                                            borderRadius: '6px',
+                                            background: '#eff6ff',
+                                            border: '1px solid #bfdbfe',
+                                        }}
+                                    >
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Quote Date <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <DateInput
+                                                value={quoteDate}
+                                                onChange={(e) => setQuoteDate(e.target.value)}
+                                                max={format(new Date(), 'yyyy-MM-dd')}
+                                                style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL }}
+                                            />
+                                        </div>
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Validity (Days) <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <input type="number" value={validityDays} onChange={(e) => setValidityDays(parseInt(e.target.value) || 0)} style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL }} />
+                                        </div>
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Customer Reference <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <input
+                                                type="text"
+                                                value={customerReference}
+                                                onChange={(e) => setCustomerReference(e.target.value)}
+                                                placeholder="Customer RFP or Enquiry ref"
+                                                style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px' }}
+                                            />
+                                        </div>
+                                        <div style={{ marginBottom: '0' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
+                                            {showAttentionAsSelect ? (
                                                 <select
                                                     value={attentionSelectMerged.includes(toAttention) ? toAttention : ''}
                                                     onChange={(e) => setToAttention(e.target.value)}
-                                                    style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px', background: '#fff' }}
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px', background: '#fff' }}
                                                 >
                                                     <option value="">— Select —</option>
                                                     {attentionSelectMerged.map((opt) => (
                                                         <option key={opt} value={opt}>{opt}</option>
                                                     ))}
                                                 </select>
-                                        ) : (
-                                        <input
-                                            type="text"
-                                            value={toAttention}
-                                            onChange={(e) => setToAttention(e.target.value)}
-                                            placeholder="Contact Person..."
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                        />
-                                        )}
+                                            ) : (
+                                                <input
+                                                    type="text"
+                                                    value={toAttention}
+                                                    onChange={(e) => setToAttention(e.target.value)}
+                                                    placeholder="Contact Person..."
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px' }}
+                                                />
+                                            )}
+                                        </div>
                                     </div>
 
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Subject <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical' }} />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <ListBoxControl
-                                            label={
-                                                <span style={{ fontSize: '12px', color: '#64748b' }}>
-                                                    Enquiry Type<span style={{ color: '#ef4444' }}>*</span>
-                                                </span>
-                                            }
-                                            options={enquiryTypesMaster}
-                                            selectedOption={quoteEnquiryTypeSelect}
-                                            onOptionChange={(val) => setQuoteEnquiryTypeSelect(val || '')}
-                                            listBoxItems={quoteTypeList}
-                                            onAdd={handleAddQuoteType}
-                                            onRemove={handleRemoveQuoteTypeAt}
-                                            minSearchLength={0}
-                                            disabled={false}
-                                            canRemove
-                                        />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <CreatableSelect
-                                            isClearable
-                                            onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
-                                            options={computedPreparedByOptions}
-                                            value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
-                                            placeholder="Select or Type Name..."
-                                            styles={{
-                                                control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
-                                                valueContainer: (base) => ({ ...base, padding: '0 8px' }),
-                                                input: (base) => ({ ...base, margin: 0, padding: 0 }),
-                                            }}
-                                        />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Signatory <span style={{ color: '#ef4444' }}>*</span></label>
-                                        <CreatableSelect
-                                            isClearable
-                                            onChange={(newValue) => {
-                                                setSignatory(newValue ? newValue.value : '');
-                                                // Update designation if selected from list
-                                                if (newValue) {
-                                                    if (newValue.designation) {
-                                                    setSignatoryDesignation(newValue.designation);
-                                                    } else {
-                                                        const matched = usersList.find(u => u.FullName === newValue.value);
-                                                        setSignatoryDesignation(matched?.Designation || '');
-                                                    }
+                                    {/* Block 2 — subject & enquiry type */}
+                                    <div
+                                        style={{
+                                            padding: '8px 10px',
+                                            borderRadius: '6px',
+                                            background: '#f5f3ff',
+                                            border: '1px solid #ddd6fe',
+                                        }}
+                                    >
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Subject <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '4px 8px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px', boxSizing: 'border-box' }} />
+                                        </div>
+                                        <div style={{ marginBottom: '0' }}>
+                                            <ListBoxControl
+                                                wrapperClassName="mb-0"
+                                                label={
+                                                    <span style={{ fontSize: '12px', color: '#64748b' }}>
+                                                        Enquiry Type<span style={{ color: '#ef4444' }}>*</span>
+                                                    </span>
                                                 }
-                                            }}
-                                            options={computedSignatoryOptions.length > 0 ? computedSignatoryOptions : computedPreparedByOptions}
-                                            value={signatory ? { label: signatory, value: signatory } : null}
-                                            placeholder="Select or Type Signatory..."
-                                            styles={{
-                                                control: (base) => ({ ...base, minHeight: '34px', fontSize: '13px' }),
-                                                valueContainer: (base) => ({ ...base, padding: '0 8px' }),
-                                                input: (base) => ({ ...base, margin: 0, padding: 0 }),
-                                            }}
-                                        />
-                                    </div>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Signatory Designation</label>
-                                        <input
-                                            type="text"
-                                            value={signatoryDesignation}
-                                            onChange={(e) => setSignatoryDesignation(e.target.value)}
-                                            placeholder="Signatory's Title..."
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '13px' }}
-                                        />
-                                    </div>
-
-                                    <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '15px 0' }} />
-                                    <h5 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Recipient Info (Optional Override):</h5>
-
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>To Address</label>
-                                        <textarea
-                                            value={toAddress}
-                                            onChange={(e) => setToAddress(e.target.value)}
-                                            rows={2}
-                                            placeholder="Client Address..."
-                                            style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px' }}
-                                        />
-                                    </div>
-
-                                    <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
-                                        <div style={{ flex: 1 }}>
-                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Phone</label>
-                                            <input
-                                                type="text"
-                                                value={toPhone}
-                                                onChange={(e) => setToPhone(e.target.value)}
-                                                style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                                options={enquiryTypesMaster}
+                                                selectedOption={quoteEnquiryTypeSelect}
+                                                onOptionChange={(val) => setQuoteEnquiryTypeSelect(val || '')}
+                                                listBoxItems={quoteTypeList}
+                                                onAdd={handleAddQuoteType}
+                                                onRemove={handleRemoveQuoteTypeAt}
+                                                minSearchLength={0}
+                                                disabled={false}
+                                                canRemove
                                             />
                                         </div>
-                                        <div style={{ flex: 1 }}>
-                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Fax</label>
-                                            <input
-                                                type="text"
-                                                value={toFax}
-                                                onChange={(e) => setToFax(e.target.value)}
-                                                style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                    </div>
+
+                                    {/* Block 3 — prepared by, signatory, designation */}
+                                    <div
+                                        style={{
+                                            padding: '8px 10px',
+                                            borderRadius: '6px',
+                                            background: '#ecfdf5',
+                                            border: '1px solid #a7f3d0',
+                                        }}
+                                    >
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <CreatableSelect
+                                                isClearable
+                                                onChange={(newValue) => setPreparedBy(newValue ? newValue.value : '')}
+                                                options={computedPreparedByOptions}
+                                                value={preparedBy ? { label: preparedBy, value: preparedBy } : null}
+                                                placeholder="Select or Type Name..."
+                                                styles={quotePreparedSignatoryCreatableStyles}
                                             />
                                         </div>
-                                        <div style={{ flex: 1 }}>
-                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '4px' }}>Email</label>
-                                            <input
-                                                type="email"
-                                                value={toEmail}
-                                                onChange={(e) => setToEmail(e.target.value)}
-                                                style={{ width: '100%', padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Signatory <span style={{ color: '#ef4444' }}>*</span></label>
+                                            <CreatableSelect
+                                                isClearable
+                                                onChange={(newValue) => {
+                                                    setSignatory(newValue ? newValue.value : '');
+                                                    if (newValue) {
+                                                        if (newValue.designation) {
+                                                            setSignatoryDesignation(newValue.designation);
+                                                        } else {
+                                                            const matched = usersList.find(u => u.FullName === newValue.value);
+                                                            setSignatoryDesignation(matched?.Designation || '');
+                                                        }
+                                                    }
+                                                }}
+                                                options={computedSignatoryOptions.length > 0 ? computedSignatoryOptions : computedPreparedByOptions}
+                                                value={signatory ? { label: signatory, value: signatory } : null}
+                                                placeholder="Select or Type Signatory..."
+                                                styles={quotePreparedSignatoryCreatableStyles}
                                             />
+                                        </div>
+                                        <div style={{ marginBottom: '0' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Signatory Designation</label>
+                                            <input
+                                                type="text"
+                                                value={signatoryDesignation}
+                                                onChange={(e) => setSignatoryDesignation(e.target.value)}
+                                                placeholder="Signatory's Title..."
+                                                style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px' }}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {/* Block 4 — recipient override */}
+                                    <div
+                                        style={{
+                                            padding: '8px 10px',
+                                            borderRadius: '6px',
+                                            background: '#fffbeb',
+                                            border: '1px solid #fde68a',
+                                        }}
+                                    >
+                                        <h5 style={{ margin: '0 0 6px 0', fontSize: '11px', color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>Recipient Info (Optional Override):</h5>
+                                        <div style={{ marginBottom: '6px' }}>
+                                            <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>To Address</label>
+                                            <textarea
+                                                value={toAddress}
+                                                onChange={(e) => setToAddress(e.target.value)}
+                                                rows={2}
+                                                placeholder="Client Address..."
+                                                style={{ width: '100%', padding: '4px 8px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px', boxSizing: 'border-box' }}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '6px', marginBottom: '0', flexWrap: 'wrap' }}>
+                                            <div style={{ flex: '1 1 80px', minWidth: 0 }}>
+                                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Phone</label>
+                                                <input
+                                                    type="text"
+                                                    value={toPhone}
+                                                    onChange={(e) => setToPhone(e.target.value)}
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
+                                                />
+                                            </div>
+                                            <div style={{ flex: '1 1 80px', minWidth: 0 }}>
+                                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Fax</label>
+                                                <input
+                                                    type="text"
+                                                    value={toFax}
+                                                    onChange={(e) => setToFax(e.target.value)}
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
+                                                />
+                                            </div>
+                                            <div style={{ flex: '1 1 80px', minWidth: 0 }}>
+                                                <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Email</label>
+                                                <input
+                                                    type="email"
+                                                    value={toEmail}
+                                                    onChange={(e) => setToEmail(e.target.value)}
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
+                                                />
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
 
                                 {/* Template Section */}
-                                <div style={{ padding: '16px', borderBottom: '1px solid #e2e8f0', background: '#fff' }}>
+                                <div
+                                    style={{
+                                        padding: '12px 14px',
+                                        borderBottom: '1px solid #1e293b',
+                                        background: '#334155',
+                                        color: '#e8e8e8',
+                                    }}
+                                >
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                                        <h4 style={{ margin: 0, fontSize: '13px', color: '#475569' }}>Clause Templates:</h4>
+                                        <h4 style={{ margin: 0, fontSize: '13px', color: '#f1f5f9', fontWeight: 600 }}>Clause Templates:</h4>
                                     </div>
 
-                                    {/* Save Template */}
+                                    {/* Store new template */}
                                     <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
                                         <input
                                             type="text"
                                             placeholder="New Template Name"
                                             value={savedTemplateName}
                                             onChange={(e) => setSavedTemplateName(e.target.value)}
-                                            style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                            style={{
+                                                flex: 1,
+                                                ...QUOTE_LEFT_COMPACT_CONTROL,
+                                                fontSize: '12px',
+                                                background: '#f8fafc',
+                                                color: '#0f172a',
+                                                borderColor: '#94a3b8',
+                                            }}
                                         />
-                                        <button onClick={handleSaveTemplate} style={{ padding: '6px 12px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                                            Save
+                                        <button
+                                            type="button"
+                                            onClick={handleSaveTemplate}
+                                            style={{
+                                                padding: '6px 12px',
+                                                background: '#3b82f6',
+                                                color: '#f8fafc',
+                                                border: 'none',
+                                                borderRadius: '4px',
+                                                cursor: 'pointer',
+                                                fontSize: '12px',
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            Store
                                         </button>
                                     </div>
 
-                                    {/* Load Template */}
+                                    {/* Load template */}
                                     <div style={{ display: 'flex', gap: '8px' }}>
                                         <select
                                             value={selectedTemplateId}
                                             onChange={(e) => setSelectedTemplateId(e.target.value)}
-                                            style={{ flex: 1, padding: '6px', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '12px' }}
+                                            style={{
+                                                flex: 1,
+                                                ...QUOTE_LEFT_COMPACT_CONTROL,
+                                                fontSize: '12px',
+                                                background: '#f8fafc',
+                                                color: '#0f172a',
+                                                borderColor: '#94a3b8',
+                                            }}
                                         >
                                             <option value="">Select Template...</option>
                                             {templates.map(t => (
                                                 <option key={t.ID} value={t.ID}>{t.TemplateName}</option>
                                             ))}
                                         </select>
-                                        <button onClick={handleLoadTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', color: '#334155' }} title="Load">
+                                        <button
+                                            type="button"
+                                            onClick={handleLoadTemplate}
+                                            disabled={!selectedTemplateId}
+                                            style={{
+                                                padding: '6px',
+                                                background: '#475569',
+                                                border: '1px solid #64748b',
+                                                borderRadius: '4px',
+                                                cursor: selectedTemplateId ? 'pointer' : 'not-allowed',
+                                                color: '#e8e8e8',
+                                                opacity: selectedTemplateId ? 1 : 0.45,
+                                            }}
+                                            title="Load"
+                                        >
                                             <FolderOpen size={14} />
                                         </button>
-                                        <button onClick={handleDeleteTemplate} disabled={!selectedTemplateId} style={{ padding: '6px', background: '#fff', border: '1px solid #fee2e2', borderRadius: '4px', cursor: 'pointer', color: '#ef4444' }} title="Delete">
+                                        <button
+                                            type="button"
+                                            onClick={handleDeleteTemplate}
+                                            disabled={!selectedTemplateId}
+                                            style={{
+                                                padding: '6px',
+                                                background: '#475569',
+                                                border: '1px solid #94a3b8',
+                                                borderRadius: '4px',
+                                                cursor: selectedTemplateId ? 'pointer' : 'not-allowed',
+                                                color: '#fca5a5',
+                                                opacity: selectedTemplateId ? 1 : 0.45,
+                                            }}
+                                            title="Delete"
+                                        >
                                             <Trash2 size={14} />
                                         </button>
                                     </div>
                                 </div>
 
                                 {/* Clause Checkboxes */}
-                                <div style={{ padding: '16px' }}>
-                                    <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#475569' }}>Select & Reorder Clauses:</h4>
+                                <div style={{ padding: '10px 12px' }}>
+                                    <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#475569' }}>Select & Reorder Clauses:</h4>
                                     {orderedClauses.map((id, index) => {
 
                                         const isCustom = id.startsWith('custom_');
@@ -12949,10 +13272,10 @@ const QuoteForm = ({ openContext = null }) => {
                                         const sideSerial = clauseSidebarSerialByIndex[index] || 0;
 
                                         return (
-                                            <div key={id} style={{ marginBottom: '8px', padding: '4px', background: isCustom ? '#fff' : 'transparent', borderBottom: '1px solid #f1f5f9' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <div key={id} style={{ marginBottom: '5px', padding: '2px', background: isCustom ? '#fff' : 'transparent', borderBottom: '1px solid #f1f5f9' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                     {/* Reorder Buttons */}
-                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
                                                         <button
                                                             onClick={() => moveClause(index, 'up')}
                                                             disabled={index === 0}
@@ -12971,14 +13294,14 @@ const QuoteForm = ({ openContext = null }) => {
                                                         </button>
                                                     </div>
 
-                                                    <label style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '8px', background: isChecked ? '#f0fdf4' : '#f8fafc', borderRadius: '6px', border: `1px solid ${isChecked ? '#86efac' : '#e2e8f0'}` }}>
+                                                    <label style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', padding: '5px 8px', background: isChecked ? '#f0fdf4' : '#f8fafc', borderRadius: '6px', border: `1px solid ${isChecked ? '#86efac' : '#e2e8f0'}` }}>
                                                         <input
                                                             type="checkbox"
                                                             checked={isChecked}
                                                             onChange={() => isCustom ? updateCustomClause(id, 'isChecked', !isChecked) : toggleClause(id)}
-                                                            style={{ width: '16px', height: '16px' }}
+                                                            style={{ width: '15px', height: '15px', flexShrink: 0 }}
                                                         />
-                                                        <span style={{ fontSize: '13px', fontWeight: '500' }}>
+                                                        <span style={{ fontSize: '11.05px', fontWeight: '500', lineHeight: 1.35 }}>
                                                             {sideSerial ? `${sideSerial}. ` : ''}
                                                             {title}
                                                         </span>
@@ -12997,7 +13320,7 @@ const QuoteForm = ({ openContext = null }) => {
 
 
                                                 {isChecked && !isCustom && contentKey === 'pricingTerms' && (
-                                                    <div style={{ marginLeft: '32px', marginTop: '10px' }}>
+                                                    <div style={{ marginLeft: '28px', marginTop: '6px' }}>
                                                         <div
                                                             style={{
                                                                 fontSize: '11px',
@@ -13038,8 +13361,9 @@ const QuoteForm = ({ openContext = null }) => {
                                                             .quote-pricing-terms-auto-table-preview table {
                                                                 width: 100%;
                                                                 border-collapse: collapse;
-                                                                margin-bottom: 8px;
-                                                                font-size: 12px;
+                                                                margin-bottom: 6px;
+                                                                font-size: 11px;
+                                                                line-height: 1.25;
                                                             }
                                                             `}
                                                         </style>
@@ -13049,14 +13373,14 @@ const QuoteForm = ({ openContext = null }) => {
                                                 {isChecked && (
                                                     <button
                                                         onClick={() => setExpandedClause(expandedClause === contentKey ? null : contentKey)}
-                                                        style={{ marginTop: '4px', marginLeft: '32px', fontSize: '11px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer' }}
+                                                        style={{ marginTop: '2px', marginLeft: '28px', fontSize: '11px', color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', lineHeight: 1.3 }}
                                                     >
                                                         {expandedClause === contentKey ? '▼ Hide Editor' : '► Edit Content'}
                                                     </button>
                                                 )}
 
                                                 {expandedClause === contentKey && (
-                                                    <div style={{ marginLeft: '32px' }}>
+                                                    <div style={{ marginLeft: '28px' }}>
                                                         {(() => {
                                                             const editorHtml =
                                                                 !isCustom && contentKey === 'pricingTerms'
@@ -13075,11 +13399,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                                           : clauseContent[contentKey]);
                                                             return (
                                                         <ClauseEditor
-                                                            key={
-                                                                !isCustom && contentKey === 'pricingTerms'
-                                                                    ? `${contentKey}:${String(pricingTermsAutoTablePreviewHtml || '').length}:${String(fallbackGrandBaseTotal || 0)}`
-                                                                    : contentKey
-                                                            }
+                                                            key={`clause-editor-${id}`}
                                                             html={editorHtml}
                                                             onChange={(val) => {
                                                                 if (isCustom) updateCustomClause(id, 'content', val);
@@ -13120,7 +13440,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                     value={newClauseTitle}
                                                     onChange={(e) => setNewClauseTitle(e.target.value)}
                                                     placeholder="Clause Heading (e.g., Special Conditions)"
-                                                    style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '13px', marginBottom: '8px' }}
+                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px', marginBottom: '8px' }}
                                                     autoFocus
                                                 />
                                                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -13187,26 +13507,55 @@ const QuoteForm = ({ openContext = null }) => {
                 <div style={{ width: '4px', height: '32px', backgroundColor: '#cbd5e1', borderRadius: '2px' }}></div>
             </div>
 
-            {/* Right Panel - Quote Preview */}
-            <div style={{ flex: 1, overflow: 'auto', padding: '0 20px 20px 20px' }}>
+            {/* Right Panel - Quote Preview (no outer vertical scroll; tables scroll internally) */}
+            <div
+                style={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    padding: '4px 0 12px 0',
+                }}
+            >
                 {
                     loading ? (
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#64748b' }} >
+                        <div
+                            style={{
+                                flex: 1,
+                                minHeight: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                color: '#64748b',
+                            }}
+                        >
                             Loading enquiry data...
                         </div>
                     ) : !enquiryData ? (
-                        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div
+                            style={{
+                                flex: 1,
+                                minHeight: 0,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '4px',
+                                overflow: 'hidden',
+                            }}
+                        >
                             <div
                                 className="no-print"
                                 style={{
                                     flexShrink: 0,
                                     width: '100%',
                                     boxSizing: 'border-box',
-                                    padding: '10px 12px',
-                                    background: '#f8fafc',
-                                    border: '1px solid #e2e8f0',
-                                    borderRadius: '8px',
-                                    boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
+                                    marginTop: '4px',
+                                    marginBottom: '4px',
+                                    padding: '3px 5px',
+                                    background: 'transparent',
+                                    border: 'none',
+                                    borderRadius: 0,
+                                    boxShadow: 'none',
                                 }}
                             >
                                 <div
@@ -13216,14 +13565,14 @@ const QuoteForm = ({ openContext = null }) => {
                                         flexWrap: 'nowrap',
                                         alignItems: 'flex-end',
                                         justifyContent: 'flex-start',
-                                        gap: '10px',
+                                        gap: '4px',
                                         width: '100%',
                                         overflowX: 'auto',
                                         boxSizing: 'border-box',
                                     }}
                                 >
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Division</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Division</span>
                                         <select
                                             value={quoteListDivision}
                                             onChange={(e) => {
@@ -13238,8 +13587,8 @@ const QuoteForm = ({ openContext = null }) => {
                                             style={{
                                                 minWidth: '140px',
                                                 maxWidth: '200px',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: quoteListDivisionsLoading ? '#f1f5f9' : '#fff',
@@ -13248,6 +13597,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                     quoteListDivisionsLoading || !quoteListDivisions.length
                                                         ? 'not-allowed'
                                                         : 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             {quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
@@ -13261,8 +13611,8 @@ const QuoteForm = ({ openContext = null }) => {
                                             ))}
                                         </select>
                                     </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
                                             onChange={(e) => {
@@ -13275,13 +13625,14 @@ const QuoteForm = ({ openContext = null }) => {
                                             }}
                                             style={{
                                                 minWidth: '132px',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: '#fff',
                                                 color: '#334155',
                                                 cursor: 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
@@ -13292,13 +13643,13 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flex: '1 1 96px',
                                             minWidth: '72px',
                                             maxWidth: '216px',
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Search criteria</span>
                                         <input
                                             type="text"
                                             value={quoteListSearchCriteria}
@@ -13318,14 +13669,15 @@ const QuoteForm = ({ openContext = null }) => {
                                             style={{
                                                 width: '100%',
                                                 boxSizing: 'border-box',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
                                                 color: '#334155',
                                                 opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
+                                                minHeight: '26px',
                                             }}
                                         />
                                     </div>
@@ -13333,12 +13685,12 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>From</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>From</span>
                                         <div
                                             style={{
                                                 width: '118px',
@@ -13347,12 +13699,24 @@ const QuoteForm = ({ openContext = null }) => {
                                         >
                                             <DateInput
                                                 value={quoteListDateFrom}
-                                                onChange={(e) => setQuoteListDateFrom(e.target.value)}
+                                                onChange={(e) => {
+                                                    const nextFrom = e.target.value;
+                                                    setQuoteListDateFrom(nextFrom);
+                                                    if (nextFrom && !quoteListDateTo) {
+                                                        const today = new Date();
+                                                        const yyyy = today.getFullYear();
+                                                        const mm = String(today.getMonth() + 1).padStart(2, '0');
+                                                        const dd = String(today.getDate()).padStart(2, '0');
+                                                        setQuoteListDateTo(`${yyyy}-${mm}-${dd}`);
+                                                    }
+                                                }}
                                                 disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                                 placeholder="DD-MMM-YYYY"
                                                 style={{
-                                                    fontSize: '12px',
-                                                    padding: '6px 8px',
+                                                    fontSize: '11px',
+                                                    padding: '3px 6px',
+                                                    minHeight: '26px',
+                                                    height: '26px',
                                                     cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                                 }}
                                             />
@@ -13362,12 +13726,12 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>To</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>To</span>
                                         <div
                                             style={{
                                                 width: '118px',
@@ -13380,28 +13744,31 @@ const QuoteForm = ({ openContext = null }) => {
                                                 disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                                 placeholder="DD-MMM-YYYY"
                                                 style={{
-                                                    fontSize: '12px',
-                                                    padding: '6px 8px',
+                                                    fontSize: '11px',
+                                                    padding: '3px 6px',
+                                                    minHeight: '26px',
+                                                    height: '26px',
                                                     cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                                 }}
                                             />
                                         </div>
                                     </div>
-                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '8px', flexShrink: 0 }}>
+                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '6px', flexShrink: 0 }}>
                                         <button
                                             type="button"
                                             className="no-print"
                                             onClick={handleQuoteListSearch}
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
                                             style={{
-                                                padding: '6px 14px',
-                                                fontSize: '12px',
+                                                ...(quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading
+                                                    ? EMS_LIST_SEARCH_ENABLED_STYLE
+                                                    : EMS_LIST_SEARCH_DISABLED_STYLE),
+                                                padding: '4px 12px',
+                                                fontSize: '11px',
                                                 fontWeight: '600',
                                                 borderRadius: '6px',
-                                                border: '1px solid #2563eb',
-                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
-                                                color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             {quoteSearchLoading ? 'Searching…' : 'Search'}
@@ -13411,14 +13778,13 @@ const QuoteForm = ({ openContext = null }) => {
                                             className="no-print"
                                             onClick={handleQuoteListClear}
                                             style={{
-                                                padding: '6px 14px',
-                                                fontSize: '12px',
+                                                ...EMS_LIST_CLEAR_STYLE,
+                                                padding: '4px 12px',
+                                                fontSize: '11px',
                                                 fontWeight: '600',
                                                 borderRadius: '6px',
-                                                border: '1px solid #cbd5e1',
-                                                background: '#fff',
-                                                color: '#475569',
                                                 cursor: 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             Clear
@@ -13426,11 +13792,22 @@ const QuoteForm = ({ openContext = null }) => {
                                     </div>
                                 </div>
                             </div>
-                            {quoteListSummaryBody}
+                            <div
+                                style={{
+                                    flex: 1,
+                                    minHeight: 0,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    overflow: 'hidden',
+                                }}
+                            >
+                                {quoteListSummaryBody}
+                            </div>
                         </div>
                     ) : (!enquiryData.leadJobPrefix || !hasSelectedCustomer) ? (
                         <div style={{
-                            height: '100%',
+                            flex: 1,
+                            minHeight: 0,
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
@@ -13456,7 +13833,9 @@ const QuoteForm = ({ openContext = null }) => {
                                 display: 'flex',
                                 flexDirection: 'column',
                                 width: '100%',
+                                flex: 1,
                                 minHeight: 0,
+                                overflow: 'hidden',
                             }}
                         >
                             {/* Sticky top bar — single row; labels above controls; action icons on the right */}
@@ -13469,14 +13848,13 @@ const QuoteForm = ({ openContext = null }) => {
                                     flexShrink: 0,
                                     width: '100%',
                                     boxSizing: 'border-box',
-                                    marginTop: 0,
-                                    marginBottom: '8px',
-                                    padding: '8px 12px',
-                                background: '#f8fafc',
-                                border: '1px solid #e2e8f0',
-                                    borderTop: 'none',
-                                    borderRadius: '0 0 8px 8px',
-                                    boxShadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
+                                    marginTop: '4px',
+                                    marginBottom: '4px',
+                                    padding: '3px 5px',
+                                    background: 'transparent',
+                                    border: 'none',
+                                    borderRadius: 0,
+                                    boxShadow: 'none',
                                 }}
                             >
                                 <div
@@ -13486,14 +13864,14 @@ const QuoteForm = ({ openContext = null }) => {
                                         flexWrap: 'nowrap',
                                         alignItems: 'flex-end',
                                         justifyContent: 'flex-start',
-                                        gap: '10px',
+                                        gap: '4px',
                                         width: '100%',
                                         overflowX: 'auto',
                                         boxSizing: 'border-box',
                                     }}
                                 >
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Division</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Division</span>
                                         <select
                                             value={quoteListDivision}
                                             onChange={(e) => {
@@ -13506,8 +13884,8 @@ const QuoteForm = ({ openContext = null }) => {
                                             style={{
                                                 minWidth: '140px',
                                                 maxWidth: '200px',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: quoteListDivisionsLoading ? '#f1f5f9' : '#fff',
@@ -13516,6 +13894,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                     quoteListDivisionsLoading || !quoteListDivisions.length
                                                         ? 'not-allowed'
                                                         : 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             {quoteListDivisionsLoading && quoteListDivisions.length === 0 && (
@@ -13529,8 +13908,8 @@ const QuoteForm = ({ openContext = null }) => {
                                             ))}
                                         </select>
                                     </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flexShrink: 0 }}>
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Category</span>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', flexShrink: 0 }}>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Category</span>
                                         <select
                                             value={quoteListCategory}
                                             onChange={(e) => {
@@ -13543,13 +13922,14 @@ const QuoteForm = ({ openContext = null }) => {
                                             }}
                                             style={{
                                                 minWidth: '132px',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: '#fff',
                                                 color: '#334155',
                                                 cursor: 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             <option value={QUOTE_LIST_CATEGORY.PENDING}>Pending Quote</option>
@@ -13560,13 +13940,13 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flex: '1 1 96px',
                                             minWidth: '72px',
                                             maxWidth: '216px',
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>Search criteria</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Search criteria</span>
                                         <input
                                             type="text"
                                             value={quoteListSearchCriteria}
@@ -13586,14 +13966,15 @@ const QuoteForm = ({ openContext = null }) => {
                                             style={{
                                                 width: '100%',
                                                 boxSizing: 'border-box',
-                                                padding: '6px 10px',
-                                                fontSize: '12px',
+                                                padding: '3px 6px',
+                                                fontSize: '11px',
                                                 borderRadius: '6px',
                                                 border: '1px solid #cbd5e1',
                                                 background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#f1f5f9',
                                                 color: '#334155',
                                                 opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'text' : 'not-allowed',
+                                                minHeight: '26px',
                                             }}
                                         />
                                     </div>
@@ -13601,12 +13982,12 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>From</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>From</span>
                                         <div
                                             style={{
                                                 width: '118px',
@@ -13615,12 +13996,24 @@ const QuoteForm = ({ openContext = null }) => {
                                         >
                                             <DateInput
                                                 value={quoteListDateFrom}
-                                                onChange={(e) => setQuoteListDateFrom(e.target.value)}
+                                                onChange={(e) => {
+                                                    const nextFrom = e.target.value;
+                                                    setQuoteListDateFrom(nextFrom);
+                                                    if (nextFrom && !quoteListDateTo) {
+                                                        const today = new Date();
+                                                        const yyyy = today.getFullYear();
+                                                        const mm = String(today.getMonth() + 1).padStart(2, '0');
+                                                        const dd = String(today.getDate()).padStart(2, '0');
+                                                        setQuoteListDateTo(`${yyyy}-${mm}-${dd}`);
+                                                    }
+                                                }}
                                                 disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                                 placeholder="DD-MMM-YYYY"
                                                 style={{
-                                                    fontSize: '12px',
-                                                    padding: '6px 8px',
+                                                    fontSize: '11px',
+                                                    padding: '3px 6px',
+                                                    minHeight: '26px',
+                                                    height: '26px',
                                                     cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                                 }}
                                             />
@@ -13630,12 +14023,12 @@ const QuoteForm = ({ openContext = null }) => {
                                         style={{
                                             display: 'flex',
                                             flexDirection: 'column',
-                                            gap: '4px',
+                                            gap: '1px',
                                             flexShrink: 0,
                                             opacity: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 1 : 0.65,
                                         }}
                                     >
-                                        <span style={{ fontSize: '11px', fontWeight: 600, color: '#64748b', lineHeight: 1.2 }}>To</span>
+                                        <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>To</span>
                                         <div
                                             style={{
                                                 width: '118px',
@@ -13648,28 +14041,31 @@ const QuoteForm = ({ openContext = null }) => {
                                                 disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH}
                                                 placeholder="DD-MMM-YYYY"
                                                 style={{
-                                                    fontSize: '12px',
-                                                    padding: '6px 8px',
+                                                    fontSize: '11px',
+                                                    padding: '3px 6px',
+                                                    minHeight: '26px',
+                                                    height: '26px',
                                                     cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? 'pointer' : 'not-allowed',
                                                 }}
                                             />
                                         </div>
                                     </div>
-                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '8px', flexShrink: 0 }}>
+                                    <div style={{ display: 'flex', flexDirection: 'row', flexWrap: 'nowrap', gap: '6px', flexShrink: 0 }}>
                                         <button
                                             type="button"
                                             className="no-print"
                                             onClick={handleQuoteListSearch}
                                             disabled={quoteListCategory !== QUOTE_LIST_CATEGORY.SEARCH || quoteSearchLoading}
                                             style={{
-                                                padding: '6px 14px',
-                                                fontSize: '12px',
+                                                ...(quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading
+                                                    ? EMS_LIST_SEARCH_ENABLED_STYLE
+                                                    : EMS_LIST_SEARCH_DISABLED_STYLE),
+                                                padding: '4px 12px',
+                                                fontSize: '11px',
                                                 fontWeight: '600',
                                                 borderRadius: '6px',
-                                                border: '1px solid #2563eb',
-                                                background: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#2563eb' : '#e2e8f0',
-                                                color: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? '#fff' : '#94a3b8',
                                                 cursor: quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH && !quoteSearchLoading ? 'pointer' : 'not-allowed',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             {quoteSearchLoading ? 'Searching…' : 'Search'}
@@ -13679,14 +14075,13 @@ const QuoteForm = ({ openContext = null }) => {
                                             className="no-print"
                                             onClick={handleQuoteListClear}
                                             style={{
-                                                padding: '6px 14px',
-                                                fontSize: '12px',
+                                                ...EMS_LIST_CLEAR_STYLE,
+                                                padding: '4px 12px',
+                                                fontSize: '11px',
                                                 fontWeight: '600',
                                                 borderRadius: '6px',
-                                                border: '1px solid #cbd5e1',
-                                                background: '#fff',
-                                                color: '#475569',
                                                 cursor: 'pointer',
+                                                minHeight: '26px',
                                             }}
                                         >
                                             Clear
@@ -14215,7 +14610,7 @@ const QuoteForm = ({ openContext = null }) => {
                                         page-break-after: auto;
                                         break-after: auto;
                                     }
-                                    /* Continuation pages: avoid stretching clause stack; keep footer at sheet bottom. */
+                                    /* Continuation: clause stack may shrink; main column stays height:100% so footer margin-top:auto pins to A4 bottom when content is short. */
                                     .quote-a4-sheet--continuation .quote-sheet-main-flex {
                                         min-height: 0 !important;
                                     }
@@ -14430,6 +14825,52 @@ const QuoteForm = ({ openContext = null }) => {
                                         color: #64748b;
                                         padding-bottom: 6px;
                                     }
+                                    /*
+                                     * Right-hand A4 preview only (#quote-preview): compact clause stacking.
+                                     * Scoped IDs beat loose .clause-content rules + inline h3 margins where possible.
+                                     */
+                                    #quote-preview .quote-clause-block {
+                                        margin-bottom: 12px !important;
+                                    }
+                                    #quote-preview .quote-clause-block > h3 {
+                                        margin: 0 0 4px 0 !important;
+                                        padding: 0 !important;
+                                        line-height: 1.3 !important;
+                                    }
+                                    #quote-preview .clause-content {
+                                        line-height: 1.45 !important;
+                                        white-space: normal !important;
+                                        overflow-wrap: anywhere !important;
+                                    }
+                                    #quote-preview .clause-content p {
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        line-height: 1.45 !important;
+                                    }
+                                    #quote-preview .clause-content > * + * {
+                                        margin-top: 1.6px !important;
+                                    }
+                                    #quote-preview .clause-content p + p {
+                                        margin-top: 1.6px !important;
+                                    }
+                                    #quote-preview .clause-content ul,
+                                    #quote-preview .clause-content ol {
+                                        margin-top: 1.6px !important;
+                                        margin-bottom: 1.6px !important;
+                                        padding-left: 24px !important;
+                                        line-height: 1.45 !important;
+                                    }
+                                    #quote-preview .clause-content li {
+                                        margin-bottom: 1.6px !important;
+                                        line-height: 1.45 !important;
+                                    }
+                                    #quote-preview .clause-content li:last-child {
+                                        margin-bottom: 0 !important;
+                                    }
+                                    #quote-preview .clause-content table {
+                                        margin-top: 4px !important;
+                                        margin-bottom: 4px !important;
+                                    }
                                     @media print {
                                         /* Hide everything first */
                                         .no-print, 
@@ -14606,7 +15047,6 @@ const QuoteForm = ({ openContext = null }) => {
                                                 style={{
                                                     width: '180mm',
                                                     maxWidth: '100%',
-                                                    marginBottom: '20px',
                                                     boxSizing: 'border-box',
                                                 }}
                                             >
@@ -14614,14 +15054,13 @@ const QuoteForm = ({ openContext = null }) => {
                                                     style={{
                                                         fontSize: '14px',
                                                         fontWeight: 'bold',
-                                                        marginBottom: '8px',
                                                     }}
                                                 >
                                                     {clauseMeasureIdx + 1}. {clause.title}
                                                 </h3>
                                                 <div
                                                     className="clause-content"
-                                                    style={{ fontSize: '13px', lineHeight: '1.6' }}
+                                                    style={{ fontSize: '13px' }}
                                                     dangerouslySetInnerHTML={{
                                                         __html: getClauseDisplayBodyHtml(
                                                             clause.content,
@@ -14827,13 +15266,13 @@ const QuoteForm = ({ openContext = null }) => {
                                                             displayMajor
                                                         );
                                                         return (
-                                                            <div key={clause.key} className="quote-clause-block" style={{ marginBottom: '20px' }}>
-                                                                <h3 style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: '8px' }}>
+                                                            <div key={clause.key} className="quote-clause-block">
+                                                                <h3 style={{ fontSize: '14px', fontWeight: 'bold' }}>
                                                                     {displayMajor}. {clause.title}
                                                                 </h3>
                                                                 <div
                                                                     className="clause-content"
-                                                                    style={{ fontSize: '13px', lineHeight: '1.6' }}
+                                                                    style={{ fontSize: '13px' }}
                                                                     dangerouslySetInnerHTML={{ __html: bodyHtml }}
                                                                 />
                                                             </div>

@@ -661,8 +661,8 @@ const SalesReport = () => {
         const pctRounded = Math.round(gpPct);
         return (
             <>
-                {formatK(gpVal)} ({pctRounded}
-                <span className="sr-pct-sym">%</span>)
+                {formatK(gpVal)} {pctRounded}
+                <span className="sr-pct-sym">%</span>
             </>
         );
     };
@@ -1228,9 +1228,9 @@ const SalesReport = () => {
                 marginRight: 'calc(50% - 50vw)'
             }}
         >
-            <div className="sr-filter-bar flex-shrink-0 mb-2">
-                <div className="d-flex align-items-end justify-content-between flex-wrap gap-2">
-                    <div className="d-flex flex-wrap gap-3 align-items-end sr-filter-groups">
+            <div className="sr-filter-bar flex-shrink-0 mb-1">
+                <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                    <div className="d-flex flex-wrap align-items-end sr-filter-groups">
                         <div className="sr-filter-field">
                             <label className="sr-filter-label">Year</label>
                             <select className="form-select form-select-sm" aria-label="Year" style={{ minWidth: 100 }} value={year} onChange={(e) => setYear(e.target.value)}>
@@ -1279,8 +1279,8 @@ const SalesReport = () => {
                             </select>
                         </div>
                     </div>
-                    <div className="d-flex align-items-center gap-3 flex-wrap pb-1">
-                        <span className="text-muted small mb-0">* All values in BHD</span>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        <span className="text-muted small mb-0" style={{ fontSize: '0.7rem' }}>* All values in BHD</span>
                         <div className="d-flex gap-2 no-print">
                             <button
                                 type="button"
@@ -1553,14 +1553,14 @@ const SalesReport = () => {
                                     <div className="sr-fraction-actual sr-gm-fraction-cell sr-fraction-kpi-row">
                                         <span className="sr-fraction-suffix sr-fraction-suffix--lead">Actual</span>
                                         <span className="sr-fraction-value text-success">{formatK(gmTotalActual)}</span>
-                                        <span className="sr-gp-summary-actual-pct"> ({Math.round(gmOverallActualGpPct)}<span className="sr-pct-sym">%</span>)</span>
+                                        <span className="sr-gp-summary-actual-pct"> {Math.round(gmOverallActualGpPct)}<span className="sr-pct-sym">%</span></span>
                                     </div>
                                     <div className="sr-fraction-rule sr-gm-fraction-stack-rule" role="presentation" />
                                     <div className="sr-fraction-target sr-gm-fraction-cell sr-fraction-kpi-row">
                                         <span className="sr-fraction-suffix sr-fraction-suffix--lead">Target</span>
-                                        <span className="sr-fraction-value sr-fraction-target-val">
+                                            <span className="sr-fraction-value sr-fraction-target-val">
                                             {formatK(gmTotalTarget)}
-                                            <span className="sr-fraction-target-gp-pct"> ({formatGpTargetPctDisplay(gmOverallTargetGpPct)})</span>
+                                            <span className="sr-fraction-target-gp-pct"> {formatGpTargetPctDisplay(gmOverallTargetGpPct)}</span>
                                         </span>
                                     </div>
                                 </div>
@@ -1588,7 +1588,7 @@ const SalesReport = () => {
                                         return (
                                             <div key={`gm-qa-${row.name}`} className={`sr-q-matrix__actual sr-quarter-gp-line text-center${vsep}`}>
                                                 <span className="sr-quarter-gp-val">{formatK(a)}</span>
-                                                <span className="sr-quarter-gp-pct"> ({pct}<span className="sr-pct-sym">%</span>)</span>
+                                                <span className="sr-quarter-gp-pct"> {pct}<span className="sr-pct-sym">%</span></span>
                                             </div>
                                         );
                                     })}
@@ -1600,7 +1600,7 @@ const SalesReport = () => {
                                         return (
                                             <div key={`gm-qt-${row.name}`} className={`sr-q-matrix__target sr-gp-quarter-target text-center${vsep}`}>
                                                 <span className="sr-quarter-target-k">{formatK(t)}</span>
-                                                <span className="sr-quarter-target-gp-pct"> ({formatGpTargetPctDisplay(Number(row.targetGpPct) || 0)})</span>
+                                                <span className="sr-quarter-target-gp-pct"> {formatGpTargetPctDisplay(Number(row.targetGpPct) || 0)}</span>
                                             </div>
                                         );
                                     })}

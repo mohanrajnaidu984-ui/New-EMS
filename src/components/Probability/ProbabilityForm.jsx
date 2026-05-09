@@ -1194,7 +1194,13 @@ const ProbabilityForm = () => {
                                             <div className="prob-date-picker-wrap">
                                                 <DatePicker
                                                     selected={parseIsoDate(fromDate)}
-                                                    onChange={(date) => setFromDate(date ? format(date, 'yyyy-MM-dd') : '')}
+                                                    onChange={(date) => {
+                                                        const nextFrom = date ? format(date, 'yyyy-MM-dd') : '';
+                                                        setFromDate(nextFrom);
+                                                        if (nextFrom && !toDate) {
+                                                            setToDate(format(new Date(), 'yyyy-MM-dd'));
+                                                        }
+                                                    }}
                                                     dateFormat="dd-MM-yy"
                                                     placeholderText="DD-MM-YY"
                                                     className="form-control prob-date-input"

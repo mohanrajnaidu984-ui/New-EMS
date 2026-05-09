@@ -3,6 +3,7 @@ import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import excelIcon from '../../assets/excel_icon.png';
 import DateInput from './DateInput';
+import { EMS_LIST_SEARCH_ENABLED_STYLE, EMS_LIST_CLEAR_STYLE } from '../../constants/emsSearchButtons';
 
 const SearchEnquiry = ({ onOpen }) => {
     const { enquiries } = useData();
@@ -302,24 +303,55 @@ const SearchEnquiry = ({ onOpen }) => {
             ? <i className="bi bi-arrow-up ms-1 text-primary"></i>
             : <i className="bi bi-arrow-down ms-1 text-primary"></i>;
     };
+    const headerThStyle = {
+        position: 'sticky',
+        top: 0,
+        zIndex: 2,
+        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+        color: '#ffffff',
+        textShadow: '0 1px 2px rgba(15, 23, 42, 0.38)',
+        borderColor: 'rgba(210, 222, 255, 0.25)',
+        boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14)',
+        fontSize: '11.7px',
+        fontWeight: 400
+    };
 
     return (
         <div
-            className="px-3 px-lg-4"
-            style={{ position: 'relative', zIndex: 100, boxSizing: 'border-box' }}
+            style={{
+                position: 'relative',
+                zIndex: 100,
+                boxSizing: 'border-box',
+                height: 'calc(100vh - 132px)',
+                maxHeight: 'calc(100vh - 132px)',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                paddingLeft: 0,
+                paddingRight: 0,
+                marginLeft: 0,
+                marginRight: 0,
+                width: '100%'
+            }}
         >
             {/* Sticky under compact app header (72px) so this bar stays visible while scrolling results */}
             <div
                 style={{
-                    position: 'sticky',
-                    top: '72px',
-                    zIndex: 200,
-                    backgroundColor: '#ffffff',
-                    paddingTop: '4px',
-                    paddingBottom: '12px',
-                    marginBottom: '12px',
-                    borderBottom: '1px solid #e0e0e0',
-                    boxShadow: '0 4px 12px rgba(15, 23, 42, 0.06)',
+                    position: 'relative',
+                    top: 0,
+                    zIndex: 10,
+                    background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
+                    borderRadius: '10px',
+                    paddingTop: '6px',
+                    paddingBottom: '6px',
+                    paddingLeft: '8px',
+                    paddingRight: '8px',
+                    marginBottom: '6px',
+                    marginLeft: 0,
+                    marginRight: 0,
+                    width: '100%',
+                    border: 'none',
+                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 8px rgba(71, 85, 105, 0.12)',
                 }}
             >
             <div
@@ -331,14 +363,24 @@ const SearchEnquiry = ({ onOpen }) => {
                     rowGap: '8px',
                 }}
             >
-                <div className="d-flex align-items-center flex-wrap gap-2" style={{ fontSize: '12px', color: '#475569' }}>
+                <div className="d-flex align-items-center flex-wrap gap-2" style={{ fontSize: '12px', color: '#374151' }}>
                     <span className="text-nowrap fw-semibold">From</span>
                     <div style={{ width: '132px' }}>
                         <DateInput
                             value={dateFrom}
-                            onChange={(e) => setDateFrom(e.target.value)}
+                            onChange={(e) => {
+                                const nextFrom = e.target.value;
+                                setDateFrom(nextFrom);
+                                if (nextFrom && !dateTo) {
+                                    const today = new Date();
+                                    const yyyy = today.getFullYear();
+                                    const mm = String(today.getMonth() + 1).padStart(2, '0');
+                                    const dd = String(today.getDate()).padStart(2, '0');
+                                    setDateTo(`${yyyy}-${mm}-${dd}`);
+                                }
+                            }}
                             placeholder="DD-MMM-YYYY"
-                            style={{ fontSize: '12px', padding: '6px 8px', height: '36px' }}
+                            style={{ fontSize: '11.5px', padding: '4px 7px', height: '30px' }}
                         />
                     </div>
                     <span className="text-nowrap fw-semibold">To</span>
@@ -347,7 +389,7 @@ const SearchEnquiry = ({ onOpen }) => {
                             value={dateTo}
                             onChange={(e) => setDateTo(e.target.value)}
                             placeholder="DD-MMM-YYYY"
-                            style={{ fontSize: '12px', padding: '6px 8px', height: '36px' }}
+                            style={{ fontSize: '11.5px', padding: '4px 7px', height: '30px' }}
                         />
                     </div>
                 </div>
@@ -365,51 +407,52 @@ const SearchEnquiry = ({ onOpen }) => {
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && runSearch()}
-                        style={{ fontSize: '12.5px', borderRadius: '4px', border: '1px solid #d1d5db', height: '36px' }}
+                        style={{ fontSize: '11.5px', borderRadius: '8px', border: '1px solid #9ec7da', height: '30px' }}
                     />
                 </div>
 
                 {/* Buttons Group */}
                 <button
                     type="button"
-                    className="btn btn-primary py-0 search-btn-hover"
+                    className="search-btn-hover"
                     onClick={runSearch}
                     style={{
+                        ...EMS_LIST_SEARCH_ENABLED_STYLE,
                         fontSize: '12px',
-                        borderRadius: '4px',
+                        borderRadius: '8px',
                         fontWeight: '600',
-                        height: '36px',
-                        minWidth: '70px',
+                        height: '30px',
+                        minWidth: '64px',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
                         zIndex: 1001,
-                        pointerEvents: 'auto'
+                        pointerEvents: 'auto',
+                        cursor: 'pointer',
                     }}
                 >
-                    SEARCH
+                    Search
                 </button>
                 <button
                     type="button"
-                    className="btn btn-outline-secondary py-0 clear-btn-hover"
+                    className="clear-btn-hover"
                     onClick={handleClear}
                     style={{
+                        ...EMS_LIST_CLEAR_STYLE,
                         fontSize: '12px',
-                        borderRadius: '4px',
+                        borderRadius: '8px',
                         fontWeight: '600',
-                        height: '36px',
-                        minWidth: '70px',
+                        height: '30px',
+                        minWidth: '64px',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        backgroundColor: '#fff',
-                        border: '1px solid #d1d5db',
-                        color: '#4b5563',
                         zIndex: 1001,
-                        pointerEvents: 'auto'
+                        pointerEvents: 'auto',
+                        cursor: 'pointer',
                     }}
                 >
-                    CLEAR
+                    Clear
                 </button>
                 <button
                     type="button"
@@ -427,32 +470,23 @@ const SearchEnquiry = ({ onOpen }) => {
                     onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
                     onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
                 >
-                    <img src={excelIcon} alt="Export to Excel" style={{ height: '24px', width: 'auto' }} />
+                    <img src={excelIcon} alt="Export to Excel" style={{ height: '20px', width: 'auto' }} />
                 </button>
             </div>
-            {dateFrom && dateTo ? (
-                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '6px' }}>
-                    Filtering by enquiry date between selected dates (inclusive). Clear dates to show all dates again.
-                </div>
-            ) : (dateFrom || dateTo) ? (
-                <div style={{ fontSize: '11px', color: '#b45309', marginTop: '6px' }}>
-                    Select both From and To dates to filter the list by enquiry date.
-                </div>
-            ) : null}
             </div>
 
             <style>
                 {`
                 .search-btn-hover:hover {
-                    box-shadow: 0 4px 12px rgba(13, 110, 253, 0.25);
+                    filter: brightness(1.06);
+                    box-shadow: 0 4px 14px rgba(32, 63, 117, 0.38), inset 0 1px 0 rgba(255,255,255,0.18);
                     transform: translateY(-1px);
-                    background-color: #0b5ed7 !important;
                 }
                 .clear-btn-hover:hover {
-                    background-color: #f8f9fa !important;
-                    color: #444 !important;
-                    border-color: #6c757d !important;
-                    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+                    background-color: #8899aa !important;
+                    color: #111827 !important;
+                    border-color: #7c8694 !important;
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
                 }
                 .search-btn-hover:active, .clear-btn-hover:active {
                     transform: scale(0.98);
@@ -473,7 +507,7 @@ const SearchEnquiry = ({ onOpen }) => {
                     width: 100%;
                 }
                 .sortable-header:hover {
-                    background-color: #f0f4f8;
+                    background-color: rgba(255, 255, 255, 0.12);
                 }
                 tbody tr.enquiry-search-row-open {
                     cursor: pointer;
@@ -481,43 +515,92 @@ const SearchEnquiry = ({ onOpen }) => {
                 tbody tr.enquiry-search-row-open:hover {
                     background-color: #eff6ff !important;
                 }
+                .enquiry-search-table-wrap {
+                    flex: 1 1 0;
+                    min-height: 0;
+                    overflow-y: auto;
+                    overflow-x: auto;
+                    border: 1px solid #dbe3f1;
+                    border-radius: 8px;
+                    width: 100%;
+                }
+                .enquiry-search-table-wrap table {
+                    margin-bottom: 0 !important;
+                }
+                .enquiry-search-table-wrap thead tr {
+                    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%) !important;
+                }
+                .enquiry-search-table-wrap thead th {
+                    position: sticky;
+                    top: 0;
+                    z-index: 5;
+                    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%) !important;
+                    color: #ffffff !important;
+                    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
+                    border-color: rgba(210, 222, 255, 0.25) !important;
+                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
+                    --bs-table-bg: transparent !important;
+                    --bs-table-accent-bg: transparent !important;
+                    text-align: left;
+                }
+                .enquiry-search-table-wrap thead th .text-muted,
+                .enquiry-search-table-wrap thead th .text-primary {
+                    color: #e6efff !important;
+                }
+                .enquiry-search-table-wrap tbody td {
+                    background: #ffffff;
+                    text-align: left;
+                    padding-top: 0.22rem !important;
+                    padding-bottom: 0.22rem !important;
+                    line-height: 1.15;
+                    vertical-align: middle;
+                }
+                .enquiry-search-table-wrap tbody tr:nth-child(odd) td {
+                    background: #ffffff !important;
+                }
+                .enquiry-search-table-wrap tbody tr:nth-child(even) td {
+                    background: #f3f7fd !important;
+                }
                 `}
             </style>
 
             {/* Results Table */}
-            <div className="table-responsive">
-                <table className="table table-sm table-hover align-middle" style={{ fontSize: '13px' }}>
-                    <thead className="table-light">
+            <div className="table-responsive enquiry-search-table-wrap">
+                <table
+                    className="table table-sm table-hover align-middle"
+                    style={{ fontSize: '11.7px', tableLayout: 'auto', width: 'max-content', minWidth: '100%' }}
+                >
+                    <thead>
                         <tr>
-                            <th style={{ whiteSpace: 'nowrap' }}>Action</th>
-                            <th className="sortable-header" onClick={() => handleSort('RequestNo')}>
+                            <th style={headerThStyle}>Action</th>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('RequestNo')}>
                                 <div className="header-content">Enquiry No. <SortIcon column="RequestNo" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('EnquiryDate')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('EnquiryDate')}>
                                 <div className="header-content">Enquiry Date <SortIcon column="EnquiryDate" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('Customer')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('Customer')}>
                                 <div className="header-content">Customer Name / Contractor Name <SortIcon column="Customer" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('ClientName')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('ClientName')}>
                                 <div className="header-content">Client <SortIcon column="ClientName" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('ProjectName')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('ProjectName')}>
                                 <div className="header-content">Project <SortIcon column="ProjectName" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('SourceOfInfo')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('SourceOfInfo')}>
                                 <div className="header-content">Source <SortIcon column="SourceOfInfo" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('DueOn')} style={{ width: '104px' }}>
+                            <th className="sortable-header" onClick={() => handleSort('DueOn')} style={headerThStyle}>
                                 <div className="header-content">Due <SortIcon column="DueOn" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('SE')}>
-                                <div className="header-content">Sales Engineer / Estimation Engineer / Quantity Surveyor <SortIcon column="SE" /></div>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('SE')}>
+                                <div className="header-content">SE / EE/ TE / QS <SortIcon column="SE" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('Status')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('Status')}>
                                 <div className="header-content">Status <SortIcon column="Status" /></div>
                             </th>
-                            <th className="sortable-header" onClick={() => handleSort('CreatedBy')}>
+                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('CreatedBy')}>
                                 <div className="header-content">Created By <SortIcon column="CreatedBy" /></div>
                             </th>
                         </tr>
@@ -548,9 +631,9 @@ const SearchEnquiry = ({ onOpen }) => {
                                                 display: 'inline-flex',
                                                 alignItems: 'center',
                                                 justifyContent: 'center',
-                                                width: '32px',
-                                                height: '32px',
-                                                borderRadius: '6px',
+                                                width: '24px',
+                                                height: '24px',
+                                                borderRadius: '5px',
                                                 transition: 'all 0.2s',
                                                 backgroundColor: r._canEdit ? 'rgba(13, 110, 253, 0.1)' : 'rgba(108, 117, 125, 0.1)',
                                                 color: r._canEdit ? '#0d6efd' : '#6c757d'
@@ -558,9 +641,9 @@ const SearchEnquiry = ({ onOpen }) => {
                                             className="action-icon-hover"
                                         >
                                             {r._canEdit ? (
-                                                <i className="bi bi-pencil-square" style={{ fontSize: '16px' }}></i>
+                                                <i className="bi bi-pencil-square" style={{ fontSize: '13px' }}></i>
                                             ) : (
-                                                <i className="bi bi-eye" style={{ fontSize: '16px' }}></i>
+                                                <i className="bi bi-eye" style={{ fontSize: '13px' }}></i>
                                             )}
                                         </div>
                                     </td>
@@ -570,7 +653,7 @@ const SearchEnquiry = ({ onOpen }) => {
                                     <td>{r.ClientName}</td>
                                     <td>{r.ProjectName}</td>
                                     <td>{r.SourceOfInfo}</td>
-                                    <td style={{ width: '104px' }}>{formatDate(r.DueOn)}</td>
+                                    <td>{formatDate(r.DueOn)}</td>
                                     <td>{r.SelectedConcernedSEs?.join(', ') || r.ConcernedSE}</td>
                                     <td>{r.Status || 'Enquiry'}</td>
                                     <td>{r.CreatedBy || '-'}</td>

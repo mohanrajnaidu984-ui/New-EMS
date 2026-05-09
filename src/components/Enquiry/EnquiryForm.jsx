@@ -1706,62 +1706,129 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
 
     return (
-        <div style={{ position: 'relative', minHeight: '100vh' }}>
+        <div
+            style={{
+                position: 'relative',
+                minHeight: activeTab === 'Search' ? 'calc(100vh - 72px)' : '100vh',
+                maxHeight: activeTab === 'Search' ? 'calc(100vh - 72px)' : 'none',
+                overflowY: activeTab === 'Search' ? 'hidden' : 'visible',
+                overflowX: activeTab === 'Search' ? 'hidden' : 'visible'
+            }}
+        >
             <div style={{ position: 'relative', zIndex: 1 }}>
                 <div className="row justify-content-center">
                     <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
-                        <div className="d-flex mb-3" style={{ borderBottom: '1px solid #e0e0e0' }}>
-                            <button
-                                className="btn rounded-0 d-flex align-items-center"
+                        <div
+                            className="d-flex justify-content-start"
+                            style={{ marginTop: '10px', marginBottom: '0.2rem', paddingLeft: '140px' }}
+                        >
+                            <div
                                 style={{
-                                    color: activeTab === 'New' ? '#1d1d1f' : '#6c757d',
-                                    borderBottom: '3px solid transparent',
-                                    fontWeight: activeTab === 'New' ? '600' : '400',
-                                    backgroundColor: 'transparent',
-                                    padding: '8px 16px',
-                                    marginBottom: '-2px',
-                                    fontSize: '12px',
-                                    opacity: activeTab === 'New' ? 1 : 0.8
+                                    position: 'relative',
+                                    width: 'fit-content'
+                                }}
+                            >
+                                <div
+                                    aria-hidden="true"
+                                    style={{
+                                        position: 'absolute',
+                                        top: '-8px',
+                                        left: '146px',
+                                        transform: 'translateX(-50%)',
+                                        width: 0,
+                                        height: 0,
+                                        borderLeft: '8px solid transparent',
+                                        borderRight: '8px solid transparent',
+                                        borderBottom: '8px solid #3b74c2'
+                                    }}
+                                />
+                                <div
+                                    className="d-flex"
+                                    style={{
+                                        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+                                        borderRadius: '12px',
+                                        padding: '4px',
+                                        boxShadow: '0 2px 8px rgba(23, 47, 99, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
+                                        width: 'fit-content'
+                                    }}
+                                >
+                            <button
+                                className="btn d-flex align-items-center"
+                                style={{
+                                    color: activeTab === 'New' ? '#203f75' : '#f5f5f5',
+                                    borderBottom: '0',
+                                    fontWeight: '400',
+                                    fontFamily: '"Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif',
+                                    letterSpacing: '-0.01em',
+                                    lineHeight: 1,
+                                    backgroundColor: activeTab === 'New' ? '#f5f5f5' : 'transparent',
+                                    padding: '0.34rem 0.56rem',
+                                    marginBottom: '0',
+                                    fontSize: '11px',
+                                    opacity: activeTab === 'New' ? 1 : 0.96,
+                                    borderRadius: activeTab === 'New' ? '9999px' : '8px',
+                                    boxShadow: activeTab === 'New'
+                                        ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
+                                        : 'none',
+                                    textShadow: 'none'
                                 }}
                                 onClick={() => { setActiveTab('New'); setIsModifyMode(false); }}
                             >
-                                <i className="bi bi-plus-lg me-2"></i>
+                                <i className="bi bi-plus-lg me-2" style={{ fontSize: '12px' }}></i>
                                 New Enquiry
                             </button>
                             <button
-                                className="btn rounded-0 d-flex align-items-center"
+                                className="btn d-flex align-items-center"
                                 style={{
-                                    color: activeTab === 'Modify' ? '#1d1d1f' : '#6c757d',
-                                    borderBottom: '3px solid transparent',
-                                    fontWeight: activeTab === 'Modify' ? '600' : '400',
-                                    backgroundColor: 'transparent',
-                                    padding: '8px 16px',
-                                    marginBottom: '-2px',
-                                    fontSize: '12px',
-                                    opacity: activeTab === 'Modify' ? 1 : 0.8
+                                    color: activeTab === 'Modify' ? '#203f75' : '#f5f5f5',
+                                    borderBottom: '0',
+                                    fontWeight: '400',
+                                    fontFamily: '"Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif',
+                                    letterSpacing: '-0.01em',
+                                    lineHeight: 1,
+                                    backgroundColor: activeTab === 'Modify' ? '#f5f5f5' : 'transparent',
+                                    padding: '0.34rem 0.56rem',
+                                    marginBottom: '0',
+                                    fontSize: '11px',
+                                    opacity: activeTab === 'Modify' ? 1 : 0.96,
+                                    borderRadius: activeTab === 'Modify' ? '9999px' : '8px',
+                                    boxShadow: activeTab === 'Modify'
+                                        ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
+                                        : 'none',
+                                    textShadow: 'none'
                                 }}
                                 onClick={() => { setActiveTab('Modify'); }}
                             >
-                                <i className="bi bi-pencil-square me-2"></i>
+                                <i className="bi bi-pencil-square me-2" style={{ fontSize: '12px' }}></i>
                                 {activeTab === 'Modify' && !canEdit ? 'View Enquiry' : 'Modify Enquiry'}
                             </button>
                             <button
-                                className="btn rounded-0 d-flex align-items-center"
+                                className="btn d-flex align-items-center"
                                 style={{
-                                    color: activeTab === 'Search' ? '#1d1d1f' : '#6c757d',
-                                    borderBottom: '3px solid transparent',
-                                    fontWeight: activeTab === 'Search' ? '600' : '400',
-                                    backgroundColor: 'transparent',
-                                    padding: '8px 16px',
-                                    marginBottom: '-2px',
-                                    fontSize: '12px',
-                                    opacity: activeTab === 'Search' ? 1 : 0.8
+                                    color: activeTab === 'Search' ? '#203f75' : '#f5f5f5',
+                                    borderBottom: '0',
+                                    fontWeight: '400',
+                                    fontFamily: '"Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif',
+                                    letterSpacing: '-0.01em',
+                                    lineHeight: 1,
+                                    backgroundColor: activeTab === 'Search' ? '#f5f5f5' : 'transparent',
+                                    padding: '0.34rem 0.56rem',
+                                    marginBottom: '0',
+                                    fontSize: '11px',
+                                    opacity: activeTab === 'Search' ? 1 : 0.96,
+                                    borderRadius: activeTab === 'Search' ? '9999px' : '8px',
+                                    boxShadow: activeTab === 'Search'
+                                        ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
+                                        : 'none',
+                                    textShadow: 'none'
                                 }}
                                 onClick={() => setActiveTab('Search')}
                             >
-                                <i className="bi bi-search me-2"></i>
+                                <i className="bi bi-search me-2" style={{ fontSize: '12px' }}></i>
                                 Search Enquiry
                             </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1815,9 +1882,71 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                         {(activeTab === 'New' || (activeTab === 'Modify' && isModifyMode)) && (
                             <div className="row justify-content-center">
                                 <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
-                                    <form onSubmit={handleSubmit} aria-busy={isSubmitting}>
+                                    <form onSubmit={handleSubmit} aria-busy={isSubmitting} className="enquiry-compact-form">
+                                        <style>
+                                            {`
+                                            .enquiry-compact-form .card.mb-4 {
+                                                margin-bottom: 0.75rem !important;
+                                            }
+                                            .enquiry-compact-form .card-body {
+                                                padding: 0.85rem 0.95rem !important;
+                                            }
+                                            .enquiry-compact-form .card-title {
+                                                margin-bottom: 0.7rem !important;
+                                            }
+                                            .enquiry-compact-form .row.mb-3,
+                                            .enquiry-compact-form .mb-3 {
+                                                margin-bottom: 0.55rem !important;
+                                            }
+                                            .enquiry-compact-form .form-label {
+                                                margin-bottom: 0.2rem !important;
+                                                font-size: 11.5px;
+                                                line-height: 1.2;
+                                            }
+                                            .enquiry-compact-form .form-control,
+                                            .enquiry-compact-form .form-select {
+                                                min-height: 28px;
+                                                height: 28px;
+                                                padding-top: 0.12rem;
+                                                padding-bottom: 0.12rem;
+                                                font-size: 11.5px !important;
+                                                line-height: 1.1;
+                                            }
+                                            .enquiry-compact-form .date-input-wrapper input,
+                                            .enquiry-compact-form input[type="date"] {
+                                                min-height: 28px !important;
+                                                height: 28px !important;
+                                                font-size: 11.5px !important;
+                                            }
+                                            .enquiry-compact-form textarea.form-control {
+                                                min-height: 60px;
+                                                height: auto;
+                                            }
+                                            .enquiry-compact-form .btn {
+                                                min-height: 28px;
+                                                padding-top: 0.18rem;
+                                                padding-bottom: 0.18rem;
+                                                font-size: 11.5px;
+                                                line-height: 1.1;
+                                            }
+                                            .enquiry-compact-form .form-check {
+                                                min-height: 1.25rem;
+                                                margin-bottom: 0.05rem;
+                                            }
+                                            .enquiry-compact-form .form-check-label {
+                                                font-size: 11.5px;
+                                            }
+                                            `}
+                                        </style>
                                         {/* Enquiry Status Tracker */}
-                                        <div className="card mb-2 shadow-sm border-0 bg-white" style={{ borderRadius: '12px' }}>
+                                        <div
+                                            className="card mb-2 shadow-sm border-0"
+                                            style={{
+                                                borderRadius: '12px',
+                                                background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
+                                                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 8px rgba(71, 85, 105, 0.12)'
+                                            }}
+                                        >
                                             <div className="card-body p-2">
                                                 <h6 className="card-title fw-bold mb-2" style={{ color: '#2d3748', fontSize: '14px' }}>Enquiry Status Tracker</h6>
                                                 {isModifyMode && workflowComputed && (
@@ -1868,26 +1997,20 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                         };
                                                         const subLineHighlight =
                                                             isActive || isCompleted
-                                                                ? lostVisual && isLast
-                                                                    ? { color: '#b91c1c', fontWeight: 700 }
-                                                                    : { color: '#1d4ed8', fontWeight: 700 }
-                                                                : { color: '#334155', fontWeight: 600 };
+                                                                ? { color: '#374151', fontWeight: 700 }
+                                                                : { color: '#374151', fontWeight: 600 };
                                                         const subLineStyle = { ...subLineBase, ...subLineHighlight };
                                                         const subLineWonStyle = {
                                                             ...subLineBase,
                                                             ...(isActive || isCompleted
-                                                                ? lostVisual && isLast
-                                                                    ? { color: '#57534e', fontWeight: 700 }
-                                                                    : { color: '#047857', fontWeight: 700 }
-                                                                : { color: '#334155', fontWeight: 600 }),
+                                                                ? { color: '#374151', fontWeight: 700 }
+                                                                : { color: '#374151', fontWeight: 600 }),
                                                         };
                                                         const subLineLostStyle = {
                                                             ...subLineBase,
                                                             ...(isActive || isCompleted
-                                                                ? lostVisual && isLast
-                                                                    ? { color: '#991b1b', fontWeight: 700 }
-                                                                    : { color: '#b91c1c', fontWeight: 700 }
-                                                                : { color: '#334155', fontWeight: 600 }),
+                                                                ? { color: '#374151', fontWeight: 700 }
+                                                                : { color: '#374151', fontWeight: 600 }),
                                                         };
 
                                                         return (
@@ -1920,7 +2043,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                                     <span style={{
                                                                         marginTop: '4px',
                                                                         fontSize: '10px',
-                                                                        color: isActive || isCompleted ? (lostVisual && isLast ? '#ef4444' : '#3b82f6') : '#a0aec0',
+                                                                        color: '#374151',
                                                                         fontWeight: isActive ? '600' : '400',
                                                                         textAlign: 'center',
                                                                     }}>
@@ -2152,7 +2275,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                             onChange={(e) => handleInputChange('CustomerRefNo', e.target.value)}
                                                             placeholder="Enter Customer Reference"
                                                             disabled={!canEdit || isLimitedEdit}
-                                                            style={{ height: '38px' }}
+                                                            style={{ height: '28px' }}
                                                         />
                                                         {errors.CustomerRefNo && <ValidationTooltip message={errors.CustomerRefNo} />}
                                                     </div>

@@ -1,0 +1,539 @@
+const express = require('express');
+const router = express.Router();
+const { sql } = require('../dbConfig');
+const { getHierarchyMetadata } = require('../services/hierarchyService');
+
+// Helper to construct filter clauses (kept for reference or future use if needed, though active logic is inline below)
+// --- Helper: Apply Access Control Logic ---
+const applyAccessControl = (request, params) => {
+    const { userRole, userName, userEmail } = params;
+
+    // If Role is NOT Admin (and exists), apply visibility filters
+    // FORCE ADMIN for ranigovardhan@gmail.com
+    if (userEmail && userEmail.toLowerCase() === 'ranigovardhan@gmail.com') return '';
+
+    const userRoles = typeof userRole === 'string'
+        ? userRole.split(',').map(r => r.trim().toLowerCase())
+        : [];
+
+    const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
+
+    if (userRole && !isAdmin) {
+        // Logic: 
+        // 1. CreatedBy = userName
+        // 2. ConcernedSE (Assigned) = userName
+        // 3. Common/CC Email matches userEmail (via EnquiryFor Item)
+
+        request.input('currentUserName', sql.NVarChar, userName || '');
+        request.input('currentUserEmail', sql.NVarChar, userEmail || '');
+
+        return ` AND (
+                em.CreatedBy = @currentUserName
+                OR EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @currentUserName)
+                OR EXISTS (
+                    SELECT 1 FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
+                    WHERE ef.RequestNo = em.RequestNo
+                    AND (
+                        ',' + REPLACE(REPLACE(mef.CommonMailIds, ' ', ''), ';', ',') + ',' LIKE '%,' + @currentUserEmail + ',%'
+                        OR ',' + REPLACE(REPLACE(mef.CCMailIds, ' ', ''), ';', ',') + ',' LIKE '%,' + @currentUserEmail + ',%'
+                    )
+                )
+            ) `;
+    }
+    return '';
+};
+
+// 1. Calendar Aggregation
+router.get('/calendar', async (req, res) => {
+    try {
+        const { month, year, division, salesEngineer, userEmail, userName, userRole } = req.query;
+
+        if (!month || !year) return res.status(400).json({ error: 'Month and Year required' });
+
+        const request = new sql.Request();
+        request.input('month', sql.Int, parseInt(month));
+        request.input('year', sql.Int, parseInt(year));
+
+        let baseFilter = '';
+        if (division && division !== 'All') {
+            baseFilter += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName = @division) `;
+            request.input('division', sql.NVarChar, division);
+        }
+        if (salesEngineer && salesEngineer !== 'All') {
+            baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
+            request.input('salesEngineer', sql.NVarChar, salesEngineer);
+        }
+
+        // Apply Access Control
+        const accessFilter = applyAccessControl(request, { userRole, userName, userEmail });
+        baseFilter += accessFilter;
+        console.log('Calendar Access Filter:', accessFilter);
+        console.log('Calendar Params:', { month, year, division, salesEngineer, userEmail, userName, userRole });
+        console.log('Calendar baseFilter:', baseFilter);
+
+        // Input for Quote Filtering (Unique name to avoid conflict)
+
+
+        // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
+
+        const query = `
+            WITH FilteredEnquiries AS (
+                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
+                FROM EnquiryMaster em
+                WHERE 1=1 ${baseFilter}
+            ),
+            FilteredQuotes AS (
+                SELECT eq.CreatedAt, eq.QuoteDate, eq.RequestNo
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter}
+            ),
+            Dates AS (
+                SELECT EnquiryDate as DateVal, 'Enquiry' as Type FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year
+                UNION ALL
+                SELECT DueDate as DateVal, 'Due' as Type FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year
+                UNION ALL
+                SELECT DueDate as DateVal, 'Lapsed' as Type 
+                FROM FilteredEnquiries 
+                WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year
+                AND CAST(DueDate AS DATE) < CAST(@today AS DATE)
+                AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
+                UNION ALL
+                SELECT SiteVisitDate as DateVal, 'SiteVisit' as Type FROM FilteredEnquiries WHERE MONTH(SiteVisitDate) = @month AND YEAR(SiteVisitDate) = @year
+                UNION ALL
+                -- Count unique Enquiries quoted per day (using QuoteDate if available)
+                SELECT MIN(ISNULL(QuoteDate, CreatedAt)) as DateVal, 'Quote' as Type 
+                FROM FilteredQuotes 
+                WHERE MONTH(ISNULL(QuoteDate, CreatedAt)) = @month AND YEAR(ISNULL(QuoteDate, CreatedAt)) = @year
+                GROUP BY RequestNo, CAST(ISNULL(QuoteDate, CreatedAt) AS DATE)
+            )
+            SELECT 
+                CONVERT(VARCHAR(10), DateVal, 23) as Date,
+                SUM(CASE WHEN Type = 'Enquiry' THEN 1 ELSE 0 END) as Enquiries,
+                SUM(CASE WHEN Type = 'Due' THEN 1 ELSE 0 END) as Due,
+                SUM(CASE WHEN Type = 'Lapsed' THEN 1 ELSE 0 END) as Lapsed,
+                SUM(CASE WHEN Type = 'SiteVisit' THEN 1 ELSE 0 END) as SiteVisits,
+                SUM(CASE WHEN Type = 'Quote' THEN 1 ELSE 0 END) as Quoted
+            FROM Dates
+            WHERE DateVal IS NOT NULL
+            GROUP BY CONVERT(VARCHAR(10), DateVal, 23)
+        `;
+
+        const result = await request.query(query);
+
+        // --- Added: Calculate Unique Monthly Totals to match the list counts ---
+        const totalsQuery = `
+            WITH FilteredEnquiries AS (
+                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
+                FROM EnquiryMaster em
+                WHERE 1=1 ${baseFilter}
+            ),
+            FilteredQuotes AS (
+                SELECT eq.CreatedAt, eq.QuoteDate, eq.RequestNo
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter}
+            )
+            SELECT 
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year) as due,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(DueDate) = @month AND YEAR(DueDate) = @year AND CAST(DueDate AS DATE) < CAST(@today AS DATE) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))) as lapsed,
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredQuotes WHERE MONTH(ISNULL(QuoteDate, CreatedAt)) = @month AND YEAR(ISNULL(QuoteDate, CreatedAt)) = @year) as quoted
+        `;
+        const totalsResult = await request.query(totalsQuery);
+
+        res.json({
+            daily: result.recordset,
+            totals: totalsResult.recordset[0]
+        });
+
+    } catch (err) {
+        console.error('Calendar API Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. KPISummary
+router.get('/summary', async (req, res) => {
+    try {
+        const { division, salesEngineer, userEmail, userName, userRole } = req.query;
+        const request = new sql.Request();
+
+        let baseFilter = '';
+        if (division && division !== 'All') {
+            baseFilter += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName = @division) `;
+            request.input('division', sql.NVarChar, division);
+        }
+        if (salesEngineer && salesEngineer !== 'All') {
+            baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
+            request.input('salesEngineer', sql.NVarChar, salesEngineer);
+        }
+
+        // Apply Access Control
+        baseFilter += applyAccessControl(request, { userRole, userName, userEmail });
+
+        const today = new Date();
+        const query = `
+            SELECT
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), EnquiryDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as EnquiriesToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as DueToday,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) > CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as UpcomingDues,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE Status IN ('Quoted', 'Quote', 'Submitted') ${baseFilter}) as QuotedCount,
+                (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) ${baseFilter}) as LapsedCount
+        `;
+
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
+        const result = await request.query(query);
+        res.json(result.recordset[0]);
+
+    } catch (err) {
+        console.error('Summary API Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 3. Enquiry Table
+router.get('/enquiries', async (req, res) => {
+    try {
+        const { division, salesEngineer, date, fromDate, toDate, status, dateType, search, userEmail, userName, userRole } = req.query;
+        console.log('API /enquiries params:', { division, salesEngineer, date, fromDate, toDate, status, dateType, search, userEmail, userName, userRole });
+        const request = new sql.Request();
+
+        let whereClause = ' WHERE 1=1 ';
+
+        // --- ACCESS CONTROL LOGIC ---
+        whereClause += applyAccessControl(request, { userRole, userName, userEmail });
+
+        // 0. Global Search (Overrides default mode, but respects explicit filters)
+        if (search && search.trim() !== '') {
+            whereClause += ` AND (
+                em.ProjectName LIKE @search OR
+                em.CustomerName LIKE @search OR
+                em.RequestNo LIKE @search OR
+                em.ClientName LIKE @search OR
+                em.ConsultantName LIKE @search OR
+                em.EnquiryDetails LIKE @search OR
+                EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName LIKE @search) OR
+                EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName LIKE @search)
+            ) `;
+            request.input('search', sql.NVarChar, `%${search}%`);
+        }
+
+        // 1. Filter by Division/SE/Status
+        if (division && division !== 'All') {
+            whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName = @division) `;
+            request.input('division', sql.NVarChar, division);
+        }
+        if (salesEngineer && salesEngineer !== 'All') {
+            whereClause += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
+            request.input('salesEngineer', sql.NVarChar, salesEngineer);
+        }
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        request.input('today', sql.VarChar(10), todayStr);
+
+        if (status === 'Lapsed') {
+            whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
+        } else if (status && status !== 'All') {
+            whereClause += ` AND em.Status = @status `;
+            request.input('status', sql.NVarChar, status);
+        }
+
+        // 2. Date Logic
+        // If search is active and NO explicit date provided, we skip default 'future' mode to allow global search history.
+        const isSearchActive = search && search.trim().length > 0;
+
+        console.log('--- Filtering Logic ---');
+        console.log('fromDate:', fromDate, 'toDate:', toDate, 'date:', date, 'mode:', req.query.mode, 'search:', search);
+
+        if (fromDate && toDate) {
+            console.log('Path: Range Filter');
+            const type = dateType || 'Enquiry Date';
+            console.log('Type:', type);
+
+            if (type === 'Due Date') {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
+            } else if (type === 'Quote Date') {
+                whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(eq.QuoteDate, eq.CreatedAt), 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23)) `;
+            } else {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.EnquiryDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
+            }
+
+            request.input('fromDate', sql.VarChar(10), fromDate);
+            request.input('toDate', sql.VarChar(10), toDate);
+        } else if (date) {
+            console.log('Path: Specific Date');
+            whereClause += ` AND (
+                CONVERT(VARCHAR(10), em.EnquiryDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
+                EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(eq.QuoteDate, eq.CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23))
+            ) `;
+            request.input('date', sql.VarChar(10), date);
+        }
+
+        if (!fromDate && !toDate && !date) {
+            // Only apply default mode if NOT searching
+            if (!isSearchActive) {
+                console.log('Path: Mode/Default');
+                const currentMode = req.query.mode || 'future';
+                console.log('Mode:', currentMode);
+
+                if (currentMode === 'today') {
+                    whereClause += ` AND (
+                        CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) OR
+                        CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @today, 23)
+                    ) `;
+                } else if (currentMode === 'future') {
+                    whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) >= CONVERT(VARCHAR(10), @today, 23) `;
+                }
+            } else {
+                console.log('Path: Search Active (Skipping Default Mode)');
+            }
+        }
+        console.log('Generated WHERE:', whereClause);
+
+        // Input for User Preference Logic (Renamed to avoid conflict with applyAccessControl)
+        request.input('queryUserEmail', sql.NVarChar, userEmail || '');
+
+        const query = `
+            SELECT 
+                em.RequestNo,
+                em.ProjectName,
+                em.CustomerName,
+                em.ClientName,
+                em.ConsultantName,
+                CONVERT(VARCHAR(10), em.DueDate, 23) as DueDate,
+                CONVERT(VARCHAR(10), em.SiteVisitDate, 23) as SiteVisitDate,
+                em.EnquiryDetails,
+                CONVERT(VARCHAR(10), em.EnquiryDate, 23) as EnquiryDate,
+                em.Status,
+                em.ReceivedFrom,
+                STUFF((SELECT ', ' + SEName FROM ConcernedSE WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as ConcernedSE,
+                STUFF((SELECT ', ' + ItemName FROM EnquiryFor WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as EnquiryFor,
+
+                ${date ? `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo AND CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23)) as QuoteDate` : `(SELECT MAX(ISNULL(QuoteDate, CreatedAt)) FROM EnquiryQuotes WHERE RequestNo = em.RequestNo) as QuoteDate`},
+                
+                -- Add Quote Details prioritized by Day Match and Current User (Department)
+                (
+                    SELECT TOP 1 
+                        QuoteNumber + ' (' + CONVERT(VARCHAR, ISNULL(QuoteDate, CreatedAt), 106) + ')' 
+                    FROM EnquiryQuotes 
+                    WHERE RequestNo = em.RequestNo 
+                    ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
+                        CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
+                        CreatedAt DESC
+                ) as QuoteRefNo,
+                (
+                    SELECT TOP 1 TotalAmount 
+                    FROM EnquiryQuotes 
+                    WHERE RequestNo = em.RequestNo 
+                    ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
+                        CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
+                        CreatedAt DESC
+                ) as TotalQuotedPrice,
+                (
+                    SELECT TOP 1 TotalAmount 
+                    FROM EnquiryQuotes 
+                    WHERE RequestNo = em.RequestNo 
+                    ORDER BY 
+                        ${date ? `CASE WHEN CONVERT(VARCHAR(10), ISNULL(QuoteDate, CreatedAt), 23) = CONVERT(VARCHAR(10), @date, 23) THEN 1 ELSE 2 END,` : ''}
+                        CASE WHEN PreparedByEmail = @queryUserEmail THEN 1 ELSE 2 END, 
+                        CreatedAt DESC
+                ) as NetQuotedPrice,
+                
+                em.CreatedBy
+            FROM EnquiryMaster em
+            ${whereClause}
+            ORDER BY em.DueDate ASC
+        `;
+
+        const result = await request.query(query);
+        const enquiries = result.recordset;
+
+        // --- Fetch Pricing Breakdown Separately (SQL Server < 2016 Compatibility) ---
+        if (enquiries.length > 0) {
+            const requestNos = enquiries.map(e => e.RequestNo);
+
+            try {
+                // Fetch ALL jobs for these enquiries to build full hierarchy context
+                const jobsResult = await new sql.Request().query(`
+                    SELECT ef.RequestNo, ef.ID, ef.ParentID, ef.ItemName, ef.LeadJobCode, 
+                           mef.CommonMailIds, mef.CCMailIds 
+                    FROM EnquiryFor ef
+                    LEFT JOIN Master_EnquiryFor mef ON ef.ItemName = mef.ItemName
+                    WHERE ef.RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                `);
+                const allEnqJobs = jobsResult.recordset;
+                
+                // Fetch Extra Customers (EnquiryCustomer table)
+                const extraCustomersResult = await new sql.Request().query(`
+                    SELECT RequestNo, CustomerName FROM EnquiryCustomer WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                `);
+                const allExtraCustomers = extraCustomersResult.recordset;
+
+                // Build context map per enquiry
+                const enqContext = {};
+                requestNos.forEach(rNo => {
+                    const jobs = allEnqJobs.filter(j => j.RequestNo == rNo);
+                    const enqObj = enquiries.find(e => e.RequestNo == rNo);
+                    
+                    // Merge primary and extra customers
+                    let combinedCustomers = (enqObj.CustomerName || '').split(',').map(c => c.trim()).filter(Boolean);
+                    allExtraCustomers
+                        .filter(ec => ec.RequestNo == rNo)
+                        .forEach(ec => {
+                            const names = ec.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                            names.forEach(n => {
+                                if (!combinedCustomers.includes(n)) combinedCustomers.push(n);
+                            });
+                        });
+                    enqObj.CustomerName = combinedCustomers.join(', ');
+
+                    const metaMap = getHierarchyMetadata(jobs, enqObj.CustomerName);
+                    
+                    const meta = { byId: metaMap, byName: {} };
+                    // Build byName fallback map
+                    Object.entries(metaMap).forEach(([id, m]) => {
+                        const job = jobs.find(j => String(j.ID) === String(id));
+                        if (job && job.ItemName) {
+                            meta.byName[job.ItemName.trim().toLowerCase()] = m;
+                        }
+                    });
+                    enqContext[rNo] = meta;
+                });
+
+                // Fetch alternative customers from Pricing Options
+                const optionRes = await new sql.Request().query(`
+                    SELECT DISTINCT RequestNo, CustomerName 
+                    FROM EnquiryPricingOptions 
+                    WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                    AND CustomerName IS NOT NULL AND CustomerName <> ''
+                `);
+                optionRes.recordset.forEach(row => {
+                    const rNo = row.RequestNo;
+                    if (enqContext[rNo]) {
+                        if (!enqContext[rNo].optionCustomers) enqContext[rNo].optionCustomers = new Set();
+                        // Deduplicate logic matching pricing.js
+                        const names = row.CustomerName.split(',').map(c => c.trim()).filter(Boolean);
+                        names.forEach(n => enqContext[rNo].optionCustomers.add(n));
+                    }
+                });
+
+                const pricingQuery = `
+                    SELECT RequestNo, EnquiryForItem, Price, UpdatedAt, EnquiryForID
+                    FROM (
+                        SELECT 
+                            RequestNo, EnquiryForItem, Price, UpdatedAt, EnquiryForID,
+                            ROW_NUMBER() OVER (PARTITION BY RequestNo, EnquiryForItem ORDER BY OptionID DESC) as rn
+                        FROM EnquiryPricingValues
+                        WHERE RequestNo IN (${requestNos.map(r => `'${r}'`).join(',')})
+                    ) t
+                    WHERE rn = 1
+                `;
+
+                const pricingResult = await new sql.Request().query(pricingQuery);
+                const pricingMap = {};
+
+                pricingResult.recordset.forEach(row => {
+                    if (!pricingMap[row.RequestNo]) pricingMap[row.RequestNo] = [];
+                    
+                    let meta = { level: 1, depth: 0, rootCode: 'L1' };
+                    if (enqContext[row.RequestNo]) {
+                        const ctx = enqContext[row.RequestNo];
+                        if (row.EnquiryForID && ctx.byId[row.EnquiryForID]) {
+                            meta = ctx.byId[row.EnquiryForID];
+                        } else if (row.EnquiryForItem && ctx.byName[row.EnquiryForItem.trim().toLowerCase()]) {
+                            meta = ctx.byName[row.EnquiryForItem.trim().toLowerCase()];
+                        }
+                    }
+
+                    pricingMap[row.RequestNo].push({
+                        EnquiryForItem: row.EnquiryForItem,
+                        Price: row.Price,
+                        UpdatedAt: row.UpdatedAt,
+                        Level: meta.level,
+                        Depth: meta.depth,
+                        RootCode: meta.rootCode
+                    });
+                });
+
+                const { filterJobsByDepartment } = require('../services/hierarchyService');
+                const isAdminUser = userRole ? userRole.toLowerCase().includes('admin') || userRole.toLowerCase().includes('system') : false;
+
+                enquiries.forEach(row => {
+                    row.PricingBreakdown = JSON.stringify(pricingMap[row.RequestNo] || []);
+
+                    // Customer Resolution Logic matching other modules
+                    const jobs = allEnqJobs.filter(j => j.RequestNo == row.RequestNo);
+                    const myJobs = filterJobsByDepartment(jobs, {
+                        userDepartment: '',
+                        isAdmin: isAdminUser,
+                        isCreator: row.CreatedBy && userName ? row.CreatedBy.toLowerCase().trim() === userName.toLowerCase().trim() : false,
+                        isConcernedSE: false, // handeled via email match in helper
+                        userEmail: userEmail,
+                        userFullName: userName
+                    });
+
+                    const parentSet = new Set();
+                    if (myJobs.length > 0 && enqContext[row.RequestNo]) {
+                        const ctx = enqContext[row.RequestNo];
+                        
+                        const minLevel = Math.min(...myJobs.map(j => (ctx.byId[j.ID] && ctx.byId[j.ID].level) || 99));
+                        const topJobs = myJobs.filter(j => ((ctx.byId[j.ID] && ctx.byId[j.ID].level) || 99) === minLevel);
+                        
+                        topJobs.forEach(job => {
+                            if (ctx.byId[job.ID] && ctx.byId[job.ID].customer) {
+                                // Split comma-separated names if needed
+                                const names = ctx.byId[job.ID].customer.split(',').map(c => c.trim()).filter(Boolean);
+                                names.forEach(n => parentSet.add(n));
+                            }
+                        });
+
+                        // Add option customers too
+                        if (ctx.optionCustomers) {
+                            ctx.optionCustomers.forEach(c => parentSet.add(c));
+                        }
+                    }
+
+                    if (parentSet.size > 0) {
+                        const cleanOwnJob = (name) => name ? name.replace(/^(L\d+|Sub Job)\s*-?\s*/i, '').trim() : '';
+                        const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const myJobNamesRaw = new Set(myJobs.map(j => normalize(cleanOwnJob(j.ItemName))));
+                        const userDivisionKey = userEmail ? userEmail.split('@')[0].toLowerCase() : '';
+
+                        let finalCustomers = Array.from(parentSet).filter(c => {
+                            const cNorm = normalize(cleanOwnJob(c));
+                            if (myJobNamesRaw.has(cNorm)) return false;
+                            if (userDivisionKey && cNorm.includes(userDivisionKey)) return false;
+                            return true;
+                        });
+
+                        if (finalCustomers.length > 0) {
+                            row.CustomerName = finalCustomers.join(', ');
+                        }
+                    }
+                });
+
+            } catch (err) {
+                console.error('Error fetching pricing breakdown:', err);
+                enquiries.forEach(row => { row.PricingBreakdown = "[]"; });
+            }
+        }
+
+        res.json(enquiries);
+
+    } catch (err) {
+        console.error('Enquiry List API Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+module.exports = router;

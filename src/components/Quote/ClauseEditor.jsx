@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from 'react';
+import React, { useRef, useMemo, useState, useEffect } from 'react';
 import JoditEditor from 'jodit-react';
 
 // Custom Table Icon
@@ -12,6 +12,22 @@ const TableIcon = () => (
 
 const ClauseEditor = ({ html, onChange, style }) => {
     const editor = useRef(null);
+    /**
+     * Last HTML we reported via onChange. When parent echoes the same string, we must not update the `value`
+     * passed to jodit-react — its useEffect does `jodit.value = value` whenever strings differ from Jodit's
+     * normalized HTML, which resets the caret. We only sync React `value` when html truly changes from outside.
+     */
+    const lastEmittedRef = useRef(html ?? '');
+    const [value, setValue] = useState(() => html ?? '');
+
+    useEffect(() => {
+        const incoming = html ?? '';
+        if (incoming === lastEmittedRef.current) {
+            return;
+        }
+        lastEmittedRef.current = incoming;
+        setValue(incoming);
+    }, [html]);
 
     const config = useMemo(() => ({
         readonly: false,
@@ -47,15 +63,20 @@ const ClauseEditor = ({ html, onChange, style }) => {
         },
     }), [style?.height]);
 
+    const handleChange = (newContent) => {
+        lastEmittedRef.current = newContent;
+        onChange(newContent);
+        /** Intentionally no setValue — keeps `value` prop stable so jodit-react does not overwrite Jodit's DOM. */
+    };
+
     return (
         <div style={{ ...style, display: 'flex', flexDirection: 'column' }} className="clause-editor-wrapper">
             <JoditEditor
                 ref={editor}
-                value={html || ''}
+                value={value}
                 config={config}
                 tabIndex={1} // tabIndex of textarea
-                onChange={(newContent) => onChange(newContent)}
-                onBlur={(newContent) => onChange(newContent)}
+                onChange={handleChange}
             />
             <style>
                 {`

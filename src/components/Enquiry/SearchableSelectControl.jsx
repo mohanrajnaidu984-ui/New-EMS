@@ -49,8 +49,9 @@ const SearchableSelectControl = ({
     const customStyles = {
         control: (provided) => ({
             ...provided,
-            minHeight: '38px',
-            fontSize: '13px',
+            minHeight: '28px',
+            height: '28px',
+            fontSize: '11.5px',
             // Match Bootstrap form-control border color
             borderColor: '#dee2e6',
             boxShadow: 'none',
@@ -58,9 +59,33 @@ const SearchableSelectControl = ({
                 borderColor: '#86b7fe'
             }
         }),
+        valueContainer: (provided) => ({
+            ...provided,
+            minHeight: '28px',
+            height: '28px',
+            padding: '0 6px'
+        }),
+        indicatorsContainer: (provided) => ({
+            ...provided,
+            minHeight: '28px',
+            height: '28px'
+        }),
+        input: (provided) => ({
+            ...provided,
+            margin: 0,
+            padding: 0
+        }),
+        singleValue: (provided) => ({
+            ...provided,
+            fontSize: '11.5px'
+        }),
+        placeholder: (provided) => ({
+            ...provided,
+            fontSize: '11.5px'
+        }),
         menu: (provided) => ({
             ...provided,
-            fontSize: '13px',
+            fontSize: '11.5px',
             zIndex: 9999
         }),
         container: (provided) => ({
@@ -95,9 +120,9 @@ const SearchableSelectControl = ({
                                 type="button"
                                 className="btn btn-light"
                                 style={{
-                                    fontSize: '13px',
-                                    padding: '0.375rem 0.75rem',
-                                    height: '38px',
+                                    fontSize: '11.5px',
+                                    padding: '0.1rem 0.45rem',
+                                    height: '28px',
                                     border: '1px solid #dee2e6',
                                     backgroundColor: '#fff'
                                 }}
@@ -112,9 +137,9 @@ const SearchableSelectControl = ({
                                 type="button"
                                 className="btn btn-light"
                                 style={{
-                                    fontSize: '13px',
-                                    padding: '0.375rem 0.75rem',
-                                    height: '38px',
+                                    fontSize: '11.5px',
+                                    padding: '0.1rem 0.45rem',
+                                    height: '28px',
                                     border: '1px solid #dee2e6',
                                     backgroundColor: '#fff',
                                     borderLeft: 'none'

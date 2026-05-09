@@ -1,0 +1,56 @@
+<BACnet_to_Modbus>
+<BACnet_in_Read>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="0" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_R %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="4" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_Y %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="8" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_B %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="12" Bit="0" Length="4" Mnemonic="UPS_C_Bat Cap %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="16" Bit="0" Length="4" Mnemonic="UPS_C_Inp V_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="20" Bit="0" Length="4" Mnemonic="UPS_C_Inp V_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="24" Bit="0" Length="4" Mnemonic="UPS_C_Inp V_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="28" Bit="0" Length="4" Mnemonic="UPS_C_Bat Temp."/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="32" Bit="0" Length="4" Mnemonic="UPS_C_Bat Volt"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="36" Bit="0" Length="4" Mnemonic="UPS_C_Inp HZ_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="40" Bit="0" Length="4" Mnemonic="UPS_C_Inp HZ_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="44" Bit="0" Length="4" Mnemonic="UPS_C_Inp HZ_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="48" Bit="0" Length="4" Mnemonic="UPS_C_Pow Fail Cnt"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="52" Bit="0" Length="4" Mnemonic="UPS_C_Out V_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="56" Bit="0" Length="4" Mnemonic="UPS_C_Out V_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="60" Bit="0" Length="4" Mnemonic="UPS_C_Out V_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="64" Bit="0" Length="4" Mnemonic="UPS_C_Out A_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="68" Bit="0" Length="4" Mnemonic="UPS_C_Out A_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="72" Bit="0" Length="4" Mnemonic="UPS_C_Out A_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="76" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="80" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="84" Bit="0" Length="4" Mnemonic="UPS_C_Out KW_B"/>
+
+<row Data_Type="Analog Value" Eng_Unit="95" Position="88" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_R %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="92" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_Y %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="96" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_B %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="100" Bit="0" Length="4" Mnemonic="UPS_S_Bat Cap %"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="104" Bit="0" Length="4" Mnemonic="UPS_S_Inp V_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="108" Bit="0" Length="4" Mnemonic="UPS_S_Inp V_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="112" Bit="0" Length="4" Mnemonic="UPS_S_Inp V_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="116" Bit="0" Length="4" Mnemonic="UPS_S_Bat Temp."/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="120" Bit="0" Length="4" Mnemonic="UPS_S_Bat Volt"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="124" Bit="0" Length="4" Mnemonic="UPS_S_Inp HZ_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="128" Bit="0" Length="4" Mnemonic="UPS_S_Inp HZ_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="132" Bit="0" Length="4" Mnemonic="UPS_S_Inp HZ_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="136" Bit="0" Length="4" Mnemonic="UPS_S_Pow Fail Cnt"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="140" Bit="0" Length="4" Mnemonic="UPS_S_Out V_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="144" Bit="0" Length="4" Mnemonic="UPS_S_Out V_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="148" Bit="0" Length="4" Mnemonic="UPS_S_Out V_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="152" Bit="0" Length="4" Mnemonic="UPS_S_Out A_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="156" Bit="0" Length="4" Mnemonic="UPS_S_Out A_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="160" Bit="0" Length="4" Mnemonic="UPS_S_Out A_B"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="164" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_R"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="168" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_Y"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="172" Bit="0" Length="4" Mnemonic="UPS_S_Out KW_B"/>
+
+<row Data_Type="Analog Value" Eng_Unit="95" Position="176" Bit="0" Length="4" Mnemonic="UPS_C_Bat_Time"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="180" Bit="0" Length="4" Mnemonic="UPS_C_UPS_Status"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="184" Bit="0" Length="4" Mnemonic="UPS_S_Bat_Time"/>
+<row Data_Type="Analog Value" Eng_Unit="95" Position="188" Bit="0" Length="4" Mnemonic="UPS_S_UPS_Status"/>
+</BACnet_in_Read>
+<BACnet_in_Write/>
+</BACnet_to_Modbus>
+<!--SW_VERSION = 1.405-->
