@@ -1,43 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import Draggable from 'react-draggable';
 import { useData } from '../../context/DataContext'; // Reuse for masters if needed
 import { useAuth } from '../../context/AuthContext';
 import DashboardFilters from './LeftPanel/DashboardFilters';
 import CalendarView from './LeftPanel/CalendarView';
 import CalendarBarChart from './LeftPanel/CalendarBarChart';
-import SummaryCards from './RightPanel/SummaryCards';
-import EnquiryTable from './RightPanel/EnquiryTable';
-import AnalyticsRow from './AnalyticsRow';
+import EnquiryResultsTable from '../Enquiry/EnquiryResultsTable';
+import { attachCanEditFlag } from '../../utils/enquiryResultsHelpers';
+import { sortEnquiryRows } from '../../utils/enquiryResultsSort';
+import { resolveEffectiveSalesEngineerFilter } from '../../utils/dashboardCcAccess';
 import './DashboardLayout.css';
 
 
 const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props passed from Main
     const { masters, dashboardRefreshCounter } = useData();
     const { currentUser } = useAuth();
+    const dashboardModalDragRef = useRef(null);
     // Use relative path to leverage Vite proxy (targets port 5000), avoids port mismatch
     const API_URL = '/api/dashboard';
 
     // State
     const [dateState, setDateState] = useState(() => {
         const saved = localStorage.getItem('dashboard_dateState');
+        const now = new Date();
+        const mo = now.getMonth() + 1;
+        const yr = now.getFullYear();
         if (saved) {
             try {
-                return JSON.parse(saved);
+                const p = JSON.parse(saved);
+                const legacyM = p.month ?? mo;
+                const legacyY = p.year ?? yr;
+                return {
+                    leftCalendar: p.leftCalendar || { month: legacyM, year: legacyY },
+                    rightCalendar: p.rightCalendar || { month: legacyM, year: legacyY },
+                    selectedDate: p.selectedDate ?? null,
+                    selectedType: p.selectedType ?? 'all',
+                };
             } catch (e) {
                 console.error("Failed to parse dashboard_dateState", e);
             }
         }
         return {
-            month: new Date().getMonth() + 1,
-            year: new Date().getFullYear(),
+            leftCalendar: { month: mo, year: yr },
+            rightCalendar: { month: mo, year: yr },
             selectedDate: null,
-            selectedType: 'all'
+            selectedType: 'all',
         };
     });
+
+    /** True when filters were loaded from localStorage on first mount (don’t clobber with role defaults). */
+    const filtersHydratedFromStorageRef = useRef(false);
+    /** Apply CC / SE role defaults only once when no saved filters (masters may refresh). */
+    const dashboardRoleDefaultsAppliedRef = useRef(false);
 
     const [filters, setFilters] = useState(() => {
         const saved = localStorage.getItem('dashboard_filters');
         if (saved) {
             try {
+                filtersHydratedFromStorageRef.current = true;
                 return JSON.parse(saved);
             } catch (e) {
                 console.error("Failed to parse dashboard_filters", e);
@@ -63,14 +83,48 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     }, [filters]);
 
     const [data, setData] = useState({
-        calendar: [],
+        calendarLeft: [],
+        calendarTotalsLeft: null,
+        calendarRight: [],
+        calendarTotalsRight: null,
         summary: {},
-        table: []
+        table: [],
     });
 
     const [filteredTableData, setFilteredTableData] = useState([]);
 
     const [loading, setLoading] = useState(false);
+
+    const [resultsModalOpen, setResultsModalOpen] = useState(false);
+    const [modalSortConfig, setModalSortConfig] = useState({ key: 'EnquiryDate', direction: 'desc' });
+
+    const modalTableRows = useMemo(() => {
+        const normalized = (filteredTableData || []).map((r) => ({
+            ...r,
+            DueOn: r.DueOn ?? r.DueDate,
+            EnquiryDetails: r.EnquiryDetails ?? r.DetailsOfEnquiry,
+            SourceOfInfo: r.SourceOfInfo ?? r.SourceOfEnquiry ?? r.ReceivedFrom,
+        }));
+        return attachCanEditFlag(normalized, currentUser);
+    }, [filteredTableData, currentUser]);
+
+    const modalSortedRows = useMemo(
+        () => sortEnquiryRows(modalTableRows, modalSortConfig),
+        [modalTableRows, modalSortConfig]
+    );
+
+    const handleModalSort = (key) => {
+        let direction = 'asc';
+        if (modalSortConfig.key === key && modalSortConfig.direction === 'asc') {
+            direction = 'desc';
+        }
+        setModalSortConfig({ key, direction });
+    };
+
+    const handleModalRowOpen = (reqNo) => {
+        setResultsModalOpen(false);
+        if (onOpenEnquiry) onOpenEnquiry(reqNo);
+    };
 
     useEffect(() => {
         if (currentUser && masters.enquiryFor && masters.enqItems) {
@@ -80,7 +134,10 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 : (Array.isArray(roleString) ? roleString.map(r => r.trim().toLowerCase()) : []);
             const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
 
-            if (!isAdmin) {
+            if (!isAdmin && !filtersHydratedFromStorageRef.current) {
+                if (dashboardRoleDefaultsAppliedRef.current) return;
+                dashboardRoleDefaultsAppliedRef.current = true;
+
                 const userEmail = (currentUser.email || currentUser.EmailId || '').trim().toLowerCase();
                 const userRequestNo = String(currentUser.RequestNo || '');
                 const userDivisionName = currentUser.DivisionName; // From login API
@@ -130,15 +187,22 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         }
     }, [currentUser, masters.enqItems, masters.enquiryFor]);
 
-    // Fetch Data
-    const fetchData = async () => {
+    // Fetch Data — all dashboard endpoints in parallel; AbortSignal drops stale runs when filters change quickly
+    const fetchData = async (signal) => {
         setLoading(true);
         try {
             // preparing params
-            // Start with basic filters
+            // CC coordinator display names → treat as "All SEs" for the division (see dashboardCcAccess.js)
+            const salesEngineerForApi = resolveEffectiveSalesEngineerFilter({
+                salesEngineer: filters.salesEngineer,
+                division: filters.division,
+                enqItems: masters.enqItems,
+                users: masters.users,
+                currentUserEmail: currentUser?.email || currentUser?.EmailId || '',
+            });
             const baseParams = {
                 division: filters.division,
-                salesEngineer: filters.salesEngineer
+                salesEngineer: salesEngineerForApi,
             };
 
             // Add User Context for Access Control
@@ -149,37 +213,35 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 baseParams.userRole = currentUser.role || currentUser.Roles || 'User';
             }
 
-            // 1. Calendar Params
-            const calParams = new URLSearchParams({
+            const normalizeCalendarPayload = (raw) => {
+                if (raw == null) return { daily: [], totals: null };
+                return {
+                    daily: Array.isArray(raw) ? raw : (raw?.daily || []),
+                    totals: Array.isArray(raw) ? null : raw?.totals ?? null,
+                };
+            };
+
+            const calLeftParams = new URLSearchParams({
                 ...baseParams,
-                month: dateState.month,
-                year: dateState.year
+                month: dateState.leftCalendar.month,
+                year: dateState.leftCalendar.year,
+            });
+            const calRightParams = new URLSearchParams({
+                ...baseParams,
+                month: dateState.rightCalendar.month,
+                year: dateState.rightCalendar.year,
             });
 
-            // 1. Calendar
-            const calRes = await fetch(`${API_URL}/calendar?${calParams}`);
-            const calData = calRes.ok ? await calRes.json() : [];
-
-            // 2. Summary (KPI) Params
             const sumParams = new URLSearchParams(baseParams);
 
-            // 2. Summary (KPI)
-            // KPI depends on global filters only (Today is implied)
-            const sumRes = await fetch(`${API_URL}/summary?${sumParams}`);
-            const sumData = sumRes.ok ? await sumRes.json() : {};
-
-            // 3. Table Params
             const listParams = new URLSearchParams({
                 ...baseParams,
-                mode: filters.mode
+                mode: filters.mode,
             });
 
-            // If specific date is selected in calendar, filter table by that date
             if (dateState.selectedDate) {
                 listParams.set('date', dateState.selectedDate);
             } else {
-                // Determine mode if no date selected? or uses 'mode' state
-                // filters.mode handles 'today'/'future'/'all'
                 if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
                 if (filters.toDate) listParams.set('toDate', filters.toDate);
 
@@ -194,29 +256,53 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                 if (filters.search) listParams.set('search', filters.search);
             }
 
-            const listRes = await fetch(`${API_URL}/enquiries?${listParams}`);
-            let listData = [];
-            if (listRes.ok) {
-                listData = await listRes.json();
-                if (!Array.isArray(listData)) listData = []; // Extra safety
-            } else {
-                console.error("Enquiry API Failed:", listRes.status, listRes.statusText);
+            const fetchOpts = signal ? { signal } : {};
+
+            const [calLeftRes, calRightRes, sumRes, listRes] = await Promise.all([
+                fetch(`${API_URL}/calendar?${calLeftParams}`, fetchOpts),
+                fetch(`${API_URL}/calendar?${calRightParams}`, fetchOpts),
+                fetch(`${API_URL}/summary?${sumParams}`, fetchOpts),
+                fetch(`${API_URL}/enquiries?${listParams}`, fetchOpts),
+            ]);
+
+            if (signal?.aborted) return;
+
+            const [calLeftRaw, calRightRaw, sumDataRaw, listDataRaw] = await Promise.all([
+                calLeftRes.ok ? calLeftRes.json() : Promise.resolve([]),
+                calRightRes.ok ? calRightRes.json() : Promise.resolve([]),
+                sumRes.ok ? sumRes.json() : Promise.resolve({}),
+                listRes.ok ? listRes.json() : Promise.resolve([]),
+            ]);
+
+            if (signal?.aborted) return;
+
+            if (!listRes.ok) {
+                console.error('Enquiry API Failed:', listRes.status, listRes.statusText);
             }
 
+            let listData = Array.isArray(listDataRaw) ? listDataRaw : [];
+
+            const leftCal = normalizeCalendarPayload(calLeftRaw);
+            const rightCal = normalizeCalendarPayload(calRightRaw);
+
             setData({
-                calendar: Array.isArray(calData) ? calData : (calData.daily || []),
-                calendarTotals: !Array.isArray(calData) ? calData.totals : null,
-                summary: sumData || {},
-                table: Array.isArray(listData) ? listData : []
+                calendarLeft: leftCal.daily,
+                calendarTotalsLeft: leftCal.totals,
+                calendarRight: rightCal.daily,
+                calendarTotalsRight: rightCal.totals,
+                summary: sumDataRaw || {},
+                table: listData,
             });
-
-
         } catch (err) {
-            console.error("Dashboard Fetch Error:", err);
+            if (err?.name === 'AbortError') return;
+            console.error('Dashboard Fetch Error:', err);
             setData({
-                calendar: [],
+                calendarLeft: [],
+                calendarTotalsLeft: null,
+                calendarRight: [],
+                calendarTotalsRight: null,
                 summary: {},
-                table: []
+                table: [],
             });
         } finally {
             setLoading(false);
@@ -239,25 +325,32 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
             return;
         }
 
-        const filtered = data.table.filter(row => {
-            const compareDate = (dateVal) => {
-                if (!dateVal) return false;
-                const d1 = new Date(dateVal).toISOString().split('T')[0];
-                return d1 === targetDate;
-            };
+        /** Match calendar day using local date (API UTC midnight caused UTC ISO compare to drop every row). */
+        const localYmd = (dateVal) => {
+            if (!dateVal) return null;
+            const d = new Date(dateVal);
+            if (Number.isNaN(d.getTime())) return null;
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        };
+
+        const dueVal = (row) => row.DueDate ?? row.DueOn;
+
+        const filtered = data.table.filter((row) => {
+            const compareDate = (dateVal) => localYmd(dateVal) === targetDate;
 
             if (type === 'enquiry') return compareDate(row.EnquiryDate);
-            if (type === 'due') return compareDate(row.DueDate);
+            if (type === 'due') return compareDate(dueVal(row));
             if (type === 'visit') return compareDate(row.SiteVisitDate);
             if (type === 'lapsed') {
-                const isDueOnDate = compareDate(row.DueDate);
+                const isDueOnDate = compareDate(dueVal(row));
                 const isLapsedStatus = !row.Status || !['Quote', 'Won', 'Lost', 'Quoted', 'Submitted'].includes(row.Status);
                 return isDueOnDate && isLapsedStatus;
             }
             if (type === 'quote') {
-                // Backend already filters QuoteDate to match the selected @date parameter.
-                // So if QuoteDate is not null, it IS the target date.
-                return !!row.QuoteDate;
+                return compareDate(row.QuoteDate);
             }
             return true;
         });
@@ -276,15 +369,38 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     }, [filters]);
 
     useEffect(() => {
+        const ac = new AbortController();
         const timer = setTimeout(() => {
-            fetchData();
-        }, 500); // Debounce API calls slightly
-        return () => clearTimeout(timer);
-    }, [dateState.month, dateState.year, dateState.selectedDate, filters.division, filters.salesEngineer, filters.mode, filters.fromDate, filters.toDate, filters.dateType, filters.search, filters.status, dashboardRefreshCounter]);
+            fetchData(ac.signal);
+        }, 120); // Short debounce — parallel /calendar/summary/enquiries already minimize wall time
+        return () => {
+            clearTimeout(timer);
+            ac.abort();
+        };
+    }, [
+        dateState.leftCalendar.month,
+        dateState.leftCalendar.year,
+        dateState.rightCalendar.month,
+        dateState.rightCalendar.year,
+        dateState.selectedDate,
+        filters.division,
+        filters.salesEngineer,
+        filters.mode,
+        filters.fromDate,
+        filters.toDate,
+        filters.dateType,
+        filters.search,
+        filters.status,
+        dashboardRefreshCounter,
+    ]);
 
     // Handlers
-    const handleMonthChange = (m, y) => {
-        setDateState(prev => ({ ...prev, month: m, year: y }));
+    const handleLeftCalendarMonthChange = (m, y) => {
+        setDateState((prev) => ({ ...prev, leftCalendar: { month: m, year: y } }));
+    };
+
+    const handleRightCalendarMonthChange = (m, y) => {
+        setDateState((prev) => ({ ...prev, rightCalendar: { month: m, year: y } }));
     };
 
     const handleDateClick = (dateStr, type = 'all') => {
@@ -293,12 +409,13 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
             selectedDate: dateStr,
             selectedType: type
         }));
+        setResultsModalOpen(true);
     };
 
-    const handleBarClick = (type) => {
-        // Calculate Month Range based on current Calendar Month
-        const y = dateState.year;
-        const m = dateState.month;
+    const handleBarClick = (type, source = 'left') => {
+        const cal = source === 'right' ? dateState.rightCalendar : dateState.leftCalendar;
+        const y = cal.year;
+        const m = cal.month;
         // Construct localized date strings to avoid timezone shifts
         // Month is 1-indexed in state, 0-indexed in Date constructor
         const start = new Date(y, m - 1, 1);
@@ -339,26 +456,14 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         }
 
         setFilters(prev => ({ ...prev, ...newFilters }));
-    };
-
-    const handleTableFilterChange = (newFilters) => {
-        // If changing mode, we might want to clear selectedDate?
-        if (newFilters.mode) {
-            setDateState(prev => ({ ...prev, selectedDate: null, selectedType: 'all' }));
-        }
-        if (newFilters.date === null) {
-            setDateState(prev => ({ ...prev, selectedDate: null, selectedType: 'all' }));
-        }
-        setFilters(newFilters);
-    };
-
-    // Wire up row click to open enquiry
-    const handleRowClick = (reqNo) => {
-        if (onOpenEnquiry) onOpenEnquiry(reqNo); // Needs to be passed down from App -> Main -> Dashboard
+        setResultsModalOpen(true);
     };
 
     return (
-        <div className="container-fluid" style={{ height: 'calc(100vh - 110px)', display: 'flex', flexDirection: 'column', padding: 0 }}>
+        <div
+            className="container-fluid dashboard-page-root"
+            style={{ height: 'calc(100vh - 110px)', display: 'flex', flexDirection: 'column', padding: 0 }}
+        >
 
 
 
@@ -366,61 +471,161 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
 
 
-            {/* Row 2: Content Area (Calendar + Table) */}
-            <div className="flex-grow-1 dashboard-split-container" style={{ minHeight: 0 }}>
-                {/* Calendar Panel - 40% */}
-                <div className="dashboard-left-panel">
-                    <div className="px-3 py-2 border-bottom bg-white">
-                        <DashboardFilters
-                            filters={filters}
-                            setFilters={setFilters}
-                            masters={masters}
-                            viewMode="division_se"
-                        />
-                    </div>
-                    <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-                        <CalendarBarChart
-                            data={data.calendar}
-                            monthlyTotals={data.calendarTotals}
-                            onBarClick={handleBarClick}
-                        />
-                        <div className="p-2" style={{ flex: 1 }}>
-                            <CalendarView
-                                month={dateState.month}
-                                year={dateState.year}
-                                onMonthChange={handleMonthChange}
-                                data={data.calendar}
-                                selectedDate={dateState.selectedDate}
-                                selectedType={dateState.selectedType}
-                                onDateClick={handleDateClick}
+            {/* Two equal calendar dashboards; enquiry list opens in a modal (Search Enquiry–style grid) */}
+            <div className="flex-grow-1 d-flex flex-column" style={{ minHeight: 0 }}>
+                <div className="dashboard-split-container dashboard-calendars-row">
+                    <div className="dashboard-half-panel">
+                        <div className="px-3 py-2 dashboard-filter-bar-row dashboard-filter-bar-strip">
+                            <DashboardFilters
+                                filters={filters}
+                                setFilters={setFilters}
+                                masters={masters}
+                                viewMode="division_se"
                             />
+                        </div>
+                        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                            <div className="dashboard-calendar-gutter d-flex flex-column flex-grow-1" style={{ minHeight: 0, overflow: 'hidden' }}>
+                                <div className="dashboard-calendar-combined d-flex flex-column flex-grow-1">
+                                    <CalendarBarChart
+                                        data={data.calendarLeft}
+                                        monthlyTotals={data.calendarTotalsLeft}
+                                        onBarClick={(t) => handleBarClick(t, 'left')}
+                                    />
+                                    <div className="d-flex flex-column flex-grow-1" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                                        <CalendarView
+                                            month={dateState.leftCalendar.month}
+                                            year={dateState.leftCalendar.year}
+                                            onMonthChange={handleLeftCalendarMonthChange}
+                                            data={data.calendarLeft}
+                                            selectedDate={dateState.selectedDate}
+                                            selectedType={dateState.selectedType}
+                                            onDateClick={handleDateClick}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="dashboard-half-panel">
+                        <div className="px-3 py-2 dashboard-filter-bar-row dashboard-filter-bar-strip">
+                            <DashboardFilters
+                                filters={filters}
+                                setFilters={setFilters}
+                                masters={masters}
+                                viewMode="search_date"
+                            />
+                        </div>
+                        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                            <div className="dashboard-calendar-gutter d-flex flex-column flex-grow-1" style={{ minHeight: 0, overflow: 'hidden' }}>
+                                <div className="dashboard-calendar-combined d-flex flex-column flex-grow-1">
+                                    <CalendarBarChart
+                                        data={data.calendarRight}
+                                        monthlyTotals={data.calendarTotalsRight}
+                                        onBarClick={(t) => handleBarClick(t, 'right')}
+                                    />
+                                    <div className="d-flex flex-column flex-grow-1" style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                                        <CalendarView
+                                            month={dateState.rightCalendar.month}
+                                            year={dateState.rightCalendar.year}
+                                            onMonthChange={handleRightCalendarMonthChange}
+                                            data={data.calendarRight}
+                                            selectedDate={dateState.selectedDate}
+                                            selectedType={dateState.selectedType}
+                                            onDateClick={handleDateClick}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
-
-                {/* Table Panel - 60% */}
-                <div className="dashboard-right-panel">
-                    <div className="px-3 py-2 border-bottom bg-white">
-                        <DashboardFilters
-                            filters={filters}
-                            setFilters={setFilters}
-                            masters={masters}
-                            viewMode="search_date"
-                            selectedDate={dateState.selectedDate}
-                        />
-                    </div>
-                    <div style={{ flex: 1, overflow: 'hidden' }} className="p-2">
-                        <EnquiryTable
-                            data={filteredTableData}
-                            onRowClick={handleRowClick}
-                            filters={filters}
-                            setFilters={handleTableFilterChange}
-                            selectedDate={dateState.selectedDate}
-                            selectedType={dateState.selectedType}
-                        />
-                    </div>
-                </div>
             </div>
+
+            {resultsModalOpen && (
+                <div
+                    className="modal show d-block"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="dashboard-enquiries-modal-title"
+                    style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10050 }}
+                    onClick={() => setResultsModalOpen(false)}
+                >
+                    <Draggable
+                        nodeRef={dashboardModalDragRef}
+                        handle=".dashboard-enquiries-modal-drag-handle"
+                        cancel=".btn-close, .btn-close-white, button"
+                        enableUserSelectHack={false}
+                    >
+                        <div
+                            ref={dashboardModalDragRef}
+                            className="modal-dialog modal-xl"
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ maxWidth: 'min(96vw, 1320px)', margin: '2vh auto' }}
+                        >
+                        <div className="modal-content border-0 shadow-lg d-flex flex-column" style={{ maxHeight: '92vh' }}>
+                            <div
+                                className="modal-header text-white flex-shrink-0 border-0 align-items-center dashboard-enquiries-modal-header-compact"
+                                style={{
+                                    paddingTop: '0.25rem',
+                                    paddingBottom: '0.25rem',
+                                    paddingLeft: '0.5rem',
+                                    paddingRight: '0.5rem',
+                                    minHeight: 0,
+                                    backgroundColor: '#4169e1',
+                                }}
+                            >
+                                <div
+                                    className="dashboard-enquiries-modal-drag-handle modal-title d-flex align-items-center mb-0 flex-grow-1"
+                                    id="dashboard-enquiries-modal-title"
+                                    style={{ cursor: 'grab', fontSize: '0.75rem', lineHeight: 1.2 }}
+                                >
+                                    <i className="bi bi-grip-vertical me-1 opacity-75" aria-hidden />
+                                    <span className="visually-hidden">Enquiry results table</span>
+                                    {loading ? (
+                                        <span className="small fw-normal opacity-75">Loading…</span>
+                                    ) : null}
+                                </div>
+                                <button
+                                    type="button"
+                                    className="btn-close btn-close-white"
+                                    style={{ padding: '0.3rem', transform: 'scale(0.85)' }}
+                                    aria-label="Close"
+                                    onClick={() => setResultsModalOpen(false)}
+                                />
+                            </div>
+                            {/* Avoid modal-dialog-scrollable + nested flex — it collapsed the table to zero height */}
+                            <div
+                                className="modal-body p-2 dashboard-enquiries-modal-body d-flex flex-column"
+                                style={{
+                                    overflow: 'hidden',
+                                    maxHeight: 'calc(92vh - 32px)',
+                                    minHeight: '260px',
+                                }}
+                            >
+                                {loading && modalSortedRows.length === 0 ? (
+                                    <div className="text-center text-muted py-3 small flex-shrink-0">Loading enquiries…</div>
+                                ) : null}
+                                {/* Table inner layout uses flex:1 + minHeight:0; needs a parent with real height or the scroll area collapses to blank */}
+                                <div
+                                    className="d-flex flex-column flex-grow-1"
+                                    style={{ minHeight: 0, height: 'min(72vh, 780px)' }}
+                                >
+                                    <EnquiryResultsTable
+                                        sortedRows={modalSortedRows}
+                                        sortConfig={modalSortConfig}
+                                        onSort={handleModalSort}
+                                        masters={masters}
+                                        onRowOpen={handleModalRowOpen}
+                                        emptyLabel="No enquiries for this selection."
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        </div>
+                    </Draggable>
+                </div>
+            )}
         </div>
     );
 };

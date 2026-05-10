@@ -1,0 +1,122 @@
+/**
+ * Search Enquiry results grid + Dashboard modal (same component).
+ * Loaded as a real CSS module path so Vite always bundles these rules.
+ * Scoped under .enquiry-results-table-root to beat Bootstrap table defaults.
+ */
+
+.enquiry-results-table-root .action-icon-hover:hover {
+    background-color: rgba(13, 110, 253, 0.25) !important;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.enquiry-results-table-root .sortable-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.enquiry-results-table-root .header-content {
+    display: inline-flex;
+    align-items: center;
+    width: 100%;
+}
+
+.enquiry-results-table-root .sortable-header:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.enquiry-results-table-root tbody tr.enquiry-search-row-open {
+    cursor: pointer;
+}
+
+.enquiry-results-table-root tbody tr.enquiry-search-row-open:hover {
+    background-color: #eff6ff !important;
+}
+
+/* Outer scroll frame: no solid border (avoids double-edge vs blue header); soft ring only */
+.enquiry-results-table-root .enquiry-search-table-wrap {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: auto;
+    border: none !important;
+    border-radius: 18px;
+    width: 100%;
+    background-color: #eef2f9;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+    box-shadow:
+        0 0 0 1px rgba(219, 227, 241, 0.85),
+        0 4px 18px rgba(15, 23, 42, 0.08);
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap table {
+    margin: 0 !important;
+    border-collapse: separate;
+    border-spacing: 0 5px;
+    width: max-content;
+    min-width: 100%;
+    max-width: none;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead tr {
+    background: transparent !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead th {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--ems-table-header-gradient) !important;
+    color: #ffffff !important;
+    font-weight: 400 !important;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
+    border-color: rgba(210, 222, 255, 0.25) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        inset 0 -1px 0 rgba(15, 23, 42, 0.14);
+    --bs-table-bg: transparent !important;
+    --bs-table-accent-bg: transparent !important;
+    text-align: left;
+    vertical-align: middle !important;
+}
+
+/* Full inner radius — wrapper has no inset border, so 18px matches the rounded frame */
+.enquiry-results-table-root .enquiry-search-table-wrap thead tr:first-child th:first-child {
+    border-top-left-radius: 18px !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead tr:first-child th:last-child {
+    border-top-right-radius: 18px !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead th .header-content {
+    font-weight: 400 !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead th.sortable-header {
+    font-weight: 400 !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap thead th .text-muted,
+.enquiry-results-table-root .enquiry-search-table-wrap thead th .text-primary {
+    color: #e6efff !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap tbody td {
+    background: #ffffff;
+    text-align: left;
+    padding-top: 0.38rem !important;
+    padding-bottom: 0.38rem !important;
+    line-height: 1.15;
+    vertical-align: middle;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap tbody tr:nth-child(odd) td {
+    background: #ffffff !important;
+}
+
+.enquiry-results-table-root .enquiry-search-table-wrap tbody tr:nth-child(even) td {
+    background: #f3f7fd !important;
+}

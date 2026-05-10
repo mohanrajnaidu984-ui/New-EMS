@@ -13,56 +13,7 @@ import EnquiryItemModal from '../Modals/EnquiryItemModal';
 import DateInput from './DateInput';
 import ValidationTooltip from '../Common/ValidationTooltip';
 import CollaborativeNotes from './CollaborativeNotes';
-
-/**
- * Resolves SE/EE/QS names for one Enquiry For row: explicit assignedSEs first, then
- * Concerned SE list + Master users (department match), then fuzzy match, then trust saved seList.
- * Used for validation and to align client state with data loaded without per-item assignments.
- */
-function inferAssignedSEsForEnquiryForItem(item, seList, users) {
-    if (!Array.isArray(seList) || seList.length === 0) return [];
-
-    if (typeof item === 'string') {
-        return seList.map((n) => String(n || '').trim()).filter(Boolean);
-    }
-
-    const assigned = Array.isArray(item?.assignedSEs)
-        ? item.assignedSEs.filter(Boolean)
-        : (item?.assignedSE ? [item.assignedSE] : []);
-    if (assigned.length > 0) return assigned.map((n) => String(n || '').trim()).filter(Boolean);
-
-    const userList = Array.isArray(users) ? users : [];
-    const normalize = (s) => String(s || '').trim().toLowerCase();
-    const itemBase = (name) => {
-        const raw = String(name || '').replace(/^L\d+\s*-\s*/i, '').trim();
-        const parts = raw.split(' - ');
-        return normalize(parts.length > 1 ? parts[parts.length - 1] : raw);
-    };
-    const selectedSet = new Set(seList.map((n) => normalize(n)).filter(Boolean));
-    const dept = itemBase(item?.itemName || item?.name || '');
-
-    const exact = userList
-        .filter((u) => dept && normalize(u?.Department) === dept && selectedSet.has(normalize(u?.FullName)))
-        .map((u) => String(u?.FullName || '').trim())
-        .filter(Boolean);
-    if (exact.length > 0) return [...new Set(exact)];
-
-    const fuzzy = userList
-        .filter((u) => {
-            const d = normalize(u?.Department);
-            const fn = normalize(u?.FullName);
-            if (!d || !selectedSet.has(fn)) return false;
-            return !!(dept && (dept.includes(d) || d.includes(dept)));
-        })
-        .map((u) => String(u?.FullName || '').trim())
-        .filter(Boolean);
-    if (fuzzy.length > 0) return [...new Set(fuzzy)];
-
-    const verified = seList.filter((n) => userList.some((u) => normalize(u?.FullName) === normalize(n)));
-    if (verified.length > 0) return verified;
-
-    return seList.map((n) => String(n || '').trim()).filter(Boolean);
-}
+import { inferAssignedSEsForEnquiryForItem } from '../../utils/inferAssignedSEsForEnquiryForItem';
 
 /** Alphanumeric fold for company / contractor name comparison (OCR & master data variants). */
 function normalizeCompanyKey(str) {
@@ -1739,14 +1690,19 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                         height: 0,
                                         borderLeft: '8px solid transparent',
                                         borderRight: '8px solid transparent',
-                                        borderBottom: '8px solid #3b74c2'
+                                        borderBottom: '8px solid #2f5fae'
                                     }}
                                 />
                                 <div
                                     className="d-flex"
                                     style={{
-                                        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
-                                        borderRadius: '12px',
+                                        /* Match main menu strip: rounded top edge + gradient */
+                                        background: 'linear-gradient(180deg, #2f5fae 0%, #203f75 100%)',
+                                        borderTopLeftRadius: '18px',
+                                        borderTopRightRadius: '18px',
+                                        borderBottomLeftRadius: '14px',
+                                        borderBottomRightRadius: '14px',
+                                        overflow: 'hidden',
                                         padding: '4px',
                                         boxShadow: '0 2px 8px rgba(23, 47, 99, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
                                         width: 'fit-content'
@@ -1766,7 +1722,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     marginBottom: '0',
                                     fontSize: '11px',
                                     opacity: activeTab === 'New' ? 1 : 0.96,
-                                    borderRadius: activeTab === 'New' ? '9999px' : '8px',
+                                    borderRadius: activeTab === 'New' ? '9999px' : '14px',
                                     boxShadow: activeTab === 'New'
                                         ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
                                         : 'none',
@@ -1791,7 +1747,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     marginBottom: '0',
                                     fontSize: '11px',
                                     opacity: activeTab === 'Modify' ? 1 : 0.96,
-                                    borderRadius: activeTab === 'Modify' ? '9999px' : '8px',
+                                    borderRadius: activeTab === 'Modify' ? '9999px' : '14px',
                                     boxShadow: activeTab === 'Modify'
                                         ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
                                         : 'none',
@@ -1816,7 +1772,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     marginBottom: '0',
                                     fontSize: '11px',
                                     opacity: activeTab === 'Search' ? 1 : 0.96,
-                                    borderRadius: activeTab === 'Search' ? '9999px' : '8px',
+                                    borderRadius: activeTab === 'Search' ? '9999px' : '14px',
                                     boxShadow: activeTab === 'Search'
                                         ? 'inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 2px 5px rgba(10, 24, 54, 0.32)'
                                         : 'none',

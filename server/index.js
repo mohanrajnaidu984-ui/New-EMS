@@ -13,6 +13,7 @@ const multerMemory = multer({ storage: multer.memoryStorage() });
 const { parseContactCardFromOcrText } = require('./parseContactOcr');
 const { computeEnquiryWorkflowStatus } = require('./services/computeEnquiryWorkflowStatus');
 const {
+    resolveQuoteAttachmentsBase,
     resolveEnquiryAttachmentsBase,
     resolveEnquiryUploadDestination,
     resolveEnquiryAttachmentVisibilityBase,
@@ -3002,6 +3003,7 @@ console.log('PORT:', PORT);
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`EMS attachments root (enquiries): ${resolveEnquiryAttachmentsBase()}`);
+    console.log(`EMS attachments root (quotes): ${resolveQuoteAttachmentsBase()}`);
 });
 server.on('error', (e) => console.error('Server Error:', e));
 

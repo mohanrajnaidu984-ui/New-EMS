@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import {
     BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
@@ -204,12 +204,6 @@ const TOP_JOB_TABLE_CONFIG = {
         chartHeader: 'Net Quoted Value Chart',
         metricHeader: 'Chance %',
         extraHeader: 'Follow Up Remarks'
-    },
-    Pending: {
-        valueHeader: 'Net Quoted Value',
-        chartHeader: 'Net Quoted Value Chart',
-        metricHeader: 'Status',
-        extraHeader: null
     }
 };
 
@@ -234,6 +228,27 @@ const FUNNEL_STAGES = FUNNEL_STAGE_DEFS.map((s, i) => {
 
 /** Custom inverted funnel; numeric values are shown in the summary block below. */
 function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
+    const funnelWrapRef = useRef(null);
+    const [svgPx, setSvgPx] = useState(null);
+
+    useLayoutEffect(() => {
+        const el = funnelWrapRef.current;
+        if (!el) return undefined;
+
+        const measure = () => {
+            const r = el.getBoundingClientRect();
+            const w = Math.max(1, Math.round(r.width));
+            const h = Math.max(1, Math.round(r.height));
+            setSvgPx((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+        };
+
+        measure();
+        if (typeof ResizeObserver === 'undefined') return undefined;
+        const ro = new ResizeObserver(measure);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
     const vb = { w: 100, h: 100 };
     /** Extra viewBox space above/below drawing (y 0…h) so top % label (e.g. 10%) isn’t clipped. */
     const vbPadY = 6;
@@ -249,20 +264,22 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
     /** Small visual separation only between 10% and 25% bands. */
     const topBandGap = 2.4;
 
+    const vbW = vb.w + 2 * vbPadX;
+    const vbH = vb.h + 2 * vbPadY;
+
     return (
         <div className="sales-pipeline-funnel-visual d-flex flex-column flex-grow-1 min-h-0 w-100">
-            <div className="sr-funnel-svg-wrap">
+            <div className="sr-funnel-svg-wrap" ref={funnelWrapRef}>
                 <svg
-                    viewBox={`${-vbPadX} ${-vbPadY} ${vb.w + 2 * vbPadX} ${vb.h + 2 * vbPadY}`}
+                    viewBox={`${-vbPadX} ${-vbPadY} ${vbW} ${vbH}`}
                     preserveAspectRatio="xMidYMid meet"
-                    className="sr-funnel-svg"
+                    width={svgPx?.w}
+                    height={svgPx?.h}
+                    className={`sr-funnel-svg${svgPx ? ' sr-funnel-svg--sized' : ''}`}
                     role="img"
                     aria-label="Sales pipeline by probability stage"
                 >
                     <defs>
-                        <filter id="srFunnelDrop" x="-30%" y="-30%" width="160%" height="160%">
-                            <feDropShadow dx="0" dy="1.2" stdDeviation="1.6" floodColor="#0f172a" floodOpacity="0.13" />
-                        </filter>
                         {rows.map((row, i) => (
                             <linearGradient
                                 key={`srFunnelGrad-${i}`}
@@ -272,13 +289,12 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                                 x2="0"
                                 y2="1"
                             >
-                                <stop offset="0%" stopColor={mixHexWithWhite(row.fill, 0.45)} />
-                                <stop offset="50%" stopColor={row.fill} />
-                                <stop offset="100%" stopColor={mixHexWithBlack(row.fill, 0.52)} />
+                                <stop offset="0%" stopColor={mixHexWithWhite(row.fill, 0.38)} />
+                                <stop offset="100%" stopColor={mixHexWithBlack(row.fill, 0.42)} />
                             </linearGradient>
                         ))}
                     </defs>
-                    <g filter="url(#srFunnelDrop)">
+                    <g>
                     {rows.map((row, i) => {
                         const y0 = i * bandH + (i === 1 ? topBandGap / 2 : 0);
                         const y1 = (i + 1) * bandH - (i === 0 ? topBandGap / 2 : 0);
@@ -294,8 +310,10 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                                 <polygon
                                     points={pts}
                                     fill={`url(#srFunnelGrad-${i})`}
-                                    stroke="rgba(15, 23, 42, 0.32)"
-                                    strokeWidth="0.55"
+                                    stroke="#1e293b"
+                                    strokeOpacity={0.42}
+                                    strokeWidth="0.5"
+                                    strokeLinejoin="miter"
                                     vectorEffect="non-scaling-stroke"
                                 />
                             </g>
@@ -318,7 +336,7 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                                 key={`lbl-${stage.probability}`}
                                 x={labelX}
                                 y={cy}
-                                fontSize={3.35}
+                                fontSize={3.55}
                                 textAnchor="end"
                                 dominantBaseline="middle"
                                 className="sr-funnel-label-text-svg"
@@ -338,8 +356,8 @@ function SalesPipelineFunnelVisual({ rows, formatFullNumber }) {
                                 key={`fval-${row.name || i}`}
                                 x={vb.w / 2}
                                 y={cyVal}
-                                fontSize={3.75}
-                                fontWeight="800"
+                                fontSize={4}
+                                fontWeight="600"
                                 textAnchor="middle"
                                 dominantBaseline="middle"
                                 className="sr-funnel-block-value-svg"
@@ -386,7 +404,7 @@ const SalesReport = () => {
         return 'Won';
     });
 
-    const [loading, setLoading] = useState(false);
+    const [summaryLoading, setSummaryLoading] = useState(false);
     const [topJobsLoading, setTopJobsLoading] = useState(false);
     const [tableExpanded, setTableExpanded] = useState(false);
     const [topJobColumnFilters, setTopJobColumnFilters] = useState({});
@@ -470,8 +488,8 @@ const SalesReport = () => {
         localStorage.setItem('reports_top_job_status', topJobStatus);
     }, [topJobStatus, topJobStatusStorageKey]);
 
-    const fetchSummary = async () => {
-        setLoading(true);
+    const fetchSummary = useCallback(async (signal) => {
+        setSummaryLoading(true);
         setSummaryError(null);
         try {
             const params = new URLSearchParams();
@@ -482,7 +500,7 @@ const SalesReport = () => {
             const email = (currentUser?.EmailId || currentUser?.email || storedLoginEmail || '').trim();
             if (email) params.append('email', email);
 
-            const res = await fetch(`/api/sales-report/summary?${params.toString()}`);
+            const res = await fetch(`/api/sales-report/summary?${params.toString()}`, { signal });
             if (res.ok) {
                 const data = await res.json();
                 const d = defaultReport();
@@ -495,18 +513,25 @@ const SalesReport = () => {
                 }));
             } else {
                 setSummaryError('Could not load sales report.');
-                setReportData(defaultReport());
+                setReportData((prev) => ({
+                    ...defaultReport(),
+                    topJobBooked: prev.topJobBooked || []
+                }));
             }
         } catch (error) {
+            if (error?.name === 'AbortError') return;
             console.error('Failed to fetch report summary', error);
             setSummaryError('Could not load sales report.');
-            setReportData(defaultReport());
+            setReportData((prev) => ({
+                ...defaultReport(),
+                topJobBooked: prev.topJobBooked || []
+            }));
         } finally {
-            setLoading(false);
+            if (!signal.aborted) setSummaryLoading(false);
         }
-    };
+    }, [year, company, division, role, filterLocks.company, currentUser, storedLoginEmail]);
 
-    const fetchTopJobBooked = async () => {
+    const fetchTopJobBooked = useCallback(async (signal) => {
         setTopJobsLoading(true);
         try {
             const params = new URLSearchParams();
@@ -518,7 +543,7 @@ const SalesReport = () => {
             const email = (currentUser?.EmailId || currentUser?.email || storedLoginEmail || '').trim();
             if (email) params.append('email', email);
 
-            const res = await fetch(`/api/sales-report/top-job-booked?${params.toString()}`);
+            const res = await fetch(`/api/sales-report/top-job-booked?${params.toString()}`, { signal });
             if (res.ok) {
                 const data = await res.json();
                 setReportData((prev) => ({
@@ -527,23 +552,28 @@ const SalesReport = () => {
                 }));
             }
         } catch (e) {
+            if (e?.name === 'AbortError') return;
             console.error('Failed to fetch top jobs', e);
         } finally {
-            setTopJobsLoading(false);
+            if (!signal.aborted) setTopJobsLoading(false);
         }
-    };
-
-    useEffect(() => {
-        if (!year) return;
-        if (!filterLocks.company && (!company || !division)) return;
-        fetchSummary();
-    }, [year, company, division, role, filterLocks.company, currentUser, storedLoginEmail]);
-
-    useEffect(() => {
-        if (!year) return;
-        if (!filterLocks.company && (!company || !division)) return;
-        fetchTopJobBooked();
     }, [year, company, division, role, topJobStatus, filterLocks.company, currentUser, storedLoginEmail]);
+
+    useEffect(() => {
+        if (!year) return;
+        if (!filterLocks.company && (!company || !division)) return;
+        const ac = new AbortController();
+        fetchSummary(ac.signal);
+        return () => ac.abort();
+    }, [fetchSummary]);
+
+    useEffect(() => {
+        if (!year) return;
+        if (!filterLocks.company && (!company || !division)) return;
+        const ac = new AbortController();
+        fetchTopJobBooked(ac.signal);
+        return () => ac.abort();
+    }, [fetchTopJobBooked]);
 
     useEffect(() => {
         const email = (currentUser?.EmailId || currentUser?.email || storedLoginEmail || '').trim();
@@ -1280,6 +1310,12 @@ const SalesReport = () => {
                         </div>
                     </div>
                     <div className="d-flex align-items-center gap-2 flex-wrap">
+                        {summaryLoading ? (
+                            <span className="text-muted small mb-0 d-flex align-items-center gap-1" style={{ fontSize: '0.7rem' }} aria-live="polite">
+                                <span className="spinner-border spinner-border-sm text-primary" role="status" style={{ width: '0.75rem', height: '0.75rem' }} />
+                                Updating charts…
+                            </span>
+                        ) : null}
                         <span className="text-muted small mb-0" style={{ fontSize: '0.7rem' }}>* All values in BHD</span>
                         <div className="d-flex gap-2 no-print">
                             <button
@@ -1311,12 +1347,8 @@ const SalesReport = () => {
                 <div className="alert alert-warning py-1 px-2 small mb-2">{summaryError}</div>
             )}
 
-            {loading ? (
-                <div className="d-flex justify-content-center align-items-center flex-grow-1 py-4">
-                    <div className="spinner-border text-primary" role="status"><span className="visually-hidden">Loading…</span></div>
-                </div>
-            ) : (
-                <div className="sr-dashboard-grid flex-grow-1 min-h-0">
+            <div className="flex-grow-1 min-h-0 d-flex flex-column">
+            <div className="sr-dashboard-grid flex-grow-1 min-h-0">
                     {/* 1 — Won / Lost: summary + pie chart in one card (row 1–2) */}
                     <section className="sr-cell sr-cell-won-combined sr-summary-panel sr-summary-compact sr-target-card card border-0 shadow-sm d-flex flex-column min-h-0">
                         <div className="sr-summary-title">Won / Lost</div>
@@ -1397,6 +1429,7 @@ const SalesReport = () => {
                                                 cornerRadius={4}
                                                 startAngle={90}
                                                 endAngle={-270}
+                                                isAnimationActive={false}
                                             >
                                                 {pieSlices.map((entry, index) => {
                                                     const g = SR_DONUT_GRADIENTS[entry.name];
@@ -1523,8 +1556,8 @@ const SalesReport = () => {
                                             wrapperStyle={{ fontSize: SR_TA_LEGEND_FONT_SIZE, color: SR_CHART_LEGEND_GREY }}
                                             verticalAlign="bottom"
                                         />
-                                        <Bar dataKey="target" name="Target" fill={SR_BAR_JB.target} radius={[5, 5, 0, 0]} maxBarSize={20} />
-                                        <Bar dataKey="actual" name="Actual Achieved" fill={SR_BAR_JB.actual} radius={[5, 5, 0, 0]} maxBarSize={20} />
+                                        <Bar dataKey="target" name="Target" fill={SR_BAR_JB.target} radius={[5, 5, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                                        <Bar dataKey="actual" name="Actual Achieved" fill={SR_BAR_JB.actual} radius={[5, 5, 0, 0]} maxBarSize={20} isAnimationActive={false} />
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
@@ -1632,8 +1665,8 @@ const SalesReport = () => {
                                             wrapperStyle={{ fontSize: SR_TA_LEGEND_FONT_SIZE, color: SR_CHART_LEGEND_GREY }}
                                             verticalAlign="bottom"
                                         />
-                                        <Bar dataKey="target" name="Target" fill={SR_BAR_GM.target} radius={[5, 5, 0, 0]} maxBarSize={20} />
-                                        <Bar dataKey="actual" name="Actual Achieved" fill={SR_BAR_GM.actual} radius={[5, 5, 0, 0]} maxBarSize={20} />
+                                        <Bar dataKey="target" name="Target" fill={SR_BAR_GM.target} radius={[5, 5, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                                        <Bar dataKey="actual" name="Actual Achieved" fill={SR_BAR_GM.actual} radius={[5, 5, 0, 0]} maxBarSize={20} isAnimationActive={false} />
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
@@ -1908,7 +1941,7 @@ const SalesReport = () => {
                         </div>
                     </section>
                 </div>
-            )}
+            </div>
         </div>
     );
 };

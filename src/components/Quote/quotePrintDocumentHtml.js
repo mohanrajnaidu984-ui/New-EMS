@@ -58,7 +58,15 @@ function normalizePdfStaticAssets(html, apiOrigin, rewriteFromOrigin) {
 
 function getServerPdfHeaderModeCss(printWithHeader) {
     if (!printWithHeader) {
-        return `.print-logo-section, .footer-section, .quote-print-repeat-strip, .quote-print-page-indicator, .quote-print-footer-rule { display: none !important; } .page-one { min-height: auto !important; }`;
+        /**
+         * Keep layout: visibility:hidden preserves box size (no reflow). Page "Page X of Y" stays visible;
+         * only logo band + company address block are invisible. Repeat strip is off-flow → display:none.
+         */
+        return (
+            '.quote-sheet-logo-row, .quote-continuation-header { visibility: hidden !important; } ' +
+            '.quote-print-footer-wrap { visibility: hidden !important; } ' +
+            '.quote-print-repeat-strip, .print-logo-section { display: none !important; }'
+        );
     }
     return `.quote-print-repeat-strip, .quote-print-footer-rule { display: none !important; }`;
 }
@@ -110,6 +118,21 @@ html[data-preview-pdf="1"] .quote-document-root {
     max-width: 210mm !important;
     margin-left: auto !important;
     margin-right: auto !important;
+    box-sizing: border-box !important;
+}
+/** Print/PDF: block imgs ignore parent text-align — keep logo right-aligned like on-screen flex layout */
+html[data-preview-pdf="1"] .quote-sheet-logo-row {
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: flex-end !important;
+    align-items: flex-start !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+html[data-preview-pdf="1"] .quote-sheet-logo-row > div {
+    width: 100% !important;
+    max-width: 100% !important;
+    text-align: right !important;
     box-sizing: border-box !important;
 }
 html[data-preview-pdf="1"] .header-section.quote-header-row {
@@ -360,6 +383,11 @@ html[data-preview-pdf="1"] .quote-sheet-logo-row img,
 html[data-preview-pdf="1"] .quote-continuation-header img {
     height: 68px !important;
     width: auto !important;
+    max-width: 212px !important;
+    display: block !important;
+    margin-left: auto !important;
+    margin-right: 0 !important;
+    object-fit: contain !important;
 }
 html[data-preview-pdf="1"] .clause-content table,
 html[data-preview-pdf="1"] .clause-content table th,
@@ -457,6 +485,19 @@ html[data-preview-pdf="1"] .quote-print-footer-company {
     }
     html[data-preview-pdf="1"] .quote-a4-sheet--continuation .content-section {
         flex: 0 1 auto !important;
+    }
+    html[data-preview-pdf="1"] .quote-sheet-logo-row {
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: flex-end !important;
+        align-items: flex-start !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    html[data-preview-pdf="1"] .quote-sheet-logo-row img,
+    html[data-preview-pdf="1"] .quote-continuation-header img {
+        margin-left: auto !important;
+        margin-right: 0 !important;
     }
     html[data-preview-pdf="1"] .footer-section {
         display: flex !important;

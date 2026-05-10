@@ -8,26 +8,35 @@ const MainLayout = ({ children, activeTab, onNavigate, onOpenEnquiry }) => {
 
             {/* Content Wrapper: 100% for Dashboard, 83% for others */}
             <div
-                className={`container-fluid ${activeTab === 'Dashboard' || activeTab === 'Quote' ? 'px-0' : 'px-4'}`}
+                className={`container-fluid ${
+                    activeTab === 'Dashboard' || activeTab === 'Quote' || activeTab === 'Reports'
+                        ? 'px-0'
+                        : activeTab === 'Probability'
+                          ? 'px-1'
+                          : 'px-4'
+                }`}
                 style={{
                     maxWidth: activeTab === 'Dashboard' ? '100%' : '100%',
                     width: '100%',
                     margin: '0 auto',
                     marginTop: '72px', // Exact header height for flush fit
                     height: 'calc(100vh - 72px)',
-                    overflowY: activeTab === 'Quote' ? 'hidden' : 'auto',
+                    overflowY: activeTab === 'Quote' || activeTab === 'Probability' ? 'hidden' : 'auto',
                     overflowX: 'hidden',
                 }}
             >
-                {activeTab === 'Quote' ? (
+                {activeTab === 'Quote' || activeTab === 'Probability' ? (
                     <div
                         style={{
-                            paddingLeft: '4px',
-                            paddingRight: '4px',
+                            paddingLeft: activeTab === 'Probability' ? 0 : '4px',
+                            paddingRight: activeTab === 'Probability' ? 0 : '4px',
                             boxSizing: 'border-box',
                             width: '100%',
                             minHeight: 0,
                             height: '100%',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            overflow: 'hidden',
                         }}
                     >
                         {children}

@@ -8,6 +8,7 @@ import {
     EMS_LIST_SEARCH_DISABLED_STYLE,
     EMS_LIST_CLEAR_STYLE,
 } from '../../constants/emsSearchButtons';
+import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
 import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
@@ -46,8 +47,11 @@ function getQuotePdfServerOrigin() {
     return `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
 }
 
-/** User requested manual-only tab behavior (disable automatic tab/preview switching). */
-const DISABLE_QUOTE_TAB_AUTOMATION = true;
+/**
+ * When true, skips AutoLoad / hard fallback / tab-change preview / browse-checkbox initializer effects.
+ * Must be false for "Previous Quotes / Revisions" to auto-select the top list row and sync the right-hand preview.
+ */
+const DISABLE_QUOTE_TAB_AUTOMATION = false;
 
 /** Right-panel quote filter row (category drives which fields are enabled). */
 const QUOTE_LIST_CATEGORY = {
@@ -65,6 +69,14 @@ const QUOTE_LEFT_COMPACT_CONTROL = {
     borderRadius: '4px',
     fontSize: '12px',
     lineHeight: 1.2,
+};
+
+/** All “Quote Details” sub-blocks use the same light blue as the first card (~#EBF2FF / blue-50). */
+const QUOTE_DETAILS_SUBBLOCK_STYLE = {
+    padding: '8px 10px',
+    borderRadius: '6px',
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
 };
 
 /** Must match server `normalizeQuoteFormDraftUserEmail` (draft list is scoped to this user only). */
@@ -1465,6 +1477,32 @@ const isFormSyncedToQuoteRow = (row, formQuoteId, formQuoteNumber) => {
 };
 
 /**
+ * Same row as the **top card** in Previous Quotes: group by base ref (`QuoteNumber` before `-R`),
+ * order groups like the sidebar (`b.localeCompare(a)`), take highest `RevisionNo` within that group
+ * (tie-break `QuoteDate`). Flat sort by revision only breaks when multiple `-R0` exist (e.g. L1 vs L2).
+ */
+function pickTopPreviousQuotesListRow(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const quoteGroups = rows.reduce((acc, q) => {
+        const key = q.QuoteNumber?.split('-R')[0] || 'Unknown';
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(q);
+        return acc;
+    }, {});
+    const quoteGroupsSorted = Object.entries(quoteGroups).sort(([a], [b]) => b.localeCompare(a));
+    const revisions = quoteGroupsSorted[0]?.[1];
+    if (!revisions?.length) return null;
+    const sorted = [...revisions].sort((a, b) => {
+        const dr = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
+        if (dr !== 0) return dr;
+        const ta = Date.parse(a.QuoteDate || 0) || 0;
+        const tb = Date.parse(b.QuoteDate || 0) || 0;
+        return tb - ta;
+    });
+    return sorted[0] || null;
+}
+
+/**
  * When multiple job tabs exist, division heuristics must use the ACTIVE tab's job (e.g. BMS subjob),
  * not selectedLeadId (often the parent HVAC lead) — otherwise HVP quotes match the wrong tab.
  * Searches jobsPool first — pricingData.jobs may omit subjobs that still exist in hierarchy merge.
@@ -1885,6 +1923,8 @@ const QuoteForm = ({ openContext = null }) => {
      * When disabled: preview follows left-panel fields only; pricing summary visible; quote ref shows Draft / *-Draft.
      */
     const [browsePreviousQuotesRevisions, setBrowsePreviousQuotesRevisions] = useState(false);
+    /** One-shot after enabling Previous Quotes: snap preview to the same row as the top list card (overrides stale tab.quoteNo / formViewingSomeTabQuote). */
+    const browseForceListTopRef = useRef(false);
 
     const toggleExpanded = (quoteNo) => {
         setExpandedGroups(prev => ({ ...prev, [quoteNo]: !prev[quoteNo] }));
@@ -3844,15 +3884,49 @@ const QuoteForm = ({ openContext = null }) => {
         return divisionOwnjobFallbackSummary;
     }, [pricingSummary, divisionOwnjobFallbackSummary]);
 
+    const pricingSelectionContextKey = React.useMemo(() => {
+        const base = `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`;
+        // Previous Quotes: changing saved quote ref must reset “checked jobs” so Clause 4 auto-table matches the new summary.
+        if (!browsePreviousQuotesRevisions) return base;
+        return `${base}::q:${String(quoteId ?? '')}::${String(quoteNumber || '').trim()}`;
+    }, [
+        enquiryData?.enquiry?.RequestNo,
+        activeQuoteTab,
+        toName,
+        browsePreviousQuotesRevisions,
+        quoteId,
+        quoteNumber,
+    ]);
+
+    // New context must start with all pricing groups checked (ignore stale touched memory from older context).
+    React.useEffect(() => {
+        if (!pricingSelectionContextKey) return;
+        const allNames = (pricingSummaryRowsForUi || []).map((g) => g?.name).filter(Boolean);
+        if (!allNames.length) return;
+        if (pricingSelectionInitContextRef.current === pricingSelectionContextKey) return;
+
+        pricingSelectionInitContextRef.current = pricingSelectionContextKey;
+        pricingSelectionTouchedRef.current[pricingSelectionContextKey] = false;
+        setSelectedJobs((prev) => {
+            const sameSize = prev.length === allNames.length;
+            const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
+            return sameMembers ? prev : allNames;
+        });
+    }, [pricingSelectionContextKey, pricingSummaryRowsForUi]);
+
     const activeJobsForClause = React.useMemo(() => {
         const allNames = (pricingSummaryForClause || []).map((g) => g?.name).filter(Boolean);
-        const currentSelectionKey = `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`;
-        const touched = Boolean(pricingSelectionTouchedRef.current[currentSelectionKey]);
+        const touched = Boolean(pricingSelectionTouchedRef.current[pricingSelectionContextKey]);
         if (!touched) return allNames;
         const base = Array.isArray(selectedJobs) ? selectedJobs : [];
-        if (base.length > 0) return base;
+        if (base.length > 0) {
+            // Stale checkbox list (e.g. other job tab / lead) → no group name matches → empty Pricing & Payment table body.
+            const anyMatch = allNames.some((n) => jobNameMatchesActiveJobsList(n, base));
+            if (!anyMatch && allNames.length > 0) return allNames;
+            return base;
+        }
         return allNames;
-    }, [selectedJobs, pricingSummaryForClause, enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]);
+    }, [selectedJobs, pricingSummaryForClause, pricingSelectionContextKey]);
 
     const fallbackGrandBaseTotal = React.useMemo(
         () =>
@@ -3939,27 +4013,6 @@ const QuoteForm = ({ openContext = null }) => {
         }
         return 0;
     }, [calculatedTabs, effectiveQuoteTabs, pricingSummaryForClause, divisionOwnjobFallbackSummary]);
-
-    const pricingSelectionContextKey = React.useMemo(
-        () => `${enquiryData?.enquiry?.RequestNo || ''}::${activeQuoteTab || ''}::${normalize(toName || '')}`,
-        [enquiryData?.enquiry?.RequestNo, activeQuoteTab, toName]
-    );
-
-    // New context must start with all pricing groups checked (ignore stale touched memory from older context).
-    React.useEffect(() => {
-        if (!pricingSelectionContextKey) return;
-        const allNames = (pricingSummaryRowsForUi || []).map((g) => g?.name).filter(Boolean);
-        if (!allNames.length) return;
-        if (pricingSelectionInitContextRef.current === pricingSelectionContextKey) return;
-
-        pricingSelectionInitContextRef.current = pricingSelectionContextKey;
-        pricingSelectionTouchedRef.current[pricingSelectionContextKey] = false;
-        setSelectedJobs((prev) => {
-            const sameSize = prev.length === allNames.length;
-            const sameMembers = sameSize && allNames.every((n) => prev.includes(n));
-            return sameMembers ? prev : allNames;
-        });
-    }, [pricingSelectionContextKey, pricingSummaryRowsForUi]);
 
     /** Avoid preview signature/footer falling back to a personal-locked enquiry row when multiple job tabs are shown. */
     const quotePreviewEnquiryCompanyFallback = React.useMemo(() => {
@@ -7747,6 +7800,8 @@ const QuoteForm = ({ openContext = null }) => {
      *   (was copying `ToName` from the row while still on the parent tab → wrong customer on subjob preview).
      * @param opts.skipPreparedSignatory If true and the quote row has **no** Prepared By, default to the logged-in user
      *   (auto-load / tab sync). When Prepared By exists on the row it is **always** shown so parent/subjob previews match the saved revision.
+     * @param opts.applySavedDigitalSignatures When true, apply `DigitalSignaturesJson` from the row. When false, clear stamps (draft preview).
+     *   When omitted, follows `browsePreviousQuotesRevisions`. Pass true from `focusBrowseOnOwnjobWithQuote` so signatures load even if state has not re-rendered yet.
      */
     const loadQuote = (quote, opts = {}) => {
         if (!currentUser) {
@@ -7756,6 +7811,12 @@ const QuoteForm = ({ openContext = null }) => {
 
         const skipPreparedSignatory = opts.skipPreparedSignatory === true;
         const preserveRecipient = opts.preserveRecipient === true;
+        const applySavedDigitalSignatures =
+            opts.applySavedDigitalSignatures === true
+                ? true
+                : opts.applySavedDigitalSignatures === false
+                  ? false
+                  : browsePreviousQuotesRevisions;
         const effectiveQuoteTab =
             opts.forActiveQuoteTab != null && String(opts.forActiveQuoteTab).trim() !== ''
                 ? String(opts.forActiveQuoteTab)
@@ -7971,8 +8032,36 @@ const QuoteForm = ({ openContext = null }) => {
         setExpandedClause(null);
         setPendingFiles([]); // Clear any pending files from previous session
         {
-            const stampsFromDb = parseDigitalSignaturesFromQuoteRow(quote);
-            setQuoteDigitalStamps(stampsFromDb);
+            if (!applySavedDigitalSignatures) {
+                setQuoteDigitalStamps([]);
+                const ctx = stampScopeRef.current;
+                if (ctx?.requestNo) {
+                    saveStampsForEnquiry(ctx.requestNo, [], ctx.leadKey, ctx.customer);
+                }
+            } else {
+                const stampsFromDb = parseDigitalSignaturesFromQuoteRow(quote);
+                const rawSig = quote?.DigitalSignaturesJson ?? quote?.digitalSignaturesJson;
+                /**
+                 * After Save/Revision, `focusBrowseOnOwnjobWithQuote` → `loadQuote` may receive a list row that omits
+                 * `DigitalSignaturesJson` (undefined). Parsing then yielded [] and erased in-memory stamps.
+                 * Keep placements when the API object truly omitted the field; honor explicit `null` / `"[]"` as empty.
+                 */
+                setQuoteDigitalStamps((prev) => {
+                    if (stampsFromDb.length > 0) {
+                        return stampsFromDb.map((s) => ({
+                            ...s,
+                            removableBeforeNextCommit: false,
+                        }));
+                    }
+                    if (rawSig === undefined && prev.length > 0) {
+                        return prev.map((s) => ({
+                            ...s,
+                            removableBeforeNextCommit: false,
+                        }));
+                    }
+                    return [];
+                });
+            }
         }
         window.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -8050,7 +8139,7 @@ const QuoteForm = ({ openContext = null }) => {
             setLoadedEnquiryQuoteRowForPreview(null);
             return;
         }
-        const latest = [...tabRows].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
+        const latest = pickTopPreviousQuotesListRow(tabRows);
         if (!latest) return;
         const latestId = quoteRowId(latest);
         const currentId = quoteRowId(loadedEnquiryQuoteRowForPreview);
@@ -8208,8 +8297,9 @@ const QuoteForm = ({ openContext = null }) => {
             String(quoteId).trim() !== '' &&
             tabQuotes.some((q) => isFormSyncedToQuoteRow(q, quoteId, quoteNumber));
 
-        // Fast path: tab.quoteNo must resolve within tab-scoped rows only (never load another tab's ref from sourceQuotes).
-        if (activeTabObj.quoteNo && tabQuotes.length > 0) {
+        // Fast path: tab.quoteNo syncs pricing branch → quote (draft workflow). In Previous Quotes browse mode,
+        // the sidebar list order / top card must win — otherwise tab.quoteNo pins an older branch ref (e.g. L1 vs L2).
+        if (!browsePreviousQuotesRevisions && activeTabObj.quoteNo && tabQuotes.length > 0) {
             const want = String(activeTabObj.quoteNo).trim();
             const baseWant = want.split('-R')[0];
             const byNo = tabQuotes.find((q) => {
@@ -8230,13 +8320,18 @@ const QuoteForm = ({ openContext = null }) => {
         }
 
         if (tabQuotes.length > 0) {
-            // Found quotes: Sort by Revision (Desc) and Load Latest
-            const sorted = [...tabQuotes].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0));
-            const latest = sorted[0];
-
-            if (!formViewingSomeTabQuote && !isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) {
+            const latest = pickTopPreviousQuotesListRow(tabQuotes);
+            const forceBrowseListTop = browsePreviousQuotesRevisions && browseForceListTopRef.current;
+            if (
+                latest &&
+                !isFormSyncedToQuoteRow(latest, quoteId, quoteNumber) &&
+                (forceBrowseListTop || !formViewingSomeTabQuote)
+            ) {
                 console.log('[AutoLoad] Loading latest quote:', latest.QuoteNumber, 'for branch:', currentLeadCode);
                 loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
+                if (forceBrowseListTop) {
+                    browseForceListTopRef.current = false;
+                }
             }
         } else {
             console.log('[AutoLoad] No quotes found for tab. Branch:', currentLeadCode);
@@ -8295,13 +8390,7 @@ const QuoteForm = ({ openContext = null }) => {
                     return true;
                 });
                 if (relaxedByCustomerAndLead.length > 0) {
-                    const latestRelaxed = [...relaxedByCustomerAndLead].sort((a, b) => {
-                        const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
-                        if (r !== 0) return r;
-                        const ta = Date.parse(a.QuoteDate || 0) || 0;
-                        const tb = Date.parse(b.QuoteDate || 0) || 0;
-                        return tb - ta;
-                    })[0];
+                    const latestRelaxed = pickTopPreviousQuotesListRow(relaxedByCustomerAndLead);
                     const viewingFromRelaxed =
                         quoteId != null &&
                         String(quoteId).trim() !== '' &&
@@ -8463,13 +8552,7 @@ const QuoteForm = ({ openContext = null }) => {
             !!quoteId && panel.some((q) => isFormSyncedToQuoteRow(q, quoteId, quoteNumber));
         if (currentInScope) return;
 
-        const latest = [...panel].sort((a, b) => {
-            const r = (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0);
-            if (r !== 0) return r;
-            const ta = Date.parse(a.QuoteDate || 0) || 0;
-            const tb = Date.parse(b.QuoteDate || 0) || 0;
-            return tb - ta;
-        })[0];
+        const latest = pickTopPreviousQuotesListRow(panel);
 
         if (!latest) {
             const aligned = getFilteredQuotesForPreviousQuotesTab(activeQuoteTab);
@@ -8556,8 +8639,8 @@ const QuoteForm = ({ openContext = null }) => {
 
         prevQuoteTabForAutoLoadRef.current = activeQuoteTab;
 
-        const latest = [...filtered].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0))[0];
-        if (isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) return;
+        const latest = pickTopPreviousQuotesListRow(filtered);
+        if (!latest || isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) return;
 
         loadQuote(latest, { preserveRecipient: true, skipPreparedSignatory: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps -- loadQuote is defined in-component; tab-change guard uses ref
@@ -8601,10 +8684,16 @@ const QuoteForm = ({ openContext = null }) => {
             return;
         }
 
+        const filtered = getFilteredQuotesForPreviousQuotesTab(firstId);
+        // Scoped / by-enquiry rows often arrive after the checkbox is turned on — do not latch until we have rows,
+        // otherwise we skip loadQuote permanently and the user must click the list (see double-click workaround).
+        if (!filtered.length) {
+            return;
+        }
+
         if (browsePrevQuotesLatchRef.current) return;
         browsePrevQuotesLatchRef.current = true;
 
-        const filtered = getFilteredQuotesForPreviousQuotesTab(firstId);
         const quoteGroups = filtered.reduce((acc, q) => {
             const key = q.QuoteNumber?.split('-R')[0] || 'Unknown';
             if (!acc[key]) acc[key] = [];
@@ -8619,9 +8708,8 @@ const QuoteForm = ({ openContext = null }) => {
             return next;
         });
 
-        const sorted = [...filtered].sort((a, b) => (Number(b.RevisionNo) || 0) - (Number(a.RevisionNo) || 0));
-        const latest = sorted[0];
-        if (latest) {
+        const latest = pickTopPreviousQuotesListRow(filtered);
+        if (latest && !isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) {
             queueMicrotask(() => {
                 try {
                     loadQuote(latest, {
@@ -8629,10 +8717,13 @@ const QuoteForm = ({ openContext = null }) => {
                         skipPreparedSignatory: true,
                         forActiveQuoteTab: firstId,
                     });
+                    browseForceListTopRef.current = false;
                 } catch (e) {
                     console.warn('[browsePreviousQuotesRevisions] load latest', e);
                 }
             });
+        } else if (latest && isFormSyncedToQuoteRow(latest, quoteId, quoteNumber)) {
+            browseForceListTopRef.current = false;
         }
     }, [
         browsePreviousQuotesRevisions,
@@ -8641,6 +8732,10 @@ const QuoteForm = ({ openContext = null }) => {
         toName,
         activeQuoteTab,
         getFilteredQuotesForPreviousQuotesTab,
+        scopedQuotesFetchSettledKey,
+        scopedQuotePanelFetchKey,
+        quoteId,
+        quoteNumber,
     ]);
 
     /** Draft mode: keep the active tab on Own Job (first `isSelf` tab). */
@@ -8720,6 +8815,7 @@ const QuoteForm = ({ openContext = null }) => {
                     preserveRecipient: true,
                     skipPreparedSignatory: true,
                     forActiveQuoteTab: ownTabId,
+                    applySavedDigitalSignatures: true,
                 })
             );
         }
@@ -8742,7 +8838,11 @@ const QuoteForm = ({ openContext = null }) => {
             quoteId != null && String(quoteId).trim() !== '' ? quoteId : idFromTuple;
 
         if (tupleLatest && (!quoteId || String(quoteId).trim() === '') && idFromTuple) {
-            loadQuote(tupleLatest, { preserveRecipient: true, skipPreparedSignatory: true });
+            loadQuote(tupleLatest, {
+                preserveRecipient: true,
+                skipPreparedSignatory: true,
+                applySavedDigitalSignatures: false,
+            });
         }
 
         console.log('[handleRevise] Starting revision process. QuoteId:', effectiveReviseId);
@@ -8769,7 +8869,12 @@ const QuoteForm = ({ openContext = null }) => {
 
         setSaving(true);
         try {
-            const payload = getQuotePayload();
+            const basePayload = getQuotePayload();
+            /** New revisions must not inherit the prior revision’s signatures until the user places stamps again. */
+            const payload = {
+                ...basePayload,
+                digitalSignaturesJson: serializeDigitalStampsForApi([]),
+            };
             console.log('[handleRevise] Payload:', payload);
             console.log('[handleRevise] Calling API:', `${API_BASE}/api/quotes/${effectiveReviseId}/revise`);
 
@@ -8831,9 +8936,7 @@ const QuoteForm = ({ openContext = null }) => {
                     });
                 }
 
-                commitQuoteDigitalStampsRef.current?.((prev) =>
-                    prev.map((s) => ({ ...s, removableBeforeNextCommit: false }))
-                );
+                commitQuoteDigitalStampsRef.current?.(() => []);
 
                 // Note: Metadata is NOT cleared anymore to allow immediate viewing/working with the new revision.
                 // Re-calculating existing quotes will pull the latest list.
@@ -9354,7 +9457,11 @@ const QuoteForm = ({ openContext = null }) => {
         if (tabForOwn && String(activeQuoteTab) !== String(tabForOwn.id)) {
             handleTabChange(tabForOwn.id, { force: true });
         }
-        loadQuote(match, { preserveRecipient: true, skipPreparedSignatory: true });
+        loadQuote(match, {
+            preserveRecipient: true,
+            skipPreparedSignatory: true,
+            applySavedDigitalSignatures: true,
+        });
         pendingQuoteOpenTargetRef.current = null;
     }, [existingQuotes, enquiryData?.enquiry?.RequestNo, calculatedTabs, activeQuoteTab]);
 
@@ -9477,7 +9584,7 @@ const QuoteForm = ({ openContext = null }) => {
                                 position: 'sticky',
                                 top: 0,
                                 zIndex: 2,
-                                background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+                                background: EMS_TABLE_HEADER_GRADIENT,
                                 boxShadow: '0 1px 0 rgba(15, 23, 42, 0.12)',
                             }}
                         >
@@ -10347,13 +10454,16 @@ const QuoteForm = ({ openContext = null }) => {
         if (quoteId != null && String(quoteId).trim() !== '') {
             return;
         }
+        if (!browsePreviousQuotesRevisions) {
+            return;
+        }
         const loaded = loadStampsForEnquiry(
             digitalStampScope.requestNo,
             digitalStampScope.leadKey,
             digitalStampScope.customer
         );
         setQuoteDigitalStamps((prev) => (JSON.stringify(prev) === JSON.stringify(loaded) ? prev : loaded));
-    }, [digitalStampScope, quoteId]);
+    }, [digitalStampScope, quoteId, browsePreviousQuotesRevisions]);
 
     const commitQuoteDigitalStamps = useCallback((updater) => {
         setQuoteDigitalStamps((prev) => {
@@ -10556,7 +10666,11 @@ const QuoteForm = ({ openContext = null }) => {
     const handleRemoveDigitalStamp = useCallback(
         (id) => {
             if (String(id).startsWith('inherited-')) return;
-            commitQuoteDigitalStamps((prev) => prev.filter((s) => s.id !== id));
+            commitQuoteDigitalStamps((prev) => {
+                const t = prev.find((s) => s.id === id);
+                if (t && t.removableBeforeNextCommit !== true) return prev;
+                return prev.filter((s) => s.id !== id);
+            });
         },
         [commitQuoteDigitalStamps]
     );
@@ -10564,6 +10678,10 @@ const QuoteForm = ({ openContext = null }) => {
     /** Parent own-job tab: show this tab's stamps plus latest saved stamps from each direct subjob quote row. */
     const quotePreviewDigitalStamps = React.useMemo(() => {
         const base = Array.isArray(quoteDigitalStamps) ? quoteDigitalStamps : [];
+        /** Draft mode (Previous Quotes off): preview only session stamps — no saved revision overlays or subjob inheritance. */
+        if (!browsePreviousQuotesRevisions) {
+            return base;
+        }
         const tabs = calculatedTabs && calculatedTabs.length > 0 ? calculatedTabs : [];
         const activeTabObj = tabs.find((t) => String(t.id) === String(activeQuoteTab));
         if (!activeTabObj?.isOwnJobTab) return base;
@@ -10645,6 +10763,7 @@ const QuoteForm = ({ openContext = null }) => {
         }
         return merged;
     }, [
+        browsePreviousQuotesRevisions,
         quoteDigitalStamps,
         calculatedTabs,
         activeQuoteTab,
@@ -10727,22 +10846,54 @@ const QuoteForm = ({ openContext = null }) => {
         return () => window.removeEventListener('keydown', onKeyDown, true);
     }, [hasUserPricing, printQuote]);
 
+    /**
+     * Save blob to disk. After `await fetch()`, browsers may ignore `<a download>` unless we use the
+     * File System Access API (secure contexts) or a synchronous anchor click (no rAF — that drops user activation).
+     */
     const triggerBlobDownload = (blob, fileName) => {
-        const url = URL.createObjectURL(blob);
+        const safeName = String(fileName || 'quote.pdf').replace(/[/\\?%*:|"<>]/g, '_');
+        const typedBlob =
+            blob && blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
+
+        if (typeof navigator !== 'undefined' && typeof navigator.msSaveOrOpenBlob === 'function') {
+            try {
+                navigator.msSaveOrOpenBlob(typedBlob, safeName);
+            } catch (e) {
+                console.warn('[triggerBlobDownload] msSaveOrOpenBlob', e);
+            }
+            return;
+        }
+
+        const url = URL.createObjectURL(typedBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = fileName;
+        a.download = safeName;
+        a.rel = 'noopener';
+        /** Do not use pointer-events:none — Chromium may ignore programmatic click(). Off-screen but clickable. */
+        a.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0.01;z-index:-1';
         document.body.appendChild(a);
-        a.click();
-        a.remove();
-        // Revoke after a delay so chained downloads (email flow) are not cancelled by Chrome.
+        try {
+            a.click();
+        } catch (e) {
+            console.warn('[triggerBlobDownload] anchor.click failed', e);
+            try {
+                window.open(url, '_blank', 'noopener,noreferrer');
+            } catch (_) {
+                /* ignore */
+            }
+        }
         window.setTimeout(() => {
+            try {
+                a.remove();
+            } catch (_) {
+                /* ignore */
+            }
             try {
                 URL.revokeObjectURL(url);
             } catch (_) {
                 /* ignore */
             }
-        }, 4500);
+        }, 60_000);
     };
 
     /** Same PDF bytes as Download PDF — used by download + Outlook email flow */
@@ -10767,9 +10918,11 @@ const QuoteForm = ({ openContext = null }) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ html, filename: fname, emulateScreen: true }),
+            cache: 'no-store',
         });
         if (!res.ok) {
             const raw = await res.text();
+            const trimmed = raw.trim();
             let detail = res.statusText;
             try {
                 const j = JSON.parse(raw);
@@ -10778,7 +10931,21 @@ const QuoteForm = ({ openContext = null }) => {
                     detail = `${detail}\n\n${String(j.hint).trim()}`;
                 }
             } catch {
-                if (raw && raw.trim()) detail = raw.trim().slice(0, 400);
+                if (trimmed) detail = trimmed.slice(0, 400);
+            }
+            /** Vite proxy often returns 500 with an empty body when Express is stopped (ECONNREFUSED) — avoid useless "Internal Server Error". */
+            const detailStr = String(detail || '').trim();
+            const apiProbablyDown =
+                res.status === 502 ||
+                res.status === 503 ||
+                res.status === 504 ||
+                (res.status === 500 && !trimmed && /^internal server error$/i.test(detailStr));
+            if (apiProbablyDown) {
+                throw new Error(
+                    'The EMS API server is not running or not reachable on the proxied port (default 5001). ' +
+                        'Open a second terminal, cd to the project server folder, run npm start, and keep it running while you use PDF download. ' +
+                        'The Vite dev server only serves the UI; quote PDFs are generated by Express + Puppeteer.'
+                );
             }
             throw new Error(detail || `HTTP ${res.status}`);
         }
@@ -10815,7 +10982,34 @@ const QuoteForm = ({ openContext = null }) => {
         setIsUploading(true);
         try {
             const { blob, fileName } = await fetchQuotePdfBlob();
-            triggerBlobDownload(blob, fileName);
+            const safeName = String(fileName || 'quote.pdf').replace(/[/\\?%*:|"<>]/g, '_');
+            const typedBlob =
+                blob && blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
+
+            /**
+             * Chromium often ignores `<a download>` after `await` (no transient user activation).
+             * File System Access API works on secure origins (https / localhost) without that restriction.
+             */
+            if (
+                typeof window !== 'undefined' &&
+                window.isSecureContext &&
+                typeof window.showSaveFilePicker === 'function'
+            ) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: safeName,
+                        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(typedBlob);
+                    await writable.close();
+                    return;
+                } catch (e) {
+                    if (e && e.name === 'AbortError') return;
+                    console.warn('[downloadPDF] showSaveFilePicker', e);
+                }
+            }
+            triggerBlobDownload(typedBlob, safeName);
         } catch (err) {
                     console.error('PDF generation error:', err);
             alert(
@@ -12426,7 +12620,16 @@ const QuoteForm = ({ openContext = null }) => {
                                 <input
                                     type="checkbox"
                                     checked={browsePreviousQuotesRevisions}
-                                    onChange={(e) => setBrowsePreviousQuotesRevisions(e.target.checked)}
+                                    onChange={(e) => {
+                                        const next = e.target.checked;
+                                        setBrowsePreviousQuotesRevisions(next);
+                                        if (next) {
+                                            browseForceListTopRef.current = true;
+                                        } else {
+                                            browseForceListTopRef.current = false;
+                                            commitQuoteDigitalStamps(() => []);
+                                        }
+                                    }}
                                 />
                                 <span>Previous Quotes / Revisions (Updated)</span>
                             </label>
@@ -12957,14 +13160,7 @@ const QuoteForm = ({ openContext = null }) => {
                                     <h4 style={{ margin: '0 0 2px 0', fontSize: '14px', color: '#475569' }}>Quote Details:</h4>
 
                                     {/* Block 1 — dates & refs through Attention */}
-                                    <div
-                                        style={{
-                                            padding: '8px 10px',
-                                            borderRadius: '6px',
-                                            background: '#eff6ff',
-                                            border: '1px solid #bfdbfe',
-                                        }}
-                                    >
+                                    <div style={{ ...QUOTE_DETAILS_SUBBLOCK_STYLE }}>
                                         <div style={{ marginBottom: '6px' }}>
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Quote Date <span style={{ color: '#ef4444' }}>*</span></label>
                                             <DateInput
@@ -13014,14 +13210,7 @@ const QuoteForm = ({ openContext = null }) => {
                                     </div>
 
                                     {/* Block 2 — subject & enquiry type */}
-                                    <div
-                                        style={{
-                                            padding: '8px 10px',
-                                            borderRadius: '6px',
-                                            background: '#f5f3ff',
-                                            border: '1px solid #ddd6fe',
-                                        }}
-                                    >
+                                    <div style={{ ...QUOTE_DETAILS_SUBBLOCK_STYLE }}>
                                         <div style={{ marginBottom: '6px' }}>
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Subject <span style={{ color: '#ef4444' }}>*</span></label>
                                             <textarea value={subject} onChange={(e) => setSubject(e.target.value)} rows={2} style={{ width: '100%', padding: '4px 8px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px', boxSizing: 'border-box' }} />
@@ -13048,14 +13237,7 @@ const QuoteForm = ({ openContext = null }) => {
                                     </div>
 
                                     {/* Block 3 — prepared by, signatory, designation */}
-                                    <div
-                                        style={{
-                                            padding: '8px 10px',
-                                            borderRadius: '6px',
-                                            background: '#ecfdf5',
-                                            border: '1px solid #a7f3d0',
-                                        }}
-                                    >
+                                    <div style={{ ...QUOTE_DETAILS_SUBBLOCK_STYLE }}>
                                         <div style={{ marginBottom: '6px' }}>
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Prepared By <span style={{ color: '#ef4444' }}>*</span></label>
                                             <CreatableSelect
@@ -13101,15 +13283,8 @@ const QuoteForm = ({ openContext = null }) => {
                                     </div>
 
                                     {/* Block 4 — recipient override */}
-                                    <div
-                                        style={{
-                                            padding: '8px 10px',
-                                            borderRadius: '6px',
-                                            background: '#fffbeb',
-                                            border: '1px solid #fde68a',
-                                        }}
-                                    >
-                                        <h5 style={{ margin: '0 0 6px 0', fontSize: '11px', color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>Recipient Info (Optional Override):</h5>
+                                    <div style={{ ...QUOTE_DETAILS_SUBBLOCK_STYLE }}>
+                                        <h5 style={{ margin: '0 0 6px 0', fontSize: '11px', color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>Recipient Info (Optional Override):</h5>
                                         <div style={{ marginBottom: '6px' }}>
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>To Address</label>
                                             <textarea
@@ -13152,17 +13327,17 @@ const QuoteForm = ({ openContext = null }) => {
                                     </div>
                                 </div>
 
-                                {/* Template Section */}
+                                {/* Template Section — light green panel */}
                                 <div
                                     style={{
                                         padding: '12px 14px',
-                                        borderBottom: '1px solid #1e293b',
-                                        background: '#334155',
-                                        color: '#e8e8e8',
+                                        borderBottom: '1px solid #bbf7d0',
+                                        background: '#ecfdf5',
+                                        color: '#334155',
                                     }}
                                 >
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                                        <h4 style={{ margin: 0, fontSize: '13px', color: '#f1f5f9', fontWeight: 600 }}>Clause Templates:</h4>
+                                        <h4 style={{ margin: 0, fontSize: '13px', color: '#166534', fontWeight: 600 }}>Clause Templates:</h4>
                                     </div>
 
                                     {/* Store new template */}
@@ -13176,9 +13351,9 @@ const QuoteForm = ({ openContext = null }) => {
                                                 flex: 1,
                                                 ...QUOTE_LEFT_COMPACT_CONTROL,
                                                 fontSize: '12px',
-                                                background: '#f8fafc',
+                                                background: '#ffffff',
                                                 color: '#0f172a',
-                                                borderColor: '#94a3b8',
+                                                borderColor: '#86efac',
                                             }}
                                         />
                                         <button
@@ -13208,9 +13383,9 @@ const QuoteForm = ({ openContext = null }) => {
                                                 flex: 1,
                                                 ...QUOTE_LEFT_COMPACT_CONTROL,
                                                 fontSize: '12px',
-                                                background: '#f8fafc',
+                                                background: '#ffffff',
                                                 color: '#0f172a',
-                                                borderColor: '#94a3b8',
+                                                borderColor: '#86efac',
                                             }}
                                         >
                                             <option value="">Select Template...</option>
@@ -13224,11 +13399,11 @@ const QuoteForm = ({ openContext = null }) => {
                                             disabled={!selectedTemplateId}
                                             style={{
                                                 padding: '6px',
-                                                background: '#475569',
-                                                border: '1px solid #64748b',
+                                                background: '#ffffff',
+                                                border: '1px solid #86efac',
                                                 borderRadius: '4px',
                                                 cursor: selectedTemplateId ? 'pointer' : 'not-allowed',
-                                                color: '#e8e8e8',
+                                                color: '#166534',
                                                 opacity: selectedTemplateId ? 1 : 0.45,
                                             }}
                                             title="Load"
@@ -13241,11 +13416,11 @@ const QuoteForm = ({ openContext = null }) => {
                                             disabled={!selectedTemplateId}
                                             style={{
                                                 padding: '6px',
-                                                background: '#475569',
-                                                border: '1px solid #94a3b8',
+                                                background: '#ffffff',
+                                                border: '1px solid #fecaca',
                                                 borderRadius: '4px',
                                                 cursor: selectedTemplateId ? 'pointer' : 'not-allowed',
-                                                color: '#fca5a5',
+                                                color: '#dc2626',
                                                 opacity: selectedTemplateId ? 1 : 0.45,
                                             }}
                                             title="Delete"
@@ -14572,6 +14747,11 @@ const QuoteForm = ({ openContext = null }) => {
                                         overflow-x: visible;
                                         overflow-y: visible;
                                         margin: 0 auto;
+                                        font-family: 'Segoe UI', 'Segoe UI Web (West European)', system-ui, -apple-system, sans-serif;
+                                    }
+                                    #quote-preview .quote-a4-sheet,
+                                    #quote-preview .quote-document-root {
+                                        font-family: inherit;
                                     }
                                     #quote-preview .quote-a4-sheet {
                                         flex-shrink: 0;
@@ -14645,6 +14825,20 @@ const QuoteForm = ({ openContext = null }) => {
                                         display: flex;
                                         justify-content: flex-end;
                                         width: 100%;
+                                    }
+                                    /**
+                                     * With Header off: letterhead invisible but space preserved (no vertical shift).
+                                     * Page numbers stay visible; company footer block hidden but keeps height.
+                                     */
+                                    #quote-print-root[data-print-with-header='0'] .quote-sheet-logo-row,
+                                    #quote-print-root[data-print-with-header='0'] .quote-continuation-header {
+                                        visibility: hidden !important;
+                                    }
+                                    #quote-print-root[data-print-with-header='0'] .quote-print-footer-wrap {
+                                        visibility: hidden !important;
+                                    }
+                                    #quote-print-root[data-print-with-header='0'] .quote-print-repeat-strip {
+                                        display: none !important;
                                     }
                                     .quote-cover-first-page {
                                         flex-shrink: 0;
@@ -14944,9 +15138,12 @@ const QuoteForm = ({ openContext = null }) => {
                                             flex: 0 1 auto !important;
                                         }
 
-                                        .quote-sheet-logo-row, 
+                                        .quote-sheet-logo-row,
                                         .quote-continuation-header {
                                             display: flex !important;
+                                            flex-direction: row !important;
+                                            justify-content: flex-end !important;
+                                            align-items: flex-start !important;
                                             visibility: visible !important;
                                         }
                                         .footer-section {
@@ -14988,9 +15185,13 @@ const QuoteForm = ({ openContext = null }) => {
                                             display: block !important;
                                         }
 
-                                        /* Fix for logo specifically */
-                                        .quote-sheet-logo-row img {
+                                        /* Logo: block imgs must use margin auto — parent text-align is not enough in print */
+                                        .quote-sheet-logo-row img,
+                                        .quote-continuation-header img {
                                             max-height: 68px !important;
+                                            display: block !important;
+                                            margin-left: auto !important;
+                                            margin-right: 0 !important;
                                         }
                                         .no-print { display: none !important; }
                                         .quote-a4-sheet { box-shadow: none !important; }

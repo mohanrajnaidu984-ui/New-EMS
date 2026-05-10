@@ -8,6 +8,7 @@ import {
     EMS_LIST_SEARCH_DISABLED_STYLE,
     EMS_LIST_CLEAR_STYLE,
 } from '../../constants/emsSearchButtons';
+import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
@@ -4268,7 +4269,7 @@ const PricingForm = ({ openContext = null }) => {
                                         minWidth: 'min-content',
                                         width: 'fit-content',
                                         maxWidth: '100%',
-                                        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
+                                        background: EMS_TABLE_HEADER_GRADIENT,
                                         borderRadius: '12px',
                                         padding: '2px',
                                         boxShadow: '0 2px 8px rgba(23, 47, 99, 0.35), inset 0 1px 0 rgba(255,255,255,0.2)',
@@ -4398,7 +4399,7 @@ const PricingForm = ({ openContext = null }) => {
                                     tableLayout: 'auto',
                                 }}
                             >
-                                <thead style={{ background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)', position: 'sticky', top: 0, zIndex: 1 }}>
+                                <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
                                     <tr>
                                         <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap', borderTopLeftRadius: '8px' }}>Enquiry No.</th>
                                         <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Project Name</th>
@@ -4653,7 +4654,7 @@ const PricingForm = ({ openContext = null }) => {
                                         tableLayout: 'auto',
                                     }}
                                 >
-                                    <thead style={{ background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)', position: 'sticky', top: 0, zIndex: 1 }}>
+                                    <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
                                         <tr>
                                             <SortableHeader field="RequestNo" label="Enquiry No." />
                                             <SortableHeader field="ProjectName" label="Project Name" />

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import EnquiryForm from './Enquiry/EnquiryForm';
 import SearchEnquiry from './Enquiry/SearchEnquiry';
 import Dashboard from './Dashboard/Dashboard';
@@ -6,7 +6,7 @@ import PricingForm from './Pricing/PricingForm';
 import QuoteForm from './Quote/QuoteForm';
 import ProbabilityForm from './Probability/ProbabilityForm';
 
-import SalesReport from './SalesReport/SalesReport';
+const SalesReport = lazy(() => import('./SalesReport/SalesReport'));
 import SalesTarget from './SalesTarget/SalesTarget';
 import About from './About/About';
 import Help from './Help/Help';
@@ -35,7 +35,17 @@ const Main = ({ activeTab, onNavigate, enquiryToOpen, openContext, onOpenEnquiry
                     <ProbabilityForm />
                 )}
                 {activeTab === 'Sales Report' && (
-                    <SalesReport />
+                    <Suspense
+                        fallback={
+                            <div className="d-flex justify-content-center align-items-center py-5">
+                                <div className="spinner-border text-primary" role="status">
+                                    <span className="visually-hidden">Loading report…</span>
+                                </div>
+                            </div>
+                        }
+                    >
+                        <SalesReport />
+                    </Suspense>
                 )}
                 {activeTab === 'Help' && (
                     <Help />

@@ -14,9 +14,11 @@
     padding: 0.4rem 0.5rem 0.35rem;
     box-sizing: border-box;
     --sr-header-font-scale: 1.1;
-    /* Shared blue bar height: prior 1.35rem + 25% */
+    /* Blue section title bars only: −10% vs base calc */
+    --sr-section-header-font-factor: 0.9;
+    /* Shared blue bar height: −10% from 1.75rem, then −5% */
     /* Single fixed row height for Won/Lost, JB, GM, Pipeline, Top Jobs toolbar */
-    --sr-section-header-min-height: 1.75rem;
+    --sr-section-header-min-height: calc(1.575rem * 0.95);
     --sr-bg-smoke: #f5f5f5;
     /* Canvas behind the grid only — gutters between cards; panels keep --sr-bg-smoke */
     --sr-page-bg: #bcc8d9;
@@ -25,6 +27,8 @@
     --sr-header-bar-bg: var(--sr-blue);
     --sr-header-bar-border: #5c648f;
     --sr-header-bar-text: #fff;
+    /* Section title bars — same as Search Enquiry / Pricing / Quote (`--ems-table-header-gradient`) */
+    --sr-section-header-gradient: var(--ems-table-header-gradient);
     background-color: var(--sr-page-bg);
 }
 
@@ -140,11 +144,11 @@
 
 /* Long title in Gross margin summary card */
 .sr-gm-section .sr-summary-title {
-    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     line-height: 1.15;
     padding-left: 0.25rem;
     padding-right: 0.25rem;
-    font-weight: 500 !important;
+    font-weight: 400 !important;
     min-height: var(--sr-section-header-min-height);
     height: var(--sr-section-header-min-height);
     box-sizing: border-box;
@@ -161,8 +165,8 @@
 /* Section headers: gradient bar, inset shine — shared fixed height */
 .sr-summary-compact .sr-summary-title {
     text-align: center;
-    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
-    font-weight: 500 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
+    font-weight: 400 !important;
     min-height: var(--sr-section-header-min-height);
     height: var(--sr-section-header-min-height);
     box-sizing: border-box;
@@ -174,7 +178,7 @@
     color: var(--sr-header-bar-text);
     letter-spacing: 0.035em;
     text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
-    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%);
+    background: var(--sr-section-header-gradient);
     border-bottom: 1px solid rgba(30, 41, 59, 0.35);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
 }
@@ -421,7 +425,7 @@
 /* —— Target vs Actual (reference layout) —— */
 .sr-target-card .sr-summary-title {
     color: var(--sr-header-bar-text);
-    font-weight: 500 !important;
+    font-weight: 400 !important;
 }
 
 .sr-target-card .sr-summary-body.sr-target-body {
@@ -697,7 +701,7 @@
 
 /* Target + GM: +15% typography (header + 40% summary stack); tighter spacing so layout stays contained */
 .sr-cell-target-combined.sr-jb-section.sr-summary-compact .sr-summary-title {
-    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1));
+    font-size: calc(0.62rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     line-height: 1.15;
     padding-left: 0.22rem;
     padding-right: 0.22rem;
@@ -874,7 +878,7 @@
 }
 
 .sr-cell-gm-combined.sr-gm-section.sr-summary-compact .sr-summary-title {
-    font-size: calc(0.58rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1));
+    font-size: calc(0.58rem * var(--sr-ta-text-scale) * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     line-height: 1.15;
     padding-left: 0.18rem;
     padding-right: 0.18rem;
@@ -1143,6 +1147,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    transform: translateZ(0);
+    backface-visibility: hidden;
 }
 
 .sr-funnel-svg {
@@ -1151,17 +1157,29 @@
     max-height: 100%;
     display: block;
     overflow: visible;
-    filter: drop-shadow(0 1px 3px rgba(15, 23, 42, 0.06));
+    shape-rendering: geometricPrecision;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    /* Integer width/height attrs set in JS — avoids blurry fractional raster scale */
+}
+
+.sr-funnel-svg.sr-funnel-svg--sized {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
 }
 
 .sr-funnel-label-text-svg {
     fill: #0f172a;
-    font-weight: 600;
+    font-weight: 500;
     pointer-events: none;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 .sr-funnel-block-value-svg {
     pointer-events: none;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 /* Sales Pipeline — same white card + blue header as other sections */
@@ -1175,8 +1193,8 @@
 .sr-pipeline-header {
     flex-shrink: 0;
     text-align: center;
-    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
-    font-weight: 500 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
+    font-weight: 400 !important;
     min-height: var(--sr-section-header-min-height);
     height: var(--sr-section-header-min-height);
     box-sizing: border-box;
@@ -1186,7 +1204,7 @@
     color: var(--sr-header-bar-text);
     letter-spacing: 0.035em;
     text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
-    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%);
+    background: var(--sr-section-header-gradient);
     border-bottom: 1px solid rgba(30, 41, 59, 0.35);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
     padding: 0 0.35rem;
@@ -1272,14 +1290,14 @@
 }
 
 .sr-report-table-title {
-    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%) !important;
+    background: var(--sr-section-header-gradient) !important;
     border-bottom: 1px solid rgba(30, 41, 59, 0.35) !important;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14) !important;
     color: var(--sr-header-bar-text) !important;
     text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38) !important;
     letter-spacing: 0.035em !important;
-    font-weight: 500 !important;
-    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
+    font-weight: 400 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     min-height: var(--sr-section-header-min-height);
     height: var(--sr-section-header-min-height);
     box-sizing: border-box;
@@ -1299,14 +1317,14 @@
 
 .sr-report-table-heading {
     color: var(--sr-header-bar-text) !important;
-    font-weight: 500 !important;
-    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1));
+    font-weight: 400 !important;
+    font-size: calc(0.72rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
 }
 
 .sr-top-jobs-status-select {
     max-width: 9.25rem;
     min-width: 6.5rem;
-    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     padding-top: 0.16rem;
     padding-bottom: 0.16rem;
     border-radius: 4px;
@@ -1355,7 +1373,7 @@
 
 /* Bootstrap card-header can force semibold on table section title */
 .sales-report-page .sr-report-table-title.card-header {
-    font-weight: 500 !important;
+    font-weight: 400 !important;
 }
 
 /* Expanded table mode: left side fully table, pipeline unchanged */
@@ -1379,8 +1397,9 @@
 }
 
 .sr-detail-table thead th {
-    font-size: calc(0.68rem * var(--sr-header-font-scale, 1.1));
-    padding: 0.25rem 0.35rem;
+    font-size: calc(0.68rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
+    font-weight: 400 !important;
+    padding: calc(0.225rem * 0.95) calc(0.315rem * 0.95);
     line-height: 1.15;
     position: sticky;
     top: 0;
@@ -1549,7 +1568,7 @@
     width: 1%;
     min-width: 11.55rem;
     white-space: nowrap;
-    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1));
+    font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
 }
 
 .sr-job-bar-cell {

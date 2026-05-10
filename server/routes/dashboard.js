@@ -524,6 +524,8 @@ router.get('/enquiries', async (req, res) => {
                 CONVERT(VARCHAR(10), em.EnquiryDate, 23) as EnquiryDate,
                 em.Status,
                 em.ReceivedFrom,
+                NULLIF(STUFF((SELECT ', ' + et.TypeName FROM EnquiryType et WHERE et.RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, ''), '') AS EnquiryType,
+                em.SourceOfEnquiry AS SourceOfInfo,
                 STUFF((SELECT ', ' + SEName FROM ConcernedSE WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as ConcernedSE,
                 STUFF((SELECT ', ' + ItemName FROM EnquiryFor WHERE RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, '') as EnquiryFor,
 
@@ -614,6 +616,41 @@ router.get('/enquiries', async (req, res) => {
                 // Fallback to empty array
                 enquiries.forEach(row => {
                     row.PricingBreakdown = "[]";
+                });
+            }
+
+            // Lead-job hierarchy for dashboard table (Project / Division tree / SE columns)
+            try {
+                const efReq = new sql.Request();
+                requestNos.forEach((no, i) => {
+                    efReq.input(`ef${i}`, sql.NVarChar, String(no));
+                });
+                const efPlaceholders = requestNos.map((_, i) => `@ef${i}`).join(', ');
+                const efRes = await efReq.query(`
+                    SELECT RequestNo, ID, ParentID, ItemName, LeadJobCode, LeadJobName
+                    FROM EnquiryFor
+                    WHERE RequestNo IN (${efPlaceholders})
+                    ORDER BY RequestNo, ID
+                `);
+                const jobsByReq = {};
+                (efRes.recordset || []).forEach((r) => {
+                    const k = String(r.RequestNo);
+                    if (!jobsByReq[k]) jobsByReq[k] = [];
+                    jobsByReq[k].push({
+                        ID: r.ID,
+                        ParentID: r.ParentID,
+                        ItemName: r.ItemName,
+                        LeadJobCode: r.LeadJobCode,
+                        LeadJobName: r.LeadJobName,
+                    });
+                });
+                enquiries.forEach((row) => {
+                    row.EnquiryForJobs = jobsByReq[String(row.RequestNo)] || [];
+                });
+            } catch (err) {
+                console.error('Error fetching EnquiryFor jobs for dashboard:', err);
+                enquiries.forEach((row) => {
+                    row.EnquiryForJobs = [];
                 });
             }
         }

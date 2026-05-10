@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { ChevronRight, ChevronDown, MapPin, Calendar, User, Info, AlertCircle, ArrowUp, ArrowDown, ArrowUpDown, Search, X } from 'lucide-react';
+import { ChevronRight, ChevronDown, Calendar, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 import { format, startOfWeek, endOfWeek, startOfMonth, endOfMonth, addDays, isSameDay } from 'date-fns';
+import { getLeadJobDisplayLines } from '../../../utils/leadJobDisplayLines';
+import { useData } from '../../../context/DataContext';
 
 const DateShortcutBtn = ({ label, isActive, onClick }) => {
     const [isHovered, setIsHovered] = useState(false);
@@ -22,6 +24,7 @@ const DateShortcutBtn = ({ label, isActive, onClick }) => {
 };
 
 const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, selectedType }) => {
+    const { masters } = useData();
 
     // Helper to format date: DD-MMM-YY
     const formatDate = (dateStr) => {
@@ -226,15 +229,13 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
 
     // Column Resizing Logic
     const [colWidths, setColWidths] = useState({
-        col1: 150,
-        col2: 180,
-        col3: 200,
-        col4: 300,
-        colQuoteRef: 120,
-        colQuoteTotal: 120,
-        colQuoteNet: 120,
-        col5: 120,
-        col6: 120
+        col1: 140,
+        col2Proj: 168,
+        col2Div: 340,
+        col4: 280,
+        col3: 188,
+        col5: 112,
+        col6: 112,
     });
 
     const resizingRef = useRef({ col: null, startX: 0, startWidth: 0 });
@@ -320,13 +321,12 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
                     alignItems: 'center',
                     gap: '4px',
                     transition: 'all 0.2s ease',
-                    // Only apply scale/transform on hover if needed, or keep it subtle
                     transform: isHovered ? 'translateX(2px)' : 'none',
                     fontWeight: isHovered || isSorted ? '800' : '600',
                     color: isHovered || isSorted ? '#111827' : 'inherit',
-                    width: 'fit-content'
+                    width: 'fit-content',
+                    marginBottom: '1px',
                 }}
-                className="mb-1"
             >
                 {label}
                 <span className="d-flex align-items-center text-muted" style={{ opacity: isSorted || isHovered ? 1 : 0.3 }}>
@@ -346,59 +346,50 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
 
             {/* Table Content */}
             <div className="flex-grow-1" style={{ overflow: 'auto', border: '1px solid #dee2e6' }}>
-                <table className="table table-hover mb-0" style={{ fontSize: '0.85rem', tableLayout: 'fixed', minWidth: '100%', width: 'max-content' }}>
+                <table
+                    className="table table-striped table-hover table-sm mb-0 align-middle"
+                    style={{ fontSize: '0.8rem', tableLayout: 'fixed', minWidth: '100%', width: 'max-content' }}
+                >
                     <thead className="sticky-top" style={{ zIndex: 10, top: 0, backgroundColor: '#eff6ff' }}>
                         <tr className="border-bottom">
                             {/* Column 1 Header */}
-                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col1, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                            <th className="py-1 px-2 text-secondary small position-relative" style={{ width: colWidths.col1, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
                                 <SortableHeader label="Enquiry No" fieldKey="RequestNo" />
                                 <SortableHeader label="Enquiry Date" fieldKey="EnquiryDate" />
                                 <SortableHeader label="Due Date" fieldKey="DueDate" />
                                 <Resizer col="col1" />
                             </th>
 
-                            {/* Column 2 Header */}
-                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col2, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                            <th className="py-1 px-2 text-secondary small position-relative" style={{ width: colWidths.col2Proj, minWidth: '96px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
                                 <SortableHeader label="Project Name" fieldKey="ProjectName" />
-                                <SortableHeader label="Division" fieldKey="EnquiryFor" />
-                                <SortableHeader label="Sales Engineer" fieldKey="ConcernedSE" />
-                                <Resizer col="col2" />
+                                <Resizer col="col2Proj" />
                             </th>
 
-                            {/* Column 3 Header */}
-                            <th className="p-2 text-secondary small position-relative" style={{ width: colWidths.col3, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                            <th className="py-1 px-2 text-secondary small position-relative" style={{ width: colWidths.col2Div, minWidth: '220px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
+                                <span style={{ fontWeight: 700, fontSize: '0.72rem', color: '#475569' }}>Divisions</span>
+                                <div className="text-muted" style={{ fontSize: '0.65rem', fontWeight: 500 }}>
+                                    SE/EE/TE/QS Involved
+                                </div>
+                                <Resizer col="col2Div" />
+                            </th>
+
+                            <th className="py-1 px-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col4, minWidth: '150px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
+                                <SortableHeader label="Enquiry Details" fieldKey="EnquiryDetails" />
+                                <Resizer col="col4" />
+                            </th>
+
+                            {/* Customer column */}
+                            <th className="py-1 px-2 text-secondary small position-relative" style={{ width: colWidths.col3, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
                                 <SortableHeader label="Customer" fieldKey="CustomerName" />
                                 <SortableHeader label="Client" fieldKey="ClientName" />
                                 <SortableHeader label="Consultant" fieldKey="ConsultantName" />
                                 <Resizer col="col3" />
                             </th>
-
-                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col4, minWidth: '150px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
-                                <SortableHeader label="Enquiry Details" fieldKey="EnquiryDetails" />
-                                <Resizer col="col4" />
-                            </th>
-
-                            {(selectedType === 'quote' || filters?.dateType === 'Quote Date') && (
-                                <>
-                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteRef || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
-                                        <SortableHeader label="Quote Ref" fieldKey="QuoteRefNo" />
-                                        <Resizer col="colQuoteRef" />
-                                    </th>
-                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteTotal || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
-                                        <SortableHeader label="Total Quoted" fieldKey="TotalQuotedPrice" />
-                                        <Resizer col="colQuoteTotal" />
-                                    </th>
-                                    <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.colQuoteNet || 120, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
-                                        <SortableHeader label="Subjob prices" fieldKey="PricingBreakdown" />
-                                        <Resizer col="colQuoteNet" />
-                                    </th>
-                                </>
-                            )}
-                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col5, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                            <th className="py-1 px-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col5, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
                                 <SortableHeader label="Site Visit Date" fieldKey="SiteVisitDate" />
                                 <Resizer col="col5" />
                             </th>
-                            <th className="p-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col6, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff' }}>
+                            <th className="py-1 px-2 text-secondary small fw-bold position-relative" style={{ width: colWidths.col6, minWidth: '100px', verticalAlign: 'top', backgroundColor: '#eff6ff', lineHeight: 1.25 }}>
                                 <SortableHeader label="Remarks" fieldKey="Status" />
                                 <Resizer col="col6" />
                             </th>
@@ -409,183 +400,136 @@ const EnquiryTable = ({ data, onRowClick, filters, setFilters, selectedDate, sel
                             processedData.map((row, idx) => {
                                 const isExpanded = expandedRows.has(row.RequestNo);
                                 const contentClass = isExpanded ? "text-wrap text-break" : "text-truncate";
-                                const cellStyle = { verticalAlign: 'top' };
+                                const cellStyle = { verticalAlign: 'top', padding: '6px 8px', lineHeight: 1.35 };
                                 const rowColor = getRowColor(row.DueDate, row.Status, row.SiteVisitDate);
+                                const todayMid = new Date();
+                                todayMid.setHours(0, 0, 0, 0);
+                                let dueDay = null;
+                                if (row.DueDate) {
+                                    dueDay = new Date(row.DueDate);
+                                    dueDay.setHours(0, 0, 0, 0);
+                                }
+                                const isDueOverdue =
+                                    dueDay &&
+                                    dueDay < todayMid &&
+                                    row.Status !== 'Closed';
+
+                                const jobLines = getLeadJobDisplayLines(row, { users: masters.users });
 
                                 return (
-                                    <tr key={idx}
+                                    <tr key={row.RequestNo ?? idx}
                                         onClick={() => onRowClick(row.RequestNo)}
-                                        style={{ cursor: 'pointer', borderLeft: `4px solid ${rowColor}` }}
+                                        style={{ cursor: 'pointer', borderLeft: `3px solid ${rowColor}` }}
                                     >
                                         {/* Column 1: Enquiry No / Date / Due */}
-                                        <td className="p-2" style={cellStyle}>
-                                            <div className="d-flex align-items-center gap-2 mb-1" {...hoverEvents('Enquiry No')} style={{ width: 'fit-content' }}>
+                                        <td style={cellStyle}>
+                                            <div className="d-flex align-items-center gap-1" {...hoverEvents('Enquiry No')} style={{ width: 'fit-content' }}>
                                                 <button
+                                                    type="button"
                                                     className="btn btn-sm btn-link p-0 text-muted"
                                                     onClick={(e) => toggleRow(e, row.RequestNo)}
                                                 >
-                                                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                                    {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                                                 </button>
-                                                <span className="fw-bold text-dark">{row.RequestNo}</span>
+                                                <span className="fw-bold text-dark" style={{ fontSize: '0.8rem' }}>{row.RequestNo}</span>
                                             </div>
-                                            <div className="ps-4 mb-1" {...hoverEvents('Enquiry Date')} style={{ width: 'fit-content' }}>
-                                                <span className="badge bg-light text-secondary border fw-normal" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                                                    {formatDate(row.EnquiryDate)}
-                                                </span>
+                                            <div className="ps-3 pt-0" {...hoverEvents('Enquiry Date')} style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#64748b' }}>
+                                                {formatDate(row.EnquiryDate) || '—'}
                                             </div>
-                                            <div className="ps-4" {...hoverEvents('Due Date')} style={{ width: 'fit-content' }}>
-                                                <span
-                                                    className={`badge border fw-normal ${new Date(row.DueDate) < new Date() ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-25' : 'bg-light text-dark'}`}
-                                                    style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
-                                                >
-                                                    {formatDate(row.DueDate)}
-                                                </span>
+                                            <div className="ps-3" {...hoverEvents('Due Date')} style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: isDueOverdue ? '#dc2626' : '#334155' }}>
+                                                {formatDate(row.DueDate) || '—'}
                                             </div>
                                         </td>
 
-                                        {/* Column 2: Project / Division / SE */}
-                                        <td className="p-2" style={cellStyle}>
-                                            <div {...hoverEvents('Project Name')} style={{ width: 'fit-content' }}>
-                                                <div className={`fw-bold text-dark mb-1 ${contentClass}`} title={row.ProjectName}>{row.ProjectName || '-'}</div>
-                                            </div>
-                                            <div {...hoverEvents('Division')} style={{ width: 'fit-content' }}>
-                                                <div className="d-flex flex-wrap gap-1 align-items-center mb-1">
-                                                    <span className="badge border fw-normal text-secondary bg-light">{row.EnquiryFor || '-'}</span>
-                                                </div>
-                                            </div>
-                                            <div {...hoverEvents('Sales Engineer')} style={{ width: 'fit-content' }}>
-                                                <div className="d-flex align-items-center gap-1 text-secondary small">
-                                                    <User size={13} />
-                                                    <span className={contentClass} title={row.ConcernedSE}>{row.ConcernedSE || '-'}</span>
-                                                </div>
+                                        <td style={cellStyle} {...hoverEvents('Project Name')}>
+                                            <div className={`fw-bold text-dark ${contentClass}`} style={{ fontSize: '0.8rem' }} title={row.ProjectName}>
+                                                {row.ProjectName || '-'}
                                             </div>
                                         </td>
 
-                                        {/* Column 3: Parties */}
-                                        <td className="p-2" style={cellStyle}>
+                                        <td style={cellStyle} {...hoverEvents('Division')}>
+                                            {jobLines.map((ln, li) => {
+                                                const sePart = ln.se ? ` (${ln.se})` : '';
+                                                const isSub = ln.depth > 0;
+                                                return (
+                                                    <div
+                                                        key={`jd-${row.RequestNo}-${li}`}
+                                                        style={{
+                                                            paddingLeft: isSub ? `${8 + (ln.depth - 1) * 12}px` : 0,
+                                                            fontSize: '0.74rem',
+                                                            color: '#1e293b',
+                                                            marginBottom: li < jobLines.length - 1 ? 4 : 0,
+                                                            whiteSpace: 'nowrap',
+                                                        }}
+                                                    >
+                                                        {isSub ? (
+                                                            <span className="text-muted me-1" style={{ fontSize: '0.7rem' }}>
+                                                                {'--> '}
+                                                            </span>
+                                                        ) : null}
+                                                        <span style={{ fontWeight: ln.depth === 0 ? 600 : 400 }}>{ln.label}</span>
+                                                        {ln.se ? (
+                                                            <span style={{ color: '#9f1239', fontWeight: 400, fontSize: '81%' }}>{sePart}</span>
+                                                        ) : null}
+                                                    </div>
+                                                );
+                                            })}
+                                        </td>
+
+                                        {/* Enquiry Details */}
+                                        <td style={cellStyle}>
+                                            <div className={`text-secondary ${contentClass}`} style={!isExpanded ? { maxHeight: '48px', overflow: 'hidden', fontSize: '0.78rem' } : { fontSize: '0.78rem' }}>
+                                                {row.EnquiryDetails || '-'}
+                                            </div>
+                                        </td>
+
+                                        {/* Parties */}
+                                        <td style={cellStyle}>
                                             <div {...hoverEvents('Customer')} style={{ width: 'fit-content' }}>
-                                                <div className={`fw-bold text-dark mb-1 ${contentClass}`} title={row.CustomerName}>{row.CustomerName || '-'}</div>
+                                                <div className={`fw-bold text-dark ${contentClass}`} style={{ fontSize: '0.8rem', marginBottom: '2px' }} title={row.CustomerName}>{row.CustomerName || '-'}</div>
                                             </div>
 
                                             <div {...hoverEvents('Client')} style={{ width: 'fit-content' }}>
-                                                <div className={`small text-secondary mb-1 ${contentClass}`} title={row.ClientName}>
+                                                <div className={`small text-secondary ${contentClass}`} style={{ fontSize: '0.75rem', marginBottom: '2px' }} title={row.ClientName}>
                                                     {row.ClientName || '-'}
                                                 </div>
                                             </div>
                                             <div {...hoverEvents('Consultant')} style={{ width: 'fit-content' }}>
-                                                <div className={`small text-muted ${contentClass}`} title={row.ConsultantName}>
+                                                <div className={`small text-muted ${contentClass}`} style={{ fontSize: '0.74rem' }} title={row.ConsultantName}>
                                                     {row.ConsultantName || '-'}
                                                 </div>
                                             </div>
                                         </td>
 
-                                        {/* Column 4: Enquiry Details */}
-                                        <td className="p-2" style={cellStyle}>
-                                            <div className={`text-secondary ${contentClass}`} style={!isExpanded ? { maxHeight: '60px', overflow: 'hidden' } : {}}>
-                                                {row.EnquiryDetails || '-'}
-                                            </div>
-                                        </td>
-
-                                        {(selectedType === 'quote' || filters?.dateType === 'Quote Date') && (() => {
-                                            try {
-                                                const breakdown = row.PricingBreakdown ? JSON.parse(row.PricingBreakdown) : [];
-                                                // Validate breakdown is array
-                                                if (!Array.isArray(breakdown)) throw new Error("Invalid format");
-
-                                                const total = breakdown.reduce((sum, item) => sum + (Number(item?.Price) || 0), 0);
-                                                const displayTotal = breakdown.length > 0
-                                                    ? total.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
-                                                    : (row.TotalQuotedPrice ? Number(row.TotalQuotedPrice).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : '-');
-
-                                                // Sort: By RootCode (L1, L2) then by level
-                                                const sortedBreakdown = [...breakdown].sort((a, b) => {
-                                                    const codeA = (a?.RootCode || "L1");
-                                                    const codeB = (b?.RootCode || "L1");
-                                                    if (codeA !== codeB) return codeA.localeCompare(codeB, undefined, { numeric: true });
-                                                    
-                                                    const depthA = a?.Depth || 0;
-                                                    const depthB = b?.Depth || 0;
-                                                    return depthA - depthB;
-                                                });
-
-                                                return (
-                                                    <>
-                                                        <td className="p-2" style={cellStyle}>
-                                                            <div className="small text-dark fw-bold">{row.QuoteRefNo || '-'}</div>
-                                                        </td>
-                                                        <td className="p-2" style={cellStyle}>
-                                                            <div className="small text-dark">{displayTotal}</div>
-                                                        </td>
-                                                        <td className="p-2" style={cellStyle}>
-                                                            <div style={{ fontSize: '0.75rem' }}>
-                                                                {sortedBreakdown.length > 0 ? sortedBreakdown.map((item, i) => {
-                                                                    const itemName = item?.EnquiryForItem || "Unknown";
-                                                                    const rootCode = item?.RootCode || 'L1';
-                                                                    const depth = item?.Depth || 0;
-                                                                    const price = Number(item?.Price || 0);
-
-                                                                    // Visual indents based on depth
-                                                                    const indent = `${depth * 20}px`;
-
-                                                                    return (
-                                                                        <div key={i} className="mb-1 text-nowrap" style={{ paddingLeft: indent }}>
-                                                                            {depth > 0 && <span className="text-muted me-1">↳</span>}
-                                                                            <span className={`fw-bold ${depth === 0 ? 'text-dark' : 'text-secondary'}`}>{itemName} ({rootCode}): </span>
-                                                                            {price > 0 ? (
-                                                                                <span className={`px-1 rounded ${depth === 0 ? 'bg-success bg-opacity-10 text-success' : 'bg-light text-dark border'}`}>
-                                                                                    {price.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="text-muted fst-italic p-1 bg-light rounded">Not Updated</span>
-                                                                            )}
-                                                                            {item?.UpdatedAt && price > 0 && (
-                                                                                <span className="text-muted ms-2" style={{ fontSize: '0.65rem' }}>
-                                                                                    ({format(new Date(item.UpdatedAt), 'dd-MMM-yy hh:mm a')})
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                    );
-                                                                }) : <span className="text-muted">-</span>}
-                                                            </div>
-                                                        </td>
-                                                    </>
-                                                );
-                                            } catch (err) {
-                                                console.error("Error rendering quote breakdown:", err, row);
-                                                return (
-                                                    <>
-                                                        <td className="p-2" style={cellStyle}>-</td>
-                                                        <td className="p-2" style={cellStyle}>-</td>
-                                                        <td className="p-2" style={cellStyle}><span className="text-danger small">Error data</span></td>
-                                                    </>
-                                                );
-                                            }
-                                        })()}
-
                                         {/* Column 5: Site Visit */}
-                                        <td className="p-2" style={cellStyle}>
+                                        <td style={cellStyle}>
                                             {row.SiteVisitDate ? (
-                                                <span className="badge bg-success bg-opacity-10 text-success border border-success border-opacity-25 fw-normal d-inline-flex align-items-center gap-1" style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
-                                                    <Calendar size={12} />
+                                                <div className="d-inline-flex align-items-center gap-1 text-success" style={{ fontFamily: 'monospace', fontSize: '0.72rem' }}>
+                                                    <Calendar size={11} />
                                                     {formatDate(row.SiteVisitDate)}
-                                                </span>
-                                            ) : '-'}
+                                                </div>
+                                            ) : (
+                                                <span className="text-muted">—</span>
+                                            )}
                                         </td>
 
                                         {/* Column 6: Remarks */}
-                                        <td className="p-2" style={cellStyle}>
-                                            <span className="badge bg-light text-dark border rounded-pill fw-normal d-inline-flex align-items-center gap-1 px-2">
-                                                {row.Status === 'Closed' ? <div className="rounded-circle bg-success" style={{ width: 6, height: 6 }} /> :
-                                                    <div className="rounded-circle bg-warning" style={{ width: 6, height: 6 }} />}
+                                        <td style={cellStyle}>
+                                            <div className="d-inline-flex align-items-center gap-1 text-dark" style={{ fontSize: '0.75rem' }}>
+                                                {row.Status === 'Closed' ? (
+                                                    <span className="rounded-circle bg-success d-inline-block" style={{ width: 5, height: 5 }} />
+                                                ) : (
+                                                    <span className="rounded-circle bg-warning d-inline-block" style={{ width: 5, height: 5 }} />
+                                                )}
                                                 {row.Status || 'Open'}
-                                            </span>
+                                            </div>
                                         </td>
                                     </tr>
                                 );
                             })
                         ) : (
                             <tr>
-                                <td colSpan={selectedType === 'quote' ? "9" : "6"} className="text-center py-5 text-muted">
+                                <td colSpan={7} className="text-center py-5 text-muted">
                                     <div className="py-2">No records found</div>
                                 </td>
                             </tr>

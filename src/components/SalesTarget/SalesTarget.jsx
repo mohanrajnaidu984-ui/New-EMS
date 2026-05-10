@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 import './SalesTarget.css';
 
 // ── Formatted Revenue Input (shows ###,###,### when not focused) ──
@@ -43,7 +44,7 @@ const RevenueInput = ({ value, onChange, placeholder = '0', style = {} }) => {
             type="text"
             inputMode="numeric"
             className="form-control form-control-sm bg-white text-dark border-secondary text-center"
-            style={{ fontSize: '13px', letterSpacing: '0.3px', ...style }}
+            style={{ fontSize: '12px', letterSpacing: '0.2px', paddingTop: '0.2rem', paddingBottom: '0.2rem', ...style }}
             value={displayValue}
             onFocus={handleFocus}
             onBlur={handleBlur}
@@ -156,19 +157,53 @@ const SalesTarget = () => {
         }));
     };
 
+    /** Parse BD revenue / GP field to a finite number, or NaN if unset or invalid */
+    const parseTargetNumber = (raw) => {
+        if (raw === '' || raw === null || raw === undefined) return NaN;
+        const n = parseFloat(String(raw).replace(/,/g, ''));
+        return Number.isFinite(n) ? n : NaN;
+    };
+
     const handleSave = async () => {
         if (!selectedEngineer) return alert("Please select a Sales Engineer");
 
-        const finalPayload = items.map(itemName => ({
+        const qs = ['Q1', 'Q2', 'Q3', 'Q4'];
+        const problems = [];
+
+        for (const itemName of items) {
+            const row = targetData[itemName] || {};
+            for (const q of qs) {
+                const rev = parseTargetNumber(row[q]);
+                const gp = parseTargetNumber(row[`${q}_GP`]);
+
+                if (!Number.isFinite(rev) || rev <= 0) {
+                    problems.push(`${itemName} · ${q}: Revenue must be greater than zero`);
+                }
+                if (!Number.isFinite(gp) || gp <= 0) {
+                    problems.push(`${itemName} · ${q}: GP % must be greater than zero`);
+                }
+            }
+        }
+
+        if (problems.length > 0) {
+            const maxLines = 14;
+            const head = problems.slice(0, maxLines).join('\n');
+            const extra =
+                problems.length > maxLines ? `\n… and ${problems.length - maxLines} more` : '';
+            alert(`Cannot save:\n\nTargets cannot be zero or blank.\nEvery quarter needs Revenue (BD) > 0 and GP % > 0.\n\n${head}${extra}`);
+            return;
+        }
+
+        const finalPayload = items.map((itemName) => ({
             itemName,
-            Q1: targetData[itemName]?.Q1 || 0,
-            Q2: targetData[itemName]?.Q2 || 0,
-            Q3: targetData[itemName]?.Q3 || 0,
-            Q4: targetData[itemName]?.Q4 || 0,
-            Q1_GP: targetData[itemName]?.Q1_GP || 0,
-            Q2_GP: targetData[itemName]?.Q2_GP || 0,
-            Q3_GP: targetData[itemName]?.Q3_GP || 0,
-            Q4_GP: targetData[itemName]?.Q4_GP || 0,
+            Q1: parseTargetNumber(targetData[itemName]?.Q1),
+            Q2: parseTargetNumber(targetData[itemName]?.Q2),
+            Q3: parseTargetNumber(targetData[itemName]?.Q3),
+            Q4: parseTargetNumber(targetData[itemName]?.Q4),
+            Q1_GP: parseTargetNumber(targetData[itemName]?.Q1_GP),
+            Q2_GP: parseTargetNumber(targetData[itemName]?.Q2_GP),
+            Q3_GP: parseTargetNumber(targetData[itemName]?.Q3_GP),
+            Q4_GP: parseTargetNumber(targetData[itemName]?.Q4_GP),
         }));
 
         try {
@@ -227,15 +262,16 @@ const SalesTarget = () => {
     };
 
     const labelCellStyle = {
-        fontSize: '10px',
+        fontSize: '9px',
         fontWeight: '600',
         textTransform: 'uppercase',
-        letterSpacing: '0.5px',
-        paddingTop: '4px',
-        paddingBottom: '4px',
-        paddingLeft: '8px',
+        letterSpacing: '0.35px',
+        paddingTop: '1px',
+        paddingBottom: '2px',
+        paddingLeft: '4px',
         color: '#6c757d',
         whiteSpace: 'nowrap',
+        lineHeight: 1.15,
     };
 
     const gpLabelStyle = {
@@ -244,7 +280,7 @@ const SalesTarget = () => {
     };
 
     return (
-        <div className="container-fluid p-4 sales-target-container" style={{ backgroundColor: '#f1f3f5', minHeight: 'calc(100vh - 72px)', color: '#212529' }}>
+        <div className="container-fluid p-4 sales-target-container" style={{ minHeight: 'calc(100vh - 72px)', color: '#212529' }}>
             <div style={{ width: '70%', margin: '0 auto' }}>
             <div className="d-flex justify-content-between align-items-center mb-4">
                 <h4 className="fw-bold text-dark mb-0">
@@ -257,7 +293,7 @@ const SalesTarget = () => {
             </div>
 
             {/* Filters */}
-            <div className="card border mb-4 shadow-sm" style={{ backgroundColor: '#ffffff', borderColor: '#dee2e6' }}>
+            <div className="card border mb-4 shadow-sm sales-target-filter-panel">
                 <div className="card-body d-flex gap-3 align-items-end">
                     <div className="form-group">
                         <label className="small text-muted mb-1">Financial Year</label>
@@ -297,19 +333,19 @@ const SalesTarget = () => {
 
             {/* Grid */}
             {selectedEngineer ? (
-                <div className="table-responsive rounded shadow-sm">
-                    <table className="table table-bordered mb-0 align-middle bg-white" style={{ borderCollapse: 'separate', borderSpacing: 0 }}>
+                <div className="table-responsive sales-target-grid-wrap shadow-sm">
+                    <table className="table table-bordered mb-0 align-middle bg-white sales-target-grid-table" style={{ borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', width: '100%' }}>
                         <thead>
-                            <tr style={{ background: '#e9ecef' }}>
-                                <th className="text-start ps-4" style={{ width: '28%', fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#495057', padding: '14px 16px' }}>
+                            <tr style={{ background: EMS_TABLE_HEADER_GRADIENT }}>
+                                <th className="text-start ps-3 text-white" style={{ width: '28%', fontSize: '10px', letterSpacing: '0.55px', textTransform: 'uppercase', padding: '8px 10px', borderBottom: '1px solid rgba(255, 255, 255, 0.22)', lineHeight: 1.2 }}>
                                     Item Name
                                 </th>
                                 {quarters.map(q => (
-                                    <th key={q} className="text-center" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#495057', padding: '14px 16px' }}>
+                                    <th key={q} className="text-center text-white" style={{ fontSize: '10px', letterSpacing: '0.55px', textTransform: 'uppercase', padding: '8px 10px', borderBottom: '1px solid rgba(255, 255, 255, 0.22)', lineHeight: 1.2 }}>
                                         {q} — Target
                                     </th>
                                 ))}
-                                <th className="text-center fw-bold" style={{ fontSize: '11px', letterSpacing: '1px', textTransform: 'uppercase', color: '#198754', padding: '14px 16px' }}>
+                                <th className="text-center fw-bold text-white sales-target-col-total" style={{ fontSize: '10px', letterSpacing: '0.55px', textTransform: 'uppercase', padding: '8px 10px', borderBottom: '1px solid rgba(255, 255, 255, 0.22)', lineHeight: 1.2 }}>
                                     Total
                                 </th>
                             </tr>
@@ -348,21 +384,23 @@ const SalesTarget = () => {
                                         {/* Row 1: Item name + Revenue inputs */}
                                         <tr style={revenueRowStyle}>
                                             <td
-                                                className="text-start ps-4 text-nowrap"
+                                                className="text-start ps-3 text-nowrap"
                                                 rowSpan={2}
                                                 style={{
                                                     fontWeight: '600',
-                                                    fontSize: '13px',
+                                                    fontSize: '12px',
                                                     color: '#212529',
                                                     verticalAlign: 'middle',
                                                     borderRight: '1px solid #dee2e6',
                                                     borderBottom: '1px solid #dee2e6',
+                                                    paddingTop: '6px',
+                                                    paddingBottom: '6px',
                                                 }}
                                             >
                                                 {item}
                                             </td>
                                             {quarters.map((q, qi) => (
-                                                <td key={q} style={{ padding: '6px 8px' }}>
+                                                <td key={q} style={{ padding: '4px 6px', verticalAlign: 'top' }}>
                                                     <div style={labelCellStyle}>Revenue (BD)</div>
                                                     <RevenueInput
                                                         value={row[q] ?? ''}
@@ -371,8 +409,8 @@ const SalesTarget = () => {
                                                     />
                                                 </td>
                                             ))}
-                                            <td className="text-center fw-bold" style={{ color: '#0d6efd', fontSize: '13px', borderLeft: '1px solid #dee2e6' }}>
-                                                <div style={{ ...labelCellStyle, color: '#0d6efd' }}>Revenue</div>
+                                            <td className="text-center fw-bold sales-target-col-total" style={{ color: '#0d6efd', fontSize: '12px', borderLeft: '1px solid #dee2e6', padding: '4px 6px', verticalAlign: 'middle' }}>
+                                                <div style={{ ...labelCellStyle, color: '#0d6efd', paddingBottom: '2px' }}>Revenue</div>
                                                 {fmt(totalRev)}
                                             </td>
                                         </tr>
@@ -380,36 +418,38 @@ const SalesTarget = () => {
                                         {/* Row 2: GP % inputs + calculated BD amounts */}
                                         <tr style={gpRowStyle}>
                                             {quarters.map((q, qi) => (
-                                                <td key={q} style={{ padding: '6px 8px' }}>
+                                                <td key={q} style={{ padding: '4px 6px', verticalAlign: 'top' }}>
                                                     <div style={gpLabelStyle}>GP %</div>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexWrap: 'wrap' }}>
                                                         <input
                                                             type="number"
                                                             min="0"
                                                             max="100"
                                                             step="0.1"
-                                                            className="form-control form-control-sm text-center"
+                                                            className="form-control form-control-sm text-center py-0"
                                                             style={{
-                                                                fontSize: '13px',
+                                                                fontSize: '12px',
                                                                 background: '#ffffff',
                                                                 border: '1px solid #ced4da',
                                                                 color: '#212529',
-                                                                width: '70px',
+                                                                width: '58px',
                                                                 flexShrink: 0,
+                                                                paddingTop: '0.15rem',
+                                                                paddingBottom: '0.15rem',
                                                             }}
                                                             value={row[`${q}_GP`] ?? ''}
                                                             onChange={(e) => handleInputChange(item, `${q}_GP`, e.target.value)}
                                                             placeholder="%"
                                                         />
-                                                        <span style={{ color: '#198754', fontWeight: '700', fontSize: '13px' }}>%</span>
+                                                        <span style={{ color: '#198754', fontWeight: '700', fontSize: '12px' }}>%</span>
                                                         {qGPAmts[qi] > 0 && (
                                                             <span style={{
-                                                                fontSize: '11px',
+                                                                fontSize: '10px',
                                                                 color: '#198754',
                                                                 background: 'rgba(25, 135, 84, 0.1)',
                                                                 border: '1px solid rgba(25, 135, 84, 0.25)',
-                                                                borderRadius: '4px',
-                                                                padding: '1px 6px',
+                                                                borderRadius: '3px',
+                                                                padding: '0 4px',
                                                                 whiteSpace: 'nowrap',
                                                             }}>
                                                                 BD {fmt(qGPAmts[qi])}
@@ -418,8 +458,8 @@ const SalesTarget = () => {
                                                     </div>
                                                 </td>
                                             ))}
-                                            <td className="text-center fw-bold" style={{ color: '#198754', fontSize: '13px', borderLeft: '1px solid #dee2e6' }}>
-                                                <div style={gpLabelStyle}>GP ({avgGPPct.toFixed(1)}%)</div>
+                                            <td className="text-center fw-bold sales-target-col-total" style={{ color: '#198754', fontSize: '12px', borderLeft: '1px solid #dee2e6', padding: '4px 6px', verticalAlign: 'middle' }}>
+                                                <div style={{ ...gpLabelStyle, paddingBottom: '2px' }}>GP ({avgGPPct.toFixed(1)}%)</div>
                                                 {fmt(totalGPAmt)}
                                             </td>
                                         </tr>
@@ -433,15 +473,15 @@ const SalesTarget = () => {
                                 </tr>
                             )}
                         </tbody>
-                        <tfoot style={{ backgroundColor: '#f8f9fa', borderTop: '2px solid #ced4da' }}>
+                        <tfoot style={{ backgroundColor: '#f8f9fa', borderTop: '1px solid #ced4da' }}>
                             <tr>
-                                <th className="text-start ps-4" style={{ color: '#212529', padding: '14px 16px', fontSize: '13px' }}>Grand Total</th>
-                                <th colSpan="4" style={{ padding: '14px 16px' }}></th>
-                                <th className="text-center" style={{ padding: '14px 16px' }}>
-                                    <div style={{ color: '#0d6efd', fontSize: '12px', fontWeight: '700' }}>
+                                <th className="text-start ps-3" style={{ color: '#212529', padding: '8px 10px', fontSize: '12px' }}>Grand Total</th>
+                                <th colSpan="4" style={{ padding: '8px 6px' }}></th>
+                                <th className="text-center sales-target-col-total" style={{ padding: '8px 10px' }}>
+                                    <div style={{ color: '#0d6efd', fontSize: '11px', fontWeight: '700', lineHeight: 1.25 }}>
                                         Revenue: {fmt(grandTotalRevenue)}
                                     </div>
-                                    <div style={{ color: '#198754', fontSize: '12px', fontWeight: '700', marginTop: '4px' }}>
+                                    <div style={{ color: '#198754', fontSize: '11px', fontWeight: '700', marginTop: '2px', lineHeight: 1.25 }}>
                                         GP ({grandTotalRevenue > 0 ? ((grandTotalGPAmount / grandTotalRevenue) * 100).toFixed(1) : '0.0'}%): {fmt(grandTotalGPAmount)}
                                     </div>
                                 </th>

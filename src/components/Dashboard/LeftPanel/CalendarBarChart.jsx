@@ -25,48 +25,48 @@ const CalendarBarChart = ({ data, monthlyTotals, onBarClick }) => {
     ];
 
     return (
-        <div className="p-3 bg-white border-bottom" style={{ borderColor: '#e5e7eb' }}>
-            <div className="mb-2">
-                <h6 className="text-secondary mb-0" style={{ fontSize: '0.875rem', fontWeight: 600 }}>
-                    Monthly Overview
-                </h6>
-            </div>
-            <div className="d-flex gap-3">
-                {bars.map((bar, index) => (
-                    <div
-                        key={index}
-                        className="flex-fill"
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => onBarClick && onBarClick(bar.type)}
-                    >
-                        <div className="d-flex justify-content-between align-items-center mb-1">
-                            <span className="small text-secondary" style={{ fontSize: '0.75rem' }}>
-                                {bar.label}
-                            </span>
-                            <span className="fw-bold" style={{ fontSize: '0.875rem', color: bar.color }}>
-                                {bar.value}
-                            </span>
-                        </div>
+        <div className="dashboard-monthly-overview-inner flex-shrink-0 py-2 px-2 border-bottom bg-white" style={{ borderColor: '#e5e7eb' }}>
+                <div className="mb-1">
+                    <h6 className="text-secondary mb-0" style={{ fontSize: '0.78rem', fontWeight: 600, lineHeight: 1.2 }}>
+                        Monthly Overview
+                    </h6>
+                </div>
+                <div className="d-flex gap-2">
+                    {bars.map((bar, index) => (
                         <div
-                            className="position-relative rounded"
-                            style={{
-                                height: '8px',
-                                backgroundColor: bar.bgColor,
-                                overflow: 'hidden'
-                            }}
+                            key={index}
+                            className="flex-fill"
+                            style={{ cursor: 'pointer', minWidth: 0 }}
+                            onClick={() => onBarClick && onBarClick(bar.type)}
                         >
+                            <div className="d-flex justify-content-between align-items-center mb-0" style={{ gap: '4px' }}>
+                                <span className="small text-secondary text-truncate" style={{ fontSize: '0.68rem', lineHeight: 1.15, minWidth: 0 }}>
+                                    {bar.label}
+                                </span>
+                                <span className="fw-bold flex-shrink-0" style={{ fontSize: '0.78rem', color: bar.color }}>
+                                    {bar.value}
+                                </span>
+                            </div>
                             <div
-                                className="position-absolute top-0 start-0 h-100 rounded"
+                                className="position-relative rounded mt-1"
                                 style={{
-                                    width: `${(bar.value / maxValue) * 100}%`,
-                                    backgroundColor: bar.color,
-                                    transition: 'width 0.3s ease'
+                                    height: '5px',
+                                    backgroundColor: bar.bgColor,
+                                    overflow: 'hidden'
                                 }}
-                            />
+                            >
+                                <div
+                                    className="position-absolute top-0 start-0 h-100 rounded"
+                                    style={{
+                                        width: `${(bar.value / maxValue) * 100}%`,
+                                        backgroundColor: bar.color,
+                                        transition: 'width 0.3s ease'
+                                    }}
+                                />
+                            </div>
                         </div>
-                    </div>
-                ))}
-            </div>
+                    ))}
+                </div>
         </div>
     );
 };

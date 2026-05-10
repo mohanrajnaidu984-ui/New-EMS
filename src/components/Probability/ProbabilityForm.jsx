@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import Select from 'react-select';
 import AsyncSelect from 'react-select/async'; // START_OF_FILE_MODIFICATION
 import DatePicker from 'react-datepicker';
@@ -8,8 +9,18 @@ import { enUS } from 'date-fns/locale';
 import { FilterX, RefreshCw } from 'lucide-react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
+import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
+import { flip } from '@floating-ui/react';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
+/** Prefer opening below the input; restrict flip fallbacks so the calendar rarely moves above the field. */
+const PROB_LIST_DATE_PICKER_POPPER_MODIFIERS = [
+    flip({
+        padding: 16,
+        fallbackPlacements: ['bottom-start', 'bottom-end', 'left-start', 'right-start'],
+    }),
+];
 
 /** Lost To — search Master directory (contractors + clients) only after this many characters. */
 const LOST_TO_MIN_SEARCH_CHARS = 3;
@@ -70,6 +81,16 @@ const ProbabilityForm = () => {
     const [sortCol, setSortCol] = useState(null);
     const [sortAsc, setSortAsc] = useState(true);
     const [openColFilter, setOpenColFilter] = useState(null);
+    /** Fixed positioning for column filter popovers (escapes overflow:auto on table scroll wrap). */
+    const [filterPanelPos, setFilterPanelPos] = useState(null);
+    const tableScrollWrapRef = useRef(null);
+    const filterHeaderRefs = useRef({
+        enquiry: null,
+        project: null,
+        customer: null,
+        net: null,
+        status: null,
+    });
     const [draftMulti, setDraftMulti] = useState(() => new Set());
     const [draftNet, setDraftNet] = useState({ mode: 'all', v1: '', v2: '' });
     const [filterSearch, setFilterSearch] = useState('');
@@ -785,6 +806,53 @@ const ProbabilityForm = () => {
         return Number.isNaN(d.getTime()) ? null : d;
     }, []);
 
+    const updateFilterPanelPosition = useCallback(() => {
+        if (!openColFilter) {
+            setFilterPanelPos(null);
+            return;
+        }
+        const el = filterHeaderRefs.current[openColFilter];
+        if (!el) {
+            setFilterPanelPos(null);
+            return;
+        }
+        const rect = el.getBoundingClientRect();
+        const isNet = openColFilter === 'net';
+        const baseMinW = openColFilter === 'status' ? 220 : isNet ? 240 : 260;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = isNet ? rect.right - Math.max(baseMinW, rect.width) : rect.left;
+        left = Math.max(8, Math.min(left, vw - baseMinW - 8));
+        const top = rect.bottom + 4;
+        const capMax =
+            openColFilter === 'status' ? 280 : openColFilter === 'net' ? 360 : 320;
+        const maxH = Math.min(capMax, Math.max(120, vh - top - 16));
+        setFilterPanelPos({
+            top,
+            left,
+            minWidth: Math.max(baseMinW, rect.width),
+            maxHeight: maxH,
+        });
+    }, [openColFilter]);
+
+    useLayoutEffect(() => {
+        updateFilterPanelPosition();
+    }, [updateFilterPanelPosition]);
+
+    useEffect(() => {
+        if (!openColFilter) return undefined;
+        const onScrollOrResize = () => updateFilterPanelPosition();
+        window.addEventListener('resize', onScrollOrResize);
+        window.addEventListener('scroll', onScrollOrResize, true);
+        const scrollEl = tableScrollWrapRef.current;
+        scrollEl?.addEventListener('scroll', onScrollOrResize);
+        return () => {
+            window.removeEventListener('resize', onScrollOrResize);
+            window.removeEventListener('scroll', onScrollOrResize, true);
+            scrollEl?.removeEventListener('scroll', onScrollOrResize);
+        };
+    }, [openColFilter, updateFilterPanelPosition]);
+
     useEffect(() => {
         if (!openColFilter) return undefined;
         const onDoc = (e) => {
@@ -936,207 +1004,30 @@ const ProbabilityForm = () => {
 
     // --- Render Logic ---
 
-    // Detail View
-    if (false) {
-        return (
-            <div className="container-fluid pt-4 pb-4 bg-light min-vh-100">
-                <div className="row justify-content-center">
-                    <div className="col-12 col-lg-8">
-                        <div className="card border-0 shadow-sm rounded-3">
-                            <div className="card-header bg-white border-bottom py-3 d-flex justify-content-between align-items-center">
-                                <div className="d-flex align-items-center gap-3">
-                                    <button onClick={() => setViewMode('list')} className="btn btn-light btn-sm rounded-circle border p-2">
-                                        <ArrowLeft size={18} />
-                                    </button>
-                                    <h5 className="mb-0 text-primary fw-bold">Update Probability: {formData.enquiryNo}</h5>
-                                </div>
-                                <div className="d-flex align-items-center gap-2">
-                                    <span className="badge bg-info text-dark">{formData.status}</span>
-                                    <button onClick={handleSubmit} className="btn btn-primary d-flex align-items-center gap-2">
-                                        <Save size={18} /> Update
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="card-body p-4">
-                                {/* Top Info */}
-                                <div className="row mb-4">
-                                    <div className="col-md-6">
-                                        <label className="small text-secondary fw-bold">Project Name</label>
-                                        <div className="fw-medium">{formData.projectName}</div>
-                                    </div>
-                                    <div className="col-md-3">
-                                        <label className="small text-secondary fw-bold">Enquiry Date</label>
-                                        <div className="fw-medium">{formData.enquiryDate ? new Date(formData.enquiryDate).toLocaleDateString() : '-'}</div>
-                                    </div>
-                                    <div className="col-md-3">
-                                        <label className="small text-secondary fw-bold">Quote No</label>
-                                        <select className="form-select form-select-sm" value={quoteNo} onChange={e => setQuoteNo(e.target.value)}>
-                                            {quotesList.map(q => <option key={q.QuoteNumber} value={q.QuoteNumber}>{q.QuoteNumber}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                <hr className="text-muted opacity-25" />
-
-                                <div className="row g-4">
-                                    {/* Left Col */}
-                                    <div className="col-md-6">
-                                        {/* Probability Selector */}
-                                        <div className="mb-3">
-                                            <label className="form-label small fw-bold">Probability / Status</label>
-                                            <select
-                                                className="form-select"
-                                                value={formData.probabilityOption}
-                                                onChange={(e) => handleProbabilityChange(e.target.value)}
-                                            >
-                                                <option value="No Chance (0%)">No Chance (0%)</option>
-                                                <option value="Low Chance (25%)">Low Chance (25%)</option>
-                                                <option value="50-50 Chance (50%)">50-50 Chance (50%)</option>
-                                                <option value="Medium Chance (75%)">Medium Chance (75%)</option>
-                                                <option value="High Chance (90%)">High Chance (90%)</option>
-                                                <option value="Very High Chance (99%)">Very High Chance (99%)</option>
-                                            </select>
-                                        </div>
-
-
-
-
-                                    </div>
-
-                                    {/* Right Col */}
-                                    <div className="col-md-6">
-                                        <div className="mb-3">
-                                            <label className="form-label small fw-bold">Booked Date</label>
-                                            <input type="date" className="form-control" value={formData.expectedDate} onChange={e => setFormData(p => ({ ...p, expectedDate: e.target.value }))} />
-                                        </div>
-                                        <div className="mb-3">
-                                            <label className="form-label small fw-bold">Remarks</label>
-                                            <textarea className="form-control" rows="4" value={formData.remarks} onChange={e => setFormData(p => ({ ...p, remarks: e.target.value }))}></textarea>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Conditional Sections */}
-
-                                {formData.status === 'Won' && (
-                                    <div className="mt-4 border border-success rounded p-3 bg-success bg-opacity-10">
-                                        <h6 className="text-success fw-bold mb-3">Won Details</h6>
-                                        <div className="row g-3">
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">ERP Job No.</label>
-                                                <input type="text" className="form-control" value={formData.wonDetails.jobNo} onChange={e => handleDetailsChange('wonDetails', 'jobNo', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Job Value</label>
-                                                <input type="text" className="form-control" value={formData.wonDetails.orderValue} onChange={e => handleDetailsChange('wonDetails', 'orderValue', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Customer Name</label>
-                                                <input type="text" className="form-control" value={formData.wonDetails.customerName} onChange={e => handleDetailsChange('wonDetails', 'customerName', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Contact Name</label>
-                                                <input type="text" className="form-control" value={formData.wonDetails.contactName} onChange={e => handleDetailsChange('wonDetails', 'contactName', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Contact No</label>
-                                                <input type="text" className="form-control" value={formData.wonDetails.contactNo} onChange={e => handleDetailsChange('wonDetails', 'contactNo', e.target.value)} />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {formData.status === 'Lost' && (
-                                    <div className="mt-4 border border-danger rounded p-3 bg-danger bg-opacity-10">
-                                        <h6 className="text-danger fw-bold mb-3">Lost Details</h6>
-                                        <div className="row g-3">
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Winning Competitor</label>
-                                                <input type="text" className="form-control" value={formData.lostDetails.customer} onChange={e => handleDetailsChange('lostDetails', 'customer', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Reason</label>
-                                                <select className="form-select" value={formData.lostDetails.reason} onChange={e => handleDetailsChange('lostDetails', 'reason', e.target.value)}>
-                                                    <option value="">Select...</option>
-                                                    <option value="Price High">Price High</option>
-                                                    <option value="Delivery">Delivery</option>
-                                                    <option value="Spec">Technical Spec</option>
-                                                </select>
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Competitor Price</label>
-                                                <input type="text" className="form-control" value={formData.lostDetails.competitorPrice} onChange={e => handleDetailsChange('lostDetails', 'competitorPrice', e.target.value)} />
-                                            </div>
-                                            <div className="col-md-6">
-                                                <label className="small fw-bold">Lost Date</label>
-                                                <input type="date" className="form-control" value={formData.lostDetails.lostDate ? formData.lostDetails.lostDate.split('T')[0] : ''} onChange={e => handleDetailsChange('lostDetails', 'lostDate', e.target.value)} />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {formData.status === 'Retendered' && (
-                                    <div className="mt-4 border border-warning rounded p-3 bg-warning bg-opacity-10">
-                                        <h6 className="text-dark fw-bold mb-3">Retender Details</h6>
-                                        <div className="mb-3">
-                                            <label className="small fw-bold">Retender Date</label>
-                                            <input type="date" className="form-control" value={formData.retenderDate} onChange={e => setFormData(p => ({ ...p, retenderDate: e.target.value }))} />
-                                        </div>
-                                    </div>
-                                )}
-
-                                {formData.status === 'OnHold' && (
-                                    <div className="mt-4 border border-warning rounded p-3 bg-warning bg-opacity-10">
-                                        <h6 className="text-dark fw-bold mb-3">On Hold Details</h6>
-                                        <div className="mb-3">
-                                            <label className="small fw-bold">On Hold Date</label>
-                                            <input type="date" className="form-control" value={formData.onHoldDate} onChange={e => setFormData(p => ({ ...p, onHoldDate: e.target.value }))} />
-                                        </div>
-                                    </div>
-                                )}
-
-                                {formData.status === 'Cancelled' && (
-                                    <div className="mt-4 border border-secondary rounded p-3 bg-secondary bg-opacity-10">
-                                        <h6 className="text-dark fw-bold mb-3">Cancellation Details</h6>
-                                        <div className="mb-3">
-                                            <label className="small fw-bold">Cancellation Date</label>
-                                            <input type="date" className="form-control" value={formData.cancellationDate} onChange={e => setFormData(p => ({ ...p, cancellationDate: e.target.value }))} />
-                                        </div>
-                                    </div>
-                                )}
-
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    }
-
     // List View
     return (
-        <div className="container-fluid pt-1 pb-4 bg-light min-vh-100 prob-probability-page d-flex flex-column">
-            <div className="row justify-content-center flex-grow-1" style={{ minHeight: 0 }}>
-                <div className="col-12 col-lg-10 d-flex flex-column" style={{ minHeight: 0, flex: '1 1 auto' }}>
-                    <div className="card border-0 shadow-sm rounded-3 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
+        <div className="container-fluid pt-1 pb-0 bg-light prob-probability-page d-flex flex-column h-100 min-h-0 overflow-hidden px-0">
+            <div className="row g-0 flex-grow-1" style={{ minHeight: 0 }}>
+                <div className="col-12 d-flex flex-column" style={{ minHeight: 0, flex: '1 1 auto' }}>
+                    <div className="card border-0 shadow-sm rounded-3 d-flex flex-column flex-grow-1 min-h-0" style={{ minHeight: 0, flex: '1 1 auto' }}>
                         {/* Header & Filters */}
-                        <div className="card-header bg-white border-bottom py-3" style={{ flexShrink: 0 }}>
-                            <div
-                                className="d-flex align-items-end gap-2"
-                                style={{
-                                    flexWrap: 'nowrap',
-                                    overflowX: 'auto',
-                                    overflowY: 'hidden',
-                                    scrollbarGutter: 'stable',
-                                    WebkitOverflowScrolling: 'touch',
-                                }}
-                            >
+                        <div className="card-header border-0 bg-transparent py-0 px-2" style={{ flexShrink: 0 }}>
+                            <div className="prob-list-filter-panel">
+                                <div
+                                    className="d-flex align-items-end gap-1"
+                                    style={{
+                                        flexWrap: 'nowrap',
+                                        overflowX: 'auto',
+                                        overflowY: 'visible',
+                                        scrollbarGutter: 'stable',
+                                        WebkitOverflowScrolling: 'touch',
+                                    }}
+                                >
                                 {/* Division Selector */}
-                                <div style={{ width: '200px', flex: '0 0 auto' }}>
-                                    <label className="small text-muted fw-bold mb-1">Division</label>
+                                <div style={{ width: '158px', flex: '0 0 auto' }}>
+                                    <label className="small text-muted fw-normal mb-0">Division</label>
                                     <select
-                                        className="form-select"
+                                        className="form-select form-select-sm"
                                         value={selectedDivision}
                                         onChange={(e) => setSelectedDivision(e.target.value)}
                                         disabled={divisionOptions.length <= 1}
@@ -1152,10 +1043,10 @@ const ProbabilityForm = () => {
                                 </div>
 
                                 {/* Mode Selector */}
-                                <div style={{ width: '180px', flex: '0 0 auto' }}>
-                                    <label className="small text-muted fw-bold mb-1">View Mode</label>
+                                <div style={{ width: '142px', flex: '0 0 auto' }}>
+                                    <label className="small text-muted fw-normal mb-0">View Mode</label>
                                     <select
-                                        className="form-select"
+                                        className="form-select form-select-sm"
                                         value={listMode}
                                         onChange={(e) => {
                                             setListMode(e.target.value);
@@ -1175,11 +1066,11 @@ const ProbabilityForm = () => {
                                         <option value="Retendered">Retendered</option>
                                     </select>
                                 </div>
-                                <div style={{ width: '260px', flex: '0 0 auto' }}>
-                                    <label className="small text-muted fw-bold mb-1">Search</label>
+                                <div style={{ width: '198px', flex: '0 0 auto' }}>
+                                    <label className="small text-muted fw-normal mb-0">Search</label>
                                     <input
                                         type="text"
-                                        className="form-control"
+                                        className="form-control form-control-sm"
                                         value={viewSearchText}
                                         onChange={(e) => setViewSearchText(e.target.value)}
                                         placeholder="Enquiry No, Project Name, Customer Name"
@@ -1189,8 +1080,8 @@ const ProbabilityForm = () => {
                                 {/* Date Filters (Not for Pending) */}
                                 {listMode !== 'Pending' && listMode !== 'FollowUp' && (
                                     <>
-                                        <div style={{ width: '120px', flex: '0 0 auto' }} className="d-flex flex-column">
-                                            <label className="small text-muted fw-bold mb-1 d-block">From</label>
+                                        <div style={{ width: '142px', flex: '0 0 auto' }} className="d-flex flex-column">
+                                            <label className="small text-muted fw-normal mb-0 d-block">From</label>
                                             <div className="prob-date-picker-wrap">
                                                 <DatePicker
                                                     selected={parseIsoDate(fromDate)}
@@ -1201,10 +1092,15 @@ const ProbabilityForm = () => {
                                                             setToDate(format(new Date(), 'yyyy-MM-dd'));
                                                         }
                                                     }}
-                                                    dateFormat="dd-MM-yy"
-                                                    placeholderText="DD-MM-YY"
+                                                    dateFormat="dd-MMM-yy"
+                                                    placeholderText="DD-MMM-YY"
                                                     className="form-control prob-date-input"
                                                     popperClassName="prob-datepicker-popper"
+                                                    popperPlacement="bottom-start"
+                                                    showPopperArrow={false}
+                                                    popperProps={{ strategy: 'fixed' }}
+                                                    portalId="prob-datepicker-portal"
+                                                    popperModifiers={PROB_LIST_DATE_PICKER_POPPER_MODIFIERS}
                                                     todayButton="Today"
                                                     clearButtonTitle="Clear"
                                                     isClearable
@@ -1212,16 +1108,21 @@ const ProbabilityForm = () => {
                                                 <span className="prob-date-input-icon" aria-hidden="true" />
                                             </div>
                                         </div>
-                                        <div style={{ width: '120px', flex: '0 0 auto' }} className="d-flex flex-column">
-                                            <label className="small text-muted fw-bold mb-1 d-block">To</label>
+                                        <div style={{ width: '142px', flex: '0 0 auto' }} className="d-flex flex-column">
+                                            <label className="small text-muted fw-normal mb-0 d-block">To</label>
                                             <div className="prob-date-picker-wrap">
                                                 <DatePicker
                                                     selected={parseIsoDate(toDate)}
                                                     onChange={(date) => setToDate(date ? format(date, 'yyyy-MM-dd') : '')}
-                                                    dateFormat="dd-MM-yy"
-                                                    placeholderText="DD-MM-YY"
+                                                    dateFormat="dd-MMM-yy"
+                                                    placeholderText="DD-MMM-YY"
                                                     className="form-control prob-date-input"
                                                     popperClassName="prob-datepicker-popper"
+                                                    popperPlacement="bottom-start"
+                                                    showPopperArrow={false}
+                                                    popperProps={{ strategy: 'fixed' }}
+                                                    portalId="prob-datepicker-portal"
+                                                    popperModifiers={PROB_LIST_DATE_PICKER_POPPER_MODIFIERS}
                                                     todayButton="Today"
                                                     clearButtonTitle="Clear"
                                                     isClearable
@@ -1232,7 +1133,7 @@ const ProbabilityForm = () => {
                                         <div
                                             className="align-self-end"
                                             style={{
-                                                minWidth: '300px',
+                                                minWidth: '248px',
                                                 flex: '0 0 auto',
                                                 background: '#ffffff',
                                                 border: '1px solid #d7dee8',
@@ -1243,12 +1144,12 @@ const ProbabilityForm = () => {
                                         >
                                             <div
                                                 style={{
-                                                    padding: '4px 8px',
-                                                    fontSize: '10px',
-                                                    fontWeight: 700,
+                                                    padding: '3px 6px',
+                                                    fontSize: '9px',
+                                                    fontWeight: 400,
                                                     color: '#ffffff',
-                                                    backgroundColor: '#4b5a96',
-                                                    backgroundImage: 'linear-gradient(180deg, #8c97c8 0%, #6f7db4 20%, #5a679f 52%, #4a578d 78%, #3f4c82 100%)',
+                                                    backgroundColor: 'transparent',
+                                                    backgroundImage: EMS_TABLE_HEADER_GRADIENT,
                                                     borderBottom: '1px solid rgba(22, 33, 74, 0.38)',
                                                     lineHeight: 1.1,
                                                     textShadow: '0 1px 1px rgba(19, 27, 58, 0.6)',
@@ -1257,7 +1158,7 @@ const ProbabilityForm = () => {
                                             >
                                                 Probability Summary
                                             </div>
-                                            <div title="Net quoted total" style={{ color: '#0c4a6e', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                            <div title="Net quoted total" style={{ color: '#0c4a6e', display: 'flex', justifyContent: 'space-between', gap: '6px', padding: '1px 6px', fontSize: '10px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
                                                 <span>Total Net Quoted :</span>
                                                 <span style={{ textAlign: 'right' }}>
                                                     {filteredSortedRows.length > 0
@@ -1265,7 +1166,7 @@ const ProbabilityForm = () => {
                                                         : <span className="text-muted">—</span>}
                                                 </span>
                                             </div>
-                                            <div title="Job Value total (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                            <div title="Job Value total (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '6px', padding: '1px 6px', fontSize: '10px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
                                                 <span>Won Total :</span>
                                                 <span style={{ textAlign: 'right' }}>
                                                     {listAggregates.sumJob > 0
@@ -1273,13 +1174,13 @@ const ProbabilityForm = () => {
                                                         : <span className="text-muted">—</span>}
                                                 </span>
                                             </div>
-                                            <div title="GP average (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                            <div title="GP average (Won)" style={{ color: '#198754', display: 'flex', justifyContent: 'space-between', gap: '6px', padding: '1px 6px', fontSize: '10px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
                                                 <span>GP AVG :</span>
                                                 <span style={{ textAlign: 'right' }}>
                                                     {listAggregates.avgGp != null ? `${listAggregates.avgGp.toFixed(2)}%` : <span className="text-muted">—</span>}
                                                 </span>
                                             </div>
-                                            <div title="Lost total" style={{ color: '#dc3545', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
+                                            <div title="Lost total" style={{ color: '#dc3545', display: 'flex', justifyContent: 'space-between', gap: '6px', padding: '1px 6px', fontSize: '10px', fontWeight: 700, lineHeight: 1.1, borderBottom: '1px solid #eef3f8' }}>
                                                 <span>Lost Total :</span>
                                                 <span style={{ textAlign: 'right' }}>
                                                     {listAggregates.sumLost > 0
@@ -1287,7 +1188,7 @@ const ProbabilityForm = () => {
                                                         : <span className="text-muted">—</span>}
                                                 </span>
                                             </div>
-                                            <div title="Followup total" style={{ color: '#4169e1', display: 'flex', justifyContent: 'space-between', gap: '8px', padding: '2px 8px', fontSize: '11px', fontWeight: 700, lineHeight: 1.1 }}>
+                                            <div title="Followup total" style={{ color: '#4169e1', display: 'flex', justifyContent: 'space-between', gap: '6px', padding: '1px 6px', fontSize: '10px', fontWeight: 700, lineHeight: 1.1 }}>
                                                 <span>Followup Total :</span>
                                                 <span style={{ textAlign: 'right' }}>
                                                     {listAggregates.sumFollowup > 0
@@ -1301,9 +1202,9 @@ const ProbabilityForm = () => {
 
                                 {/* FollowUp Probability Filter */}
                                 {listMode === 'FollowUp' && (
-                                    <div style={{ width: '180px', flex: '0 0 auto' }}>
-                                        <label className="small text-muted fw-bold mb-1">Probability</label>
-                                        <select className="form-select" value={filterProbability} onChange={e => setFilterProbability(e.target.value)}>
+                                    <div style={{ width: '142px', flex: '0 0 auto' }}>
+                                        <label className="small text-muted fw-normal mb-0">Probability</label>
+                                        <select className="form-select form-select-sm" value={filterProbability} onChange={e => setFilterProbability(e.target.value)}>
                                             <option value="">All</option>
                                             <option value="Low Chance (25%)">Low Chance (25%)</option>
                                             <option value="50-50 Chance (50%)">50-50 Chance (50%)</option>
@@ -1316,36 +1217,39 @@ const ProbabilityForm = () => {
                                 )}
 
                                 {/* Refresh & table column filters */}
-                                <div className="ms-auto align-self-end d-flex gap-2" style={{ flex: '0 0 auto' }}>
+                                <div className="ms-auto align-self-end d-flex gap-1" style={{ flex: '0 0 auto' }}>
                                     <button
                                         type="button"
                                         className="btn btn-outline-secondary btn-sm d-flex align-items-center justify-content-center"
-                                        style={{ width: '36px', height: '36px', padding: 0 }}
+                                        style={{ width: '28px', height: '28px', padding: 0 }}
                                         onClick={clearAllColumnFilters}
                                         title="Clear table filters"
                                         aria-label="Clear table filters"
                                     >
-                                        <FilterX size={16} />
+                                        <FilterX size={14} />
                                     </button>
                                     <button
                                         className="btn btn-outline-primary btn-sm d-flex align-items-center justify-content-center"
-                                        style={{ width: '36px', height: '36px', padding: 0 }}
+                                        style={{ width: '28px', height: '28px', padding: 0 }}
                                         onClick={fetchList}
                                         disabled={loadingList}
                                         title="Refresh"
                                         aria-label="Refresh"
                                     >
-                                        <RefreshCw size={16} />
+                                        <RefreshCw size={14} />
                                     </button>
+                                </div>
                                 </div>
                             </div>
                         </div>
 
-                        <div className="card-body p-0 d-flex flex-column" style={{ minHeight: 0 }}>
+                        <div className="card-body p-0 d-flex flex-column flex-grow-1 min-h-0" style={{ minHeight: 0, flex: '1 1 auto' }}>
                             <div
-                                className="prob-table-scroll-wrap border-top px-3"
+                                ref={tableScrollWrapRef}
+                                className="prob-table-scroll-wrap border-top px-2 flex-grow-1 min-h-0"
                                 style={{
-                                    maxHeight: 'calc(100vh - 260px)',
+                                    flex: '1 1 auto',
+                                    minHeight: 0,
                                     overflowX: 'auto',
                                     overflowY: 'auto',
                                     scrollbarGutter: 'stable',
@@ -1364,22 +1268,25 @@ const ProbabilityForm = () => {
                                             <th className="prob-summary-th prob-summary-details" style={{ width: '1300px' }} aria-hidden="true" />
                                         </tr>
                                         <tr className="prob-thead-labels">
-                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '50px', textAlign: 'left' }}>SL</th>
-                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '72px', textAlign: 'left' }}>Update</th>
+                                            <th className="px-2 py-1 align-bottom fw-normal" style={{ width: '50px', textAlign: 'left' }}>SL</th>
+                                            <th className="px-2 py-1 align-bottom fw-normal" style={{ width: '72px', textAlign: 'left' }}>Update</th>
                                             <th
+                                                ref={(el) => {
+                                                    filterHeaderRefs.current.enquiry = el;
+                                                }}
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
                                                 style={{ width: '100px', textAlign: 'left', cursor: 'pointer' }}
                                                 onClick={(e) => toggleMultiColumnFilter('enquiry', e)}
                                             >
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
-                                                    <span className="fw-bold">Enquiry</span>
+                                                    <span className="fw-normal">Enquiry</span>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0">
                                                         <span className={`user-select-none ${filterActiveClass('enquiry')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
                                                         <button
                                                             type="button"
                                                             data-sort-only="true"
                                                             className="btn btn-link p-0 text-decoration-none user-select-none"
-                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            style={{ fontSize: '11px', lineHeight: 1 }}
                                                             title="Sort"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -1390,42 +1297,24 @@ const ProbabilityForm = () => {
                                                         </button>
                                                     </span>
                                                 </div>
-                                                {openColFilter === 'enquiry' && (
-                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
-                                                        <div className="d-flex gap-1 mb-2">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.enquiry))}>All</button>
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
-                                                        </div>
-                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
-                                                            {columnUniques.enquiry.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
-                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
-                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
-                                                                    <span className="text-truncate">{val}</span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('enquiry')}>Clear</button>
-                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('enquiry')}>Apply</button>
-                                                        </div>
-                                                    </div>
-                                                )}
                                             </th>
                                             <th
+                                                ref={(el) => {
+                                                    filterHeaderRefs.current.project = el;
+                                                }}
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
                                                 style={{ width: '200px', textAlign: 'left', cursor: 'pointer' }}
                                                 onClick={(e) => toggleMultiColumnFilter('project', e)}
                                             >
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
-                                                    <span className="fw-bold">Project Name</span>
+                                                    <span className="fw-normal">Project Name</span>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0">
                                                         <span className={`user-select-none ${filterActiveClass('project')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
                                                         <button
                                                             type="button"
                                                             data-sort-only="true"
                                                             className="btn btn-link p-0 text-decoration-none user-select-none"
-                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            style={{ fontSize: '11px', lineHeight: 1 }}
                                                             title="Sort"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -1436,42 +1325,24 @@ const ProbabilityForm = () => {
                                                         </button>
                                                     </span>
                                                 </div>
-                                                {openColFilter === 'project' && (
-                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
-                                                        <div className="d-flex gap-1 mb-2">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.project))}>All</button>
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
-                                                        </div>
-                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
-                                                            {columnUniques.project.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
-                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
-                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
-                                                                    <span className="text-truncate">{val}</span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('project')}>Clear</button>
-                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('project')}>Apply</button>
-                                                        </div>
-                                                    </div>
-                                                )}
                                             </th>
                                             <th
+                                                ref={(el) => {
+                                                    filterHeaderRefs.current.customer = el;
+                                                }}
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
                                                 style={{ width: '160px', textAlign: 'left', cursor: 'pointer' }}
                                                 onClick={(e) => toggleMultiColumnFilter('customer', e)}
                                             >
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
-                                                    <span className="fw-bold">Customer Name</span>
+                                                    <span className="fw-normal">Customer Name</span>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0">
                                                         <span className={`user-select-none ${filterActiveClass('customer')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">▼</span>
                                                         <button
                                                             type="button"
                                                             data-sort-only="true"
                                                             className="btn btn-link p-0 text-decoration-none user-select-none"
-                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            style={{ fontSize: '11px', lineHeight: 1 }}
                                                             title="Sort"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -1482,29 +1353,11 @@ const ProbabilityForm = () => {
                                                         </button>
                                                     </span>
                                                 </div>
-                                                {openColFilter === 'customer' && (
-                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 260, maxHeight: 320, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
-                                                        <div className="d-flex gap-1 mb-2">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.customer))}>All</button>
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
-                                                        </div>
-                                                        <div style={{ maxHeight: 160, overflowY: 'auto' }}>
-                                                            {columnUniques.customer.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
-                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
-                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
-                                                                    <span className="text-truncate">{val}</span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('customer')}>Clear</button>
-                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('customer')}>Apply</button>
-                                                        </div>
-                                                    </div>
-                                                )}
                                             </th>
                                             <th
+                                                ref={(el) => {
+                                                    filterHeaderRefs.current.net = el;
+                                                }}
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header prob-net-quoted-th"
                                                 style={{ width: '140px', textAlign: 'left', cursor: 'pointer' }}
                                                 onClick={(e) => toggleNetColumnFilter(e)}
@@ -1512,7 +1365,7 @@ const ProbabilityForm = () => {
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
                                                     <div className="d-flex flex-column align-items-start" style={{ minWidth: 0, textAlign: 'left' }}>
                                                         <span className="prob-net-quoted-sub">(Excludes Subjobs)</span>
-                                                        <span className="fw-bold">Net Quoted</span>
+                                                        <span className="fw-normal">Net Quoted</span>
                                                     </div>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0 align-self-end">
                                                         <span className={`user-select-none ${filterActiveClass('net')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">
@@ -1522,7 +1375,7 @@ const ProbabilityForm = () => {
                                                             type="button"
                                                             data-sort-only="true"
                                                             className="btn btn-link p-0 text-decoration-none user-select-none"
-                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            style={{ fontSize: '11px', lineHeight: 1 }}
                                                             title="Sort"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -1533,40 +1386,17 @@ const ProbabilityForm = () => {
                                                         </button>
                                                     </span>
                                                 </div>
-                                                {openColFilter === 'net' && (
-                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', right: 0, top: '100%', zIndex: 1060, minWidth: 240, fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                                                        <label className="form-label small mb-1">Condition</label>
-                                                        <select className="form-select form-select-sm mb-2" value={draftNet.mode} onChange={(e) => setDraftNet((d) => ({ ...d, mode: e.target.value }))}>
-                                                            <option value="all">All</option>
-                                                            <option value="gt">Greater than</option>
-                                                            <option value="lt">Less than</option>
-                                                            <option value="eq">Equal to</option>
-                                                            <option value="gte">Greater or equal</option>
-                                                            <option value="lte">Less or equal</option>
-                                                            <option value="between">Between</option>
-                                                        </select>
-                                                        <label className="form-label small mb-1">Value (BD)</label>
-                                                        <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 101.100" value={draftNet.v1} onChange={(e) => setDraftNet((d) => ({ ...d, v1: e.target.value }))} />
-                                                        {draftNet.mode === 'between' && (
-                                                            <>
-                                                                <label className="form-label small mb-1">And (BD)</label>
-                                                                <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 200" value={draftNet.v2} onChange={(e) => setDraftNet((d) => ({ ...d, v2: e.target.value }))} />
-                                                            </>
-                                                        )}
-                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={clearNetFilter}>Clear</button>
-                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={applyNetDraft}>Apply</button>
-                                                        </div>
-                                                    </div>
-                                                )}
                                             </th>
                                             <th
+                                                ref={(el) => {
+                                                    filterHeaderRefs.current.status = el;
+                                                }}
                                                 className="px-2 py-1 align-bottom position-relative prob-table-filter-header"
                                                 style={{ width: '130px', textAlign: 'left', cursor: 'pointer' }}
                                                 onClick={(e) => toggleMultiColumnFilter('status', e)}
                                             >
                                                 <div className="d-flex align-items-end justify-content-between gap-1">
-                                                    <span className="fw-bold">Status</span>
+                                                    <span className="fw-normal">Status</span>
                                                     <span className="d-flex align-items-center gap-1 flex-shrink-0">
                                                         <span className={`user-select-none ${filterActiveClass('status')}`} style={{ fontSize: '10px', lineHeight: 1 }} title="Filter">
                                                             ▼
@@ -1575,7 +1405,7 @@ const ProbabilityForm = () => {
                                                             type="button"
                                                             data-sort-only="true"
                                                             className="btn btn-link p-0 text-decoration-none user-select-none"
-                                                            style={{ fontSize: '11px', lineHeight: 1, color: '#0c4a6e' }}
+                                                            style={{ fontSize: '11px', lineHeight: 1 }}
                                                             title="Sort"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
@@ -1586,29 +1416,8 @@ const ProbabilityForm = () => {
                                                         </button>
                                                     </span>
                                                 </div>
-                                                {openColFilter === 'status' && (
-                                                    <div className="prob-filter-panel border rounded shadow-sm bg-white p-2 mt-1 text-start text-dark normal-case fw-normal" style={{ position: 'absolute', left: 0, top: '100%', zIndex: 1060, minWidth: 220, maxHeight: 280, overflow: 'auto', fontSize: '11px' }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-                                                        <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
-                                                        <div className="d-flex gap-1 mb-2">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.status))}>All</button>
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>None</button>
-                                                        </div>
-                                                        <div style={{ maxHeight: 140, overflowY: 'auto' }}>
-                                                            {columnUniques.status.filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase())).map((val) => (
-                                                                <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
-                                                                    <input type="checkbox" checked={draftMulti.has(val)} onChange={() => { setDraftMulti((prev) => { const n = new Set(prev); if (n.has(val)) n.delete(val); else n.add(val); return n; }); }} />
-                                                                    <span className="text-truncate">{val}</span>
-                                                                </label>
-                                                            ))}
-                                                        </div>
-                                                        <div className="d-flex gap-1 mt-2 justify-content-end">
-                                                            <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('status')}>Clear</button>
-                                                            <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('status')}>Apply</button>
-                                                        </div>
-                                                    </div>
-                                                )}
                                             </th>
-                                            <th className="px-2 py-1 align-bottom fw-bold" style={{ width: '1300px', textAlign: 'left' }}>
+                                            <th className="px-2 py-1 align-bottom fw-normal" style={{ width: '1300px', textAlign: 'left' }}>
                                                 Details
                                             </th>
                                         </tr>
@@ -1640,10 +1449,9 @@ const ProbabilityForm = () => {
                                                     <td className="px-2 py-1 prob-td text-center">
                                                         <button
                                                             type="button"
-                                                            className={`btn btn-sm px-2 py-1 ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
+                                                            className={`btn btn-sm prob-row-update-btn ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
                                                             onClick={() => persistUpdate(item)}
                                                             disabled={updatingReqNo === item.RequestNo}
-                                                            style={{ fontSize: '11px', fontWeight: 'bold', minWidth: '58px', whiteSpace: 'nowrap' }}
                                                         >
                                                             {updatingReqNo === item.RequestNo ? (
                                                                 <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
@@ -2283,6 +2091,225 @@ const ProbabilityForm = () => {
                     </div>
                 </div>
             </div >
+            {openColFilter && filterPanelPos
+                ? createPortal(
+                      <div
+                          className="prob-filter-panel border rounded shadow-sm bg-white p-2 text-start text-dark normal-case fw-normal"
+                          style={{
+                              position: 'fixed',
+                              top: filterPanelPos.top,
+                              left: filterPanelPos.left,
+                              zIndex: 1100,
+                              minWidth: filterPanelPos.minWidth,
+                              maxHeight: filterPanelPos.maxHeight,
+                              overflow: 'auto',
+                              fontSize: '11px',
+                          }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                      >
+                          {openColFilter === 'enquiry' && (
+                              <>
+                                  <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                  <div className="d-flex gap-1 mb-2">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.enquiry))}>
+                                          All
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>
+                                          None
+                                      </button>
+                                  </div>
+                                  <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                      {columnUniques.enquiry
+                                          .filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase()))
+                                          .map((val) => (
+                                              <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={draftMulti.has(val)}
+                                                      onChange={() => {
+                                                          setDraftMulti((prev) => {
+                                                              const n = new Set(prev);
+                                                              if (n.has(val)) n.delete(val);
+                                                              else n.add(val);
+                                                              return n;
+                                                          });
+                                                      }}
+                                                  />
+                                                  <span className="text-truncate">{val}</span>
+                                              </label>
+                                          ))}
+                                  </div>
+                                  <div className="d-flex gap-1 mt-2 justify-content-end">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('enquiry')}>
+                                          Clear
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('enquiry')}>
+                                          Apply
+                                      </button>
+                                  </div>
+                              </>
+                          )}
+                          {openColFilter === 'project' && (
+                              <>
+                                  <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                  <div className="d-flex gap-1 mb-2">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.project))}>
+                                          All
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>
+                                          None
+                                      </button>
+                                  </div>
+                                  <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                      {columnUniques.project
+                                          .filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase()))
+                                          .map((val) => (
+                                              <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={draftMulti.has(val)}
+                                                      onChange={() => {
+                                                          setDraftMulti((prev) => {
+                                                              const n = new Set(prev);
+                                                              if (n.has(val)) n.delete(val);
+                                                              else n.add(val);
+                                                              return n;
+                                                          });
+                                                      }}
+                                                  />
+                                                  <span className="text-truncate">{val}</span>
+                                              </label>
+                                          ))}
+                                  </div>
+                                  <div className="d-flex gap-1 mt-2 justify-content-end">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('project')}>
+                                          Clear
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('project')}>
+                                          Apply
+                                      </button>
+                                  </div>
+                              </>
+                          )}
+                          {openColFilter === 'customer' && (
+                              <>
+                                  <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                  <div className="d-flex gap-1 mb-2">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.customer))}>
+                                          All
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>
+                                          None
+                                      </button>
+                                  </div>
+                                  <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+                                      {columnUniques.customer
+                                          .filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase()))
+                                          .map((val) => (
+                                              <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={draftMulti.has(val)}
+                                                      onChange={() => {
+                                                          setDraftMulti((prev) => {
+                                                              const n = new Set(prev);
+                                                              if (n.has(val)) n.delete(val);
+                                                              else n.add(val);
+                                                              return n;
+                                                          });
+                                                      }}
+                                                  />
+                                                  <span className="text-truncate">{val}</span>
+                                              </label>
+                                          ))}
+                                  </div>
+                                  <div className="d-flex gap-1 mt-2 justify-content-end">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('customer')}>
+                                          Clear
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('customer')}>
+                                          Apply
+                                      </button>
+                                  </div>
+                              </>
+                          )}
+                          {openColFilter === 'net' && (
+                              <>
+                                  <label className="form-label small mb-1">Condition</label>
+                                  <select className="form-select form-select-sm mb-2" value={draftNet.mode} onChange={(e) => setDraftNet((d) => ({ ...d, mode: e.target.value }))}>
+                                      <option value="all">All</option>
+                                      <option value="gt">Greater than</option>
+                                      <option value="lt">Less than</option>
+                                      <option value="eq">Equal to</option>
+                                      <option value="gte">Greater or equal</option>
+                                      <option value="lte">Less or equal</option>
+                                      <option value="between">Between</option>
+                                  </select>
+                                  <label className="form-label small mb-1">Value (BD)</label>
+                                  <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 101.100" value={draftNet.v1} onChange={(e) => setDraftNet((d) => ({ ...d, v1: e.target.value }))} />
+                                  {draftNet.mode === 'between' && (
+                                      <>
+                                          <label className="form-label small mb-1">And (BD)</label>
+                                          <input type="text" className="form-control form-control-sm mb-2" placeholder="e.g. 200" value={draftNet.v2} onChange={(e) => setDraftNet((d) => ({ ...d, v2: e.target.value }))} />
+                                      </>
+                                  )}
+                                  <div className="d-flex gap-1 mt-2 justify-content-end">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={clearNetFilter}>
+                                          Clear
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-primary py-0" onClick={applyNetDraft}>
+                                          Apply
+                                      </button>
+                                  </div>
+                              </>
+                          )}
+                          {openColFilter === 'status' && (
+                              <>
+                                  <input className="form-control form-control-sm mb-2" placeholder="Search..." value={filterSearch} onChange={(e) => setFilterSearch(e.target.value)} />
+                                  <div className="d-flex gap-1 mb-2">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set(columnUniques.status))}>
+                                          All
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => setDraftMulti(new Set())}>
+                                          None
+                                      </button>
+                                  </div>
+                                  <div style={{ maxHeight: 140, overflowY: 'auto' }}>
+                                      {columnUniques.status
+                                          .filter((v) => !filterSearch || String(v).toLowerCase().includes(filterSearch.toLowerCase()))
+                                          .map((val) => (
+                                              <label key={String(val)} className="d-flex align-items-center gap-2 mb-1 text-truncate" style={{ cursor: 'pointer' }}>
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={draftMulti.has(val)}
+                                                      onChange={() => {
+                                                          setDraftMulti((prev) => {
+                                                              const n = new Set(prev);
+                                                              if (n.has(val)) n.delete(val);
+                                                              else n.add(val);
+                                                              return n;
+                                                          });
+                                                      }}
+                                                  />
+                                                  <span className="text-truncate">{val}</span>
+                                              </label>
+                                          ))}
+                                  </div>
+                                  <div className="d-flex gap-1 mt-2 justify-content-end">
+                                      <button type="button" className="btn btn-sm btn-outline-secondary py-0" onClick={() => clearMultiFilter('status')}>
+                                          Clear
+                                      </button>
+                                      <button type="button" className="btn btn-sm btn-primary py-0" onClick={() => applyMultiDraft('status')}>
+                                          Apply
+                                      </button>
+                                  </div>
+                              </>
+                          )}
+                      </div>,
+                      document.body,
+                  )
+                : null}
             {historyReqNo ? (
                 <div className="position-fixed top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center" style={{ background: 'rgba(0,0,0,0.35)', zIndex: 2000 }}>
                     <div className="bg-white rounded shadow" style={{ width: '95%', maxWidth: '1200px', maxHeight: '85vh', overflow: 'hidden' }}>
@@ -2312,8 +2339,8 @@ const ProbabilityForm = () => {
                         </div>
                         <div className="p-2" style={{ maxHeight: '70vh', overflow: 'auto' }}>
                             <table className="table table-sm table-bordered mb-0" style={{ fontSize: '12px' }}>
-                                <thead>
-                                    <tr>
+                                <thead style={{ background: EMS_TABLE_HEADER_GRADIENT }}>
+                                    <tr className="text-white">
                                         <th>Updated</th>
                                         <th>Customer name</th>
                                         <th>Quote Ref</th>

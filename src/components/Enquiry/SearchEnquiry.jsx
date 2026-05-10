@@ -4,9 +4,18 @@ import { useAuth } from '../../context/AuthContext';
 import excelIcon from '../../assets/excel_icon.png';
 import DateInput from './DateInput';
 import { EMS_LIST_SEARCH_ENABLED_STYLE, EMS_LIST_CLEAR_STYLE } from '../../constants/emsSearchButtons';
+import { getLeadJobDisplayLines, formatLeadJobLinesPlain } from '../../utils/leadJobDisplayLines';
+import { sortEnquiryRows } from '../../utils/enquiryResultsSort';
+import {
+    formatEnquiryResultDate,
+    getCustomerDisplayLines,
+    getEnquiryTypeDisplay,
+    getEnquiryDetailsDisplay,
+} from '../../utils/enquiryResultsHelpers';
+import EnquiryResultsTable from './EnquiryResultsTable';
 
 const SearchEnquiry = ({ onOpen }) => {
-    const { enquiries } = useData();
+    const { enquiries, masters } = useData();
     const { currentUser } = useAuth();
 
     // Search filters
@@ -45,20 +54,6 @@ const SearchEnquiry = ({ onOpen }) => {
             if (dateB - dateA !== 0) return dateB - dateA;
             return (b.RequestNo || '').localeCompare(a.RequestNo || '');
         });
-    };
-
-    // Date formatting helper: DD-MMM-YY
-    const formatDate = (dateStr) => {
-        if (!dateStr) return "-";
-        const date = new Date(dateStr);
-        if (isNaN(date.getTime())) return dateStr;
-
-        const day = String(date.getDate()).padStart(2, '0');
-        const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-        const month = months[date.getMonth()];
-        const year = String(date.getFullYear()).slice(-2);
-
-        return `${day}-${month}-${year}`;
     };
 
     // Custom sorting for Due Date (Default): Today/Future (Asc) then Past (Desc)
@@ -121,58 +116,11 @@ const SearchEnquiry = ({ onOpen }) => {
         setSortConfig({ key, direction });
     };
 
-    // Memoize and sort results
     const sortedResults = React.useMemo(() => {
         if (sortConfig.key === 'Default') {
             return getPrioritySortedList(results);
         }
-
-        const sortableItems = [...results];
-        if (sortConfig.key !== null) {
-            sortableItems.sort((a, b) => {
-                let valA = a[sortConfig.key];
-                let valB = b[sortConfig.key];
-
-                // Special handling for nested/computed fields
-                if (sortConfig.key === 'Customer') valA = a.SelectedCustomers?.join(', ') || a.CustomerName;
-                if (sortConfig.key === 'Customer') valB = b.SelectedCustomers?.join(', ') || b.CustomerName;
-                if (sortConfig.key === 'SE') valA = a.SelectedConcernedSEs?.join(', ') || a.ConcernedSE;
-                if (sortConfig.key === 'SE') valB = b.SelectedConcernedSEs?.join(', ') || b.ConcernedSE;
-
-                // Date handling
-                if (sortConfig.key === 'EnquiryDate' || sortConfig.key === 'DueOn') {
-                    const d1 = valA ? new Date(valA).getTime() : 0;
-                    const d2 = valB ? new Date(valB).getTime() : 0;
-                    if (d1 !== d2) {
-                        return sortConfig.direction === 'asc' ? d1 - d2 : d2 - d1;
-                    }
-                    // Tie-breaker: RequestNo (Numeric)
-                    const n1 = parseInt(a.RequestNo) || 0;
-                    const n2 = parseInt(b.RequestNo) || 0;
-                    return sortConfig.direction === 'asc' ? n1 - n2 : n2 - n1;
-                }
-
-                // Numeric handling for RequestNo
-                if (sortConfig.key === 'RequestNo') {
-                    const n1 = parseInt(valA) || 0;
-                    const n2 = parseInt(valB) || 0;
-                    return sortConfig.direction === 'asc' ? n1 - n2 : n2 - n1;
-                }
-
-                // String handling
-                valA = valA ? String(valA).toLowerCase() : "";
-                valB = valB ? String(valB).toLowerCase() : "";
-
-                if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-                if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-
-                // Final Tie-breaker for all sorts: RequestNo (Numeric)
-                const nr1 = parseInt(a.RequestNo) || 0;
-                const nr2 = parseInt(b.RequestNo) || 0;
-                return nr2 - nr1; // Always latest for equal strings
-            });
-        }
-        return sortableItems;
+        return sortEnquiryRows(results, sortConfig);
     }, [results, sortConfig]);
 
     const handleSearch = useCallback(() => {
@@ -219,6 +167,7 @@ const SearchEnquiry = ({ onOpen }) => {
                 e.ClientName?.toLowerCase().includes(lowerText) ||
                 e.ProjectName?.toLowerCase().includes(lowerText) ||
                 (e.SelectedConcernedSEs && e.SelectedConcernedSEs.join(',').toLowerCase().includes(lowerText)) ||
+                String(e.EnquiryDetails || e.DetailsOfEnquiry || '').toLowerCase().includes(lowerText) ||
                 e.CreatedBy?.toLowerCase().includes(lowerText)
             );
         }
@@ -263,20 +212,22 @@ const SearchEnquiry = ({ onOpen }) => {
             return;
         }
 
-        const headers = ["Enquiry No.", "Enquiry Date", "Customer Name / Contractor Name", "Client", "Project", "Source", "Due Date", "Sales Engineer / Estimation Engineer / Quantity Surveyor", "Status", "Created By"];
+        const headers = ["Enquiry No.", "Enquiry Date", "Project", "Divisions & SE/EE/TE/QS Involved", "Enquiry Details", "Customer Name / Contractor Name", "Due Date", "Client", "Enquiry Type", "Source", "Status", "Created By"];
 
         const csvContent = [
             headers.join(","),
             ...sortedResults.map(r => {
                 const row = [
                     r.RequestNo,
-                    formatDate(r.EnquiryDate),
-                    (r.SelectedCustomers?.join('; ') || r.CustomerName || ''),
-                    (r.ClientName || ''),
+                    formatEnquiryResultDate(r.EnquiryDate),
                     (r.ProjectName || ''),
+                    formatLeadJobLinesPlain(getLeadJobDisplayLines(r, { users: masters.users })),
+                    getEnquiryDetailsDisplay(r),
+                    getCustomerDisplayLines(r).join('\n'),
+                    formatEnquiryResultDate(r.DueOn),
+                    (r.ClientName || ''),
+                    getEnquiryTypeDisplay(r),
                     (r.SourceOfInfo || ''),
-                    formatDate(r.DueOn),
-                    (r.SelectedConcernedSEs?.join('; ') || r.ConcernedSE || ''),
                     r.Status || 'Enquiry',
                     r.CreatedBy || '-'
                 ];
@@ -295,25 +246,6 @@ const SearchEnquiry = ({ onOpen }) => {
             link.click();
             document.body.removeChild(link);
         }
-    };
-
-    const SortIcon = ({ column }) => {
-        if (sortConfig.key !== column) return <i className="bi bi-arrow-down-up ms-1 text-muted" style={{ fontSize: '10px' }}></i>;
-        return sortConfig.direction === 'asc'
-            ? <i className="bi bi-arrow-up ms-1 text-primary"></i>
-            : <i className="bi bi-arrow-down ms-1 text-primary"></i>;
-    };
-    const headerThStyle = {
-        position: 'sticky',
-        top: 0,
-        zIndex: 2,
-        background: 'linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%)',
-        color: '#ffffff',
-        textShadow: '0 1px 2px rgba(15, 23, 42, 0.38)',
-        borderColor: 'rgba(210, 222, 255, 0.25)',
-        boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14)',
-        fontSize: '11.7px',
-        fontWeight: 400
     };
 
     return (
@@ -341,7 +273,11 @@ const SearchEnquiry = ({ onOpen }) => {
                     top: 0,
                     zIndex: 10,
                     background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
-                    borderRadius: '10px',
+                    borderTopLeftRadius: '18px',
+                    borderTopRightRadius: '18px',
+                    borderBottomLeftRadius: '10px',
+                    borderBottomRightRadius: '10px',
+                    overflow: 'hidden',
                     paddingTop: '6px',
                     paddingBottom: '6px',
                     paddingLeft: '8px',
@@ -491,177 +427,17 @@ const SearchEnquiry = ({ onOpen }) => {
                 .search-btn-hover:active, .clear-btn-hover:active {
                     transform: scale(0.98);
                 }
-                .action-icon-hover:hover {
-                    background-color: rgba(13, 110, 253, 0.25) !important;
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-                }
-                .sortable-header {
-                    cursor: pointer;
-                    user-select: none;
-                    white-space: nowrap;
-                }
-                .header-content {
-                    display: inline-flex;
-                    align-items: center;
-                    width: 100%;
-                }
-                .sortable-header:hover {
-                    background-color: rgba(255, 255, 255, 0.12);
-                }
-                tbody tr.enquiry-search-row-open {
-                    cursor: pointer;
-                }
-                tbody tr.enquiry-search-row-open:hover {
-                    background-color: #eff6ff !important;
-                }
-                .enquiry-search-table-wrap {
-                    flex: 1 1 0;
-                    min-height: 0;
-                    overflow-y: auto;
-                    overflow-x: auto;
-                    border: 1px solid #dbe3f1;
-                    border-radius: 8px;
-                    width: 100%;
-                }
-                .enquiry-search-table-wrap table {
-                    margin-bottom: 0 !important;
-                }
-                .enquiry-search-table-wrap thead tr {
-                    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%) !important;
-                }
-                .enquiry-search-table-wrap thead th {
-                    position: sticky;
-                    top: 0;
-                    z-index: 5;
-                    background: linear-gradient(180deg, #3b74c2 0%, #2f5fae 45%, #203f75 100%) !important;
-                    color: #ffffff !important;
-                    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.38);
-                    border-color: rgba(210, 222, 255, 0.25) !important;
-                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(15, 23, 42, 0.14);
-                    --bs-table-bg: transparent !important;
-                    --bs-table-accent-bg: transparent !important;
-                    text-align: left;
-                }
-                .enquiry-search-table-wrap thead th .text-muted,
-                .enquiry-search-table-wrap thead th .text-primary {
-                    color: #e6efff !important;
-                }
-                .enquiry-search-table-wrap tbody td {
-                    background: #ffffff;
-                    text-align: left;
-                    padding-top: 0.22rem !important;
-                    padding-bottom: 0.22rem !important;
-                    line-height: 1.15;
-                    vertical-align: middle;
-                }
-                .enquiry-search-table-wrap tbody tr:nth-child(odd) td {
-                    background: #ffffff !important;
-                }
-                .enquiry-search-table-wrap tbody tr:nth-child(even) td {
-                    background: #f3f7fd !important;
-                }
                 `}
             </style>
 
-            {/* Results Table */}
-            <div className="table-responsive enquiry-search-table-wrap">
-                <table
-                    className="table table-sm table-hover align-middle"
-                    style={{ fontSize: '11.7px', tableLayout: 'auto', width: 'max-content', minWidth: '100%' }}
-                >
-                    <thead>
-                        <tr>
-                            <th style={headerThStyle}>Action</th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('RequestNo')}>
-                                <div className="header-content">Enquiry No. <SortIcon column="RequestNo" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('EnquiryDate')}>
-                                <div className="header-content">Enquiry Date <SortIcon column="EnquiryDate" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('Customer')}>
-                                <div className="header-content">Customer Name / Contractor Name <SortIcon column="Customer" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('ClientName')}>
-                                <div className="header-content">Client <SortIcon column="ClientName" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('ProjectName')}>
-                                <div className="header-content">Project <SortIcon column="ProjectName" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('SourceOfInfo')}>
-                                <div className="header-content">Source <SortIcon column="SourceOfInfo" /></div>
-                            </th>
-                            <th className="sortable-header" onClick={() => handleSort('DueOn')} style={headerThStyle}>
-                                <div className="header-content">Due <SortIcon column="DueOn" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('SE')}>
-                                <div className="header-content">SE / EE/ TE / QS <SortIcon column="SE" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('Status')}>
-                                <div className="header-content">Status <SortIcon column="Status" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => handleSort('CreatedBy')}>
-                                <div className="header-content">Created By <SortIcon column="CreatedBy" /></div>
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {sortedResults.length === 0 ? (
-                            <tr><td colSpan="11" className="text-muted text-center">No results.</td></tr>
-                        ) : (
-                            sortedResults.map((r, idx) => (
-                                <tr
-                                    key={`${r.RequestNo}-${idx}`}
-                                    className="enquiry-search-row-open"
-                                    tabIndex={0}
-                                    role="button"
-                                    title={r._canEdit ? 'Open enquiry (edit)' : 'Open enquiry (view)'}
-                                    onClick={() => r.RequestNo && onOpen(r.RequestNo)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter' || e.key === ' ') {
-                                            e.preventDefault();
-                                            if (r.RequestNo) onOpen(r.RequestNo);
-                                        }
-                                    }}
-                                >
-                                    <td className="position-relative">
-                                        <div
-                                            aria-hidden
-                                            style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                width: '24px',
-                                                height: '24px',
-                                                borderRadius: '5px',
-                                                transition: 'all 0.2s',
-                                                backgroundColor: r._canEdit ? 'rgba(13, 110, 253, 0.1)' : 'rgba(108, 117, 125, 0.1)',
-                                                color: r._canEdit ? '#0d6efd' : '#6c757d'
-                                            }}
-                                            className="action-icon-hover"
-                                        >
-                                            {r._canEdit ? (
-                                                <i className="bi bi-pencil-square" style={{ fontSize: '13px' }}></i>
-                                            ) : (
-                                                <i className="bi bi-eye" style={{ fontSize: '13px' }}></i>
-                                            )}
-                                        </div>
-                                    </td>
-                                    <td>{r.RequestNo}</td>
-                                    <td>{formatDate(r.EnquiryDate)}</td>
-                                    <td>{r.SelectedCustomers?.join(', ') || r.CustomerName}</td>
-                                    <td>{r.ClientName}</td>
-                                    <td>{r.ProjectName}</td>
-                                    <td>{r.SourceOfInfo}</td>
-                                    <td>{formatDate(r.DueOn)}</td>
-                                    <td>{r.SelectedConcernedSEs?.join(', ') || r.ConcernedSE}</td>
-                                    <td>{r.Status || 'Enquiry'}</td>
-                                    <td>{r.CreatedBy || '-'}</td>
-                                </tr>
-                            ))
-                        )}
-                    </tbody>
-                </table>
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <EnquiryResultsTable
+                    sortedRows={sortedResults}
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    masters={masters}
+                    onRowOpen={onOpen}
+                />
             </div>
         </div>
     );

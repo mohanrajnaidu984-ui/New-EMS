@@ -21,6 +21,23 @@ const { sendGeneralEmail } = require('../emailService');
 const { resolveQuoteUploadDestination } = require('../lib/attachmentsRoot');
 
 /**
+ * UNC paths (`\\server\share\...`) must not be passed through `path.resolve()` — Node can change the prefix and break Express.sendFile / existsSync.
+ * QuoteAttachments.FilePath stores disk location only; FileData is intentionally unused (files are never stored as BLOB in DB).
+ */
+function absolutePathForFilesystem(p) {
+    const s = String(p ?? '').trim();
+    if (!s) return s;
+    const normalized = path.normalize(s);
+    if (normalized.startsWith('\\\\')) {
+        return normalized;
+    }
+    if (path.isAbsolute(normalized)) {
+        return normalized;
+    }
+    return path.resolve(normalized);
+}
+
+/**
  * Pending list SQL keys off priced tuples vs quote existence; JS mapping (customer / lead / OwnJob matching)
  * can show every line quoted while the row is still returned. Omit those from GET /list/pending.
  */
@@ -35,7 +52,7 @@ function shouldOmitFromPendingQuoteList(row) {
     return false;
 }
 
-// Quote attachments: same root as enquiries (ENQUIRY_ATTACHMENTS_ROOT); files under …/quotes/<quoteId>/
+// Quote attachments: ENQUIRY_ATTACHMENTS_ROOT + Quotes/<quoteId>, or QUOTE_ATTACHMENTS_ROOT=<UNC>/Quotes, or explicit QUOTE_ATTACHMENTS_ROOT (see lib/attachmentsRoot.js).
 const quoteAttachmentStorage = multer.diskStorage({
     destination: (req, file, cb) => {
         try {
@@ -43,8 +60,10 @@ const quoteAttachmentStorage = multer.diskStorage({
             if (!fs.existsSync(dest)) {
                 fs.mkdirSync(dest, { recursive: true });
             }
+            console.log('[quote-attachments] multer destination:', dest);
             cb(null, dest);
         } catch (err) {
+            console.error('[quote-attachments] mkdir failed:', err && err.message, resolveQuoteUploadDestination(req.params.quoteId));
             cb(err);
         }
     },
@@ -2429,9 +2448,7 @@ router.post('/:id/revise', async (req, res) => {
             ? typeof digitalSignaturesJson === 'string'
                 ? digitalSignaturesJson
                 : JSON.stringify(Array.isArray(digitalSignaturesJson) ? digitalSignaturesJson : [])
-            : existing.DigitalSignaturesJson != null && existing.DigitalSignaturesJson !== undefined
-              ? String(existing.DigitalSignaturesJson)
-              : '[]';
+            : '[]';
         let effectiveOwnJob = String(ownJob !== undefined && ownJob !== null ? ownJob : (existing.OwnJob || '')).trim();
 
         if (preparedByEmail || existing.PreparedByEmail) {
@@ -2595,16 +2612,26 @@ router.delete('/config/templates/:id', async (req, res) => {
 // GET /api/quotes/attachments/:quoteId - List all attachments for a quote
 router.get('/attachments/:quoteId', async (req, res) => {
     try {
-        const { quoteId } = req.params;
+        const quoteIdNum = parseInt(String(req.params.quoteId), 10);
+        if (!Number.isFinite(quoteIdNum)) {
+            return res.status(400).json({ error: 'Invalid quote id' });
+        }
         const result = await sql.query`
             SELECT ID, QuoteID, FileName, UploadedAt 
             FROM QuoteAttachments 
-            WHERE QuoteID = ${quoteId}
+            WHERE QuoteID = ${quoteIdNum}
             ORDER BY UploadedAt DESC
         `;
         res.json(result.recordset);
     } catch (err) {
         console.error('Error fetching quote attachments:', err);
+        const msg = String(err && err.message ? err.message : err);
+        if (/invalid object name ['"]?quoteattachments/i.test(msg)) {
+            return res.status(500).json({
+                error: 'QuoteAttachments table missing',
+                hint: 'Run: node server/migrate_quote_attachments.js',
+            });
+        }
         res.status(500).json({ error: 'Failed to fetch attachments' });
     }
 });
@@ -2612,7 +2639,10 @@ router.get('/attachments/:quoteId', async (req, res) => {
 // POST /api/quotes/attachments/:quoteId - Upload attachments for a quote
 router.post('/attachments/:quoteId', upload.array('files'), async (req, res) => {
     try {
-        const { quoteId } = req.params;
+        const quoteIdNum = parseInt(String(req.params.quoteId), 10);
+        if (!Number.isFinite(quoteIdNum)) {
+            return res.status(400).json({ error: 'Invalid quote id' });
+        }
         const files = req.files;
 
         if (!files || files.length === 0) {
@@ -2622,20 +2652,40 @@ router.post('/attachments/:quoteId', upload.array('files'), async (req, res) => 
         const uploadedResults = [];
         for (const file of files) {
             const fileName = file.originalname;
-            const filePath = file.path;
+            const filePath = absolutePathForFilesystem(file.path);
+            if (!fs.existsSync(filePath)) {
+                console.error('[quote-attachments] file missing after multer write:', filePath);
+                return res.status(500).json({
+                    error: 'Upload failed: file was not written to storage',
+                    hint: 'Verify ENQUIRY_ATTACHMENTS_ROOT / QUOTE_ATTACHMENTS_ROOT and that the Windows account running Node can create files on that UNC share.',
+                    attemptedPath: filePath,
+                });
+            }
+            console.log('[quote-attachments] saved file:', filePath);
 
             const result = await sql.query`
                 INSERT INTO QuoteAttachments (QuoteID, FileName, FilePath)
-                VALUES (${quoteId}, ${fileName}, ${filePath});
+                VALUES (${quoteIdNum}, ${fileName}, ${filePath});
                 SELECT SCOPE_IDENTITY() AS ID;
             `;
             uploadedResults.push({ id: result.recordset[0].ID, fileName });
         }
 
-        res.status(201).json({ message: 'Files uploaded successfully', files: uploadedResults });
+        res.status(201).json({
+            message: 'Files uploaded successfully',
+            storageMode: 'filesystem',
+            files: uploadedResults,
+        });
     } catch (err) {
         console.error('Error uploading quote attachments:', err);
-        res.status(500).json({ error: 'Failed to upload attachments' });
+        const msg = String(err && err.message ? err.message : err);
+        if (/invalid object name ['"]?quoteattachments/i.test(msg)) {
+            return res.status(500).json({
+                error: 'QuoteAttachments table missing',
+                hint: 'Run: node server/migrate_quote_attachments.js',
+            });
+        }
+        res.status(500).json({ error: 'Failed to upload attachments', details: msg });
     }
 });
 
@@ -2652,12 +2702,19 @@ router.get('/attachments/download/:id', async (req, res) => {
             return res.status(404).json({ error: 'Attachment not found' });
         }
 
-        if (fs.existsSync(attachment.FilePath)) {
+        const absPath = absolutePathForFilesystem(attachment.FilePath);
+        if (fs.existsSync(absPath)) {
             const disposition = req.query.download === 'true' ? 'attachment' : 'inline';
             res.setHeader('Content-Disposition', `${disposition}; filename="${attachment.FileName}"`);
-            res.sendFile(path.resolve(attachment.FilePath));
+            res.sendFile(absPath);
         } else {
-            res.status(404).json({ error: 'File not found on server' });
+            console.error('[quote-attachments] download missing file:', absPath);
+            res.status(404).json({
+                error: 'File not found on server',
+                pathInDb: attachment.FilePath,
+                resolvedPath: absPath,
+                hint: 'Row exists but the file is missing on disk (moved, UNC offline, or upload failed silently).',
+            });
         }
     } catch (err) {
         console.error('Error downloading quote attachment:', err);
@@ -2700,8 +2757,11 @@ router.delete('/attachments/:id', async (req, res) => {
         `;
         const attachment = result.recordset[0];
 
-        if (attachment && fs.existsSync(attachment.FilePath)) {
-            fs.unlinkSync(attachment.FilePath);
+        if (attachment) {
+            const absPath = absolutePathForFilesystem(attachment.FilePath);
+            if (fs.existsSync(absPath)) {
+                fs.unlinkSync(absPath);
+            }
         }
 
         await sql.query`DELETE FROM QuoteAttachments WHERE ID = ${id}`;

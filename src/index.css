@@ -9,6 +9,8 @@
   --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  /* Search Enquiry table header — shared with Pricing / Quote / Probability list grids */
+  --ems-table-header-gradient: linear-gradient(180deg, #4d88d6 0%, #3e74c4 45%, #305894 100%);
 }
 
 * {
@@ -722,11 +724,7 @@ input[type="date"]:focus::-webkit-datetime-edit {
   border-color: #dfe0e1;
 }
 
-/* Probability list: totals row + sky-blue label row; entire thead sticks as one block */
 .prob-probability-list-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 8;
   color: #0c4a6e;
 }
 
@@ -768,25 +766,55 @@ input[type="date"]:focus::-webkit-datetime-edit {
 }
 
 .prob-probability-list-table thead tr.prob-thead-labels {
-  background-color: #4b5a96;
-  background-image: linear-gradient(
-    180deg,
-    #8c97c8 0%,
-    #6f7db4 20%,
-    #5a679f 52%,
-    #4a578d 78%,
-    #3f4c82 100%
-  );
+  background-color: transparent;
+  background-image: var(--ems-table-header-gradient);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.45) inset,
     0 -1px 0 rgba(22, 33, 74, 0.38) inset,
-    0 2px 6px rgba(26, 36, 76, 0.22);
+    0 2px 6px rgba(26, 36, 76, 0.22),
+    0 4px 12px rgba(15, 23, 42, 0.18);
   border-top-left-radius: 10px;
   border-top-right-radius: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
-/* Sky-blue label row: kill Bootstrap .table white/inset fill so gradient shows on every column */
+/* Sky-blue label row: gradient on each th so sticky header cells stay solid while tbody scrolls */
+.prob-table-scroll-wrap .prob-probability-list-table.table > thead > tr.prob-thead-labels > th {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  background-color: transparent !important;
+  background-image: var(--ems-table-header-gradient) !important;
+  color: #ffffff !important;
+  --bs-table-bg: transparent !important;
+  --bs-table-accent-bg: transparent !important;
+  vertical-align: bottom;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.018em;
+  text-shadow: 0 1px 1px rgba(19, 27, 58, 0.6);
+  line-height: 1.35;
+  padding-top: calc(0.5rem * 1.2);
+  padding-bottom: calc(0.5rem * 1.2);
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(20, 29, 62, 0.22) !important;
+  border-color: rgba(210, 222, 255, 0.2);
+}
+
+/* Rounded top corners on the label row (must be on th — tr radius does not clip cells) */
+.prob-table-scroll-wrap .prob-probability-list-table thead tr.prob-thead-labels > th:first-child {
+  border-top-left-radius: 10px;
+}
+
+.prob-table-scroll-wrap .prob-probability-list-table thead tr.prob-thead-labels > th:last-child {
+  border-top-right-radius: 10px;
+}
+
+/* Non-scroll contexts (if any) keep row-level gradient only */
 .prob-probability-list-table.table > thead > tr.prob-thead-labels > th {
   background-color: transparent !important;
   background-image: none !important;
@@ -796,7 +824,7 @@ input[type="date"]:focus::-webkit-datetime-edit {
   vertical-align: bottom;
   text-align: left;
   font-size: 0.72rem;
-  font-weight: 700;
+  font-weight: 400;
   letter-spacing: 0.018em;
   text-shadow: 0 1px 1px rgba(19, 27, 58, 0.6);
   line-height: 1.35;
@@ -821,15 +849,78 @@ input[type="date"]:focus::-webkit-datetime-edit {
   text-shadow: 0 1px 1px rgba(19, 27, 58, 0.55);
 }
 
+/* Let the list filter strip sit on the page background (no white “frame” behind the rounded panel) */
+.prob-probability-page .card {
+  background-color: transparent;
+  --bs-card-bg: transparent;
+}
+
+.prob-probability-page .card-body {
+  background-color: #ffffff;
+  border-radius: 0 0 0.5rem 0.5rem;
+}
+
 .prob-probability-page .card-header {
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border-bottom: 1px solid #dbeafe !important;
+  background: transparent !important;
+  border-bottom: none !important;
 }
 
 .prob-probability-page .card-header label.small {
   color: #1e40af !important;
-  font-weight: 700 !important;
+  font-weight: 400 !important;
   letter-spacing: 0.01em;
+}
+
+/* List filter strip — compact rounded container */
+.prob-probability-page .prob-list-filter-panel {
+  margin-top: 2px;
+  margin-bottom: 2px;
+  padding: 4px 8px;
+  border: 1px solid #dbe3f1;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%);
+  overflow: visible;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 1px 6px rgba(71, 85, 105, 0.09);
+}
+
+.prob-probability-page .prob-list-filter-panel > .d-flex.align-items-end {
+  gap: 0.35rem !important;
+}
+
+.prob-probability-page .prob-list-filter-panel label.small {
+  font-size: 0.68rem !important;
+  line-height: 1.15;
+  letter-spacing: 0.008em;
+}
+
+.prob-probability-page .prob-list-filter-panel .form-select.form-select-sm,
+.prob-probability-page .prob-list-filter-panel .form-control.form-control-sm {
+  min-height: 1.65rem;
+  padding-top: 0.18rem;
+  padding-bottom: 0.18rem;
+  padding-left: 0.4rem;
+  padding-right: 1.65rem;
+  font-size: 0.76rem;
+  line-height: 1.25;
+}
+
+.prob-probability-page .prob-list-filter-panel .prob-date-input {
+  min-height: 1.65rem;
+  padding-top: 0.18rem !important;
+  padding-bottom: 0.18rem !important;
+  font-size: 0.76rem !important;
+}
+
+.prob-probability-page .prob-list-filter-panel .prob-date-picker-wrap .prob-date-input-icon {
+  right: 6px;
+  width: 12px;
+  height: 12px;
+}
+
+/* Bootstrap fw-bold on thead labels → normal weight */
+.prob-probability-list-table thead tr.prob-thead-labels th.fw-bold,
+.prob-probability-list-table thead tr.prob-thead-labels .fw-bold {
+  font-weight: 400 !important;
 }
 
 .prob-probability-list-table thead tr:not(.prob-summary-row):not(.prob-thead-labels) {
@@ -851,18 +942,6 @@ input[type="date"]:focus::-webkit-datetime-edit {
   text-shadow: 0 1px 1px rgba(19, 27, 58, 0.45);
 }
 
-@supports (background: linear-gradient(in oklab, white, blue)) {
-  .prob-probability-list-table thead tr.prob-thead-labels {
-    background-image: linear-gradient(
-      180deg in oklab,
-      oklch(0.71 0.08 275) 0%,
-      oklch(0.62 0.09 275) 28%,
-      oklch(0.54 0.08 275) 62%,
-      oklch(0.47 0.07 275) 100%
-    );
-  }
-}
-
 /* Probability list: body alignment (bottom-left; net / numeric exceptions) */
 .prob-probability-page {
   overflow-x: hidden;
@@ -876,6 +955,35 @@ input[type="date"]:focus::-webkit-datetime-edit {
   border: 1px solid #dbe6f3;
   border-radius: 10px;
   overflow: hidden;
+}
+
+/* Allow sticky thead inside scroll wrapper — table overflow clips sticky positioning */
+.prob-table-scroll-wrap > table.prob-probability-list-table {
+  overflow: visible;
+}
+
+/* Filter dropdowns live in thead but extend over tbody — keep thead above paint order */
+.prob-table-scroll-wrap .prob-probability-list-table thead {
+  position: relative;
+  z-index: 30;
+}
+
+.prob-table-scroll-wrap .prob-probability-list-table tbody {
+  position: relative;
+  z-index: 1;
+}
+
+.prob-table-scroll-wrap .prob-probability-list-table tfoot {
+  position: relative;
+  z-index: 1;
+}
+
+.prob-probability-list-table thead th.prob-table-filter-header {
+  overflow: visible !important;
+}
+
+.prob-probability-list-table .prob-filter-panel {
+  z-index: 1080 !important;
 }
 
 .prob-probability-list-table tbody td.prob-td {
@@ -943,6 +1051,23 @@ input[type="date"]:focus::-webkit-datetime-edit {
   padding-bottom: 0.12rem;
   padding-left: 0.38rem;
   padding-right: 0.38rem;
+}
+
+/* Update column — row persist button (narrower than detail-area btn-sm) */
+.prob-probability-page .prob-probability-list-table tbody td.prob-td .prob-row-update-btn {
+  font-size: 0.62rem !important;
+  font-weight: 700;
+  padding: 0.1rem 0.36rem !important;
+  min-width: 48px;
+  line-height: 1.15;
+  white-space: nowrap;
+  border-radius: 0.3rem;
+}
+
+.prob-probability-page .prob-probability-list-table tbody td.prob-td .prob-row-update-btn .spinner-border-sm {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-width: 0.11em;
 }
 
 /* Force-compact all remaining inline-heavy controls/text inside probability detail cells */
@@ -1046,6 +1171,7 @@ input[type="date"]:focus::-webkit-datetime-edit {
   background: #ffffff;
   border-radius: 0 0 12px 12px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  -webkit-overflow-scrolling: touch;
 }
 
 .prob-date-picker-wrap {

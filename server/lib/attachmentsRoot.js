@@ -57,12 +57,44 @@ function resolveEnquiryUploadDestinationByVisibility(requestNo, visibility, divi
     return path.join(base, safeRequestNo, safeDivision);
 }
 
+/**
+ * Folder under ENQUIRY_ATTACHMENTS_ROOT for quote files (default `Quotes` to match \\share\ems app\Quotes\…).
+ * Override with QUOTE_ATTACHMENTS_SUBFOLDER e.g. `quotes` if an older deploy used lowercase.
+ */
+function quoteAttachmentsSubfolder() {
+    const s = process.env.QUOTE_ATTACHMENTS_SUBFOLDER;
+    if (s != null && String(s).trim()) return String(s).trim();
+    return 'Quotes';
+}
+
+/** Parent directory for all quote attachment folders (no per-quote id). For logs / ops. */
+function resolveQuoteAttachmentsBase() {
+    const explicit =
+        process.env.QUOTE_ATTACHMENTS_ROOT || process.env.EMS_QUOTE_ATTACHMENTS_ROOT;
+    if (explicit && String(explicit).trim()) {
+        return path.normalize(String(explicit).trim());
+    }
+    const envRoot = normalizeEnvRoot();
+    if (envRoot) {
+        return path.join(envRoot, quoteAttachmentsSubfolder());
+    }
+    return path.join(__dirname, '..', 'uploads', 'quotes');
+}
+
 function resolveQuoteUploadDestination(quoteId) {
     const raw = quoteId != null ? String(quoteId) : 'unknown';
     const safeId = raw.replace(/[^a-zA-Z0-9-_]/g, '_') || 'unknown';
+
+    /** Full UNC/base for quote files, e.g. \\151.50.20.129\ems app\Quotes — optional; overrides subfolder layout */
+    const explicitRoot =
+        process.env.QUOTE_ATTACHMENTS_ROOT || process.env.EMS_QUOTE_ATTACHMENTS_ROOT;
+    if (explicitRoot && String(explicitRoot).trim()) {
+        return path.join(path.normalize(String(explicitRoot).trim()), safeId);
+    }
+
     const envRoot = normalizeEnvRoot();
     if (envRoot) {
-        return path.join(envRoot, 'quotes', safeId);
+        return path.join(envRoot, quoteAttachmentsSubfolder(), safeId);
     }
     return path.join(__dirname, '..', 'uploads', 'quotes', safeId);
 }
@@ -73,5 +105,6 @@ module.exports = {
     resolveEnquiryUploadDestination,
     resolveEnquiryAttachmentVisibilityBase,
     resolveEnquiryUploadDestinationByVisibility,
+    resolveQuoteAttachmentsBase,
     resolveQuoteUploadDestination,
 };

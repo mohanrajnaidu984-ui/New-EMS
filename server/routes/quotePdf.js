@@ -29,6 +29,14 @@ function rewriteHtmlAssetHostsForPuppeteer(html) {
     out = out.replace(/<base\s+href\s*=\s*["'][^"']*["']/i, `<base href="${local}/">`);
     const reAbsUploads = new RegExp(`https?:\\/\\/[^\\s"'<>]+:${port}\\/uploads`, 'gi');
     out = out.replace(reAbsUploads, `${local}/uploads`);
+    /**
+     * Dev: logos often use the Vite origin (`:5174/uploads`, etc.). Puppeteer must hit Express `/uploads`
+     * (same machine) — rewrite common dev-server ports so Chromium does not hang or fail loading assets.
+     */
+    out = out.replace(
+        /https?:\/\/(?:localhost|127\.0\.0\.1|[\w.-]+):\s*(?:5173|5174|5175|5176|5177|5178|5179)\/uploads/gi,
+        `${local}/uploads`
+    );
     return out;
 }
 
@@ -138,6 +146,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
     let browser;
     let tmpHtmlPath = null;
     try {
+        const bundledChrome =
+            typeof puppeteer.executablePath === 'function' ? puppeteer.executablePath() : null;
         const launchOpts = {
             headless: true,
             args: [
@@ -150,6 +160,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         };
         if (process.env.PUPPETEER_EXECUTABLE_PATH) {
             launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        } else if (bundledChrome && fs.existsSync(bundledChrome)) {
+            launchOpts.executablePath = bundledChrome;
         }
         browser = await puppeteer.launch(launchOpts);
         const page = await browser.newPage();
@@ -182,15 +194,22 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
         return res.send(Buffer.from(buf));
     } catch (err) {
-        const msg = String(err && err.message ? err.message : err);
+        const raw = err && err.message ? String(err.message) : String(err);
+        let msg = raw.trim() || 'pdf_generation_failed';
+        let hint =
+            'If logos fail to load, set QUOTE_PDF_ASSET_ORIGIN in server/.env (e.g. http://127.0.0.1:5001). ' +
+            'Ensure Puppeteer can launch Chrome: cd server && npx puppeteer browsers install chrome (or set PUPPETEER_EXECUTABLE_PATH).';
+        if (/Could not find Chrome|browser.*executable|Executable doesn't exist|Browser closed|spawn .* ENOENT/i.test(raw)) {
+            hint =
+                'Chrome for Puppeteer is missing or blocked. From the server folder run: npx puppeteer browsers install chrome. ' +
+                'On locked-down PCs set PUPPETEER_EXECUTABLE_PATH to a Chrome/Chromium exe.';
+        }
         console.error('[quote-pdf]', err && err.stack ? err.stack : err);
         if (!res.headersSent) {
             return res.status(500).json({
                 error: 'pdf_generation_failed',
                 message: msg,
-                hint:
-                    'If logos fail to load, set QUOTE_PDF_ASSET_ORIGIN in server/.env (e.g. http://127.0.0.1:5002). ' +
-                    'Ensure Puppeteer can launch Chrome (or set PUPPETEER_EXECUTABLE_PATH).',
+                hint,
             });
         }
         return;
