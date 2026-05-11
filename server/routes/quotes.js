@@ -13,6 +13,101 @@ const {
     normalizePricingJobName,
     jobBelongsToSessionDivision,
 } = require('../lib/quotePricingAccess');
+
+/** Shared SELECT for GET /by-enquiry — inputs must be bound on `sql.Request` before each call. */
+const BY_ENQUIRY_QUOTES_SQL = `
+            SELECT ID, QuoteNumber, QuoteDate,
+                   CONVERT(varchar(10), CAST(QuoteDate AS DATE), 23) AS QuoteDateYmd,
+                   ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention,
+                   Subject, CustomerReference, YourRef, QuoteType, ValidityDays, PreparedBy, PreparedByEmail,
+                   Signatory, SignatoryDesignation, Status, RevisionNo, TotalAmount, QuoteNo,
+                   RequestNo, CreatedAt, UpdatedAt, OwnJob, LeadJob,
+                   ShowScopeOfWork, ShowBasisOfOffer, ShowExclusions, ShowPricingTerms,
+                   ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
+                   ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
+                   Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
+                   CustomClauses, ClauseOrder, DigitalSignaturesJson
+            FROM EnquiryQuotes
+            WHERE LTRIM(RTRIM(ISNULL(CAST(RequestNo AS NVARCHAR(50)), ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
+              AND (
+                @toName IS NULL
+                OR LTRIM(RTRIM(ISNULL(CAST(@toName AS NVARCHAR(4000)), N''))) = N''
+                OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N''))))
+                OR (
+                  @strictTuple = 0 AND
+                  @toNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@toNameStripped, N''))) <> N''
+                  AND (
+                    LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N''))))
+                    OR (
+                      @strictTuple = 0 AND
+                      LEN(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) >= 5
+                      AND LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) + N'%'
+                    )
+                  )
+                )
+              )
+              AND (
+                @leadJobName IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
+                OR (
+                  @strictTuple = 0 AND
+                  @leadJobNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))) <> N''
+                  AND LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))))
+                )
+                OR (
+                  @strictTuple = 0 AND
+                  LTRIM(RTRIM(ISNULL(@leadJobName, N''))) <> N''
+                  AND LEN(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) <= 6
+                  AND LEFT(UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))), 1) = N'L'
+                  AND TRY_CONVERT(INT, SUBSTRING(LTRIM(RTRIM(ISNULL(@leadJobName, N''))), 2, 4)) IS NOT NULL
+                  AND (
+                    UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
+                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N' %'
+                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N'-%'
+                  )
+                )
+                OR (
+                  @strictTuple = 1
+                  AND @strictDivisionCode IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
+                  AND CHARINDEX(
+                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
+                        UPPER(ISNULL(QuoteNumber, N''))
+                      ) > 0
+                )
+              )
+              AND (
+                @ownJobName IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N''))))
+                OR (
+                  @strictTuple = 0 AND
+                  @ownJobNameStripped IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))) <> N''
+                  AND LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))))
+                )
+                OR (
+                  @strictTuple = 0 AND
+                  LTRIM(RTRIM(ISNULL(@ownJobName, N''))) <> N''
+                  AND LTRIM(RTRIM(ISNULL(OwnJob, N''))) <> N''
+                  AND (
+                    LOWER(LTRIM(RTRIM(@ownJobName))) LIKE LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) + N'%'
+                    OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) LIKE LOWER(LTRIM(RTRIM(@ownJobName))) + N'%'
+                  )
+                )
+                OR (
+                  @strictTuple = 1
+                  AND @strictDivisionCode IS NOT NULL
+                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
+                  AND CHARINDEX(
+                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
+                        UPPER(ISNULL(QuoteNumber, N''))
+                      ) > 0
+                )
+              )
+            ORDER BY QuoteNo, RevisionNo DESC
+        `;
 const mapQuoteListingRows = require('../lib/mapQuoteListingRows');
 const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
 const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
@@ -600,99 +695,24 @@ router.get('/by-enquiry/:requestNo', async (req, res) => {
         request.input('strictDivisionCode', sql.NVarChar, strictDivisionCode || null);
         request.input('strictTuple', sql.Bit, strictTuple ? 1 : 0);
 
-        const result = await request.query(`
-            SELECT ID, QuoteNumber, QuoteDate,
-                   CONVERT(varchar(10), CAST(QuoteDate AS DATE), 23) AS QuoteDateYmd,
-                   ToName, ToAddress, ToPhone, ToEmail, ToFax, ToAttention,
-                   Subject, CustomerReference, YourRef, QuoteType, ValidityDays, PreparedBy, PreparedByEmail,
-                   Signatory, SignatoryDesignation, Status, RevisionNo, TotalAmount, QuoteNo,
-                   RequestNo, CreatedAt, UpdatedAt, OwnJob, LeadJob,
-                   ShowScopeOfWork, ShowBasisOfOffer, ShowExclusions, ShowPricingTerms,
-                   ShowSchedule, ShowWarranty, ShowResponsibilityMatrix, ShowTermsConditions, ShowAcceptance, ShowBillOfQuantity,
-                   ScopeOfWork, BasisOfOffer, Exclusions, PricingTerms,
-                   Schedule, Warranty, ResponsibilityMatrix, TermsConditions, Acceptance, BillOfQuantity,
-                   CustomClauses, ClauseOrder, DigitalSignaturesJson
-            FROM EnquiryQuotes
-            WHERE LTRIM(RTRIM(ISNULL(CAST(RequestNo AS NVARCHAR(50)), ''))) = LTRIM(RTRIM(ISNULL(@requestNo, '')))
-              AND (
-                @toName IS NULL
-                OR LTRIM(RTRIM(ISNULL(CAST(@toName AS NVARCHAR(4000)), N''))) = N''
-                OR LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toName, N''))))
-                OR (
-                  @strictTuple = 0 AND
-                  @toNameStripped IS NOT NULL
-                  AND LTRIM(RTRIM(ISNULL(@toNameStripped, N''))) <> N''
-                  AND (
-                    LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N''))))
-                    OR (
-                      @strictTuple = 0 AND
-                      LEN(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) >= 5
-                      AND LOWER(LTRIM(RTRIM(ISNULL(ToName, N'')))) LIKE N'%' + LOWER(LTRIM(RTRIM(ISNULL(@toNameStripped, N'')))) + N'%'
-                    )
-                  )
-                )
-              )
-              AND (
-                @leadJobName IS NULL
-                OR LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
-                OR (
-                  @strictTuple = 0 AND
-                  @leadJobNameStripped IS NOT NULL
-                  AND LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))) <> N''
-                  AND LOWER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@leadJobNameStripped, N''))))
-                )
-                OR (
-                  @strictTuple = 0 AND
-                  LTRIM(RTRIM(ISNULL(@leadJobName, N''))) <> N''
-                  AND LEN(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) <= 6
-                  AND LEFT(UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))), 1) = N'L'
-                  AND TRY_CONVERT(INT, SUBSTRING(LTRIM(RTRIM(ISNULL(@leadJobName, N''))), 2, 4)) IS NOT NULL
-                  AND (
-                    UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N''))))
-                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N' %'
-                    OR UPPER(LTRIM(RTRIM(ISNULL(LeadJob, N'')))) LIKE UPPER(LTRIM(RTRIM(ISNULL(@leadJobName, N'')))) + N'-%'
-                  )
-                )
-                OR (
-                  @strictTuple = 1
-                  AND @strictDivisionCode IS NOT NULL
-                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
-                  AND CHARINDEX(
-                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
-                        UPPER(ISNULL(QuoteNumber, N''))
-                      ) > 0
-                )
-              )
-              AND (
-                @ownJobName IS NULL
-                OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobName, N''))))
-                OR (
-                  @strictTuple = 0 AND
-                  @ownJobNameStripped IS NOT NULL
-                  AND LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))) <> N''
-                  AND LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) = LOWER(LTRIM(RTRIM(ISNULL(@ownJobNameStripped, N''))))
-                )
-                OR (
-                  @strictTuple = 0 AND
-                  LTRIM(RTRIM(ISNULL(@ownJobName, N''))) <> N''
-                  AND LTRIM(RTRIM(ISNULL(OwnJob, N''))) <> N''
-                  AND (
-                    LOWER(LTRIM(RTRIM(@ownJobName))) LIKE LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) + N'%'
-                    OR LOWER(LTRIM(RTRIM(ISNULL(OwnJob, N'')))) LIKE LOWER(LTRIM(RTRIM(@ownJobName))) + N'%'
-                  )
-                )
-                OR (
-                  @strictTuple = 1
-                  AND @strictDivisionCode IS NOT NULL
-                  AND LTRIM(RTRIM(ISNULL(@strictDivisionCode, N''))) <> N''
-                  AND CHARINDEX(
-                        N'/' + UPPER(LTRIM(RTRIM(ISNULL(@strictDivisionCode, N'')))) + N'/',
-                        UPPER(ISNULL(QuoteNumber, N''))
-                      ) > 0
-                )
-              )
-            ORDER BY QuoteNo, RevisionNo DESC
-        `);
+        let result = await request.query(BY_ENQUIRY_QUOTES_SQL);
+        if (strictTuple && userEmail && (result.recordset?.length || 0) === 0) {
+            const normalizedRelax = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
+            const ctxRelax = await resolvePricingAccessContext(normalizedRelax);
+            if (ctxRelax.isCcUser) {
+                const relaxReq = new sql.Request();
+                relaxReq.input('requestNo', sql.NVarChar, requestNo);
+                relaxReq.input('toName', sql.NVarChar, toName || null);
+                relaxReq.input('toNameStripped', sql.NVarChar, toNameStripped);
+                relaxReq.input('leadJobName', sql.NVarChar, leadJobName || null);
+                relaxReq.input('leadJobNameStripped', sql.NVarChar, leadJobNameStripped);
+                relaxReq.input('ownJobName', sql.NVarChar, ownJobName || null);
+                relaxReq.input('ownJobNameStripped', sql.NVarChar, ownJobNameFromTabStripped || stripJobPrefixForQuoteMatch(ownJobName) || null);
+                relaxReq.input('strictDivisionCode', sql.NVarChar, strictDivisionCode || null);
+                relaxReq.input('strictTuple', sql.Bit, 0);
+                result = await relaxReq.query(BY_ENQUIRY_QUOTES_SQL);
+            }
+        }
 
         console.log(`[Quote API] Found ${result.recordset.length} quotes for RequestNo ${requestNo}`);
         res.json(result.recordset);
@@ -716,6 +736,11 @@ router.get('/access/:requestNo', async (req, res) => {
 
         const normalizedEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
 
+        const ctx = await resolvePricingAccessContext(normalizedEmail);
+        if (!ctx.user) {
+            return res.json({ canCreate: false, seName: null });
+        }
+
         const userRes = await sql.query`
             SELECT TOP 1 FullName, Roles, Department
             FROM Master_ConcernedSE
@@ -723,12 +748,10 @@ router.get('/access/:requestNo', async (req, res) => {
         `;
 
         const row = userRes.recordset?.[0];
-        const seName = row?.FullName || null;
-        if (!seName) {
-            return res.json({ canCreate: false, seName: null });
-        }
+        const seNameFromMaster = row?.FullName ? String(row.FullName).trim() : null;
+        const seName = seNameFromMaster || ctx.userFullName || null;
 
-        const roleStr = String(row?.Roles || '').toLowerCase();
+        const roleStr = String(row?.Roles || ctx.user?.Roles || '').toLowerCase();
         const isAdmin = roleStr.includes('admin') || roleStr.includes('system');
         if (isAdmin) {
             return res.json({ canCreate: true, seName, reason: 'admin' });
@@ -739,7 +762,6 @@ router.get('/access/:requestNo', async (req, res) => {
             return res.json({ canCreate: false, seName });
         }
 
-        const ctx = await resolvePricingAccessContext(normalizedEmail);
         const reason = ctx.isCcUser ? 'cc_coordinator' : 'scoped';
         return res.json({ canCreate: true, seName, reason });
     } catch (err) {

@@ -128,8 +128,11 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
             deptNormEsc = '';
             hasDeptScope = false;
         }
+        /** CC + Division toolbar: same MEF/job row predicates as non-CC (division-only); enquiry gate still requires CC or ConcernedSE (below). */
+        const unifyCcWithDivision =
+            isCcUser && !isManagementDept && (divisionFilter || '').toString().trim();
         /** CC: must be on CCMailIds AND (when we have a department) see only that department’s jobs/subjobs — same shape as non-CC scope. */
-        const mefAccessPredicate = isCcUser
+        let mefAccessPredicate = isCcUser
             ? `(
                 ${
                     // Management users are division proxies: they may not be listed in CCMailIds.
@@ -161,7 +164,7 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                 )`
                 : `1 = 1`;
 
-        const scopedJobIdsSubquery = isCcUser
+        let scopedJobIdsSubquery = isCcUser
             ? `(
                 ${
                     isManagementDept
@@ -191,6 +194,11 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
                 )${divisionMef2DeptSql}`
                 : `1 = 1${divisionMef2DeptSql}`;
+
+        if (unifyCcWithDivision) {
+            mefAccessPredicate = '1 = 1';
+            scopedJobIdsSubquery = `1 = 1${divisionMef2DeptSql}`;
+        }
 
         // Step 1 + 2: see module doc above; RequestNo is enforced by JOIN (E.RequestNo = PV via PO).
         const pvMatchesEfJobSql = `
@@ -238,17 +246,42 @@ async function runPendingQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = '
         if (userEmail && !isAdmin) {
             const enforceAssignedOnly = !isCcUser;
             // Match ConcernedSE by login email via Master_ConcernedSE (FullName-only match fails when FullName is NULL or mismatched).
-            const assignedOnlyClause = enforceAssignedOnly
-                ? `
-                AND EXISTS (
+            const concernedSeEmailExistsSql = `
+                EXISTS (
                     SELECT 1
                     FROM ConcernedSE cs
                     INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
                     WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, N'')))
                       AND LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(N'${uEsc}'))
                 )
+            `;
+            const ccCoordinatorEnquiryExistsSql = `
+                EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor efGate
+                    INNER JOIN Master_EnquiryFor mefGate ON (
+                        efGate.ItemName = mefGate.ItemName OR
+                        efGate.ItemName LIKE N'% - ' + mefGate.ItemName
+                    )
+                    WHERE efGate.RequestNo = E.RequestNo
+                      AND (
+                        REPLACE(',' + REPLACE(ISNULL(mefGate.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                        ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(mefGate.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                      )
+                )
+            `;
+            const assignedOnlyClause = unifyCcWithDivision
+                ? `
+                AND (
+                    ${concernedSeEmailExistsSql}
+                    OR ${ccCoordinatorEnquiryExistsSql}
+                )
                 `
-                : '';
+                : enforceAssignedOnly
+                  ? `
+                AND ${concernedSeEmailExistsSql}
+                `
+                  : '';
             // Refined logic for specific user's division
             query = `
                 SELECT DISTINCT 

@@ -6,6 +6,8 @@ import './Login.css';
 
 const Login = ({ onSwitchToSignup }) => {
     const { login } = useAuth();
+    const passwordPolicyRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{10,}$/;
+    const passwordPolicyMessage = 'Password must be at least 10 characters and include uppercase, lowercase, number, and special character.';
 
     // Steps: 'email', 'password', 'setup', 'forgot'
     const [step, setStep] = useState('email');
@@ -125,8 +127,8 @@ const Login = ({ onSwitchToSignup }) => {
             setError('Passwords do not match');
             return;
         }
-        if (formData.newPassword.length < 6) {
-            setError('Password must be at least 6 characters');
+        if (!passwordPolicyRegex.test(formData.newPassword)) {
+            setError(passwordPolicyMessage);
             return;
         }
 
@@ -335,6 +337,7 @@ const Login = ({ onSwitchToSignup }) => {
                                 alt=""
                                 aria-hidden="true"
                                 className="ems-brand-mark me-1"
+                                style={{ transform: 'translateY(-2px)' }}
                             />
                             <span className="ems-brand-text d-flex align-items-center">
                                 <span className="ems-brand-word">EMS</span>

@@ -599,6 +599,17 @@ input[type="date"]:focus::-webkit-datetime-edit {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Header-only clarity boost without changing gradient colors */
+.navbar .ems-brand-word {
+  font-weight: 900;
+  letter-spacing: -0.55px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-stroke: 0;
+  filter: none;
+}
+
 .ems-brand-subtext {
   font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
   font-size: 10px;

@@ -4806,11 +4806,13 @@ const QuoteForm = ({ openContext = null }) => {
         const p = scopedEnquiryQuotesParams;
         if (!p) return null;
         const em = (currentUser?.email || currentUser?.EmailId || '').trim().toLowerCase();
+        const divKey = (quoteListDivision || '').trim();
         return [
             p.leadJobName,
             p.toName,
             p.ownJobName ?? '',
             p.useDepartmentForOwnJob ? '1' : '0',
+            p.useDepartmentForOwnJob ? divKey : '',
             em,
             String(scopedQuotePanelRefreshNonce),
         ].join('\x1e');
@@ -4819,6 +4821,7 @@ const QuoteForm = ({ openContext = null }) => {
         scopedEnquiryQuotesParams?.toName,
         scopedEnquiryQuotesParams?.ownJobName,
         scopedEnquiryQuotesParams?.useDepartmentForOwnJob,
+        quoteListDivision,
         currentUser?.email,
         currentUser?.EmailId,
         scopedQuotePanelRefreshNonce,
@@ -4890,6 +4893,9 @@ const QuoteForm = ({ openContext = null }) => {
         browsePreviousQuotesRevisions,
         activeQuoteTab,
         calculatedTabs,
+        quoteListDivision,
+        currentUser?.email,
+        currentUser?.EmailId,
     ]);
 
     /** Keep Enquiry Type list seeded from selected enquiry when form list is empty. */

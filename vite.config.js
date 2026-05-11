@@ -4,8 +4,8 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  /** Must match `PORT` in server/.env (Express). Default 5001. */
-  const apiPort = String(env.VITE_API_PORT || env.VITE_DEV_API_PORT || '5001').trim() || '5001'
+  /** Must match `PORT` in server/.env (Express). Default 5002. */
+  const apiPort = String(env.VITE_API_PORT || env.VITE_DEV_API_PORT || '5002').trim() || '5002'
   const apiTarget = `http://127.0.0.1:${apiPort}`
 
   return {

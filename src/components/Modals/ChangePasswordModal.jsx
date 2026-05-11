@@ -4,6 +4,8 @@ import { useAuth } from '../../context/AuthContext';
 
 const ChangePasswordModal = ({ show, onClose }) => {
     const { currentUser } = useAuth();
+    const passwordPolicyRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{10,}$/;
+    const passwordPolicyMessage = 'Password must be at least 10 characters and include uppercase, lowercase, number, and special character.';
     const [formData, setFormData] = useState({
         currentPassword: '',
         newPassword: '',
@@ -32,8 +34,8 @@ const ChangePasswordModal = ({ show, onClose }) => {
             return;
         }
 
-        if (formData.newPassword.length < 6) {
-            setError('Password must be at least 6 characters');
+        if (!passwordPolicyRegex.test(formData.newPassword)) {
+            setError(passwordPolicyMessage);
             return;
         }
 

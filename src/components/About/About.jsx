@@ -13,6 +13,19 @@ const About = () => {
             from enquiry to reporting with consistent data, faster updates, and better visibility.
           </p>
 
+          <div className="mb-3 text-secondary">
+            <p className="mb-1">
+              <strong>Latest update highlights:</strong>
+            </p>
+            <ul className="mb-0" style={{ paddingLeft: '1.1rem' }}>
+              <li>Refined login journey with step-based email verification and sign-in flow.</li>
+              <li>First-time users now complete password setup directly in the login process.</li>
+              <li>Forgot password sends temporary credentials to registered email for recovery.</li>
+              <li>Password policy is enforced with minimum 10 characters, uppercase, lowercase, number, and special character.</li>
+              <li>Header and login branding updated to the latest EMS visual style.</li>
+            </ul>
+          </div>
+
           <div className="mb-2">
             <h6 className="mb-1" style={{ color: '#20396D', fontWeight: 700 }}>Application Sections</h6>
             <div className="text-secondary">

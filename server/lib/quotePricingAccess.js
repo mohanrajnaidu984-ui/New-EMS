@@ -215,21 +215,14 @@ function getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, sessionDivisio
     if (!d) {
         return getPricingAnchorJobs(enqJobs, ctx, userEmail);
     }
-    const { isAdmin, isCcUser } = ctx;
+    const { isAdmin } = ctx;
     if (isAdmin) {
         return enqJobs.filter((job) => jobBelongsToSessionDivision(job, d));
     }
-    if (isCcUser) {
-        const divLower = d.toLowerCase();
-        const globalDivCc = ctx.ccCoordinatorDepartmentNames && ctx.ccCoordinatorDepartmentNames.has(divLower);
-        return enqJobs.filter((job) => {
-            if (!jobBelongsToSessionDivision(job, d)) return false;
-            if (ccMailIdsContainsUser(job.CCMailIds, userEmail)) return true;
-            /** Same pending scope as division dropdown: user coordinates this department on master even if this enquiry’s MEF row omits them in CCMailIds. */
-            if (globalDivCc) return true;
-            return false;
-        });
-    }
+    /**
+     * Session Division set: same own-job anchors for everyone (CC vs non-CC only differs in how many divisions
+     * appear in the toolbar — not in job-tree / pricing tuple behaviour).
+     */
     return getDepartmentPricingAnchors(enqJobs, d);
 }
 
@@ -297,16 +290,18 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo, sessionDiv
     if (Number.isNaN(rn)) return false;
     const sessionDivTrim = (sessionDivision || '').toString().trim();
 
+    /** Assigned SE on this enquiry (email join) — same as pending-quote list; CC coordinators may also be ConcernedSE. */
+    const concernedSeByEmailRes = await sql.query`
+        SELECT TOP 1 1 AS ok
+        FROM ConcernedSE cs
+        INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+        WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
+          AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
+    `;
+    const allowedByConcernedSe = (concernedSeByEmailRes.recordset?.length || 0) > 0;
+
     if (!ctx.isCcUser) {
-        /** Same gate as pending quote list: ConcernedSE row + login email on Master_ConcernedSE (not FullName-only). */
-        const cse = await sql.query`
-            SELECT TOP 1 1 AS ok
-            FROM ConcernedSE cs
-            INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
-            WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
-              AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
-        `;
-        if ((cse.recordset?.length || 0) === 0) return false;
+        if (!allowedByConcernedSe) return false;
     } else {
         const tdProfile = (ctx.userDepartment || '').trim();
         const deptNormProfile = normalizePricingJobName(tdProfile);
@@ -359,10 +354,40 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo, sessionDiv
                     OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${deptLike}
                     OR LOWER(LTRIM(RTRIM(mef.ItemName))) LIKE ${normLike}
                     OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${normLike}
-                )
+                  )
             `;
         }
-        if ((cc.recordset?.length || 0) === 0) return false;
+        let allowedByCc = (cc.recordset?.length || 0) > 0;
+        /**
+         * Profile-scoped CC query is easy to miss (e.g. Department "Management", or short "BMS" vs line text).
+         * Fall back to "any CCMailIds hit on this enquiry" — same as `!tdProfile` branch — so coordinators match pricing list.
+         */
+        if (!allowedByCc && !sessionDivTrim && (ctx.userDepartment || '').trim()) {
+            const ccBroad = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+            allowedByCc = (ccBroad.recordset?.length || 0) > 0;
+        }
+        /**
+         * Division toolbar + CC: instance MEF may omit DepartmentName / CCMailIds while coordinator is still
+         * registered for that department on master — allow any CC line on the enquiry when dept is in their set.
+         */
+        if (!allowedByCc && sessionDivTrim && ctx.ccCoordinatorDepartmentNames?.has(sessionDivTrim.toLowerCase())) {
+            const ccBroadDiv = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+            allowedByCc = (ccBroadDiv.recordset?.length || 0) > 0;
+        }
+        /** Match pricing list: CC on master OR assigned SE — so Previous Quotes / by-enquiry are not blank for dual-role users. */
+        if (!allowedByCc && !allowedByConcernedSe) return false;
     }
 
     const jobsRes = await sql.query`
@@ -379,9 +404,33 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo, sessionDiv
         seen.add(String(jid));
         enqJobs.push(row);
     }
-    const anchors = sessionDivTrim
+    let anchors = sessionDivTrim
         ? getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, sessionDivTrim)
         : getPricingAnchorJobs(enqJobs, ctx, userEmail);
+    /**
+     * CC users who are also ConcernedSE often pass the gate via email join while instance MEF.CCMailIds
+     * omits them — then CC-only anchor logic returns []. Use the same department anchors as a normal SE.
+     */
+    if (anchors.length === 0 && allowedByConcernedSe) {
+        anchors = sessionDivTrim
+            ? getDepartmentPricingAnchors(enqJobs, sessionDivTrim)
+            : getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+    }
+    /**
+     * CC coordinators passed the enquiry gate but CCMailIds-based anchor pick is empty (common with template/instance drift).
+     * Use session division anchors, then profile department, then all jobs on the enquiry for read access.
+     */
+    if (anchors.length === 0 && ctx.isCcUser) {
+        if (sessionDivTrim) {
+            anchors = getDepartmentPricingAnchors(enqJobs, sessionDivTrim);
+        }
+        if (anchors.length === 0 && (ctx.userDepartment || '').trim()) {
+            anchors = getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+        }
+        if (anchors.length === 0 && enqJobs.length > 0) {
+            anchors = [...enqJobs];
+        }
+    }
     return anchors.length > 0;
 }
 

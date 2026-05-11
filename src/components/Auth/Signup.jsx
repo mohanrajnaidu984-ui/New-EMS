@@ -4,6 +4,8 @@ import './Login.css';
 
 const Signup = ({ onSwitchToLogin }) => {
     const { login } = useAuth();
+    const passwordPolicyRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{10,}$/;
+    const passwordPolicyMessage = 'Password must be at least 10 characters and include uppercase, lowercase, number, and special character.';
     const [formData, setFormData] = useState({
         username: '',
         email: '',
@@ -44,8 +46,8 @@ const Signup = ({ onSwitchToLogin }) => {
             return;
         }
 
-        if (formData.password.length < 8) {
-            setError('Password must be at least 8 characters');
+        if (!passwordPolicyRegex.test(formData.password)) {
+            setError(passwordPolicyMessage);
             return;
         }
 
@@ -151,7 +153,7 @@ const Signup = ({ onSwitchToLogin }) => {
                                     id="password"
                                     name="password"
                                     className="form-control"
-                                    placeholder="Enter your password (min 8 characters)"
+                                    placeholder="Enter your password (min 10 chars, mixed complexity)"
                                     value={formData.password}
                                     onChange={handleChange}
                                     disabled={loading}

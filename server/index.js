@@ -468,6 +468,26 @@ app.post('/api/extract-contact-ocr', multerMemory.single('image'), async (req, r
 });
 
 // --- Authentication Routes ---
+const PASSWORD_POLICY_MESSAGE = 'Password must be at least 10 characters and include uppercase, lowercase, number, and special character.';
+
+const isPasswordComplex = (password = '') => {
+    return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{10,}$/.test(password);
+};
+
+const generateCompliantTempPassword = () => {
+    const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const lower = 'abcdefghijklmnopqrstuvwxyz';
+    const numbers = '0123456789';
+    const special = '!@#$%^&*()_+-=[]{}|;:,.<>?';
+    const all = `${upper}${lower}${numbers}${special}`;
+
+    const pick = (charset) => charset[Math.floor(Math.random() * charset.length)];
+    let temp = `${pick(upper)}${pick(lower)}${pick(numbers)}${pick(special)}`;
+    while (temp.length < 12) {
+        temp += pick(all);
+    }
+    return temp;
+};
 
 // User Signup
 app.post('/api/auth/signup', async (req, res) => {
@@ -479,8 +499,8 @@ app.post('/api/auth/signup', async (req, res) => {
             return res.status(400).json({ message: 'All fields are required' });
         }
 
-        if (password.length < 8) {
-            return res.status(400).json({ message: 'Password must be at least 8 characters' });
+        if (!isPasswordComplex(password)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
         }
 
         // Check if user already exists
@@ -612,6 +632,10 @@ app.post('/api/auth/check-user', async (req, res) => {
 app.post('/api/auth/set-password', async (req, res) => {
     const { email, newPassword } = req.body;
     try {
+        if (!isPasswordComplex(newPassword)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        }
+
         const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE EmailId = ${email}`;
         const user = result.recordset[0];
 
@@ -654,7 +678,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         // User requirement: "ability to reset password by forgot password option".
         // Let's generate a temporary password and email it.
 
-        const tempPassword = Math.random().toString(36).slice(-8);
+        const tempPassword = generateCompliantTempPassword();
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(tempPassword, salt);
 
@@ -686,6 +710,10 @@ app.post('/api/auth/change-password', async (req, res) => {
     const { userId, currentPassword, newPassword } = req.body;
 
     try {
+        if (!isPasswordComplex(newPassword)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        }
+
         const result = await sql.query`SELECT * FROM Master_ConcernedSE WHERE ID = ${userId}`;
         const user = result.recordset[0];
 

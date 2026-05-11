@@ -9,9 +9,62 @@ const Help = () => {
         <div className="card-body p-4">
           <h4 className="mb-2" style={sectionTitleStyle}>Help - User Manual</h4>
           <p className="text-secondary mb-4">
-            This user manual explains each EMS module in detail, including what to enter, how to use each section,
-            and practical examples. It also includes system architecture for technical understanding.
+            This guide reflects the latest EMS application flow. It covers how to access the app, complete
+            authentication steps, and use each module with practical process guidance.
           </p>
+
+          <h6 className="mb-2" style={sectionTitleStyle}>Access, Login and Password Setup (Detailed)</h6>
+          <div className="text-secondary mb-4">
+            <p className="mb-1"><strong>1. Open the application</strong></p>
+            <ol className="mb-2" style={{ paddingLeft: '1.1rem' }}>
+              <li>Open a supported browser (Chrome or Edge recommended).</li>
+              <li>Enter the EMS URL provided by your IT/admin team.</li>
+              <li>Wait for the EMS sign-in screen to load fully before entering details.</li>
+            </ol>
+
+            <p className="mb-1"><strong>2. First-time login flow (create password)</strong></p>
+            <ol className="mb-2" style={{ paddingLeft: '1.1rem' }}>
+              <li>Enter your registered official email address and click <strong>Next</strong>.</li>
+              <li>If your account is marked first-time, EMS opens the password setup step automatically.</li>
+              <li>Enter a new password and confirm it.</li>
+              <li>Password policy: minimum 10 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.</li>
+              <li>Click <strong>Set Password & Login</strong> to continue into the application.</li>
+            </ol>
+
+            <p className="mb-1"><strong>3. Regular sign-in flow</strong></p>
+            <ol className="mb-2" style={{ paddingLeft: '1.1rem' }}>
+              <li>Enter your registered email and click <strong>Next</strong>.</li>
+              <li>Enter your password on the sign-in step.</li>
+              <li>Optionally enable <strong>Remember me</strong> if allowed on your machine.</li>
+              <li>Click <strong>Sign In</strong>.</li>
+            </ol>
+
+            <p className="mb-1"><strong>4. Forgot password flow</strong></p>
+            <ol className="mb-2" style={{ paddingLeft: '1.1rem' }}>
+              <li>On the password step, click <strong>Forgot Password?</strong>.</li>
+              <li>Submit the request for your registered email.</li>
+              <li>EMS sends a temporary password to your email address.</li>
+              <li>Sign in using the temporary password, then immediately update your password from profile options.</li>
+            </ol>
+
+            <p className="mb-1"><strong>5. Change password after login</strong></p>
+            <ol className="mb-0" style={{ paddingLeft: '1.1rem' }}>
+              <li>Open user/profile controls in the top-right area.</li>
+              <li>Select <strong>Change Password</strong>.</li>
+              <li>Enter current password, new password, and confirm password.</li>
+              <li>New password must follow the same 10-character complexity policy.</li>
+            </ol>
+          </div>
+
+          <h6 className="mb-2" style={sectionTitleStyle}>Login Troubleshooting</h6>
+          <div className="text-secondary mb-4">
+            <ul className="mb-0" style={{ paddingLeft: '1.1rem' }}>
+              <li>If email is not recognized, verify spelling and contact admin to confirm your account is active.</li>
+              <li>If password is rejected, verify uppercase/lowercase and special characters exactly.</li>
+              <li>If page looks stale after updates, do a hard refresh once (Ctrl+F5).</li>
+              <li>If sign-in still fails after reset, contact IT/admin with your email and timestamp of attempt.</li>
+            </ul>
+          </div>
 
           <h6 className="mb-2" style={sectionTitleStyle}>How To Use EMS (End-to-End)</h6>
           <ol className="text-secondary mb-4" style={{ paddingLeft: '1.1rem' }}>
@@ -283,6 +336,57 @@ const Help = () => {
               <li>Review Sales Report after status updates to confirm values are reflected correctly.</li>
               <li>Check Sales Target at regular intervals to track gap closure actions.</li>
             </ul>
+          </div>
+
+          <div className="text-secondary mb-3">
+            <p className="mb-1"><strong>Master Entry Guide - Customer / Client / Consultant / Received From</strong></p>
+            <p className="mb-1">
+              <strong>Where to create:</strong> During enquiry creation or edit, use the relevant dropdown/lookup field.
+              If the required name is not available, use the add-new option in that module popup/form.
+            </p>
+            <p className="mb-1">
+              <strong>Recommended order:</strong> Create master record first, verify saved values, then continue enquiry save.
+            </p>
+            <p className="mb-1">
+              <strong>Step-by-step flow:</strong>
+            </p>
+            <ol className="mb-1" style={{ paddingLeft: '1.1rem' }}>
+              <li>Open the relevant module/form where the master is required (typically Enquiry flow).</li>
+              <li>In the field (Customer/Client/Consultant/Received From), search existing values first.</li>
+              <li>If not found, click add-new/create option.</li>
+              <li>Enter mandatory details such as name, contact person, mobile/email, and remarks as applicable.</li>
+              <li>Save the master entry and wait for confirmation.</li>
+              <li>Re-select/refresh the same field and choose the newly created value.</li>
+              <li>Complete remaining enquiry details and save.</li>
+            </ol>
+            <p className="mb-0 mt-1">
+              <strong>Validation checks:</strong> avoid duplicate spellings, confirm correct customer group/type,
+              and ensure email/phone formats are valid before final save.
+            </p>
+          </div>
+
+          <div className="text-secondary mb-3">
+            <p className="mb-1"><strong>Scanning Function - How to Use</strong></p>
+            <p className="mb-1">
+              EMS supports scan/OCR-assisted data capture in modules where contact card or image-based details
+              are collected (for customer/contact related entry points).
+            </p>
+            <p className="mb-1">
+              <strong>Step-by-step scanning process:</strong>
+            </p>
+            <ol className="mb-1" style={{ paddingLeft: '1.1rem' }}>
+              <li>Open the form where contact details are being captured.</li>
+              <li>Click the scan/upload option.</li>
+              <li>Upload a clear image of the business card/document (good lighting, no blur).</li>
+              <li>Wait for OCR processing to complete.</li>
+              <li>Review extracted values (name, company, phone, email, designation, etc.).</li>
+              <li>Correct any OCR mismatch manually before saving.</li>
+              <li>Save the entry and verify it appears correctly in lookup/search.</li>
+            </ol>
+            <p className="mb-0 mt-1">
+              <strong>Best practices:</strong> use high-resolution images, crop unnecessary background,
+              and always manually validate email/mobile values after scan.
+            </p>
           </div>
 
           <div className="text-secondary mb-3">

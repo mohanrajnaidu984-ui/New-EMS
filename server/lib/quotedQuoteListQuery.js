@@ -107,7 +107,9 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
         deptNormEsc = '';
         hasDeptScope = false;
     }
-    const mefAccessPredicate = isCcUser
+    const unifyCcWithDivision =
+        isCcUser && !isManagementDept && (divisionFilter || '').toString().trim();
+    let mefAccessPredicate = isCcUser
         ? `(
                 ${
                     isManagementDept
@@ -137,7 +139,7 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                 )`
             : `1 = 1`;
 
-    const scopedJobIdsSubquery = isCcUser
+    let scopedJobIdsSubquery = isCcUser
         ? `(
                 ${
                     isManagementDept
@@ -167,6 +169,11 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
                     OR LOWER(LTRIM(RTRIM(EF2.ItemName))) LIKE '%' + N'${deptNormEsc}' + '%'` : '1=0'})
                 )${divisionMef2DeptSql}`
             : `1 = 1${divisionMef2DeptSql}`;
+
+    if (unifyCcWithDivision) {
+        mefAccessPredicate = '1 = 1';
+        scopedJobIdsSubquery = `1 = 1${divisionMef2DeptSql}`;
+    }
 
     const scopedJobIdsSelect = `
                     (
@@ -198,17 +205,42 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
     let query;
     if (userEmail && !isAdmin) {
         const enforceAssignedOnly = !isCcUser;
-        const assignedOnlyClause = enforceAssignedOnly
-            ? `
-                AND EXISTS (
+        const concernedSeEmailExistsSql = `
+                EXISTS (
                     SELECT 1
                     FROM ConcernedSE cs
                     INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
                     WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, N'')))
                       AND LOWER(LTRIM(RTRIM(m.EmailId))) = LOWER(LTRIM(N'${uEsc}'))
                 )
+            `;
+        const ccCoordinatorEnquiryExistsSql = `
+                EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor efGate
+                    INNER JOIN Master_EnquiryFor mefGate ON (
+                        efGate.ItemName = mefGate.ItemName OR
+                        efGate.ItemName LIKE N'% - ' + mefGate.ItemName
+                    )
+                    WHERE efGate.RequestNo = E.RequestNo
+                      AND (
+                        REPLACE(',' + REPLACE(ISNULL(mefGate.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uEsc},%'
+                        ${uLocalEsc.length >= 2 ? `OR REPLACE(',' + REPLACE(ISNULL(mefGate.CCMailIds, ''), ' ', '') + ',', '@almcg.com', '@almoayyedcg.com') LIKE '%,${uLocalEsc},%'` : ''}
+                      )
+                )
+            `;
+        const assignedOnlyClause = unifyCcWithDivision
+            ? `
+                AND (
+                    ${concernedSeEmailExistsSql}
+                    OR ${ccCoordinatorEnquiryExistsSql}
+                )
                 `
-            : '';
+            : enforceAssignedOnly
+              ? `
+                AND ${concernedSeEmailExistsSql}
+                `
+              : '';
         query = `
                 SELECT DISTINCT
                     E.RequestNo, E.ProjectName, E.CustomerName, E.ClientName, E.ConsultantName, E.EnquiryDate, E.DueDate, E.Status,

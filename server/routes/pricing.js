@@ -3011,6 +3011,9 @@ router.get('/:requestNo', async (req, res) => {
             throw err;
         }
 
+        /** Set while loading jobs — reused when computing edit scope for CC coordinators. */
+        let pricingDetailAccessCtx = null;
+
         // Get EnquiryFor items (jobs/columns)
         let jobs = [];
         try {
@@ -3073,15 +3076,15 @@ router.get('/:requestNo', async (req, res) => {
             console.log('Pricing API: Found', jobs.length, 'jobs');
 
             if (userEmail) {
-                const detailCtx = await resolvePricingAccessContext(userEmail);
-                if (!detailCtx.user) {
+                pricingDetailAccessCtx = await resolvePricingAccessContext(userEmail);
+                if (!pricingDetailAccessCtx.user) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
                 // Non-admins: always scope by access rules; admins: all jobs unless a Division is selected
                 const useDivision = Boolean(sessionDivision);
-                const shouldScopeJobs = !detailCtx.isAdmin || useDivision;
+                const shouldScopeJobs = !pricingDetailAccessCtx.isAdmin || useDivision;
                 if (shouldScopeJobs) {
-                    const anchors = getPricingAnchorJobsForDivision(jobs, detailCtx, userEmail, sessionDivision);
+                    const anchors = getPricingAnchorJobsForDivision(jobs, pricingDetailAccessCtx, userEmail, sessionDivision);
                     if (anchors.length === 0) {
                         return res.status(403).json({ error: 'Forbidden' });
                     }
@@ -3276,6 +3279,41 @@ router.get('/:requestNo', async (req, res) => {
                     }
                 }
             });
+
+            /**
+             * CC / Management coordinators: same pricing actions as a Concerned SE for the selected Division.
+             * Anchor scoping already filtered `jobs`; mail + Master_ConcernedSE matching often leaves `userJobItems`
+             * empty for CC-only logins — then Add / Save / branch edit stay disabled on the client.
+             */
+            if (pricingDetailAccessCtx && pricingDetailAccessCtx.isCcUser) {
+                const divForAnchor = (sessionDivision && String(sessionDivision).trim()) || '';
+                const anchorJobs = getPricingAnchorJobsForDivision(
+                    jobs,
+                    pricingDetailAccessCtx,
+                    normalizedUserEmail,
+                    divForAnchor
+                );
+                for (const aj of anchorJobs) {
+                    const nm = String(aj.ItemName || '').trim();
+                    if (!nm) continue;
+                    if (!userJobItems.includes(nm)) userJobItems.push(nm);
+                    const pid = aj.ParentID;
+                    if (pid == null || pid === '' || pid === 0 || pid === '0') {
+                        userHasLeadAccess = true;
+                    }
+                }
+                const cleanScopesCc = new Set(
+                    userJobItems.map((name) => String(name || '').trim().toLowerCase())
+                );
+                jobs.forEach((job) => {
+                    const cleanName = String(job.ItemName || '').trim().toLowerCase();
+                    if (cleanScopesCc.has(cleanName)) {
+                        if (!userJobItems.includes(job.ItemName)) {
+                            userJobItems.push(job.ItemName);
+                        }
+                    }
+                });
+            }
         }
 
         // FILTER: Scope Customers based on User Role

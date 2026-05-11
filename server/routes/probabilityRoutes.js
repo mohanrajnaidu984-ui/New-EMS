@@ -4,7 +4,12 @@ const router = express.Router();
 const { sql } = require('../dbConfig');
 
 // --- Helper: Format RequestNo for SQL LIKE if needed, or simple exact match ---
-const normalizeUserEmail = (email) => (email || '').toString().toLowerCase().trim();
+const normalizeUserEmail = (email) =>
+    (email || '')
+        .toString()
+        .toLowerCase()
+        .trim()
+        .replace(/@almcg\.com$/i, '@almoayyedcg.com');
 const norm = (s) => (s || '').toString().trim().toLowerCase();
 let probabilityTableReady = false;
 
@@ -35,13 +40,13 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
         FROM Master_ConcernedSE
         WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, '')))) = ${normalizedEmail}
     `;
-    if (!userRes.recordset?.length) return null;
-
-    const baseUser = userRes.recordset[0] || {};
-    const nonCcDepartment = String(baseUser.Department || '').trim();
+    const baseUser = userRes.recordset?.[0] || {};
+    const localPart = normalizedEmail.split('@')[0] || '';
+    const localEmailPattern = `%${localPart}@%`;
 
     const ccReq = new sql.Request();
     ccReq.input('userEmail', sql.NVarChar, normalizedEmail);
+    ccReq.input('localEmailPattern', sql.NVarChar, localEmailPattern);
     const ccRes = await ccReq.query(`
         SELECT DISTINCT LTRIM(RTRIM(ISNULL(mef.DepartmentName, ''))) AS DepartmentName
         FROM Master_EnquiryFor mef
@@ -49,6 +54,11 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
           AND (
             ',' + REPLACE(REPLACE(LOWER(ISNULL(mef.CCMailIds, '')), ' ', ''), ';', ',') + ','
               LIKE '%,' + LOWER(LTRIM(RTRIM(ISNULL(@userEmail, '')))) + ',%'
+            OR (
+              @localEmailPattern <> '%@%'
+              AND ',' + REPLACE(REPLACE(LOWER(ISNULL(mef.CCMailIds, '')), ' ', ''), ';', ',') + ','
+                 LIKE '%,' + LOWER(LTRIM(RTRIM(ISNULL(@localEmailPattern, ''))))
+            )
           )
         ORDER BY DepartmentName
     `);
@@ -56,8 +66,31 @@ const resolveProbabilityDivisionScope = async (userEmail, requestedDivision = ''
         .map((r) => String(r.DepartmentName || '').trim())
         .filter(Boolean);
 
-    const isCcUser = ccDivisions.length > 0;
-    const divisions = isCcUser ? ccDivisions : (nonCcDepartment ? [nonCcDepartment] : []);
+    const nonCcDepartment = String(baseUser.Department || '').trim();
+    const roleStr = String(baseUser.Roles || '').toLowerCase();
+    const isManagementDept = nonCcDepartment.toLowerCase() === 'management';
+    const isCcUser = ccDivisions.length > 0 || isManagementDept;
+    const isKnownProfileUser = !!String(baseUser.FullName || '').trim() || !!nonCcDepartment;
+    if (!isKnownProfileUser && !isCcUser) return null;
+
+    let divisions = [];
+    if (isCcUser) {
+        if (isManagementDept) {
+            const allDivRes = await sql.query(`
+                SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, ''))) AS DepartmentName
+                FROM Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ISNULL(DepartmentName, ''))) <> ''
+                ORDER BY DepartmentName
+            `);
+            divisions = (allDivRes.recordset || [])
+                .map((r) => String(r.DepartmentName || '').trim())
+                .filter(Boolean);
+        } else {
+            divisions = ccDivisions;
+        }
+    } else {
+        divisions = nonCcDepartment ? [nonCcDepartment] : [];
+    }
     if (!divisions.length) return null;
 
     const reqDiv = String(requestedDivision || '').trim();
@@ -841,8 +874,14 @@ router.get('/:requestNo', async (req, res) => {
     try {
         const { requestNo } = req.params;
         const userEmail = req.query.userEmail || '';
-        const allowed = await hasProbabilityAccess(requestNo, userEmail);
-        if (!allowed) return res.status(403).json({ error: 'Access denied for this enquiry' });
+        const requestedDivision = String(req.query.division || '').trim();
+        const scope = await resolveProbabilityDivisionScope(userEmail, requestedDivision);
+        const allowedSe = await hasProbabilityAccess(requestNo, userEmail);
+        const allowedByDivision =
+            scope?.division && (await hasEnquiryDivisionAccess(requestNo, scope.division));
+        if (!allowedSe && !allowedByDivision) {
+            return res.status(403).json({ error: 'Access denied for this enquiry' });
+        }
 
         const request = new sql.Request();
         request.input('reqNo', sql.NVarChar, requestNo);
