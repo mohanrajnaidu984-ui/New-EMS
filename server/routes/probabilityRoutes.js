@@ -186,6 +186,10 @@ const ensureProbabilityTable = async () => {
         BEGIN
             ALTER TABLE dbo.Probability ADD QuoteOwnJob NVARCHAR(255) NULL;
         END
+        IF COL_LENGTH('dbo.Probability', 'LostTo') IS NULL
+        BEGIN
+            ALTER TABLE dbo.Probability ADD LostTo NVARCHAR(255) NULL;
+        END
     `);
     probabilityTableReady = true;
 };
@@ -324,6 +328,8 @@ const insertProbabilityHistory = async ({
     req.input('ReasonForLoosing', sql.NVarChar, lostDetails?.reason ? String(lostDetails.reason).trim() : null);
     req.input('CompetitorPrice', sql.NVarChar, lostDetails?.competitorPrice ? String(lostDetails.competitorPrice).replace(/,/g, '').trim() : null);
     req.input('LostDate', sql.DateTime, lostDetails?.lostDate ? new Date(lostDetails.lostDate) : null);
+    // Persist the "Lost To" contractor/client name in its own column so the list view can read it back.
+    req.input('LostTo', sql.NVarChar, lostDetails?.customer ? String(lostDetails.customer).trim() : null);
     req.input('HoldReason', sql.NVarChar, holdReason ? String(holdReason).trim() : null);
     req.input('CencelledReason', sql.NVarChar, cancelledReason ? String(cancelledReason).trim() : null);
     req.input('RetenderedReason', sql.NVarChar, retenderedReason ? String(retenderedReason).trim() : null);
@@ -334,13 +340,13 @@ const insertProbabilityHistory = async ({
             RequestNo, ProjectName, LeadJobName, OwnJobName, ToName, TotalQuotedValue, NetQuotedValue,
             QuoteNo, QuoteRevision, QuoteRef, PreparedBy, QuoteOwnJob, Status, ProbabilityChance, ExpectedDate,
             ERPJobNo, FinalJobValueBooked, BookedDate, GrossMargin, ReasonForLoosing,
-            CompetitorPrice, LostDate, HoldReason, CencelledReason, RetenderedReason,
+            CompetitorPrice, LostDate, LostTo, HoldReason, CencelledReason, RetenderedReason,
             Remarks, UpdatedBy
         ) VALUES (
             @RequestNo, @ProjectName, @LeadJobName, @OwnJobName, @ToName, @TotalQuotedValue, @NetQuotedValue,
             @QuoteNo, @QuoteRevision, @QuoteRef, @PreparedBy, @QuoteOwnJob, @Status, @ProbabilityChance, @ExpectedDate,
             @ERPJobNo, @FinalJobValueBooked, @BookedDate, @GrossMargin, @ReasonForLoosing,
-            @CompetitorPrice, @LostDate, @HoldReason, @CencelledReason, @RetenderedReason,
+            @CompetitorPrice, @LostDate, @LostTo, @HoldReason, @CencelledReason, @RetenderedReason,
             @Remarks, @UpdatedBy
         )
     `);
@@ -407,7 +413,7 @@ router.get('/list', async (req, res) => {
                 NULLIF(LTRIM(RTRIM(ISNULL(P.QuoteRef, ''))), '') as WonQuoteRef,
                 E.WonOption,
                 P.GrossMargin as WonGrossProfit,
-                NULL as LostCompetitor,
+                NULLIF(LTRIM(RTRIM(ISNULL(P.LostTo, ''))), '') as LostCompetitor,
                 NULLIF(LTRIM(RTRIM(ISNULL(P.ReasonForLoosing, ''))), '') as LostReason,
                 NULLIF(LTRIM(RTRIM(ISNULL(P.CompetitorPrice, ''))), '') as LostCompetitorPrice,
                 P.LostDate as LostDate,
@@ -842,7 +848,7 @@ router.get('/history/:requestNo', async (req, res) => {
                 p.LeadJobName,
                 p.QuoteNo, p.QuoteRevision, p.QuoteRef, p.PreparedBy, p.QuoteOwnJob, p.Status, p.ProbabilityChance, p.ExpectedDate,
                 p.ERPJobNo, p.FinalJobValueBooked, p.BookedDate, p.GrossMargin, p.ReasonForLoosing,
-                p.CompetitorPrice, p.LostDate, p.HoldReason, p.CencelledReason, p.RetenderedReason,
+                p.CompetitorPrice, p.LostDate, p.LostTo, p.HoldReason, p.CencelledReason, p.RetenderedReason,
                 p.Remarks, p.UpdatedBy, p.UpdatedDateTime,
                 COALESCE(NULLIF(LTRIM(RTRIM(u.FullName)), ''), LTRIM(RTRIM(p.UpdatedBy))) AS UpdatedByDisplayName,
                 qdt.QuoteDate AS QuoteRefQuoteDate

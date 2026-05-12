@@ -3558,6 +3558,8 @@ router.get('/:requestNo', async (req, res) => {
         console.log('Final Editable:', editableJobs);
 
         console.log('Pricing API: Sending Response with jobs:', JSON.stringify(jobs.map(j => ({ name: j.ItemName, logo: j.CompanyLogo })), null, 2));
+        res.setHeader('Cache-Control', 'no-store, private, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
         res.json({
             enquiry: {
                 requestNo: enquiry.RequestNo,

@@ -1322,8 +1322,8 @@
 }
 
 .sr-top-jobs-status-select {
-    max-width: 9.25rem;
-    min-width: 6.5rem;
+    max-width: 11.5625rem; /* was 9.25rem; +25% for long status labels */
+    min-width: 8.125rem; /* was 6.5rem; +25% */
     font-size: calc(0.65rem * var(--sr-header-font-scale, 1.1) * var(--sr-section-header-font-factor, 0.9));
     padding-top: 0.16rem;
     padding-bottom: 0.16rem;
@@ -1489,6 +1489,22 @@
 
 .sr-th-filter-popover--value {
     min-width: 190px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+}
+
+.sr-th-filter-popover--value .sr-th-value-op-select {
+    flex: 0 0 auto;
+}
+
+.sr-th-filter-popover--value .sr-th-filter-search {
+    flex: 0 0 auto;
+}
+
+.sr-th-filter-popover--value .sr-th-filter-footer {
+    margin-top: 0;
 }
 
 .sr-th-value-op-select {
@@ -1497,7 +1513,7 @@
     border-radius: 4px;
     padding: 0.16rem 0.3rem;
     font-size: 0.65rem;
-    margin-bottom: 0.35rem;
+    margin-bottom: 0;
 }
 
 .sr-th-filter-search {

@@ -129,6 +129,7 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
                       className={`nav-link bg-transparent border-0 d-flex align-items-center shadow-none ems-top-nav-link${activeTab === item.id ? ' active' : ''}`}
                       onClick={() => onNavigate(item.id)}
                       aria-current={activeTab === item.id ? 'page' : undefined}
+                      data-ems-main-nav-id={item.id}
                     >
                       <i className={`bi ${item.icon} me-2 ems-top-nav-link__icon`}></i>
                       {item.label}

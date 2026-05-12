@@ -165,13 +165,13 @@ const SR_TA_QUARTER_CHART_ALIGN_STYLE = {
     '--sr-ta-plot-offset-right': `${SR_TA_PLOT_OFFSET_RIGHT}px`
 };
 
-/** Top Jobs table — must match server whitelist in `salesReportRoutes.js` */
+/** Job list table (all rows for status, sorted by value) — options must match `salesReportRoutes.js` */
 const TOP_JOB_STATUS_OPTIONS = [
     { value: 'Quoted', label: 'Quoted' },
     { value: 'Won', label: 'Won' },
     { value: 'Lost', label: 'Lost' },
     { value: 'Follow Up', label: 'Follow up' },
-    { value: 'Pending', label: 'Pending' }
+    { value: 'Pending', label: 'Pending to update Probability' }
 ];
 
 const TOP_JOB_TABLE_CONFIG = {
@@ -969,6 +969,11 @@ const SalesReport = () => {
         if (topJobStatus === 'Follow Up') {
             return row.ProbabilityChance || '—';
         }
+        if (topJobStatus === 'Pending') {
+            const st = String(row.Status || '').trim().toLowerCase();
+            if (st === 'pending') return 'Pending to update Probability';
+            return row.Status || topJobsHeadingWord || '—';
+        }
         return row.Status || topJobsHeadingWord;
     };
 
@@ -1707,7 +1712,7 @@ const SalesReport = () => {
                         <div className="card-header sr-report-table-title sr-report-table-title--toolbar px-2 py-1 small">
                             <span className="flex-grow-1" aria-hidden />
                             <span className="sr-report-table-heading text-center flex-shrink-0 px-1">
-                                Top Jobs {topJobsHeadingWord} details
+                                Jobs ({topJobsHeadingWord})
                             </span>
                             <div className="flex-grow-1 d-flex justify-content-end align-items-center">
                                 <button

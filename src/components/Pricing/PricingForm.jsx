@@ -400,7 +400,7 @@ function resolveAllEditableJobIds({ jobs, myJobs, canEditAll }) {
     const myJobsArr = Array.isArray(myJobs) ? myJobs : [];
     const out = new Set();
     for (const j of jobs) {
-        if (!myJobsArr.includes(j.itemName)) continue;
+        if (!myJobsArr.some((n) => sameEnquiryItemName(n, j.itemName))) continue;
         const id = nid(j.id);
         if (id != null) out.add(id);
     }
@@ -604,6 +604,95 @@ function tryParsePricingListDisplay(enq) {
     } catch {
         return null;
     }
+}
+
+/** Latest `updatedAt` among priced nodes in list JSON `jobForest` (matches Individual & Subjob column). */
+function maxUpdatedMsInJobForest(nodes) {
+    if (!Array.isArray(nodes) || nodes.length === 0) return NaN;
+    let max = NaN;
+    const walk = (node) => {
+        if (!node) return;
+        if (node.hasPrice && Number(node.price) > 0 && node.updatedAt) {
+            const t = new Date(node.updatedAt).getTime();
+            if (Number.isFinite(t)) max = Number.isFinite(max) ? Math.max(max, t) : t;
+        }
+        const kids = Array.isArray(node.children) ? node.children : [];
+        for (const ch of kids) walk(ch);
+    };
+    for (const n of nodes) walk(n);
+    return max;
+}
+
+/**
+ * Max timestamp (ms) shown in "Individual & Subjob Base prices": JSON `jobForest` priced lines,
+ * or legacy `SubJobPrices` indented rows (level > 0 with a positive price).
+ */
+function getLatestIndividualSubjobBasePriceUpdatedMs(enq) {
+    const structured = tryParsePricingListDisplay(enq);
+    if (structured?.jobForest?.length) {
+        return maxUpdatedMsInJobForest(structured.jobForest);
+    }
+    const split = splitSubJobPricesForListColumns(enq?.SubJobPrices);
+    let max = NaN;
+    for (const row of split.individualRows) {
+        const isUpdated =
+            row.rawPrice && row.rawPrice !== 'Not Updated' && parseFloat(row.rawPrice) > 0;
+        if (!isUpdated || !row.rawDate) continue;
+        const t = new Date(row.rawDate).getTime();
+        if (Number.isFinite(t)) max = Number.isFinite(max) ? Math.max(max, t) : t;
+    }
+    return max;
+}
+
+function sortPricingEnquiryListRows(rows, { field, direction }) {
+    return [...(rows || [])].sort((a, b) => {
+        if (field === 'LatestPriceUpdated') {
+            const aMs = getLatestIndividualSubjobBasePriceUpdatedMs(a);
+            const bMs = getLatestIndividualSubjobBasePriceUpdatedMs(b);
+            const aOk = Number.isFinite(aMs);
+            const bOk = Number.isFinite(bMs);
+            if (!aOk && !bOk) return 0;
+            if (!aOk) return 1;
+            if (!bOk) return -1;
+            if (aMs < bMs) return direction === 'asc' ? -1 : 1;
+            if (aMs > bMs) return direction === 'asc' ? 1 : -1;
+            return 0;
+        }
+        if (field === 'RequestNo') {
+            const ra = a?.RequestNo ?? a?.requestNo;
+            const rb = b?.RequestNo ?? b?.requestNo;
+            const sa = String(ra ?? '').trim();
+            const sb = String(rb ?? '').trim();
+            const na = Number(sa);
+            const nb = Number(sb);
+            const aOk = sa !== '' && Number.isFinite(na);
+            const bOk = sb !== '' && Number.isFinite(nb);
+            if (!aOk && !bOk) {
+                const as = sa.toLowerCase();
+                const bs = sb.toLowerCase();
+                if (as < bs) return direction === 'asc' ? -1 : 1;
+                if (as > bs) return direction === 'asc' ? 1 : -1;
+                return 0;
+            }
+            if (!aOk) return 1;
+            if (!bOk) return -1;
+            if (na < nb) return direction === 'asc' ? -1 : 1;
+            if (na > nb) return direction === 'asc' ? 1 : -1;
+            return 0;
+        }
+        let aVal = a[field];
+        let bVal = b[field];
+        if (field === 'DueDate' || field === 'EnquiryDate') {
+            aVal = aVal ? new Date(aVal).getTime() : Infinity;
+            bVal = bVal ? new Date(bVal).getTime() : Infinity;
+        } else {
+            aVal = (aVal || '').toString().toLowerCase();
+            bVal = (bVal || '').toString().toLowerCase();
+        }
+        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+        return 0;
+    });
 }
 
 /** Align with server `normPricingCustomerKey` on root labels — one block per customer + L# in column 4. */
@@ -927,7 +1016,10 @@ const PricingForm = ({ openContext = null }) => {
     /** Start true so first paint does not flash "No pending items" before the initial fetch runs. */
     const [pendingListLoading, setPendingListLoading] = useState(true);
     const [pendingListError, setPendingListError] = useState(null);
-    const [pendingSortConfig, setPendingSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
+    const [pendingSortConfig, setPendingSortConfig] = useState({
+        field: 'LatestPriceUpdated',
+        direction: 'desc',
+    });
     /** List filter: Master_EnquiryFor.DepartmentName; empty = all (unchanged). Options from /api/pricing/list/divisions */
     const [pricingListDivisions, setPricingListDivisions] = useState([]);
     const [pricingListDivisionsLoading, setPricingListDivisionsLoading] = useState(false);
@@ -960,6 +1052,9 @@ const PricingForm = ({ openContext = null }) => {
     const [newOptionNames, setNewOptionNames] = useState({});
     const [newOptionPrices, setNewOptionPrices] = useState({});
     const [showNewOptionInputs, setShowNewOptionInputs] = useState({});
+    // Tracks the EnquiryFor jobId for each open "+ Add" draft so Save All can auto-commit drafts
+    // even when the section `groupName` includes an `Lx - ` prefix (addOption's name lookup misses those).
+    const [pendingAddJobIds, setPendingAddJobIds] = useState({});
     const [focusedCell, setFocusedCell] = useState(null); // tracks which price input is focused
 
     // Customer state
@@ -1299,7 +1394,8 @@ const PricingForm = ({ openContext = null }) => {
                     ? `&division=${encodeURIComponent(pricingListDivision.trim())}`
                     : '';
             const url = `${API_BASE}/api/pricing/${encodeURIComponent(requestNo)}?userEmail=${encodeURIComponent(userEmail)}${divQ}${customerName ? `&customerName=${encodeURIComponent(customerName)}` : ''}`;
-            const res = await fetch(url);
+            // Always bypass HTTP cache — stale 304 bodies omit freshly POSTed EPO rows so Save All cannot resolve OptionID.
+            const res = await fetch(url, { cache: 'no-store' });
 
             if (!res.ok) {
                 const errData = await res.json();
@@ -1648,11 +1744,13 @@ const PricingForm = ({ openContext = null }) => {
 
 
 
-                // Deduplicate Options (Backend sometimes sends duplicates due to joins)
+                // Deduplicate Options (Backend sometimes sends duplicates due to joins).
+                // Must include option id — same name/item/customer/lead can legitimately be different EPO rows;
+                // dropping the new id leaves `values` keys pointing at a missing option → Save All finds nothing.
                 if (data.options) {
                     const seen = new Set();
-                    data.options = data.options.filter(o => {
-                        const key = `${o.name}|${o.itemName}|${o.customerName}|${o.leadJobName}`;
+                    data.options = data.options.filter((o) => {
+                        const key = `${String(o.id)}|${o.name}|${o.itemName}|${o.customerName}|${o.leadJobName}`;
                         if (seen.has(key)) return false;
                         seen.add(key);
                         return true;
@@ -2623,6 +2721,7 @@ const PricingForm = ({ openContext = null }) => {
         const out = {};
         const tc = normalizePricingCustomerKey(targetCustomer);
         const optById = new Map((pricingData?.options || []).map((o) => [String(o.id), o]));
+        const jobs = pricingData?.jobs || [];
         for (const [k, v] of Object.entries(src)) {
             if (String(k).startsWith('simulated')) {
                 // Simulated ids now include customer key; safe to preserve.
@@ -2635,10 +2734,27 @@ const PricingForm = ({ openContext = null }) => {
             const oc = normalizePricingCustomerKey(opt.customerName || '');
             if (tc && oc && oc === tc) {
                 out[k] = v;
+                continue;
+            }
+            if (tc && !oc) {
+                const jobIdPart = k.split('_')[1];
+                const jobRow = jobs.find((j) => String(j.id) === String(jobIdPart));
+                if (jobRow) {
+                    const pid = jobRow.parentId;
+                    const hasParent =
+                        pid != null && pid !== '' && pid !== 0 && pid !== '0';
+                    if (hasParent) {
+                        const par = jobs.find((p) => String(p.id) === String(pid));
+                        const pn = par ? normalizePricingCustomerKey(par.itemName || '') : '';
+                        if (pn && pn === tc) {
+                            out[k] = v;
+                        }
+                    }
+                }
             }
         }
         return out;
-    }, [pricingData?.options]);
+    }, [pricingData?.options, pricingData?.jobs]);
 
     // When values change, snapshot the current tab's draft values so switching tabs keeps unsaved edits per-customer.
     useEffect(() => {
@@ -2650,9 +2766,8 @@ const PricingForm = ({ openContext = null }) => {
     // Format a numeric value as ###,###,###.### (up to 3 decimal places, no trailing zeros)
     const formatPrice = (val) => {
         if (val === '' || val === undefined || val === null) return '';
-        const num = parseFloat(val);
+        const num = parseFloat(String(val).replace(/,/g, ''));
         if (isNaN(num)) return '';
-        // Use locale string with max 3 decimal places, no trailing zeros
         return num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
     };
 
@@ -2684,8 +2799,158 @@ const PricingForm = ({ openContext = null }) => {
             return;
         }
 
+        // Ref is synced after paint; merge so Save All never reads stale `values` (would skip every PUT).
+        // Declared up here because the draft-auto-commit block below seeds `valuesLive[newKey]`.
+        const valuesLive = { ...(valuesRef.current || {}), ...(values || {}) };
+
+        // Auto-commit any open "+ Add" drafts where the user has typed both Name and Price.
+        // Without this the user had to click "Add" a second time (to POST the option) BEFORE clicking
+        // Save All — easy to forget; the symptom was "No changes to save."
+        // We POST the option here and push the typed price straight into `valuesLive` so the
+        // main save loop below issues the PUT in the same click.
+        const openDrafts = Object.keys(showNewOptionInputs || {})
+            .filter((groupKey) => showNewOptionInputs[groupKey])
+            .map((groupKey) => ({
+                groupKey,
+                name: String(newOptionNames[groupKey] || '').trim(),
+                price: String(newOptionPrices[groupKey] || '').replace(/,/g, '').trim(),
+                jobId: pendingAddJobIds[groupKey] ?? null,
+            }))
+            .filter((d) => d.name && d.price);
+
+        // Track new options created here so the save loop knows they exist even though
+        // `pricingData.options` may not be re-rendered yet (loadPricing runs after this Save All).
+        const draftCreatedOptions = [];
+        if (openDrafts.length > 0) {
+            const currentActiveLeadJob = (pricingData.jobs || []).find((j) => j.id == selectedLeadId);
+            const leadJobNameForDraft = currentActiveLeadJob ? currentActiveLeadJob.itemName : null;
+
+            for (const d of openDrafts) {
+                // Resolve the target EnquiryFor row for this draft.
+                let targetJob = null;
+                if (d.jobId != null) {
+                    targetJob = (pricingData.jobs || []).find((j) => String(j.id) === String(d.jobId));
+                }
+                if (!targetJob) {
+                    // Fallback to name match — strips Lx- prefix for lead rows.
+                    const stripped = d.groupKey.replace(/^L\d+\s*-\s*/, '').trim();
+                    targetJob =
+                        (pricingData.jobs || []).find((j) => sameEnquiryItemName(j.itemName, stripped)) ||
+                        (pricingData.jobs || []).find((j) => sameEnquiryItemName(j.itemName, d.groupKey));
+                }
+                if (!targetJob) {
+                    console.warn('Save All: could not resolve job for draft option', d);
+                    continue;
+                }
+
+                // Permission gate — same rule as addOption().
+                if (!pricingData.access?.canEditAll) {
+                    const anchorId = resolveOwnJobAnchorId({
+                        jobs: pricingData.jobs,
+                        selectedLeadId,
+                        myJobs: effectiveMyJobItemNames,
+                        canEditAll: false,
+                    });
+                    if (anchorId != null && nid(targetJob.id) !== nid(anchorId)) {
+                        alert('You can only add pricing options on your assigned job row for this lead.');
+                        return;
+                    }
+                }
+
+                // Customer name: sub-jobs quote to parent, lead jobs quote to selected customer / first master.
+                let custName = selectedCustomer;
+                if (targetJob.parentId && targetJob.parentId !== '0' && targetJob.parentId !== 0) {
+                    const parent = (pricingData.jobs || []).find((p) => p.id === targetJob.parentId);
+                    if (parent) custName = String(parent.itemName || '').trim();
+                }
+                if (!custName || !String(custName).trim()) {
+                    const masterList = (pricingData.enquiry.customerName || '')
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                    if (masterList.length > 0) custName = masterList[0];
+                }
+
+                try {
+                    const res = await fetch(`${API_BASE}/api/pricing/option`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            requestNo: pricingData.enquiry.requestNo,
+                            optionName: d.name,
+                            itemName: targetJob.itemName,
+                            enquiryForId: targetJob.id,
+                            customerName: custName,
+                            leadJobName: leadJobNameForDraft,
+                        }),
+                    });
+                    if (!res.ok) {
+                        const txt = await res.text().catch(() => '');
+                        console.error('Auto-commit draft option POST failed', d, res.status, txt);
+                        alert(`Could not add option "${d.name}" (${res.status}). ${txt || ''}`);
+                        return;
+                    }
+                    const created = await res.json();
+                    const optRow = created?.option || created || {};
+                    const newOptionId = optRow.ID ?? optRow.id ?? null;
+                    if (newOptionId == null) {
+                        console.warn('Auto-commit: POST succeeded but no option ID returned', created);
+                        continue;
+                    }
+
+                    const newKey = `${newOptionId}_${targetJob.id}`;
+                    valuesLive[newKey] = d.price; // Save loop will PUT this.
+                    draftCreatedOptions.push({
+                        id: newOptionId,
+                        name: optRow.OptionName || optRow.optionName || d.name,
+                        itemName: optRow.ItemName || optRow.itemName || targetJob.itemName,
+                        customerName: optRow.CustomerName || optRow.customerName || custName,
+                        leadJobName: optRow.LeadJobName || optRow.leadJobName || leadJobNameForDraft || null,
+                    });
+
+                    // Clear draft UI state so it doesn't reappear.
+                    setShowNewOptionInputs((prev) => ({ ...prev, [d.groupKey]: false }));
+                    setNewOptionNames((prev) => ({ ...prev, [d.groupKey]: '' }));
+                    setNewOptionPrices((prev) => ({ ...prev, [d.groupKey]: '' }));
+                    setPendingAddJobIds((prev) => {
+                        const next = { ...prev };
+                        delete next[d.groupKey];
+                        return next;
+                    });
+                } catch (err) {
+                    console.error('Auto-commit draft option threw', d, err);
+                    alert(`Could not add option "${d.name}": ${err?.message || err}`);
+                    return;
+                }
+            }
+        }
+
+        // Splice draft options into the in-memory options list so the save loop can resolve `opt`
+        // by id (otherwise `pricingData.options.find(...)` returns undefined for the brand-new ID).
+        // We mutate the live array directly because `pricingData` is a useState const inside this
+        // single Save All execution; the post-save loadPricing will replace it with the server copy.
+        if (draftCreatedOptions.length > 0) {
+            if (!Array.isArray(pricingData.options)) pricingData.options = [];
+            const existingIds = new Set(pricingData.options.map((o) => String(o.id)));
+            for (const no of draftCreatedOptions) {
+                if (!existingIds.has(String(no.id))) {
+                    pricingData.options.push(no);
+                    existingIds.add(String(no.id));
+                }
+            }
+            // Also schedule a UI refresh so the new row is visible if save fails partway.
+            const snapshot = pricingData.options.slice();
+            setPricingData((prev) => (prev ? { ...prev, options: snapshot } : prev));
+        }
+
         const requestNo = pricingData.enquiry.requestNo;
         const userName = currentUser?.name || currentUser?.FullName || 'Unknown';
+        /** Parse grid / state values that may include thousands separators (same as formatPrice). */
+        const parseCellNum = (v) => {
+            if (v === '' || v === undefined || v === null) return 0;
+            const n = parseFloat(String(v).replace(/,/g, ''));
+            return Number.isFinite(n) ? n : 0;
+        };
         const editableJobs = effectiveMyJobItemNames;
         const ownEditableJobIds = resolveAllEditableJobIds({
             jobs: pricingData.jobs,
@@ -2693,22 +2958,18 @@ const PricingForm = ({ openContext = null }) => {
             canEditAll: !!pricingData.access?.canEditAll,
         });
 
-        // Determine all keys that have data (State + DB)
-        const allKeys = new Set([
-            ...Object.keys(values),
-            ...Object.keys(pricingData.values || {})
-        ]);
-
         let skippedCount = 0;
         const valuesToSave = [];
 
         // Step 1: Realize any simulated keys that have values (Step 3401)
-        const simsToProcess = Array.from(allKeys).filter(k => k.startsWith('simulated') && values[k] !== undefined && values[k] !== '');
-        for (const simKey of simsToProcess) {
+        const simKeysInitial = Object.keys(valuesLive).filter(
+            (k) => k.startsWith('simulated') && valuesLive[k] !== undefined && valuesLive[k] !== ''
+        );
+        for (const simKey of simKeysInitial) {
             try {
                 const parts = simKey.split('_');
-                const jobId = parseInt(parts[parts.length - 1]);
-                const job = pricingData.jobs.find(j => j.id === jobId);
+                const jobId = parseInt(parts[parts.length - 1], 10);
+                const job = pricingData.jobs.find((j) => String(j.id) === String(jobId)) || pricingData.jobs.find((j) => nid(j.id) === nid(jobId));
                 if (!job) continue;
                 if (!pricingData.access.canEditAll && ownEditableJobIds.size > 0 && !ownEditableJobIds.has(nid(job.id))) {
                     continue;
@@ -2736,52 +2997,79 @@ const PricingForm = ({ openContext = null }) => {
 
                 if (res.ok) {
                     const d = await res.json();
-                    const newKey = `${d.option.ID}_${jobId}`;
-                    values[newKey] = values[simKey];
-                    allKeys.add(newKey);
-                    delete values[simKey];
+                    const newKey = `${d.option.ID ?? d.option?.id}_${jobId}`;
+                    valuesLive[newKey] = valuesLive[simKey];
+                    delete valuesLive[simKey];
                 }
             } catch (err) { console.error('Sim realization error:', err); }
         }
 
+        const allKeys = new Set([
+            ...Object.keys(valuesLive),
+            ...Object.keys(pricingData.values || {})
+        ]);
+
         // Step 2: Save Loop
-        const debugSaveAll =
-            String(pricingData?.enquiry?.requestNo || requestNo) === '25'
-                ? { totals: 0, skipped: { simulated: 0, parts: 0, noJobOrOpt: 0, notEditable: 0, noMatch: 0 } }
-                : null;
+        // Always-on per-key tracer — we cannot debug "No changes to save" without per-row reasons.
+        const debugSaveAll = {
+            totals: 0,
+            skipped: {
+                simulated: 0,
+                parts: 0,
+                noJobOrOpt: 0,
+                notEditable: 0,
+                noMatch: 0,
+                noChange: 0,
+                zero: 0,
+            },
+            rows: [],
+        };
+        const traceRow = (key, status, extra) => {
+            if (debugSaveAll.rows.length < 50) {
+                debugSaveAll.rows.push({ key, status, ...(extra || {}) });
+            }
+        };
         for (const key of allKeys) {
-            if (debugSaveAll) debugSaveAll.totals++;
+            debugSaveAll.totals++;
             if (key.startsWith('simulated')) {
-                if (debugSaveAll) debugSaveAll.skipped.simulated++;
+                debugSaveAll.skipped.simulated++;
+                traceRow(key, 'simulated');
                 continue;
             }
 
             const parts = key.split('_');
             if (parts.length < 2) {
-                if (debugSaveAll) debugSaveAll.skipped.parts++;
+                debugSaveAll.skipped.parts++;
+                traceRow(key, 'badParts');
                 continue;
             }
 
-            const optionId = parseInt(parts[0]);
-            let jobId = parseInt(parts[1]);
-            const opt = pricingData.options.find(o => o.id === optionId);
+            // API / JSON may use string or number IDs — strict `===` misses rows and yields "No changes to save."
+            const optionIdStr = String(parts[0] ?? '').trim();
+            const jobPart = parts[1];
+            const opt = pricingData.options.find((o) => String(o.id) === optionIdStr);
+            let job = pricingData.jobs.find((j) => String(j.id) === String(jobPart));
 
-            // Robust Job Identification (Handle both ID-based and Name-based keys)
-            let job = pricingData.jobs.find(j => j.id === jobId);
-
-            if (!job && parts[1] && opt) {
-                // Legacy Map: key was OptionID_ItemName
-                // Use Option's leadJobName and itemName to find the exact job
-                const itemName = parts[1];
-                job = pricingData.jobs.find(j =>
-                    j.itemName === itemName &&
-                    (findLeadJobName(j) === opt.leadJobName || (!findLeadJobName(j) && !opt.leadJobName))
+            if (!job && jobPart != null && opt) {
+                const itemName = jobPart;
+                job = pricingData.jobs.find(
+                    (j) =>
+                        j.itemName === itemName &&
+                        (findLeadJobName(j) === opt.leadJobName || (!findLeadJobName(j) && !opt.leadJobName))
                 );
-                if (job) jobId = job.id; // Correct the ID for submission
             }
 
             if (!job || !opt) {
-                if (debugSaveAll) debugSaveAll.skipped.noJobOrOpt++;
+                debugSaveAll.skipped.noJobOrOpt++;
+                traceRow(key, 'noJobOrOpt', { optFound: !!opt, jobFound: !!job, optionIdStr, jobPart });
+                continue;
+            }
+
+            const optionId = nid(opt.id);
+            let jobId = nid(job.id);
+            if (optionId == null || jobId == null) {
+                debugSaveAll.skipped.parts++;
+                traceRow(key, 'badNid', { optionId, jobId });
                 continue;
             }
 
@@ -2793,10 +3081,10 @@ const PricingForm = ({ openContext = null }) => {
                 const parent = pricingData.jobs.find(p => p.id === job.parentId);
                 if (parent) {
                     const targetCust = String(parent.itemName || '').trim();
-                    const internalOpt = pricingData.options.find(o =>
-                        o.name === opt.name &&
-                        o.customerName === targetCust &&
-                        o.itemName === job.itemName &&
+                    const internalOpt = pricingData.options.find((o) =>
+                        String(o.name || '').trim().toLowerCase() === String(opt.name || '').trim().toLowerCase() &&
+                        normalizePricingCustomerKey(o.customerName) === normalizePricingCustomerKey(targetCust) &&
+                        sameEnquiryItemName(o.itemName, job.itemName) &&
                         (o.leadJobName === opt.leadJobName || (!o.leadJobName && !opt.leadJobName))
                     );
                     if (internalOpt) {
@@ -2806,14 +3094,26 @@ const PricingForm = ({ openContext = null }) => {
                 }
             }
 
-            // Permission Check (based on Job Name still)
-            if (!editableJobs.includes(job.itemName)) {
-                if (debugSaveAll) debugSaveAll.skipped.notEditable++;
+            // Permission: align with UI anchor — L-prefixed job rows vs plain division names must still match.
+            if (
+                !pricingData.access.canEditAll &&
+                !editableJobs.some((jn) => sameEnquiryItemName(jn, job.itemName))
+            ) {
+                debugSaveAll.skipped.notEditable++;
+                traceRow(key, 'notEditable_nameMatch', {
+                    jobItemName: job.itemName,
+                    editableJobs,
+                    canEditAll: !!pricingData.access.canEditAll,
+                });
                 continue;
             }
             // Non-admins: any assigned own-job row across all lead branches (not only the selected lead).
             if (!pricingData.access.canEditAll && ownEditableJobIds.size > 0 && !ownEditableJobIds.has(nid(job.id))) {
-                if (debugSaveAll) debugSaveAll.skipped.notEditable++;
+                debugSaveAll.skipped.notEditable++;
+                traceRow(key, 'notEditable_ownIds', {
+                    jobId: job.id,
+                    ownEditableJobIds: Array.from(ownEditableJobIds),
+                });
                 continue;
             }
 
@@ -2835,39 +3135,62 @@ const PricingForm = ({ openContext = null }) => {
             const optLead = norm(optLeadName);
             const jobLead = norm(jobLeadName);
 
+            const jobPartStr = String(jobPart ?? '').trim();
+            const keyIsCanonicalIdPair =
+                /^\d+$/.test(optionIdStr) &&
+                /^\d+$/.test(jobPartStr) &&
+                opt &&
+                job &&
+                String(opt.id) === optionIdStr &&
+                String(job.id) === jobPartStr;
+
             let isMatch = false;
-            if (optItem === jobItem) {
-                // Since the edited cell key already includes the concrete OptionID and JobID,
-                // we do not need to re-check lead-job scope here. Using the found `opt` + `job`
-                // pair is sufficient to persist the correct row.
+            if (keyIsCanonicalIdPair) {
+                // Cell key `${OptionID}_${EnquiryForID}` is authoritative; EPO ItemName can differ from EnquiryFor display name.
+                isMatch = true;
+            } else if (sameEnquiryItemName(opt.itemName, job.itemName)) {
+                // Same pairing rules as loadPricing initialValues (L2 label vs EPO ItemName without prefix).
                 isMatch = true;
             } else if (clean(opt.itemName) === 'Lead Job' && (!job.parentId || job.parentId === 0 || job.parentId === '0')) {
+                isMatch = true;
+            } else if (
+                Array.isArray(pricingData.rawEnquiryPricingValues) &&
+                pricingData.rawEnquiryPricingValues.some(
+                    (v) =>
+                        String(v.EnquiryForID ?? v.enquiryForId ?? '') === String(job.id) &&
+                        String(v.OptionID ?? v.optionID ?? '') === String(opt.id)
+                )
+            ) {
                 isMatch = true;
             }
 
             if (!isMatch) {
-                if (debugSaveAll) {
-                    debugSaveAll.skipped.noMatch++;
-                    debugSaveAll.failures = debugSaveAll.failures || [];
-                    debugSaveAll.failures.push({
-                        key,
-                        optionId,
-                        jobId,
-                        opt: { itemName: opt.itemName, leadJobName: optLeadName },
-                        job: { itemName: job.itemName, parentId: job.parentId },
-                        computed: { optItem, jobItem, optLead, jobLead }
-                    });
-                }
+                debugSaveAll.skipped.noMatch++;
+                debugSaveAll.failures = debugSaveAll.failures || [];
+                debugSaveAll.failures.push({
+                    key,
+                    optionId,
+                    jobId,
+                    opt: { itemName: opt.itemName, leadJobName: optLeadName },
+                    job: { itemName: job.itemName, parentId: job.parentId },
+                    computed: { optItem, jobItem, optLead, jobLead }
+                });
+                traceRow(key, 'noMatch', {
+                    optItemName: opt.itemName,
+                    jobItemName: job.itemName,
+                    optLeadName,
+                    jobLeadName,
+                });
                 continue;
             }
             // -------------------------------------------------------------
 
             // Determine Price
             let displayPrice = 0;
-            if (values.hasOwnProperty(key)) {
-                const userValue = values[key];
+            if (Object.prototype.hasOwnProperty.call(valuesLive, key)) {
+                const userValue = valuesLive[key];
                 if (userValue !== '' && userValue !== undefined && userValue !== null) {
-                    displayPrice = parseFloat(userValue) || 0;
+                    displayPrice = parseCellNum(userValue);
                 }
             } else if (pricingData.values[key] && pricingData.values[key].Price) {
                 // If using DB value, check if it was aggregated?? No, DB stores Self.
@@ -2876,10 +3199,10 @@ const PricingForm = ({ openContext = null }) => {
                 // If we don't have it in state, it means user didn't edit it.
                 // But render is showing Aggregated. initialValues puts Aggregated into State.
                 // So state ALWAYS has Aggregated.
-                if (values[key] === undefined) {
+                if (valuesLive[key] === undefined) {
                     // This case happens if initialValues didn't populate for some reason, or key missing.
                     // Fallback to DB self price.
-                    displayPrice = parseFloat(pricingData.values[key].Price) || 0;
+                    displayPrice = parseCellNum(pricingData.values[key].Price);
                 }
             }
 
@@ -2892,22 +3215,24 @@ const PricingForm = ({ openContext = null }) => {
 
                 // 1. Identify Root Option "Instance"
                 let activeOptionId = rootOptionId;
-                const rootOpt = pricingData.options.find(o => o.id === rootOptionId);
-                const rootJob = pricingData.jobs.find(j => j.id === rootJobId);
+                const rootOpt = pricingData.options.find((o) => String(o.id) === String(rootOptionId));
+                const rootJob = pricingData.jobs.find((j) => String(j.id) === String(rootJobId));
 
                 if (rootOpt && rootJob) {
-                    let specificOpt = pricingData.options.find(o =>
-                        o.name === rootOpt.name &&
-                        o.customerName === rootOpt.customerName &&
-                        o.leadJobName === rootOpt.leadJobName &&
-                        (o.itemName === rootJob.itemName)
+                    let specificOpt = pricingData.options.find(
+                        (o) =>
+                            o.name === rootOpt.name &&
+                            o.customerName === rootOpt.customerName &&
+                            o.leadJobName === rootOpt.leadJobName &&
+                            sameEnquiryItemName(o.itemName, rootJob.itemName)
                     );
                     if (!specificOpt) {
                         const cleanJobName = String(rootJob.itemName || '').trim();
-                        specificOpt = pricingData.options.find(o =>
-                            o.name === rootOpt.name &&
-                            o.customerName === rootOpt.customerName &&
-                            (o.itemName === cleanJobName)
+                        specificOpt = pricingData.options.find(
+                            (o) =>
+                                o.name === rootOpt.name &&
+                                o.customerName === rootOpt.customerName &&
+                                (o.itemName === cleanJobName || sameEnquiryItemName(o.itemName, rootJob.itemName))
                         );
                     }
                     if (specificOpt) activeOptionId = specificOpt.id;
@@ -2984,19 +3309,19 @@ const PricingForm = ({ openContext = null }) => {
                             const key = `${childActiveOptId}_${chId}`;
                             let val = 0;
                             // Priority 1: Check Current State (User Edits)
-                            if (values[key] !== undefined && values[key] !== '') {
-                                val = parseFloat(values[key]) || 0;
+                            if (valuesLive[key] !== undefined && valuesLive[key] !== '') {
+                                val = parseCellNum(valuesLive[key]);
                             }
                             // Priority 2: Check Database Values (Pre-loaded)
                             else if (pricingData.values[key]) {
-                                val = parseFloat(pricingData.values[key].Price) || 0;
+                                val = parseCellNum(pricingData.values[key].Price);
                             }
 
                             // Fallbacks (Name based keys)
                             if (val === 0 && pJob) {
                                 const nKey = `${childActiveOptId}_${pJob.itemName}`;
-                                if (values[nKey] !== undefined && values[nKey] !== '') val = parseFloat(values[nKey]);
-                                else if (pricingData.values[nKey]) val = parseFloat(pricingData.values[nKey].Price);
+                                if (valuesLive[nKey] !== undefined && valuesLive[nKey] !== '') val = parseCellNum(valuesLive[nKey]);
+                                else if (pricingData.values[nKey]) val = parseCellNum(pricingData.values[nKey].Price);
                             }
 
                             let gcSum = 0;
@@ -3034,7 +3359,8 @@ const PricingForm = ({ openContext = null }) => {
 
             // CASCADING ZERO LOGIC:
             // If User Explicitly set 0, and HiddenChildren have value, we must CLEAR them.
-            const userInitiatedZero = (values.hasOwnProperty(key) && parseFloat(values[key]) === 0);
+            const userInitiatedZero =
+                Object.prototype.hasOwnProperty.call(valuesLive, key) && parseCellNum(valuesLive[key]) === 0;
 
             if (userInitiatedZero && hiddenSum > 0) {
                 // Automatically clear hidden children (No Confirm - assume intent)
@@ -3050,8 +3376,8 @@ const PricingForm = ({ openContext = null }) => {
                     if (isVisible) return;
 
                     let childActiveOptId = optId;
-                    const pOpt = pricingData.options.find(o => o.id === optId);
-                    const pJob = pricingData.jobs.find(j => j.id === chId);
+                    const pOpt = pricingData.options.find((o) => String(o.id) === String(optId));
+                    const pJob = pricingData.jobs.find((j) => String(j.id) === String(chId));
                     if (pOpt && pJob) {
                         // HIERARCHICAL CUSTOMER RESOLUTION
                         let targetCust = pOpt.customerName;
@@ -3125,14 +3451,16 @@ const PricingForm = ({ openContext = null }) => {
 
             // NEW SKIP LOGIC (Robust Dirty Check):
             const dbValRow = pricingData.values[key];
-            const currentDbPrice = dbValRow ? (parseFloat(dbValRow.Price) || 0) : 0;
+            const currentDbPrice = dbValRow ? parseCellNum(dbValRow.Price) : 0;
             const hasExplicitDbRow = !!dbValRow;
             const isNoChange = Math.abs(priceToSave - currentDbPrice) < 0.01;
 
             if (isNoChange) {
                 // Skip if already explicit in DB, or if implicit (0) and untouched by user
-                if (hasExplicitDbRow || !values.hasOwnProperty(key)) {
+                if (hasExplicitDbRow || !Object.prototype.hasOwnProperty.call(valuesLive, key)) {
                     skippedCount++;
+                    debugSaveAll.skipped.noChange++;
+                    traceRow(key, 'noChange', { displayPrice, priceToSave, currentDbPrice, hasExplicitDbRow });
                     continue;
                 }
                 // If implicit 0 but User explicitly touched/typed 0, we PROCEED to save (Create Explicit 0 Row)
@@ -3143,8 +3471,11 @@ const PricingForm = ({ openContext = null }) => {
                 userInitiatedZero && hiddenSum > 0 && wantsZeroSave;
             if (wantsZeroSave && !allowCascadeZero && !hasExplicitDbRow) {
                 skippedCount++;
+                debugSaveAll.skipped.zero++;
+                traceRow(key, 'zero', { displayPrice, priceToSave, currentDbPrice });
                 continue;
             }
+            traceRow(key, 'queued', { displayPrice, priceToSave, currentDbPrice });
 
             valuesToSave.push({
                 optionId: effectiveOptionId, // Use Hierarchical Resolved ID
@@ -3164,26 +3495,76 @@ const PricingForm = ({ openContext = null }) => {
             const debugSimKeys = Array.from(allKeys).filter(k => k.startsWith('simulated'));
             const debugParsedKeys = Array.from(allKeys).map((k) => {
                 const parts = k.split('_');
-                const optionId = parseInt(parts[0]);
-                const jobId = parseInt(parts[1]);
-                const opt = Number.isFinite(optionId)
-                    ? (pricingData.options || []).find(o => o.id === optionId)
-                    : null;
-                const job = Number.isFinite(jobId)
-                    ? (pricingData.jobs || []).find(j => j.id === jobId)
-                    : null;
-                return { key: k, parts, optionId, jobId, optFound: !!opt, jobFound: !!job, optId: opt ? opt.id : null };
+                const oStr = String(parts[0] ?? '').trim();
+                const jStr = String(parts[1] ?? '').trim();
+                const opt = (pricingData.options || []).find((o) => String(o.id) === oStr);
+                const job = (pricingData.jobs || []).find((j) => String(j.id) === jStr);
+                return { key: k, parts, optFound: !!opt, jobFound: !!job, optId: opt ? opt.id : null };
             });
             console.log('Pricing saveAll DEBUG (valuesToSave empty)', {
                 requestNo: debugRequestNo,
                 totalKeysInSet: allKeys.size,
+                skippedCount,
                 exampleKeys: Array.from(allKeys).slice(0, 30),
                 parsedKeys: debugParsedKeys,
                 simulatedKeys: debugSimKeys,
-                valuesStateKeys: Object.keys(values || {}).slice(0, 50),
+                valuesStateKeys: Object.keys(valuesLive || {}).slice(0, 50),
+                valuesStateSample: Object.fromEntries(
+                    Object.entries(valuesLive || {}).slice(0, 30)
+                ),
                 pricingValuesKeys: Object.keys(pricingData.values || {}).slice(0, 50),
-                debugSaveAll
+                optionsCount: (pricingData.options || []).length,
+                optionsSample: (pricingData.options || []).slice(0, 30).map((o) => ({
+                    id: o.id,
+                    name: o.name,
+                    itemName: o.itemName,
+                    customerName: o.customerName,
+                    leadJobName: o.leadJobName,
+                })),
+                jobsSample: (pricingData.jobs || []).slice(0, 30).map((j) => ({
+                    id: j.id,
+                    itemName: j.itemName,
+                    parentId: j.parentId,
+                })),
+                access: {
+                    canEditAll: !!pricingData.access?.canEditAll,
+                    editableJobs: pricingData.access?.editableJobs || [],
+                },
+                ownEditableJobIds: Array.from(ownEditableJobIds || []),
+                debugSaveAll,
             });
+
+            // Distinguish permission failures from "everything already up-to-date" — the previous generic
+            // "No changes to save." hid the real cause when the cell the user typed into was on a row
+            // outside their `access.editableJobs` scope (the cell silently accepted input but the server
+            // would reject it, so the save loop skipped it).
+            const blockedByPermission = (debugSaveAll?.rows || []).filter(
+                (r) =>
+                    r &&
+                    (r.status === 'notEditable_nameMatch' || r.status === 'notEditable_ownIds') &&
+                    valuesLive &&
+                    Object.prototype.hasOwnProperty.call(valuesLive, r.key) &&
+                    String(valuesLive[r.key] ?? '').trim() !== '' &&
+                    parseCellNum(valuesLive[r.key]) !==
+                        parseCellNum(
+                            (pricingData.values || {})[r.key]
+                                ? (pricingData.values || {})[r.key].Price
+                                : 0
+                        )
+            );
+
+            if (blockedByPermission.length > 0) {
+                const rows = Array.from(
+                    new Set(blockedByPermission.map((r) => r.jobItemName).filter(Boolean))
+                );
+                const editable = (pricingData.access?.editableJobs || []).join(', ') || '(none)';
+                alert(
+                    `You don't have permission to edit price for: ${rows.join(
+                        ', '
+                    )}.\nYour editable row(s) on this enquiry: ${editable}.`
+                );
+                return;
+            }
 
             alert('No changes to save.');
             loadPricing(pricingData.enquiry.requestNo, selectedCustomer);
@@ -3569,7 +3950,7 @@ const PricingForm = ({ openContext = null }) => {
             const cleanName = (o.name || '').trim();
             const cleanItem = (o.itemName || '').trim();
             const cleanLead = (o.leadJobName || '').trim();
-            const dedupKey = `${cleanName}-${cleanItem}-${cleanLead || 'Legacy'}`;
+            const dedupKey = `${String(o.id)}-${cleanName}-${cleanItem}-${cleanLead || 'Legacy'}`;
             if (!seenKeys.has(dedupKey)) {
                 seenKeys.add(dedupKey);
                 results.push(o);
@@ -3634,6 +4015,50 @@ const PricingForm = ({ openContext = null }) => {
         !pricingData &&
         ((pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && searchResults.length > 0) ||
             (pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0));
+
+    const sortedSearchResultsForTable = React.useMemo(
+        () => sortPricingEnquiryListRows(searchResults, pendingSortConfig),
+        [searchResults, pendingSortConfig]
+    );
+
+    const PricingListSortableHeader = ({ field, label, initialDirection = 'asc', style = {} }) => {
+        const isActive = pendingSortConfig.field === field;
+        const isAsc = pendingSortConfig.direction === 'asc';
+        return (
+            <th
+                onClick={() =>
+                    setPendingSortConfig((prev) =>
+                        prev.field === field
+                            ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                            : { field, direction: initialDirection }
+                    )
+                }
+                style={{
+                    padding: '8px 12px',
+                    textAlign: 'left',
+                    fontSize: '11.7px',
+                    fontWeight: '400',
+                    color: '#ffffff',
+                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    whiteSpace: 'nowrap',
+                    ...style,
+                }}
+            >
+                {label}
+                {isActive ? (
+                    isAsc ? (
+                        ' ▲'
+                    ) : (
+                        ' ▼'
+                    )
+                ) : (
+                    <span style={{ color: '#e6efff' }}> ⇅</span>
+                )}
+            </th>
+        );
+    };
 
     return (
         <div
@@ -4401,31 +4826,50 @@ const PricingForm = ({ openContext = null }) => {
                             >
                                 <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
                                     <tr>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap', borderTopLeftRadius: '8px' }}>Enquiry No.</th>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Project Name</th>
-                                        <th
+                                        <PricingListSortableHeader
+                                            field="RequestNo"
+                                            label="Enquiry No."
+                                            style={{ padding: '6px 10px', borderTopLeftRadius: '8px' }}
+                                        />
+                                        <PricingListSortableHeader
+                                            field="ProjectName"
+                                            label="Project Name"
+                                            style={{ padding: '6px 10px' }}
+                                        />
+                                        <PricingListSortableHeader
+                                            field="CustomerName"
+                                            label="Customer Name & Total Price"
                                             style={{
                                                 padding: '6px 10px',
-                                                textAlign: 'left',
-                                                fontSize: '11.7px',
-                                                fontWeight: '400',
-                                                color: '#ffffff',
-                                                borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
-                                                whiteSpace: 'nowrap',
                                                 minWidth: 'min(560px, 92vw)',
                                                 width: 'auto',
                                             }}
-                                        >
-                                            Customer Name & Total Price
-                                        </th>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Individual & Subjob Base prices</th>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Client Name</th>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap' }}>Consultant Name</th>
-                                        <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: '11.7px', fontWeight: '400', color: '#ffffff', borderBottom: '1px solid rgba(210, 222, 255, 0.25)', whiteSpace: 'nowrap', borderTopRightRadius: '8px' }}>Enquiry Date</th>
+                                        />
+                                        <PricingListSortableHeader
+                                            field="LatestPriceUpdated"
+                                            label="Individual & Subjob Base prices"
+                                            initialDirection="desc"
+                                            style={{ padding: '6px 10px' }}
+                                        />
+                                        <PricingListSortableHeader
+                                            field="ClientName"
+                                            label="Client Name"
+                                            style={{ padding: '6px 10px' }}
+                                        />
+                                        <PricingListSortableHeader
+                                            field="ConsultantName"
+                                            label="Consultant Name"
+                                            style={{ padding: '6px 10px' }}
+                                        />
+                                        <PricingListSortableHeader
+                                            field="EnquiryDate"
+                                            label="Enquiry Date"
+                                            style={{ padding: '6px 10px', borderTopRightRadius: '8px' }}
+                                        />
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {searchResults.map((enq, idx) => {
+                                    {sortedSearchResultsForTable.map((enq, idx) => {
                                         const structured = tryParsePricingListDisplay(enq);
                                         const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
                                         const specMeta = pricingListSpecStatusMeta(enq);
@@ -4565,49 +5009,39 @@ const PricingForm = ({ openContext = null }) => {
             {/* Pending Requests List */}
             {
                 pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0 && (() => {
-                    // --- Sort Logic ---
-                    const sortedPending = [...pendingRequests].sort((a, b) => {
-                        const { field, direction } = pendingSortConfig;
-                        let aVal = a[field];
-                        let bVal = b[field];
-                        // Date fields
-                        if (field === 'DueDate' || field === 'EnquiryDate') {
-                            aVal = aVal ? new Date(aVal).getTime() : Infinity;
-                            bVal = bVal ? new Date(bVal).getTime() : Infinity;
-                        } else {
-                            aVal = (aVal || '').toString().toLowerCase();
-                            bVal = (bVal || '').toString().toLowerCase();
-                        }
-                        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-                        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
-                        return 0;
-                    });
-
-                    const SortableHeader = ({ field, label, style = {} }) => {
-                        const isActive = pendingSortConfig.field === field;
-                        const isAsc = pendingSortConfig.direction === 'asc';
-                        return (
-                            <th
-                                onClick={() => setPendingSortConfig(prev =>
-                                    prev.field === field
-                                        ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
-                                        : { field, direction: 'asc' }
-                                )}
-                                style={{
-                                    padding: '8px 12px', textAlign: 'left', fontSize: '11.7px',
-                                    fontWeight: '400', color: '#ffffff',
-                                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)', cursor: 'pointer',
-                                    userSelect: 'none', whiteSpace: 'nowrap', ...style
-                                }}
-                            >
-                                {label}
-                                {isActive
-                                    ? (isAsc ? ' ▲' : ' ▼')
-                                    : <span style={{ color: '#e6efff' }}> ⇅</span>
-                                }
-                            </th>
-                        );
-                    };
+                    const sortedPending = sortPricingEnquiryListRows(pendingRequests, pendingSortConfig);
+                    const sortFieldLabel =
+                        pendingSortConfig.field === 'DueDate'
+                            ? 'Due Date'
+                            : pendingSortConfig.field === 'RequestNo'
+                              ? 'Enquiry No.'
+                              : pendingSortConfig.field === 'ProjectName'
+                                ? 'Project Name'
+                                : pendingSortConfig.field === 'CustomerName'
+                                  ? 'Customer & Total Price'
+                                  : pendingSortConfig.field === 'LatestPriceUpdated'
+                                    ? 'Individual & Subjob Base prices'
+                                    : pendingSortConfig.field === 'ClientName'
+                                      ? 'Client Name'
+                                      : pendingSortConfig.field === 'ConsultantName'
+                                        ? 'Consultant Name'
+                                        : pendingSortConfig.field;
+                    const sortDirectionHint =
+                        pendingSortConfig.field === 'DueDate'
+                            ? pendingSortConfig.direction === 'asc'
+                                ? '(Soonest first)'
+                                : '(Latest first)'
+                            : pendingSortConfig.field === 'LatestPriceUpdated'
+                              ? pendingSortConfig.direction === 'desc'
+                                ? '(Latest price first)'
+                                : '(Oldest price first)'
+                              : pendingSortConfig.field === 'EnquiryDate'
+                                ? pendingSortConfig.direction === 'asc'
+                                  ? '(Oldest first)'
+                                  : '(Newest first)'
+                                : pendingSortConfig.direction === 'asc'
+                                  ? '(Ascending)'
+                                  : '(Descending)';
 
                     return (
                         <div
@@ -4632,7 +5066,7 @@ const PricingForm = ({ openContext = null }) => {
                                     <FileText size={16} /> Pending Updates ({pendingRequests.length})
                                 </h3>
                                 <span style={{ fontSize: '12px', color: '#64748b' }}>
-                                    Sorted by <strong>{pendingSortConfig.field === 'DueDate' ? 'Due Date' : pendingSortConfig.field === 'RequestNo' ? 'Enquiry No.' : pendingSortConfig.field === 'ProjectName' ? 'Project Name' : pendingSortConfig.field === 'CustomerName' ? 'Customer & Total Price' : pendingSortConfig.field}</strong> {pendingSortConfig.direction === 'asc' ? '(Soonest first)' : '(Latest first)'}
+                                    Sorted by <strong>{sortFieldLabel}</strong> {sortDirectionHint}
                                 </span>
                             </div>
                             {/* Make the pending list fill the viewport height (instead of a fixed 400px). */}
@@ -4656,29 +5090,21 @@ const PricingForm = ({ openContext = null }) => {
                                 >
                                     <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
                                         <tr>
-                                            <SortableHeader field="RequestNo" label="Enquiry No." />
-                                            <SortableHeader field="ProjectName" label="Project Name" />
-                                            <SortableHeader
+                                            <PricingListSortableHeader field="RequestNo" label="Enquiry No." />
+                                            <PricingListSortableHeader field="ProjectName" label="Project Name" />
+                                            <PricingListSortableHeader
                                                 field="CustomerName"
                                                 label="Customer Name & Total Price"
                                                 style={{ minWidth: 'min(560px, 92vw)', width: 'auto' }}
                                             />
-                                            <th
-                                                style={{
-                                                    padding: '8px 12px',
-                                                    textAlign: 'left',
-                                                    fontSize: '11.7px',
-                                                    fontWeight: '400',
-                                                    color: '#ffffff',
-                                                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
-                                                    whiteSpace: 'nowrap',
-                                                }}
-                                            >
-                                                Individual & Subjob Base prices
-                                            </th>
-                                            <SortableHeader field="ClientName" label="Client Name" />
-                                            <SortableHeader field="ConsultantName" label="Consultant Name" />
-                                            <SortableHeader field="DueDate" label="Due Date" />
+                                            <PricingListSortableHeader
+                                                field="LatestPriceUpdated"
+                                                label="Individual & Subjob Base prices"
+                                                initialDirection="desc"
+                                            />
+                                            <PricingListSortableHeader field="ClientName" label="Client Name" />
+                                            <PricingListSortableHeader field="ConsultantName" label="Consultant Name" />
+                                            <PricingListSortableHeader field="DueDate" label="Due Date" />
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -5583,11 +6009,21 @@ const PricingForm = ({ openContext = null }) => {
                                                                                             type="text"
                                                                                             inputMode="decimal"
                                                                                             placeholder="Price"
-                                                                                            value={newOptionPrices[groupName] || ''}
+                                                                                            value={
+                                                                                                focusedCell === `newopt:${job.id}`
+                                                                                                    ? (newOptionPrices[groupName] || '')
+                                                                                                    : formatPrice(newOptionPrices[groupName] || '')
+                                                                                            }
+                                                                                            onFocus={() => setFocusedCell(`newopt:${job.id}`)}
+                                                                                            onBlur={() =>
+                                                                                                setFocusedCell((prev) =>
+                                                                                                    prev === `newopt:${job.id}` ? null : prev
+                                                                                                )
+                                                                                            }
                                                                                             onChange={(e) => {
                                                                                                 const raw = String(e.target.value || '').replace(/,/g, '');
                                                                                                 if (raw !== '' && !/^-?\d*\.?\d*$/.test(raw)) return;
-                                                                                                setNewOptionPrices(prev => ({ ...prev, [groupName]: raw }));
+                                                                                                setNewOptionPrices((prev) => ({ ...prev, [groupName]: raw }));
                                                                                             }}
                                                                                             onKeyDown={async (e) => {
                                                                                                 if (e.key === 'Enter') {
@@ -5596,6 +6032,9 @@ const PricingForm = ({ openContext = null }) => {
                                                                                                     const ok = await addOption(groupName, nameNow, null, job.id, priceNow);
                                                                                                     if (ok) {
                                                                                                         setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: false }));
+                                                                                                        setFocusedCell((prev) =>
+                                                                                                            prev === `newopt:${job.id}` ? null : prev
+                                                                                                        );
                                                                                                     }
                                                                                                 }
                                                                                             }}
@@ -5650,6 +6089,7 @@ const PricingForm = ({ openContext = null }) => {
                                                                                         type="button"
                                                                                         onClick={() => {
                                                                                             setShowNewOptionInputs((prev) => ({ ...prev, [groupName]: true }));
+                                                                                            setPendingAddJobIds((prev) => ({ ...prev, [groupName]: job.id }));
                                                                                         }}
                                                                                         style={{
                                                                                             padding: '3px 8px',

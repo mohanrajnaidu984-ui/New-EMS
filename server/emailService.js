@@ -1,23 +1,9 @@
-const nodemailer = require('nodemailer');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+const { buildSmtpTransport, stripQuotes } = require('./lib/smtpTransport');
 
-// Determine secure flag based on port
-const isSecure = process.env.SMTP_PORT == 465;
+const defaultFrom = () => stripQuotes(process.env.SMTP_USER) || 'ems@almoayyedcg.com';
 
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: process.env.SMTP_PORT == 465,
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS ? process.env.SMTP_PASS.replace(/^"|"$/g, '') : process.env.SMTP_PASS
-    },
-    tls: {
-        rejectUnauthorized: false
-    },
-    logger: true, // Log to console
-    debug: true   // Include SMTP traffic
-});
+const transporter = buildSmtpTransport({ logger: true, debug: true });
 
 const sendAcknowledgementEmail = async (enquiryData, customerEmail, seEmail, ceoSign) => {
     try {
@@ -69,7 +55,7 @@ const sendAcknowledgementEmail = async (enquiryData, customerEmail, seEmail, ceo
         `;
 
         const mailOptions = {
-            from: 'ems@almoayyedcg.com', // HARDCODED ADDRESS
+            from: defaultFrom(),
             to: customerEmail,
             cc: seEmail,
             subject: `Acknowledgement of enquiry - ${RequestNo} dated ${formattedDate}`,
@@ -99,7 +85,7 @@ const sendAcknowledgementEmail = async (enquiryData, customerEmail, seEmail, ceo
 const sendGeneralEmail = async ({ to, cc, bcc, subject, html, attachments }) => {
     try {
         const mailOptions = {
-            from: 'ems@almoayyedcg.com', // Consistent with other emails
+            from: defaultFrom(),
             to,
             cc,
             bcc,

@@ -414,8 +414,9 @@ router.get('/attention-by-department', async (req, res) => {
     try {
         const dept = String(req.query.dept || '').trim();
         if (!dept) return res.json([]);
+        // Pull Prefix so "Attention of" displays "<Prefix> <FullName>" (e.g. "Mr. Arun Venkatesh").
         const masterSeRes = await sql.query`
-            SELECT FullName, Department FROM Master_ConcernedSE
+            SELECT FullName, Department, Prefix FROM Master_ConcernedSE
             WHERE FullName IS NOT NULL AND LTRIM(RTRIM(FullName)) <> N''
               AND (Status = N'Active' OR Status IS NULL OR LTRIM(RTRIM(ISNULL(Status, N''))) = N'')
         `;
@@ -428,10 +429,31 @@ router.get('/attention-by-department', async (req, res) => {
         const stripJobPrefix = (name) => String(name || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
         const target = normDeptLabel(stripJobPrefix(dept));
         if (!target) return res.json([]);
+        const composeName = (rawName, rawPrefix) => {
+            const n = String(rawName || '').trim();
+            let p = String(rawPrefix || '').trim();
+            if (!n) return '';
+            if (!p) return n;
+            // Always render the prefix with a trailing period — DB may store "Mr", "Mr.", or "Mr.." inconsistently.
+            p = p.replace(/[.!?,;:]+$/g, '') + '.';
+            const nL = n.toLowerCase();
+            const pL = p.toLowerCase();
+            const pBare = pL.replace(/\.+$/, '');
+            if (
+                nL === pL ||
+                nL === pBare ||
+                nL.startsWith(pL + ' ') ||
+                nL.startsWith(pBare + ' ') ||
+                nL.startsWith(pBare + '.')
+            ) {
+                return n;
+            }
+            return `${p} ${n}`;
+        };
         const names = (masterSeRes.recordset || [])
             .filter((r) => normDeptLabel(r.Department) === target)
-            .map((r) => String(r.FullName || '').trim())
-                    .filter(Boolean);
+            .map((r) => composeName(r.FullName, r.Prefix))
+            .filter(Boolean);
         res.json([...new Set(names)].sort((a, b) => a.localeCompare(b)));
     } catch (e) {
         console.error('[quotes] attention-by-department:', e);
@@ -1373,23 +1395,53 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 WHERE RequestNo = ${requestNo}
             `;
 
-            // Get ReceivedFrom contacts from ReceivedFrom table
+            // Get ReceivedFrom contacts from ReceivedFrom table — JOIN Master_ReceivedFrom to pull
+            // the Prefix (Mr./Ms./Dr./…) so the Quote "Attention of" reads "Prefix FullName".
             const receivedFromResult = await sql.query`
-                SELECT ContactName, CompanyName 
-                FROM ReceivedFrom 
-                WHERE RequestNo = ${requestNo}
+                SELECT rf.ContactName, rf.CompanyName, mrf.Prefix
+                FROM ReceivedFrom rf
+                LEFT JOIN Master_ReceivedFrom mrf
+                    ON LTRIM(RTRIM(ISNULL(mrf.ContactName, N''))) = LTRIM(RTRIM(ISNULL(rf.ContactName, N'')))
+                   AND LTRIM(RTRIM(ISNULL(mrf.CompanyName, N''))) = LTRIM(RTRIM(ISNULL(rf.CompanyName, N'')))
+                WHERE rf.RequestNo = ${requestNo}
             `;
 
             console.log('[Quote API] ReceivedFrom records:', receivedFromResult.recordset);
 
-            // Build customerContacts mapping from ReceivedFrom table
+            /**
+             * Compose a display name as "<Prefix>. <Name>" when a non-empty Prefix is available, otherwise just the name.
+             * Always normalises the prefix with a trailing period (e.g. "Mr" → "Mr.") so "Mr Mahmood" never reaches the UI.
+             * Avoids double-prefixing if the contact name already starts with the same prefix.
+             */
+            const formatNameWithPrefix = (rawName, rawPrefix) => {
+                const name = String(rawName || '').trim();
+                let prefix = String(rawPrefix || '').trim();
+                if (!name) return '';
+                if (!prefix) return name;
+                // Strip any trailing punctuation then re-add a single period — covers "Mr", "Mr.", "Mr..", etc.
+                prefix = prefix.replace(/[.!?,;:]+$/g, '') + '.';
+                const nLower = name.toLowerCase();
+                const pLower = prefix.toLowerCase();
+                const pBare = pLower.replace(/\.+$/, '');
+                if (
+                    nLower === pLower ||
+                    nLower === pBare ||
+                    nLower.startsWith(pLower + ' ') ||
+                    nLower.startsWith(pBare + ' ') ||
+                    nLower.startsWith(pBare + '.')
+                ) {
+                    return name;
+                }
+                return `${prefix} ${name}`;
+            };
+
+            // Build customerContacts mapping from ReceivedFrom table (prefix-aware display strings).
             receivedFromResult.recordset.forEach(row => {
                 if (row.CompanyName && row.ContactName) {
-                    // Clean trailing commas and trim
                     const company = row.CompanyName.replace(/,+$/, '').trim();
-                    const contact = row.ContactName.trim();
+                    const contact = formatNameWithPrefix(row.ContactName, row.Prefix);
+                    if (!contact) return;
 
-                    // If this company already has contacts, append with comma
                     if (customerContacts[company]) {
                         customerContacts[company] += ', ' + contact;
                     } else {
@@ -1432,12 +1484,46 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 });
             }
 
+            // Build a global ContactName → Prefix map from Master_ReceivedFrom — used to enrich
+            // `enquiry.ReceivedFrom` (a free-text field) so it also shows "<Prefix> <Name>".
+            let masterContactPrefixByName = new Map();
+            try {
+                const mrfAll = await sql.query`
+                    SELECT ContactName, Prefix FROM Master_ReceivedFrom
+                    WHERE ContactName IS NOT NULL AND LTRIM(RTRIM(ContactName)) <> N''
+                `;
+                (mrfAll.recordset || []).forEach((row) => {
+                    const k = String(row.ContactName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                    if (!k) return;
+                    const p = String(row.Prefix || '').trim();
+                    if (!masterContactPrefixByName.has(k) && p) masterContactPrefixByName.set(k, p);
+                });
+            } catch (_mrfErr) { /* table missing in some envs — fallback silently */ }
+
+            /** Apply Master_ReceivedFrom prefix to a free-text contact string (handles comma-separated values). */
+            const enrichContactsWithMasterPrefix = (raw) => {
+                const txt = String(raw || '').trim();
+                if (!txt) return '';
+                return txt
+                    .split(',')
+                    .map((part) => {
+                        const name = part.trim();
+                        if (!name) return '';
+                        const k = name.toLowerCase().replace(/\s+/g, ' ').trim();
+                        const prefix = masterContactPrefixByName.get(k);
+                        return formatNameWithPrefix(name, prefix);
+                    })
+                    .filter(Boolean)
+                    .join(', ');
+            };
+
             // Map ReceivedFrom for external customers
             externalCustomers.forEach((name) => {
                 const trimmed = String(name).trim();
                 if (trimmed && !hasContact(trimmed) && enquiry.ReceivedFrom) {
-                    customerContacts[trimmed] = enquiry.ReceivedFrom;
-                    console.log(`[Quote API] Mapped main customer "${trimmed}" to ReceivedFrom: "${enquiry.ReceivedFrom}"`);
+                    const display = enrichContactsWithMasterPrefix(enquiry.ReceivedFrom) || enquiry.ReceivedFrom;
+                    customerContacts[trimmed] = display;
+                    console.log(`[Quote API] Mapped main customer "${trimmed}" to ReceivedFrom: "${display}"`);
                 }
             });
 
@@ -1490,12 +1576,27 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
 
             // --- Quote "Attention of" metadata (dropdowns on client) ---
             try {
+                // Internal customers: pick Prefix from Master_ConcernedSE so "Attention of" displays "<Prefix> <FullName>".
                 const masterSeRes = await sql.query`
-                    SELECT FullName, Department, EmailId FROM Master_ConcernedSE
+                    SELECT FullName, Department, EmailId, Prefix FROM Master_ConcernedSE
                     WHERE FullName IS NOT NULL AND LTRIM(RTRIM(FullName)) <> N''
                       AND (Status = N'Active' OR Status IS NULL OR LTRIM(RTRIM(ISNULL(Status, N''))) = N'')
                 `;
                 const masterRows = masterSeRes.recordset || [];
+
+                /**
+                 * Look up Master_ConcernedSE.Prefix for a given FullName (loose, case- and whitespace-insensitive).
+                 * Returns '' when no match — caller then renders the plain name.
+                 */
+                const prefixForSeFullName = (fullName) => {
+                    const target = String(fullName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                    if (!target) return '';
+                    const hit = masterRows.find((m) => {
+                        const fk = String(m.FullName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                        return fk === target;
+                    });
+                    return hit ? String(hit.Prefix || '').trim() : '';
+                };
                 const concernedOrderedRes = await sql.query`
                     SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo} ORDER BY SEName
                 `;
@@ -1564,7 +1665,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                 receivedFromResult.recordset.forEach(row => {
                     if (!row.CompanyName || !row.ContactName) return;
                     const company = String(row.CompanyName).replace(/,+$/, '').trim();
-                    const contact = String(row.ContactName).trim();
+                    const contact = formatNameWithPrefix(row.ContactName, row.Prefix);
+                    if (!contact) return;
                     if (!byCompany[company]) byCompany[company] = new Set();
                     byCompany[company].add(contact);
                 });
@@ -1587,9 +1689,14 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                         });
                     }
                     if (set.size === 0 && enquiry.ReceivedFrom) {
+                        // Use the global Master_ReceivedFrom prefix map so fallback names also display "<Prefix> <Name>".
                         String(enquiry.ReceivedFrom).split(',').forEach(p => {
-                            const t = p.trim();
-                            if (t) set.add(t);
+                            const name = p.trim();
+                            if (!name) return;
+                            const k = name.toLowerCase().replace(/\s+/g, ' ').trim();
+                            const prefix = masterContactPrefixByName.get(k);
+                            const display = formatNameWithPrefix(name, prefix);
+                            if (display) set.add(display);
                         });
                     }
                     externalAttentionOptionsByCustomer[cust] = [...set].sort((a, b) => a.localeCompare(b));
@@ -1660,12 +1767,12 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     /** Primary: Master_ConcernedSE.Department = clean internal customer (e.g. 'HVAC Project'). */
                     let namesFromDept = masterRows
                         .filter(m => deptEqualsCleanCustomer(m.Department, cl))
-                        .map(m => String(m.FullName || '').trim())
+                        .map(m => formatNameWithPrefix(m.FullName, m.Prefix))
                         .filter(Boolean);
                     if (namesFromDept.length === 0) {
                         namesFromDept = masterRows
                             .filter(m => departmentMatchesAnyLabel(m.Department, attentionLabels))
-                            .map(m => String(m.FullName || '').trim())
+                            .map(m => formatNameWithPrefix(m.FullName, m.Prefix))
                             .filter(Boolean);
                     }
                     let options = [...new Set(namesFromDept)].sort((a, b) => a.localeCompare(b));
@@ -1676,7 +1783,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                                 const em = normalizeMail(m.EmailId);
                                 return em && divisionMails.has(em);
                             })
-                            .map((m) => String(m.FullName || '').trim())
+                            .map((m) => formatNameWithPrefix(m.FullName, m.Prefix))
                             .filter(Boolean);
                         options = [...new Set(fromMails)].sort((a, b) => a.localeCompare(b));
                     }
@@ -1689,7 +1796,8 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                             const em = normalizeMail(m.EmailId);
                             if (em && divisionMails.has(em)) {
                                 const fn = String(m.FullName || '').trim();
-                                fromConcerned.push(fn || seName);
+                                const display = formatNameWithPrefix(fn || seName, m.Prefix);
+                                fromConcerned.push(display);
                             }
                         }
                         options = [...new Set(fromConcerned)].sort((a, b) => a.localeCompare(b));
@@ -1714,8 +1822,12 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     }
                     const assignedForThisDivision = [...assignedByRowMail, ...assignedByDeptOnly];
                     const firstAssigned = assignedForThisDivision[0];
-                    const firstAssignedFull = firstAssigned
-                        ? String(findMasterForSeName(firstAssigned)?.FullName || '').trim() || firstAssigned
+                    const firstAssignedMaster = firstAssigned ? findMasterForSeName(firstAssigned) : null;
+                    const firstAssignedFullRaw = firstAssignedMaster
+                        ? String(firstAssignedMaster.FullName || '').trim() || firstAssigned
+                        : (firstAssigned || '');
+                    const firstAssignedFull = firstAssignedFullRaw
+                        ? formatNameWithPrefix(firstAssignedFullRaw, firstAssignedMaster?.Prefix)
                         : '';
                     /** Default only if that person is already in the Master_ConcernedSE–matched list */
                     let defaultAttention = '';
@@ -1747,7 +1859,7 @@ router.get('/enquiry-data/:requestNo', async (req, res) => {
                     if (cur && Array.isArray(cur.options) && cur.options.length > 0) continue;
                     const namesExact = masterRows
                         .filter((m) => deptEqualsCleanCustomer(m.Department, cl))
-                        .map((m) => String(m.FullName || '').trim())
+                        .map((m) => formatNameWithPrefix(m.FullName, m.Prefix))
                         .filter(Boolean);
                     if (namesExact.length === 0) continue;
                     const opts = [...new Set(namesExact)].sort((a, b) => a.localeCompare(b));

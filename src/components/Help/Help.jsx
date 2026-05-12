@@ -106,7 +106,7 @@ const Help = () => {
               <strong>Example:</strong> If pending follow-ups increased today, navigate to Probability and update due records first.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Process view:</strong> Dashboard -> identify priority -> open specific module -> complete update -> return for next priority.
+              <strong>Process view:</strong> Dashboard &rarr; identify priority &rarr; open specific module &rarr; complete update &rarr; return for next priority.
             </p>
             <p className="mb-0 mt-1">
               <strong>Expected output:</strong> Clear daily action queue and faster navigation to pending records.
@@ -128,7 +128,7 @@ const Help = () => {
               <strong>Example:</strong> Customer submits a new MEP request. Register enquiry with project location, assign division, then pass to Pricing.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> New Enquiry -> fill mandatory fields -> save -> verify generated enquiry reference -> move to Pricing.
+              <strong>Step process:</strong> New Enquiry &rarr; fill mandatory fields &rarr; save &rarr; verify generated enquiry reference &rarr; move to Pricing.
             </p>
             <p className="mb-0 mt-1">
               <strong>Validation notes:</strong> Ensure customer name, project name, division, and contact context are complete before save.
@@ -153,7 +153,7 @@ const Help = () => {
               <strong>Example:</strong> If material cost changed, revise pricing lines and confirm updated totals before issuing a revised quote.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Load enquiry -> update commercial lines -> validate totals/net value -> confirm for quote preparation.
+              <strong>Step process:</strong> Load enquiry &rarr; update commercial lines &rarr; validate totals/net value &rarr; confirm for quote preparation.
             </p>
             <p className="mb-0 mt-1">
               <strong>Validation notes:</strong> Recheck arithmetic consistency between item totals, quoted value, and net value before forwarding.
@@ -178,7 +178,7 @@ const Help = () => {
               <strong>Example:</strong> Quote Ref R0 issued on first submission; after negotiation, create R1 with changed value and keep both in history.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Select enquiry -> create quote reference -> publish/send -> if revised, create next revision with reason.
+              <strong>Step process:</strong> Select enquiry &rarr; create quote reference &rarr; publish/send &rarr; if revised, create next revision with reason.
             </p>
             <p className="mb-0 mt-1">
               <strong>Validation notes:</strong> Always confirm latest revision selection before status updates in Probability.
@@ -203,7 +203,7 @@ const Help = () => {
               <strong>Example:</strong> For Lost, capture lost-to contractor and reason. For Won, enter ERP job no., booked date, job value, and GP%.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Select status -> enter status-specific fields -> save update -> verify row reflects latest status.
+              <strong>Step process:</strong> Select status &rarr; enter status-specific fields &rarr; save update &rarr; verify row reflects latest status.
             </p>
             <p className="mb-0 mt-1">
               <strong>Status field guide:</strong> Lost requires lost-to/reason; Follow Up requires probability and remarks; Won requires job value, GP, and booked date.
@@ -228,7 +228,7 @@ const Help = () => {
               <strong>Example:</strong> Select Division A + SE All and compare Won vs Lost distribution to identify conversion gaps.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Apply filters -> review charts/table -> compare status buckets -> prepare action list for pending opportunities.
+              <strong>Step process:</strong> Apply filters &rarr; review charts/table &rarr; compare status buckets &rarr; prepare action list for pending opportunities.
             </p>
             <p className="mb-0 mt-1">
               <strong>Expected output:</strong> Insight-driven follow-up priorities and conversion analysis.
@@ -252,8 +252,8 @@ const Help = () => {
               <li><strong>Trend Interpretation:</strong> Rising quoted with flat won indicates conversion delay; rising lost indicates pricing/competition pressure.</li>
             </ul>
             <p className="mb-0 mt-2">
-              <strong>Detailed analysis process:</strong> Select Division/SE -> review Actual bars period-wise -> inspect Pipeline concentration -> open Top Jobs by status ->
-              identify high-value actionable records -> update Probability/Quote records -> recheck chart movement.
+              <strong>Detailed analysis process:</strong> Select Division/SE &rarr; review Actual bars period-wise &rarr; inspect Pipeline concentration &rarr; open Top Jobs by status &rarr;
+              identify high-value actionable records &rarr; update Probability/Quote records &rarr; recheck chart movement.
             </p>
             <p className="mb-0 mt-2">
               <strong>How to read the report correctly (expanded):</strong>
@@ -314,16 +314,16 @@ const Help = () => {
               <strong>Example:</strong> If Q2 target achievement is below plan, use Probability + Sales Report to prioritize high-probability follow-ups.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Check target gap -> identify pipeline support value -> assign actions -> review progress in next cycle.
+              <strong>Step process:</strong> Check target gap &rarr; identify pipeline support value &rarr; assign actions &rarr; review progress in next cycle.
             </p>
             <p className="mb-0 mt-1">
               <strong>Expected output:</strong> Measurable target plan with periodic progress checkpoints.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Detailed setup process:</strong> Select year/period -> enter target value by required scope -> save -> verify reflected baseline -> compare against live achieved value.
+              <strong>Detailed setup process:</strong> Select year/period &rarr; enter target value by required scope &rarr; save &rarr; verify reflected baseline &rarr; compare against live achieved value.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Detailed review process:</strong> Review target vs achieved weekly -> note shortfall trend -> cross-check open Follow Up/Won-ready opportunities -> update action priorities -> recheck closure in next review cycle.
+              <strong>Detailed review process:</strong> Review target vs achieved weekly &rarr; note shortfall trend &rarr; cross-check open Follow Up/Won-ready opportunities &rarr; update action priorities &rarr; recheck closure in next review cycle.
             </p>
           </div>
 

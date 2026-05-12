@@ -111,7 +111,6 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
 
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.ContactName) newErrors.ContactName = 'Contact Person Name is required';
-        if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
         if (!formData.Mobile1) newErrors.Mobile1 = 'Mobile 1 is required';
         if (!formData.EmailId) {
             newErrors.EmailId = 'E-Mail ID is required';
@@ -220,7 +219,7 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                         </select>
                     </div>
                     <div className="col-md-6" style={{ position: 'relative' }}>
-                        <label className="form-label">Address 1<span className="text-danger">*</span></label>
+                        <label className="form-label">Address 1</label>
                         <textarea className="form-control" style={{ fontSize: '13px', fontFamily: 'inherit' }}
                             value={formData.Address1} onChange={(e) => handleChange('Address1', e.target.value)} />
                         {errors.Address1 && <ValidationTooltip message={errors.Address1} />}

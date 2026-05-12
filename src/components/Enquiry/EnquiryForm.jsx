@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
 import { useData } from '../../context/DataContext';
 import { useAuth } from '../../context/AuthContext';
 import ListBoxControl from './ListBoxControl';
@@ -223,6 +223,33 @@ const EnquiryForm = ({ requestNoToOpen }) => {
     /** After initial SE hydration for a loaded enquiry, do not re-infer (would undo removing the last assignee). */
     const enquiryForHydratedRef = useRef(null);
 
+    /**
+     * Centres the entire Enquiry submenu strip horizontally under the "Enquiry" tab
+     * in the main top nav. The strip's parent flex row keeps `justify-content-start`,
+     * so we slide the strip with a measured `marginLeft`. Recomputes on mount, window
+     * resize, and tab toggle (Modify reveals an extra info row that may shift layout).
+     */
+    const submenuStripRef = useRef(null);
+    const [submenuStripMarginLeftPx, setSubmenuStripMarginLeftPx] = useState(null);
+    useLayoutEffect(() => {
+        const recompute = () => {
+            const strip = submenuStripRef.current;
+            const navBtn = document.querySelector('[data-ems-main-nav-id="Enquiry"]');
+            if (!strip || !navBtn) return;
+            const parent = strip.parentElement;
+            if (!parent) return;
+            const stripRect = strip.getBoundingClientRect();
+            const navRect = navBtn.getBoundingClientRect();
+            const parentRect = parent.getBoundingClientRect();
+            const navCenterX = navRect.left + navRect.width / 2;
+            const desiredLeftWithinParent = navCenterX - parentRect.left - stripRect.width / 2;
+            setSubmenuStripMarginLeftPx(Math.max(0, desiredLeftWithinParent));
+        };
+        recompute();
+        window.addEventListener('resize', recompute);
+        return () => window.removeEventListener('resize', recompute);
+    }, [activeTab]);
+
     // Dynamic Lists
     const combinedClientNames = useMemo(() => {
         const combined = [
@@ -422,6 +449,33 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             return;
         }
 
+        // When the Customer row already exists but its Received From slot is empty
+        // (user removed the RF in modify mode to update the contact while pricing
+        // exists), pair the new RF with that customer in place — do NOT push a
+        // duplicate customer row.
+        if (customerList.length > receivedFromList.length) {
+            const nextSlotIdx = receivedFromList.length;
+            const customerAtNextSlot = (customerList[nextSlotIdx] || '').trim();
+            if (customerAtNextSlot === cust) {
+                setReceivedFromList((prev) => [...prev, rf]);
+                handleInputChange('ReceivedFrom', '');
+                handleInputChange('CustomerName', '');
+                if (errors.ReceivedFrom) {
+                    setErrors((prev) => {
+                        const { ReceivedFrom, ...rest } = prev;
+                        return rest;
+                    });
+                }
+                if (errors.CustomerName) {
+                    setErrors((prev) => {
+                        const { CustomerName, ...rest } = prev;
+                        return rest;
+                    });
+                }
+                return;
+            }
+        }
+
         setCustomerList((prev) => [...prev, formData.CustomerName]);
         setReceivedFromList((prev) => [...prev, rf]);
 
@@ -463,19 +517,33 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         }
     };
 
-    /** Remove one row from both Customer Name and Received From lists at the same index (paired rows). */
+    /**
+     * Triggered by the `-` button on the Received From listbox. The Customer listbox
+     * itself does not expose a remove button (`canRemove={false}`), so this handler is
+     * the only path that drops a row. Behavior:
+     *   - Modify mode + pricing already saved: keep the Customer (pricing is keyed by
+     *     customer), drop only its Received From, and pre-fill the dropdowns so the
+     *     user can pick a new contact and click `+` to re-pair it for the same customer.
+     *   - Otherwise: drop both Customer and Received From at the same index, as before.
+     */
     const handleRemoveCustomerPair = (selectedIndex) => {
         if (isLimitedEdit) return;
-        if (isModifyMode && pricedEnquiryForIds.size > 0) {
-            alert('Pricing is already added for this enquiry. Customer/Received From rows cannot be removed.');
-            return;
-        }
         const pairedLen = Math.min(customerList.length, receivedFromList.length);
         if (pairedLen === 0) return;
 
         let idx = selectedIndex;
         if (idx == null || idx < 0 || idx >= pairedLen) {
             idx = pairedLen - 1;
+        }
+
+        if (isModifyMode && pricedEnquiryForIds.size > 0) {
+            const stayingCustomer = customerList[idx];
+            setReceivedFromList((prev) => prev.filter((_, i) => i !== idx));
+            if (stayingCustomer) {
+                handleInputChange('CustomerName', stayingCustomer);
+                handleInputChange('ReceivedFrom', '');
+            }
+            return;
         }
 
         setCustomerList((prev) => prev.filter((_, i) => i !== idx));
@@ -1671,12 +1739,18 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                     <div className="col-12" style={{ flex: '0 0 66%', maxWidth: '66%' }}>
                         <div
                             className="d-flex justify-content-start"
-                            style={{ marginTop: '10px', marginBottom: '0.2rem', paddingLeft: '140px' }}
+                            style={{ marginTop: '10px', marginBottom: '0.2rem' }}
                         >
                             <div
+                                ref={submenuStripRef}
                                 style={{
                                     position: 'relative',
-                                    width: 'fit-content'
+                                    width: 'fit-content',
+                                    /* Slides the whole strip so its centre sits below the Enquiry main
+                                       nav tab (computed in useLayoutEffect). Fallback 140px keeps the
+                                       pre-measurement paint close to the final position. */
+                                    marginLeft: submenuStripMarginLeftPx != null ? `${submenuStripMarginLeftPx}px` : '140px',
+                                    transition: 'margin-left 180ms ease'
                                 }}
                             >
                                 <div
@@ -1684,7 +1758,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                     style={{
                                         position: 'absolute',
                                         top: '-8px',
-                                        left: '146px',
+                                        left: '50%',
                                         transform: 'translateX(-50%)',
                                         width: 0,
                                         height: 0,
@@ -2633,25 +2707,48 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
                                             {/* Buttons Section (Left Aligned, Add then Cancel) */}
                                             <div className="d-flex justify-content-start gap-2 mt-4 mb-5">
-                                                {(!isModifyMode || (isModifyMode && canEdit)) && (
-                                                    <button
-                                                        type="submit"
-                                                        className="btn btn-outline-success"
-                                                        disabled={isSubmitting || (!isModifyMode && isFormEmpty)}
-                                                    >
-                                                        {isSubmitting ? (
-                                                            <>
-                                                                <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                                                                {isModifyMode ? 'Saving...' : 'Adding...'}
-                                                            </>
-                                                        ) : (
-                                                            isModifyMode ? 'Save Changes' : 'Add Enquiry'
-                                                        )}
-                                                    </button>
-                                                )}
+                                                {(!isModifyMode || (isModifyMode && canEdit)) && (() => {
+                                                    /* When the user clicked `-` on a priced customer's Received From,
+                                                       customerList has an entry without a paired RF. Block save until
+                                                       they pick a new contact and click `+` to re-pair the slot. */
+                                                    const hasUnpairedCustomer = customerList.length > receivedFromList.length;
+                                                    const saveDisabled =
+                                                        isSubmitting ||
+                                                        (!isModifyMode && isFormEmpty) ||
+                                                        hasUnpairedCustomer;
+                                                    return (
+                                                        <button
+                                                            type="submit"
+                                                            className="btn btn-outline-success"
+                                                            disabled={saveDisabled}
+                                                            title={
+                                                                hasUnpairedCustomer
+                                                                    ? 'Please select a Received From contact and click + to re-pair it before saving.'
+                                                                    : undefined
+                                                            }
+                                                        >
+                                                            {isSubmitting ? (
+                                                                <>
+                                                                    <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                                                    {isModifyMode ? 'Saving...' : 'Adding...'}
+                                                                </>
+                                                            ) : (
+                                                                isModifyMode ? 'Save Changes' : 'Add Enquiry'
+                                                            )}
+                                                        </button>
+                                                    );
+                                                })()}
                                                 <button type="button" className="btn btn-outline-danger" onClick={resetForm} disabled={isSubmitting}>
                                                     {isModifyMode && !canEdit ? 'Close' : 'Cancel'}
                                                 </button>
+                                                {customerList.length > receivedFromList.length && (
+                                                    <span
+                                                        className="text-danger align-self-center"
+                                                        style={{ fontSize: '12px', marginLeft: '4px' }}
+                                                    >
+                                                        Pick a Received From contact and click <strong>+</strong> to re-pair it with the listed customer before saving.
+                                                    </span>
+                                                )}
                                             </div>
 
                                             {/* Validation Error Messages */}

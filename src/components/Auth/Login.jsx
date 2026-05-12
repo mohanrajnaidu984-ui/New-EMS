@@ -224,7 +224,7 @@ const Login = ({ onSwitchToSignup }) => {
                             <input type="email" id="email" name="email" className="form-control"
                                 placeholder="Enter your email" value={formData.email} onChange={handleChange} disabled={loading} autoFocus />
                         </div>
-                        <button type="submit" className="btn btn-primary btn-login" disabled={loading}>
+                        <button type="submit" className="btn btn-primary btn-login login-page-submit" disabled={loading}>
                             {loading ? 'Checking...' : 'Next'}
                         </button>
                     </form>
@@ -255,7 +255,7 @@ const Login = ({ onSwitchToSignup }) => {
                             </div>
                             <button type="button" className="btn btn-link btn-sm p-0" onClick={() => { setStep('forgot'); setError(''); }}>Forgot Password?</button>
                         </div>
-                        <button type="submit" className="btn btn-primary btn-login" disabled={loading}>
+                        <button type="submit" className="btn btn-primary btn-login login-page-submit" disabled={loading}>
                             {loading ? 'Signing in...' : 'Sign In'}
                         </button>
                     </form>
@@ -277,7 +277,7 @@ const Login = ({ onSwitchToSignup }) => {
                             <input type="password" name="confirmPassword" className="form-control"
                                 placeholder="Confirm password" value={formData.confirmPassword} onChange={handleChange} disabled={loading} />
                         </div>
-                        <button type="submit" className="btn btn-success btn-login" disabled={loading}>
+                        <button type="submit" className="btn btn-success btn-login login-page-submit" disabled={loading}>
                             {loading ? 'Setting Password...' : 'Set Password & Login'}
                         </button>
                     </form>
@@ -293,7 +293,7 @@ const Login = ({ onSwitchToSignup }) => {
                             <label>Email Address</label>
                             <input type="email" className="form-control" value={formData.email} readOnly disabled />
                         </div>
-                        <button type="submit" className="btn btn-warning btn-login text-white" disabled={loading}>
+                        <button type="submit" className="btn btn-warning btn-login text-white login-page-submit" disabled={loading}>
                             {loading ? 'Sending...' : 'Send Reset Link'}
                         </button>
                         <button type="button" className="btn btn-link w-100 mt-2" onClick={() => setStep('password')}>Back to Login</button>
@@ -327,7 +327,7 @@ const Login = ({ onSwitchToSignup }) => {
             </style>
             <div className="login-background">
                 <div className="login-card">
-                    <div className="login-header mb-4">
+                    <div className="login-header login-brand-header mb-4">
                         <div
                             className="logo-animated d-flex align-items-center justify-content-center"
                             style={{ marginBottom: '2px' }}

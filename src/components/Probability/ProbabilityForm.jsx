@@ -25,6 +25,31 @@ const PROB_LIST_DATE_PICKER_POPPER_MODIFIERS = [
 /** Lost To — search Master directory (contractors + clients) only after this many characters. */
 const LOST_TO_MIN_SEARCH_CHARS = 3;
 
+/** Fields whose change should enable the per-row Update button. Mirrors the persistUpdate payload. */
+const PROB_TRACKED_FIELDS = [
+    'Status', 'WonQuoteRef', 'WonCustomerName', 'LeadJobName', 'WonQuoteRefDate',
+    'WonOrderValue', 'WonJobNo', 'WonOption', 'WonGrossProfit',
+    'LostCompetitor', 'LostReason', 'LostCompetitorPrice', 'LostDate',
+    'ProbabilityOption', 'ExpectedOrderDate', 'ProbabilityRemarks',
+    'SelectedTotalQuotedValue', 'SelectedNetQuotedValue', 'QuotePreparedBy',
+];
+
+/** Normalize a tracked field so semantically equal values (null/'' /trimmed) compare equal. */
+const normalizeTrackedValue = (v) => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') return v.trim();
+    if (typeof v === 'number') return String(v);
+    return String(v);
+};
+
+const buildProbItemSnapshot = (item) => {
+    const snap = {};
+    PROB_TRACKED_FIELDS.forEach((f) => {
+        snap[f] = item ? item[f] : undefined;
+    });
+    return snap;
+};
+
 /** Numeric net quoted for filters/sort (same rules as display cell). */
 function getRowNetQuotedNumber(item, currentUser) {
     const userDept = (currentUser?.Department || currentUser?.Division || '').trim().toLowerCase();
@@ -67,6 +92,9 @@ const ProbabilityForm = () => {
     const [loadingList, setLoadingList] = useState(false);
     const [updatingReqNo, setUpdatingReqNo] = useState(null); // Track which row is being updated
     const [updatedItems, setUpdatedItems] = useState({});
+    /** Per-row snapshot of editable fields, captured on fetch and after each successful save.
+     *  Used to enable the Update button only when the user has made a real change. */
+    const [itemSnapshots, setItemSnapshots] = useState({});
     const [historyReqNo, setHistoryReqNo] = useState('');
     const [historyHeader, setHistoryHeader] = useState({ projectName: '', leadJobName: '' });
     const [historyRows, setHistoryRows] = useState([]);
@@ -268,9 +296,20 @@ const ProbabilityForm = () => {
                     return item;
                 });
                 setEnquiriesList(data);
+                // Capture baseline snapshots so the Update button can detect real edits.
+                const initialSnapshots = {};
+                data.forEach((row) => {
+                    if (row?.RequestNo != null) {
+                        initialSnapshots[row.RequestNo] = buildProbItemSnapshot(row);
+                    }
+                });
+                setItemSnapshots(initialSnapshots);
+                // Clear stale "SAVED" indicators when refreshing the list.
+                setUpdatedItems({});
             } else {
                 console.error("Failed to fetch list");
                 setEnquiriesList([]);
+                setItemSnapshots({});
             }
         } catch (err) {
             console.error("Error fetching list:", err);
@@ -349,6 +388,16 @@ const ProbabilityForm = () => {
                 leadJob: q.LeadJob || q.leadJob || '',
             };
         });
+
+    /** Returns true if any tracked field on this row differs from its stored baseline snapshot. */
+    const hasItemChanges = useCallback((item) => {
+        if (!item) return false;
+        const snap = itemSnapshots[item.RequestNo];
+        if (!snap) return false;
+        return PROB_TRACKED_FIELDS.some(
+            (f) => normalizeTrackedValue(snap[f]) !== normalizeTrackedValue(item[f])
+        );
+    }, [itemSnapshots]);
 
     const quoteRefSelectValue = (item) => {
         const ref = String(item?.WonQuoteRef || '').trim();
@@ -524,6 +573,8 @@ const ProbabilityForm = () => {
             if (res.ok) {
                 // alert(`Enquiry ${item.RequestNo} updated successfully. Saved Date: ${item.ExpectedOrderDate || 'None'}`);
                 setUpdatedItems(prev => ({ ...prev, [item.RequestNo]: true }));
+                // Refresh the baseline so the Update button stays disabled until the next user edit.
+                setItemSnapshots(prev => ({ ...prev, [item.RequestNo]: buildProbItemSnapshot(item) }));
 
                 // Optionally refresh list if it moves out of current mode (e.g. Pending -> Won)
                 if (listMode === 'Pending') {
@@ -1447,16 +1498,46 @@ const ProbabilityForm = () => {
                                                         {index + 1}
                                                     </td>
                                                     <td className="px-2 py-1 prob-td text-center">
-                                                        <button
-                                                            type="button"
-                                                            className={`btn btn-sm prob-row-update-btn ${updatedItems[item.RequestNo] ? 'btn-success' : 'btn-primary'}`}
-                                                            onClick={() => persistUpdate(item)}
-                                                            disabled={updatingReqNo === item.RequestNo}
-                                                        >
-                                                            {updatingReqNo === item.RequestNo ? (
-                                                                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
-                                                            ) : (updatedItems[item.RequestNo] ? 'SAVED' : 'UPDATE')}
-                                                        </button>
+                                                        {(() => {
+                                                            const isUpdating = updatingReqNo === item.RequestNo;
+                                                            const isSaved = !!updatedItems[item.RequestNo];
+                                                            const hasChanges = hasItemChanges(item);
+                                                            // Show the spinner while saving.
+                                                            if (isUpdating) {
+                                                                return (
+                                                                    <button type="button" className="btn btn-sm prob-row-update-btn btn-primary" disabled>
+                                                                        <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                                                                    </button>
+                                                                );
+                                                            }
+                                                            // Surface UPDATE only when the row has unsaved edits.
+                                                            if (hasChanges) {
+                                                                return (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="btn btn-sm prob-row-update-btn btn-primary"
+                                                                        onClick={() => persistUpdate(item)}
+                                                                        title="Save changes for this row"
+                                                                    >
+                                                                        UPDATE
+                                                                    </button>
+                                                                );
+                                                            }
+                                                            // Keep a brief SAVED confirmation after a successful save (cleared on next fetch or edit).
+                                                            if (isSaved) {
+                                                                return (
+                                                                    <span
+                                                                        className="badge bg-success prob-row-update-btn"
+                                                                        title="Saved"
+                                                                        style={{ fontSize: '0.62rem', fontWeight: 700, padding: '0.25rem 0.4rem' }}
+                                                                    >
+                                                                        SAVED
+                                                                    </span>
+                                                                );
+                                                            }
+                                                            // No changes and not just-saved: hide the button entirely so it only appears on edit.
+                                                            return <span className="text-muted" style={{ fontSize: '11px' }}>—</span>;
+                                                        })()}
                                                     </td>
                                                     <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
                                                         <div className="d-flex align-items-center gap-2">
@@ -1507,10 +1588,102 @@ const ProbabilityForm = () => {
                                                         </select>
                                                     </td>
                                                     <td className="px-2 py-1 prob-td">
-                                                        <div className="d-flex align-items-end gap-2 flex-wrap prob-detail-controls">
+                                                        <div className={`d-flex align-items-end gap-2 flex-wrap prob-detail-controls ${item.Status === 'Lost' ? 'prob-detail-lost-layout' : ''}`}>
                                                             {item.Status === 'Lost' && (
                                                                 <>
                                                                     <div className="d-flex flex-column prob-detail-col-1">
+                                                                        <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Quote Reference</span>
+                                                                        <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
+                                                                            <Select
+                                                                                className="basic-single"
+                                                                                classNamePrefix="select"
+                                                                                placeholder="Quote ref..."
+                                                                                isSearchable={true}
+                                                                                isClearable={true}
+                                                                                menuPortalTarget={document.body}
+                                                                                value={quoteRefSelectValue(item)}
+                                                                                onChange={async (option) => {
+                                                                                    const nextRef = option ? option.value : '';
+                                                                                    const nextLead = option?.leadJob || '';
+                                                                                    if (!nextRef) {
+                                                                                        handleUpdate(item, {
+                                                                                            WonQuoteRef: '',
+                                                                                            LeadJobName: '',
+                                                                                            WonCustomerName: '',
+                                                                                            WonQuoteRefDate: '',
+                                                                                            SelectedTotalQuotedValue: null,
+                                                                                            SelectedNetQuotedValue: null,
+                                                                                            QuotePreparedBy: '',
+                                                                                        });
+                                                                                        return;
+                                                                                    }
+                                                                                    const details = await fetchQuoteDetails(nextRef);
+                                                                                    handleUpdate(item, {
+                                                                                        WonQuoteRef: nextRef,
+                                                                                        LeadJobName: nextLead,
+                                                                                        WonCustomerName: details?.customerName || item.WonCustomerName || '',
+                                                                                        WonQuoteRefDate: details?.quoteDate ?? option?.quoteDate ?? null,
+                                                                                        SelectedTotalQuotedValue: details?.totalQuotedValue ?? null,
+                                                                                        SelectedNetQuotedValue: details?.netQuotedValue ?? null,
+                                                                                        QuotePreparedBy: details?.preparedBy != null && details?.preparedBy !== '' ? String(details.preparedBy) : '',
+                                                                                    });
+                                                                                }}
+                                                                                options={buildQuoteRefOptions(item)}
+                                                                                formatOptionLabel={(opt, { context }) => (
+                                                                                    context === 'value'
+                                                                                        ? (
+                                                                                            <div
+                                                                                                style={{
+                                                                                                    fontSize: '11px',
+                                                                                                    fontWeight: 400,
+                                                                                                    whiteSpace: 'nowrap',
+                                                                                                    overflow: 'hidden',
+                                                                                                    textOverflow: 'ellipsis'
+                                                                                                }}
+                                                                                                title={opt.label}
+                                                                                            >
+                                                                                                {opt.label}
+                                                                                            </div>
+                                                                                        ) : (
+                                                                                            <div style={{ lineHeight: '1.15', padding: '2px 0' }}>
+                                                                                                <div style={{ fontWeight: 400, fontSize: '11px' }}>{opt.label}</div>
+                                                                                                <div style={{ fontSize: '10px', color: '#666' }}>
+                                                                                                    {opt.customer}{opt.leadJob ? ` (Leadjob-${opt.leadJob})` : ''}
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        )
+                                                                                )}
+                                                                                styles={{
+                                                                                    control: (base) => ({
+                                                                                        ...base,
+                                                                                        minHeight: '31px',
+                                                                                        height: '31px',
+                                                                                        fontSize: '12px'
+                                                                                    }),
+                                                                                    valueContainer: (base) => ({
+                                                                                        ...base,
+                                                                                        padding: '0 8px'
+                                                                                    }),
+                                                                                    singleValue: (base) => ({
+                                                                                        ...base,
+                                                                                        whiteSpace: 'nowrap',
+                                                                                        overflow: 'hidden',
+                                                                                        textOverflow: 'ellipsis'
+                                                                                    }),
+                                                                                    indicatorsContainer: (base) => ({
+                                                                                        ...base,
+                                                                                        height: '31px'
+                                                                                    }),
+                                                                                    menuPortal: (base) => ({
+                                                                                        ...base,
+                                                                                        zIndex: 9999
+                                                                                    })
+                                                                                }}
+                                                                                onClick={(e) => e.stopPropagation()}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="d-flex flex-column prob-detail-col-2">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Lost To</span>
                                                                         <div style={{ width: '320px', minWidth: '320px', maxWidth: '320px' }}>
                                                                             <AsyncSelect
@@ -1629,7 +1802,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-col-2">
+                                                                    <div className="d-flex flex-column prob-detail-col-3">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Reason for losing</span>
                                                                         <div style={{ width: '180px' }}>
                                                                             <select
@@ -1648,7 +1821,7 @@ const ProbabilityForm = () => {
                                                                             </select>
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-col-3">
+                                                                    <div className="d-flex flex-column prob-detail-col-4">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Competitor's price</span>
                                                                         <div className="input-group input-group-sm" style={{ width: '120px' }}>
                                                                             <span className="input-group-text px-1 text-muted" style={{ fontSize: '10px' }}>BD</span>
@@ -1662,7 +1835,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-col-4">
+                                                                    <div className="d-flex flex-column prob-detail-col-5">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Lost Date</span>
                                                                         <div style={{ width: '130px' }}>
                                                                             <input
@@ -1675,7 +1848,7 @@ const ProbabilityForm = () => {
                                                                             />
                                                                         </div>
                                                                     </div>
-                                                                    <div className="d-flex flex-column prob-detail-col-5">
+                                                                    <div className="d-flex flex-column prob-detail-col-6">
                                                                         <span style={{ fontSize: '10px', color: '#666', marginBottom: '2px' }}>Remarks</span>
                                                                         <div style={{ width: '200px' }}>
                                                                             <textarea

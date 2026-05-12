@@ -747,9 +747,24 @@ router.get('/summary', async (req, res) => {
             }
         }
 
-        /** PreparedBy + enquiry scope for Probability rows (Won / Lost / snapshot). */
+        /**
+         * PreparedBy + enquiry scope for Probability rows (Won / Lost / snapshot).
+         * Lost / Follow-up rows sometimes have NULL PreparedBy (no quote attribution recorded).
+         * Fall back to Master_ConcernedSE.Department = P.OwnJobName so the row attributes to the
+         * division's SE without double-counting across sibling SEs on the same enquiry.
+         */
         const wonPreparedByClause = effectiveQuotedSe
-            ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
+            ? ` AND (
+                    LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
+                    OR (
+                        LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
+                        AND EXISTS (
+                            SELECT 1 FROM Master_ConcernedSE msFb
+                            WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
+                              AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
+                        )
+                    )
+                )`
             : '';
         const probDivisionScopeClause = safeDivision
             ? ` AND (
@@ -1012,7 +1027,7 @@ WITH LatestProbByUpdate AS (
         try {
             topJobBookedRes = await request.query(`
             ${SQL_LATEST_PROB_CTE}
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1040,7 +1055,7 @@ WITH LatestProbByUpdate AS (
         } catch (tjErr) {
             console.warn('[Sales Report] Top jobs Probability fallback:', tjErr.message);
             topJobBookedRes = await request.query(`
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1723,8 +1738,19 @@ router.get('/top-job-booked', async (req, res) => {
             `);
             } else if (isWonTopJob) {
                 const wonProbWhere = getProbWonMetricsSql(req);
+                /** Allow NULL PreparedBy when the SE owns the row's OwnJobName via Master_ConcernedSE.Department. */
                 const wonPreparedByClause = effectiveQuotedSe
-                    ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@wonSe, '')))`
+                    ? ` AND (
+                            LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@wonSe, '')))
+                            OR (
+                                LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
+                                AND EXISTS (
+                                    SELECT 1 FROM Master_ConcernedSE msFb
+                                    WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@wonSe, '')))
+                                      AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
+                                )
+                            )
+                        )`
                     : '';
                 const wonOwnJobClause = safeDivision && safeDivision !== 'All'
                     ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
@@ -1744,7 +1770,7 @@ router.get('/top-job-booked', async (req, res) => {
                 ) __lw
                 WHERE __lw.__rn = 1
             )
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1787,8 +1813,23 @@ router.get('/top-job-booked', async (req, res) => {
             `);
             } else if (isLostTopJob || isFollowUpTopJob) {
                 const followUpStatusWhere = `(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')`;
+                /**
+                 * Lost / Follow-up rows often have NULL PreparedBy. Fall back to
+                 * Master_ConcernedSE.Department = P.OwnJobName so attribution still works
+                 * (e.g. Arun Venkatesh / BMS Project gets Lost rows where OwnJobName = 'BMS Project').
+                 */
                 const statusPreparedByClause = effectiveQuotedSe
-                    ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@statusSe, '')))`
+                    ? ` AND (
+                            LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@statusSe, '')))
+                            OR (
+                                LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
+                                AND EXISTS (
+                                    SELECT 1 FROM Master_ConcernedSE msFb
+                                    WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@statusSe, '')))
+                                      AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
+                                )
+                            )
+                        )`
                     : '';
                 const statusOwnJobClause = safeDivision && safeDivision !== 'All'
                     ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
@@ -1808,7 +1849,7 @@ router.get('/top-job-booked', async (req, res) => {
                 ) __ls
                 WHERE __ls.__rn = 1
             )
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1875,7 +1916,7 @@ router.get('/top-job-booked', async (req, res) => {
                 ) __lp
                 WHERE __lp.__rn = 1
             )
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1927,7 +1968,7 @@ router.get('/top-job-booked', async (req, res) => {
                 const followUpStatusWhere = `(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')`;
                 topJobBookedRes = await request.query(`
             ${SQL_LATEST_PROB_CTE}
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,
@@ -1973,7 +2014,7 @@ router.get('/top-job-booked', async (req, res) => {
             console.warn('[Sales Report] top-job-booked Probability fallback:', e.message);
             const topJobStatusWhereLegacy = getTopJobBookedStatusWhere(req.query.topJobStatus);
             topJobBookedRes = await request.query(`
-            SELECT TOP 10
+            SELECT
                 x.RequestNo,
                 x.ProjectName,
                 x.JobValue,

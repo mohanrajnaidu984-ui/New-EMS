@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const { connectDB, sql, dbConfig } = require('./dbConfig');
 const { resolvePricingAccessContext, getPricingAnchorJobs } = require('./lib/quotePricingAccess');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
+const { buildSmtpTransport, stripQuotes } = require('./lib/smtpTransport');
 const Tesseract = require('tesseract.js');
 const multerMemory = multer({ storage: multer.memoryStorage() });
 const { parseContactCardFromOcrText } = require('./parseContactOcr');
@@ -25,23 +25,9 @@ console.log('--- Email Config ---');
 console.log('SMTP_HOST:', process.env.SMTP_HOST);
 console.log('SMTP_USER:', process.env.SMTP_USER);
 console.log('SMTP_PORT:', process.env.SMTP_PORT);
+console.log('SMTP_ENCRYPTION:', process.env.SMTP_ENCRYPTION || '(not set)');
 
-// Strip quotes if present
-let user = process.env.SMTP_USER;
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: process.env.SMTP_PORT == 465, // true for 465, false for other ports
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS ? process.env.SMTP_PASS.replace(/^"|"$/g, '') : process.env.SMTP_PASS
-    },
-    tls: {
-        rejectUnauthorized: false
-    },
-    logger: true,
-    debug: true
-});
+const transporter = buildSmtpTransport({ logger: true, debug: true });
 
 async function normalizeEnquiryForLeadMeta(requestNo, txn = null) {
     const reqNoInt = parseInt(String(requestNo), 10);
@@ -138,7 +124,7 @@ const sendEnquiryEmail = async (enquiryData, recipients, attachments = []) => {
     };
 
     const mailOptions = {
-        from: 'ems@almoayyedcg.com', // Hardcoded to ensure visibility
+        from: stripQuotes(process.env.SMTP_USER) || 'ems@almoayyedcg.com',
         to: to.join(','),
         cc: cc ? cc.join(',') : '',
         subject: `New Enquiry No.${enquiryData.RequestNo} dated: ${formatDate(enquiryData.EnquiryDate)}`,
@@ -184,6 +170,8 @@ const splitEmails = (raw) =>
         .filter(Boolean);
 
 // Optimized notification generation: bulk lookups + single-pass inserts.
+// Recipients: enquiry creator, Concerned SE (assigned), Acknowledgement SE, AdditionalNotificationEmails,
+// plus EnquiryFor Common/CC mails (mapped to Master_ConcernedSE users for in-app rows).
 const createNotifications = async (requestNo, type, message, triggerUserEmail, triggerUserName) => {
     try {
         console.log('--- START NOTIFICATION GENERATION ---');
@@ -191,33 +179,66 @@ const createNotifications = async (requestNo, type, message, triggerUserEmail, t
 
         const recipientEmails = new Set();
 
-        // 1) Creator + Concerned SE names
-        const enqRes = await sql.query`SELECT CreatedBy FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
-        const createdBy = String(enqRes.recordset?.[0]?.CreatedBy || '').trim();
-        const seRes = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
-        const seNames = [
-            createdBy,
-            ...(seRes.recordset || []).map((r) => String(r.SEName || '').trim()),
-        ].filter(Boolean);
+        const enqMeta = await sql.query`
+            SELECT CreatedBy, AcknowledgementSE, AdditionalNotificationEmails
+            FROM EnquiryMaster WHERE RequestNo = ${requestNo}
+        `;
+        const meta = enqMeta.recordset?.[0] || {};
+        const createdBy = String(meta.CreatedBy || '').trim();
+        const acknowledgementSE = String(meta.AcknowledgementSE || '').trim();
+        const additionalRaw = meta.AdditionalNotificationEmails;
 
-        if (seNames.length > 0) {
-            const req = new sql.Request();
-            const params = [];
-            seNames.forEach((name, i) => {
-                const p = `n${i}`;
-                req.input(p, sql.NVarChar, name);
-                params.push(`@${p}`);
-            });
-            const usersRes = await req.query(`
-                SELECT EmailId FROM Master_ConcernedSE WHERE LTRIM(RTRIM(FullName)) IN (${params.join(', ')})
-            `);
-            for (const u of usersRes.recordset || []) {
-                const email = String(u.EmailId || '').trim().toLowerCase();
-                if (email) {
-                    recipientEmails.add(email);
+        // 1a) Concerned SE (assigned on enquiry) — case-insensitive name match to Master_ConcernedSE
+        const seJoined = await sql.query`
+            SELECT DISTINCT LOWER(LTRIM(RTRIM(m.EmailId))) AS EmailIdNorm
+            FROM ConcernedSE cs
+            INNER JOIN Master_ConcernedSE m
+              ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+            WHERE cs.RequestNo = ${requestNo}
+              AND LTRIM(RTRIM(ISNULL(m.EmailId, N''))) <> N''
+        `;
+        for (const row of seJoined.recordset || []) {
+            if (row.EmailIdNorm) {
+                recipientEmails.add(row.EmailIdNorm);
+            }
+        }
+
+        // 1b) Creator (CreatedBy is typically FullName; allow email match if stored as email)
+        if (createdBy) {
+            if (createdBy.includes('@')) {
+                recipientEmails.add(createdBy.toLowerCase());
+            } else {
+                const cbRes = await sql.query`
+                    SELECT LOWER(LTRIM(RTRIM(EmailId))) AS EmailIdNorm
+                    FROM Master_ConcernedSE
+                    WHERE UPPER(LTRIM(RTRIM(ISNULL(FullName, N'')))) = UPPER(LTRIM(RTRIM(${createdBy})))
+                      AND LTRIM(RTRIM(ISNULL(EmailId, N''))) <> N''
+                `;
+                for (const row of cbRes.recordset || []) {
+                    if (row.EmailIdNorm) {
+                        recipientEmails.add(row.EmailIdNorm);
+                    }
                 }
             }
         }
+
+        // 1c) Acknowledgement SE (same robust name match)
+        if (acknowledgementSE) {
+            const ackRes = await sql.query`
+                SELECT LOWER(LTRIM(RTRIM(EmailId))) AS EmailIdNorm
+                FROM Master_ConcernedSE
+                WHERE UPPER(LTRIM(RTRIM(ISNULL(FullName, N'')))) = UPPER(LTRIM(RTRIM(${acknowledgementSE})))
+                  AND LTRIM(RTRIM(ISNULL(EmailId, N''))) <> N''
+            `;
+            for (const row of ackRes.recordset || []) {
+                if (row.EmailIdNorm) {
+                    recipientEmails.add(row.EmailIdNorm);
+                }
+            }
+        }
+
+        // 1d) Additional notification emails (semicolon/comma separated)
+        splitEmails(additionalRaw).forEach((e) => recipientEmails.add(e));
 
         // 2) EnquiryFor ItemName -> Common/CC mail ids (bulk)
         const itemRes = await sql.query`SELECT ItemName FROM EnquiryFor WHERE RequestNo = ${requestNo}`;
@@ -2748,10 +2769,13 @@ app.post('/api/enquiries/:id/notes', async (req, res) => {
             VALUES(@EnquiryID, @UserID, @UserName, @UserProfileImage, @NoteContent, ${now})
         `;
 
-        // Notify Group
-        const uRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE ID = ${userId} `;
-        const uEmail = uRes.recordset.length > 0 ? uRes.recordset[0].EmailId : null;
-        await createNotifications(enquiryId, 'Note', `New note from ${userName} `, uEmail, userName);
+        // Notify assigned enquiry members + enquiry-linked distribution (see createNotifications)
+        const uRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE ID = ${userId}`;
+        const uEmail = uRes.recordset.length > 0
+            ? String(uRes.recordset[0].EmailId || '').trim().toLowerCase()
+            : null;
+        const noteMessage = `New collaborative note on enquiry ${enquiryId} from ${userName}`;
+        queueCreateNotifications(enquiryId, 'Note', noteMessage, uEmail, userName);
 
         // Mention Logic
         try {

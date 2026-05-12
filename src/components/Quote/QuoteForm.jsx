@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool, GripVertical } from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
 import { format, parseISO, addDays } from 'date-fns';
@@ -11,7 +12,7 @@ import {
 import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
-import { resolveQuoteSummaryPriceFromRows } from './quoteEnquiryPricingLookup';
+import { resolveQuoteSummaryPriceFromRows, leadJobRowMatches } from './quoteEnquiryPricingLookup';
 import ListBoxControl from '../Enquiry/ListBoxControl';
 import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
 import { buildQuotePrintDocumentHtml, captureQuotePrintRootInnerHtmlForPdf } from './quotePrintDocumentHtml';
@@ -482,6 +483,8 @@ function buildEmsAutoPricingTableHtml(summary, activeJobs) {
     const pad = '4px 8px';
     const padGroup = '5px 8px';
     const padIndent = '4px 8px 4px 14px';
+    const fmtBhd = (n) =>
+        `BD ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`;
     let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-bottom:6px;font-size:11px;line-height:1.25;">`;
     tableHtml +=
         `<thead><tr style="background:#f8fafc;"><th style="padding:${pad};border:1px solid #64748b;text-align:left;font-size:11px;">Description</th><th style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">Amount (BHD)</th></tr></thead>`;
@@ -494,26 +497,91 @@ function buildEmsAutoPricingTableHtml(summary, activeJobs) {
         if (!grp?.name || !jobNameMatchesActiveJobsList(grp.name, checked)) return;
 
         const cleanedName = String(grp.name).replace(/^(LEAD JOB |SUB JOB) \/ /, '');
+        const items = Array.isArray(grp.items) ? grp.items : [];
+        const baseItem = items.find((i) => i?.name === 'Base Price');
+        const otherItems = items.filter((i) => i?.name !== 'Base Price');
+        const basePrice = Number(baseItem?.total) || 0;
+        if (basePrice) htmlGrandTotal += basePrice;
 
-        tableHtml += `<tr><td colspan="2" style="padding:${padGroup};border:1px solid #64748b;background-color:#f1f5f9;font-weight:bold;font-size:11px;">${cleanedName}</td></tr>`;
+        // Division name now shares its row with the Base Price (single row when no other items).
+        // `data-ems-row` lets `parseLumpSumFromAutoTableHtml` find division-row amounts even after user edits.
+        tableHtml += `<tr data-ems-row="division" style="background-color:#f1f5f9;"><td style="padding:${padGroup};border:1px solid #64748b;font-weight:bold;font-size:11px;">${cleanedName}</td><td data-ems-amount="division" style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-weight:bold;font-size:11px;">${baseItem ? fmtBhd(basePrice) : ''}</td></tr>`;
 
-        (grp.items || []).forEach((item) => {
-            tableHtml += `<tr><td style="padding:${padIndent};border:1px solid #64748b;font-size:11px;">${item.name}</td><td style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">BD ${item.total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
-        });
-
-        (grp.items || []).forEach((item) => {
-            if (item.name === 'Base Price') {
-                htmlGrandTotal += item.total;
-            }
+        otherItems.forEach((item) => {
+            tableHtml += `<tr data-ems-row="item"><td style="padding:${padIndent};border:1px solid #64748b;font-size:11px;">${item.name}</td><td data-ems-amount="item" style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">${fmtBhd(item.total)}</td></tr>`;
         });
     });
 
     if (htmlGrandTotal > 0) {
-        tableHtml += `<tr style="background:#f8fafc;font-weight:700;"><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">Grand Total (Base Price)</td><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">BD ${htmlGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</td></tr>`;
+        tableHtml += `<tr data-ems-row="grand" style="background:#f8fafc;font-weight:700;"><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">Grand Total (Base Price)</td><td data-ems-amount="grand" style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">${fmtBhd(htmlGrandTotal)}</td></tr>`;
     }
     tableHtml += '</tbody></table>';
 
     return { tableHtml, htmlGrandTotal };
+}
+
+/** Format any number to "BD #,###.###" (3 decimals) for the auto table / lump-sum cells. */
+function formatBhdAmount(n) {
+    const num = Number(n || 0);
+    if (!Number.isFinite(num)) return 'BD 0.000';
+    return `BD ${num.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`;
+}
+
+/**
+ * Parse the live grand-total figure from the EMS auto pricing table embedded in a clause's HTML.
+ * Always sums every `data-ems-amount="division"` cell — the user's per-row edits are authoritative;
+ * the grand-total cell is a derived display and may be stale until we rewrite it. Falls back to the
+ * grand-cell number if no division cells are tagged (e.g. table was hand-built from scratch).
+ */
+function parseLumpSumFromAutoTableHtml(html) {
+    const raw = String(html || '');
+    if (!raw) return null;
+    const idAttr = EMS_AUTO_PRICE_SUMMARY_TABLE_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tableRe = new RegExp(`<table[^>]*id=["']${idAttr}["'][^>]*>([\\s\\S]*?)<\\/table>`, 'i');
+    const m = raw.match(tableRe);
+    if (!m) return null;
+    const tbody = m[1];
+
+    const cellNum = (cellHtml) => {
+        const txt = String(cellHtml || '')
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/[^0-9.,\-]/g, '')
+            .replace(/,/g, '');
+        const n = parseFloat(txt);
+        return Number.isFinite(n) ? n : 0;
+    };
+
+    const divRe = /<td[^>]*data-ems-amount=["']division["'][^>]*>([\s\S]*?)<\/td>/gi;
+    let sum = 0;
+    let found = false;
+    let dm;
+    while ((dm = divRe.exec(tbody)) !== null) {
+        sum += cellNum(dm[1]);
+        found = true;
+    }
+    if (found) return sum;
+
+    const grandMatch = tbody.match(/<td[^>]*data-ems-amount=["']grand["'][^>]*>([\s\S]*?)<\/td>/i);
+    if (grandMatch) {
+        const v = cellNum(grandMatch[1]);
+        if (v > 0) return v;
+    }
+    return null;
+}
+
+/**
+ * Rewrite the Grand Total cell (data-ems-amount="grand") in the auto pricing table HTML.
+ * Returns the original string when the table or the grand-total cell cannot be found.
+ */
+function updateGrandTotalCellInHtml(html, newTotal) {
+    const raw = String(html || '');
+    if (!raw) return raw;
+    const fmt = formatBhdAmount(newTotal);
+    return raw.replace(
+        /(<td[^>]*data-ems-amount=["']grand["'][^>]*>)([\s\S]*?)(<\/td>)/i,
+        (_full, openTd, _inner, closeTd) => `${openTd}${fmt}${closeTd}`
+    );
 }
 
 // Global styles for pasted tables in clauses
@@ -1596,12 +1664,55 @@ const tableStyles = `
     }
     .clause-content table th, .clause-content table td {
         border: 1px solid #64748b !important;
-        padding: 6px 8px !important;
         text-align: left !important;
+        /* Compact, Word-typical default. NO !important so source inline padding (e.g. Word's
+           padding: 1.5pt 5.4pt) wins and pasted tables keep their original spacing. */
+        padding: 2px 6px;
+        line-height: 1.25;
+        vertical-align: middle;
     }
     .clause-content table th {
         background-color: #f8fafc !important;
         font-weight: 600 !important;
+    }
+    /* EMS auto pricing summary is OUR generated table — give it a comfier explicit padding
+       so the compact 2px/6px default above does not shrink it. */
+    .clause-content table#ems-auto-price-summary-table th,
+    .clause-content table#ems-auto-price-summary-table td {
+        padding: 6px 8px !important;
+    }
+    /* Pasted tables (Excel/Word) often wrap text in <p>/<div> per cell. The .clause-content
+       'p + p' and '> * + *' rules below would otherwise add vertical rhythm INSIDE each cell
+       and inflate row heights. Neutralize that so pasted tables keep their source spacing. */
+    .clause-content table td p,
+    .clause-content table th p,
+    .clause-content table td div,
+    .clause-content table th div,
+    .clause-content table td li,
+    .clause-content table th li {
+        margin: 0 !important;
+        padding: 0 !important;
+        line-height: inherit !important;
+    }
+    .clause-content table td p + p,
+    .clause-content table th p + p,
+    .clause-content table td > * + *,
+    .clause-content table th > * + * {
+        margin-top: 0 !important;
+    }
+    .clause-content table td > p:empty,
+    .clause-content table th > p:empty {
+        display: none !important;
+    }
+    /* EMS auto pricing table: keep the Amount column right-aligned even when the
+       generic .clause-content rule above forces table cells to left-align.
+       Targets the Amount <th>/<td> by structural position AND by data-ems-amount,
+       so it works whether or not Jodit preserved our data attributes. */
+    .clause-content table#ems-auto-price-summary-table th:nth-child(2),
+    .clause-content table#ems-auto-price-summary-table td:nth-child(2),
+    .clause-content table#ems-auto-price-summary-table td[data-ems-amount],
+    .clause-content table#ems-auto-price-summary-table tr[data-ems-row="grand"] td:first-child {
+        text-align: right !important;
     }
     /* normal: pre-wrap preserved newline TEXT NODES between injected </p><p> — looked like huge gaps in preview/PDF */
     .clause-content {
@@ -1875,6 +1986,9 @@ const QuoteForm = ({ openContext = null }) => {
     /** After hydrating a quote form draft, block auto-load of latest saved quote (would overwrite clauses / tab snapshot). */
     const quoteDraftHydrateSkipAutoLoadUntilRef = useRef(0);
     const formDraftMenuWrapRef = useRef(null);
+    /** Panel is portalled to document.body to escape ancestor `overflow: auto` clipping (action row). */
+    const formDraftMenuPanelRef = useRef(null);
+    const [formDraftMenuAnchor, setFormDraftMenuAnchor] = useState({ top: 0, left: 0, width: 300 });
     /** Latest commitQuoteDigitalStamps — saveQuote/handleRevise are declared above this callback in the file. */
     const commitQuoteDigitalStampsRef = useRef(null);
     const [saving, setSaving] = useState(false);
@@ -2069,6 +2183,8 @@ const QuoteForm = ({ openContext = null }) => {
     const [toAttention, setToAttention] = useState(''); // ReceivedFrom contact for selected customer
     /** When enquiry-data map misses a label (e.g. pricing-only customer), filled from /attention-by-department. */
     const [deptAttentionNames, setDeptAttentionNames] = useState([]);
+    /** Stable id for HTML5 datalist paired with Attention of (combobox-style suggestions). */
+    const quoteAttentionDatalistId = useId().replace(/:/g, '');
 
     /** Mirrors enquiry module: multi-select enquiry types → persisted as EnquiryQuotes.QuoteType (comma-separated). */
     const [quoteEnquiryTypeSelect, setQuoteEnquiryTypeSelect] = useState('');
@@ -2397,7 +2513,7 @@ const QuoteForm = ({ openContext = null }) => {
     const handleTabChange = (newTabId, opts = {}) => {
         const force = opts && opts.force === true;
         if (!browsePreviousQuotesRevisions && !force) return;
-        if (newTabId === activeQuoteTab) return;
+        if (String(newTabId) === String(activeQuoteTab)) return;
 
         // 1. Save Current Tab State
         tabStateRegistry.current[activeQuoteTab] = {
@@ -2642,12 +2758,41 @@ const QuoteForm = ({ openContext = null }) => {
     useEffect(() => {
         if (!formDraftPanelOpen) return undefined;
         const onDocMouseDown = (e) => {
-            if (formDraftMenuWrapRef.current && !formDraftMenuWrapRef.current.contains(e.target)) {
+            const inWrap = formDraftMenuWrapRef.current && formDraftMenuWrapRef.current.contains(e.target);
+            // The dropdown panel is portalled to document.body — also accept clicks inside it.
+            const inPanel = formDraftMenuPanelRef.current && formDraftMenuPanelRef.current.contains(e.target);
+            if (!inWrap && !inPanel) {
                 setFormDraftPanelOpen(false);
             }
         };
         document.addEventListener('mousedown', onDocMouseDown);
         return () => document.removeEventListener('mousedown', onDocMouseDown);
+    }, [formDraftPanelOpen]);
+
+    /**
+     * Recompute the portalled dropdown's screen position whenever it opens, and keep it
+     * aligned to the trigger button on scroll / resize while open. Closes on outer scroll
+     * is avoided so the user can scroll the form behind the menu without losing context.
+     */
+    useLayoutEffect(() => {
+        if (!formDraftPanelOpen) return undefined;
+        const updateAnchor = () => {
+            const el = formDraftMenuWrapRef.current;
+            if (!el) return;
+            const r = el.getBoundingClientRect();
+            setFormDraftMenuAnchor({
+                top: r.bottom + 6,
+                left: r.left,
+                width: Math.max(r.width, 300),
+            });
+        };
+        updateAnchor();
+        window.addEventListener('resize', updateAnchor);
+        window.addEventListener('scroll', updateAnchor, true);
+        return () => {
+            window.removeEventListener('resize', updateAnchor);
+            window.removeEventListener('scroll', updateAnchor, true);
+        };
     }, [formDraftPanelOpen]);
 
     const markDraftHydrateSkipAutoLoad = () => {
@@ -3945,18 +4090,71 @@ const QuoteForm = ({ openContext = null }) => {
         return tableHtml;
     }, [pricingSummaryForClause, activeJobsForClause, pricingStableSig, pricingData]);
 
-    // Keep Clause 4 editor content in sync with the same auto-table shown in preview.
+    /**
+     * Structural signature of the auto pricing table. Whenever this signature changes we re-inject
+     * the auto table into the clause; while it is stable, user edits to row labels/prices are kept.
+     * Without this, every keystroke replaced the table HTML and wiped the user's row/column selection.
+     */
+    const pricingAutoTableSignature = React.useMemo(() => {
+        if (!Array.isArray(pricingSummaryForClause)) return '';
+        const checked = Array.isArray(activeJobsForClause) ? activeJobsForClause : [];
+        return pricingSummaryForClause
+            .filter((g) => g?.name && jobNameMatchesActiveJobsList(g.name, checked))
+            .map((g) => {
+                const items = Array.isArray(g.items) ? g.items : [];
+                const itemSig = items.map((i) => String(i?.name || '').trim()).sort().join('|');
+                return `${String(g.name || '').trim()}::${itemSig}`;
+            })
+            .sort()
+            .join('||');
+    }, [pricingSummaryForClause, activeJobsForClause]);
+
+    const lastInjectedAutoTableSigRef = useRef('');
+
+    // Keep Clause 4 editor content in sync with the auto-table — but only when summary STRUCTURE
+    // changes (jobs added/removed, item names changed). Mere edits to prices in the editor must
+    // not reinject the table, otherwise multi-cell selection and manual edits keep getting reset.
     React.useEffect(() => {
         if (!pricingTermsAutoTablePreviewHtml) return;
         const proseFallback = clauseContent?.pricingTerms || defaultClauses.pricingTerms || '';
-        const merged = mergePricingTermsClauseHtml(
-            clauseContent?.pricingTerms,
-            pricingTermsAutoTablePreviewHtml,
-            proseFallback
-        );
+        const currentTerms = String(clauseContent?.pricingTerms || '');
+
+        const sigChanged = lastInjectedAutoTableSigRef.current !== pricingAutoTableSignature;
+        const userHasAutoTable = currentTerms.includes(`id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}"`)
+            || currentTerms.includes(`id='${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}'`);
+
+        // Stuck-state rescue: the saved/loaded Pricing & Payment Terms may contain the auto-table
+        // shell (`id="ems-auto-price-summary-table"`) but ZERO body rows (a stale revision was saved
+        // before the summary populated). In that case the editor would otherwise keep showing the
+        // empty header forever because `sigChanged` evaluates against an unchanged signature ref.
+        // If the live preview has rows but the editor has none, force a re-merge.
+        const rowRe = /<tr[^>]*data-ems-row=["'](?:division|item|grand)["']/gi;
+        const previewRowCount = (pricingTermsAutoTablePreviewHtml.match(rowRe) || []).length;
+        const currentRowCount = (currentTerms.match(rowRe) || []).length;
+        const rescueEmptyBody = userHasAutoTable && currentRowCount === 0 && previewRowCount > 0;
+
+        let nextHtml;
+        if (!userHasAutoTable || sigChanged || rescueEmptyBody) {
+            // Replace (or insert) the auto-table — initial open, structure changed upstream, or the
+            // saved HTML had an empty body that the live summary can now repopulate.
+            nextHtml = mergePricingTermsClauseHtml(
+                currentTerms,
+                pricingTermsAutoTablePreviewHtml,
+                proseFallback
+            );
+            lastInjectedAutoTableSigRef.current = pricingAutoTableSignature;
+        } else {
+            // Stable structure + user already has auto-table — keep their HTML and only sync 4.1.
+            nextHtml = currentTerms;
+        }
+
+        // 4.1 lump-sum prose should match whatever total is currently visible in the table.
+        // Prefer the value parsed from the table HTML (covers user edits to prices); fall back to calc.
+        const livePrice = parseLumpSumFromAutoTableHtml(nextHtml);
+        const totalForProse = livePrice != null ? livePrice : fallbackGrandBaseTotal;
         const synced = syncPricingTerms41LumpSumProse(
-            merged,
-            fallbackGrandBaseTotal,
+            nextHtml,
+            totalForProse,
             false,
             numberToWordsBHD
         );
@@ -3965,7 +4163,7 @@ const QuoteForm = ({ openContext = null }) => {
             if (prevTerms === synced) return prev;
             return { ...prev, pricingTerms: synced };
         });
-    }, [pricingTermsAutoTablePreviewHtml, fallbackGrandBaseTotal]);
+    }, [pricingTermsAutoTablePreviewHtml, pricingAutoTableSignature, fallbackGrandBaseTotal]);
 
     /** Aligns with UI fallback when calculatedTabs is empty (e.g. lead job + internal customer only). */
     const effectiveQuoteTabs = React.useMemo(() => {
@@ -5679,6 +5877,49 @@ const QuoteForm = ({ openContext = null }) => {
         }
     }, [toName, toAddress, toPhone, toEmail, toFax, customersList, enquiryData, pricingData]);
 
+    /**
+     * Internal "To" customers ALWAYS take their address/phone/fax/email from
+     * `Master_EnquiryFor` (joined into `availableProfiles` on the server). When a
+     * saved quote with an internal recipient is loaded, the stored ToAddress can be
+     * stale (from a pre-fix save). This effect refreshes those fields from the
+     * master profile ONCE per (enquiry, toName), so the preview reflects the
+     * authoritative master record without fighting later manual edits.
+     */
+    const internalToAddressSyncedRef = useRef('');
+    useEffect(() => {
+        const tn = String(toName || '').trim();
+        if (!tn) return;
+        const reqNo = String(enquiryData?.enquiry?.RequestNo || '');
+        if (!reqNo) return;
+        const profiles = enquiryData?.availableProfiles || [];
+        if (!profiles.length) return;
+
+        const cleanTarget = collapseSpacesLower(stripQuoteJobPrefix(tn));
+        if (!cleanTarget) return;
+        const profile = profiles.find((p) => {
+            const a = collapseSpacesLower(stripQuoteJobPrefix(p?.itemName || ''));
+            const b = collapseSpacesLower(stripQuoteJobPrefix(p?.name || ''));
+            return (a && a === cleanTarget) || (b && b === cleanTarget);
+        });
+        if (!profile) return; // external customer — skip
+
+        const key = `${reqNo}::${tn}`;
+        if (internalToAddressSyncedRef.current === key) return;
+        internalToAddressSyncedRef.current = key;
+
+        // For internal recipients the Master_EnquiryFor row is authoritative — overwrite
+        // unconditionally so any stale external address/phone/fax/email (e.g. from a
+        // previous external selection or pre-fix saved quote row) is cleared.
+        const addr = String(profile.address || '').trim();
+        const ph = String(profile.phone || '').trim();
+        const em = String(profile.email || '').split(',')[0].trim();
+        const fx = String(profile.fax || '').trim();
+        setToAddress(addr);
+        setToPhone(ph);
+        setToEmail(em);
+        setToFax(fx);
+    }, [toName, enquiryData?.enquiry?.RequestNo, enquiryData?.availableProfiles]);
+
     // Pick pricing root for lead dropdown after list-row enquiry load (searchTerm / pending click).
     useEffect(() => {
         if (!quoteRowAutoSelectLeadRef.current) return;
@@ -6098,80 +6339,89 @@ const QuoteForm = ({ openContext = null }) => {
 
 
 
-        // Try exact match first, then robust normalized match
-        let cust = customersList.find(c => c.CompanyName === selectedName);
-        if (!cust) {
-            cust = customersList.find(c => normalize(c.CompanyName) === targetNorm);
-        }
-
-        if (cust) {
-            console.log('[handleCustomerChange] Found customer in Master list:', cust.CompanyName);
-            const addr = [cust.Address1, cust.Address2].filter(Boolean).join('\n').trim();
-            setToAddress(addr);
-            setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''} `.trim());
-            setToEmail(cust.EmailId || '');
-            setToFax(cust.FaxNo || '');
-        } else {
-            console.log('[handleCustomerChange] Customer NOT found in Master list');
-
-            // Check if it matches the parsed Enquiry Customer (could be inactive)
-            let foundInEnquiry = false;
-            if (enquiryData?.customerDetails) {
-                const enqCustName = enquiryData.enquiry?.CustomerName || enquiryData.CustomerName || '';
-                const enqCustList = enqCustName.split(',').map(c => normalize(c.trim()));
-
-                // Use same normalized check for fallback validity
-                if (enqCustList.includes(targetNorm) && enquiryData.customerDetails) {
-                    console.log('[handleCustomerChange] Using Enquiry Customer Details fallback (possibly inactive)');
-                    const details = enquiryData.customerDetails;
-                    const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
-                    setToAddress(addr);
-                    setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
-                    setToEmail(details.EmailId || '');
-                    setToFax(details.FaxNo || '');
-                    foundInEnquiry = true;
-                }
-            }
-
-            // RELAXED CHECK: Check internal profiles IF no address found yet, 
-            // OR if it's an internal-sounding name, even if it's "Linked".
-            if (!foundInEnquiry && (toAddress === '' || !isInternal) && enquiryData?.availableProfiles) {
-                // Check in internal division profiles
-                const profile = enquiryData.availableProfiles.find(p =>
-                    p.itemName.replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim() === selectedName ||
-                    normalize(p.itemName) === targetNorm ||
-                    normalize(p.name) === targetNorm
+        // --- INTERNAL CUSTOMER: address ALWAYS comes from Master_EnquiryFor ---
+        // The server has already pre-joined Master_EnquiryFor into `availableProfiles` for every
+        // row of EnquiryFor (see server/routes/quotes.js – the profile's `address`, `phone`,
+        // `fax`, `email` are sourced from `Master_EnquiryFor.Address / Phone / FaxNo / CommonMailIds`).
+        // For an internal "To" the previous external customer's address must NOT linger, so we
+        // unconditionally overwrite from the matched profile (or clear if no master row exists).
+        if (isInternal) {
+            const profile = (enquiryData?.availableProfiles || []).find((p) => {
+                const cleanItem = String(p?.itemName || '').replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim();
+                return (
+                    cleanItem === selectedName ||
+                    normalize(p?.itemName) === targetNorm ||
+                    normalize(p?.name) === targetNorm
                 );
-                if (profile) {
-                    console.log('[handleCustomerChange] ✓ Found internal profile match:', profile.itemName);
-                    if (!toAddress) setToAddress(profile.address || '');
-                    if (!toPhone) setToPhone(profile.phone || '');
-                    if (!toEmail) setToEmail(profile.email || '');
-                    if (!toFax) setToFax(profile.fax || '');
-                    if (profile.address) foundInEnquiry = true; // Mark found if we got a real address
-                }
+            });
+            if (profile) {
+                console.log('[handleCustomerChange] Internal → Master_EnquiryFor profile match:', profile.itemName);
+                setToAddress(String(profile.address || ''));
+                setToPhone(String(profile.phone || ''));
+                setToEmail(String(profile.email || ''));
+                setToFax(String(profile.fax || ''));
+            } else {
+                // No Master_EnquiryFor row for this internal division — clear stale external values
+                // so the preview does not keep showing the previous customer's address.
+                console.log('[handleCustomerChange] Internal → no Master_EnquiryFor row, clearing address');
+                setToAddress('');
+                setToPhone('');
+                setToEmail('');
+                setToFax('');
             }
-        }
+        } else {
+            // --- EXTERNAL CUSTOMER: Master_Customers → Enquiry customer details → jobs pool ---
+            let cust = customersList.find(c => c.CompanyName === selectedName);
+            if (!cust) {
+                cust = customersList.find(c => normalize(c.CompanyName) === targetNorm);
+            }
 
-        // Additional match in jobsPool/pricingData if available (more direct)
-        // Check even if Linked, because many root/parent jobs are added to the customer options list
-        if (enquiryData) {
-            const jobMatch = jobsPool.find(j =>
-                normalize(j.itemName || j.DivisionName) === targetNorm ||
-                normalize(j.ItemName) === targetNorm
-            );
-            if (jobMatch) {
-                console.log('[handleCustomerChange] Checking direct job match in pool:', jobMatch.itemName);
-                // Robust mapping: check multiple possible field names
-                const addr = jobMatch.Address || jobMatch.address || '';
-                const ph = jobMatch.Phone || jobMatch.phone || jobMatch.PhoneNo || '';
-                const fx = jobMatch.FaxNo || jobMatch.fax || jobMatch.Fax || '';
-                const em = jobMatch.Email || jobMatch.email || jobMatch.CommonMailIds || '';
+            if (cust) {
+                console.log('[handleCustomerChange] Found customer in Master list:', cust.CompanyName);
+                const addr = [cust.Address1, cust.Address2].filter(Boolean).join('\n').trim();
+                setToAddress(addr);
+                setToPhone(`${cust.Phone1 || ''} ${cust.Phone2 ? '/ ' + cust.Phone2 : ''} `.trim());
+                setToEmail(cust.EmailId || '');
+                setToFax(cust.FaxNo || '');
+            } else {
+                console.log('[handleCustomerChange] Customer NOT found in Master list');
 
-                if (addr && !toAddress) setToAddress(addr);
-                if (ph && !toPhone) setToPhone(ph);
-                if (fx && !toFax) setToFax(fx);
-                if (em && !toEmail) setToEmail(em.split(',')[0].trim());
+                // Check if it matches the parsed Enquiry Customer (could be inactive)
+                let foundInEnquiry = false;
+                if (enquiryData?.customerDetails) {
+                    const enqCustName = enquiryData.enquiry?.CustomerName || enquiryData.CustomerName || '';
+                    const enqCustList = enqCustName.split(',').map(c => normalize(c.trim()));
+
+                    if (enqCustList.includes(targetNorm) && enquiryData.customerDetails) {
+                        console.log('[handleCustomerChange] Using Enquiry Customer Details fallback (possibly inactive)');
+                        const details = enquiryData.customerDetails;
+                        const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+                        setToAddress(addr);
+                        setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
+                        setToEmail(details.EmailId || '');
+                        setToFax(details.FaxNo || '');
+                        foundInEnquiry = true;
+                    }
+                }
+
+                // External fallback to jobsPool address (if any) — only if still empty.
+                if (!foundInEnquiry && enquiryData) {
+                    const jobMatch = jobsPool.find(j =>
+                        normalize(j.itemName || j.DivisionName) === targetNorm ||
+                        normalize(j.ItemName) === targetNorm
+                    );
+                    if (jobMatch) {
+                        console.log('[handleCustomerChange] External fallback: jobsPool match:', jobMatch.itemName);
+                        const addr = jobMatch.Address || jobMatch.address || '';
+                        const ph = jobMatch.Phone || jobMatch.phone || jobMatch.PhoneNo || '';
+                        const fx = jobMatch.FaxNo || jobMatch.fax || jobMatch.Fax || '';
+                        const em = jobMatch.Email || jobMatch.email || jobMatch.CommonMailIds || '';
+                        if (addr && !toAddress) setToAddress(addr);
+                        if (ph && !toPhone) setToPhone(ph);
+                        if (fx && !toFax) setToFax(fx);
+                        if (em && !toEmail) setToEmail(em.split(',')[0].trim());
+                    }
+                }
             }
         }
 
@@ -6296,7 +6546,7 @@ const QuoteForm = ({ openContext = null }) => {
             console.log('Fetching URL:', url);
 
             console.log('[Pricing Fetch] Requesting:', url, 'ActiveCustomer:', cxName);
-            const pricingRes = await fetch(url);
+            const pricingRes = await fetch(url, { cache: 'no-store' });
             if (gen !== pricingFetchGenerationRef.current) {
                 console.log('[loadPricingData] Discarding stale response (generation mismatch after fetch)');
                 return;
@@ -7463,6 +7713,119 @@ const QuoteForm = ({ openContext = null }) => {
             }
         });
 
+        // SAFETY NET (Options like "Optional" / "Option" / custom names added in Pricing module):
+        // After all filters run, ANY EnquiryPricingValues row with a real price for the current
+        // enquiry + branch must surface in the summary panel — even if the customer / visibility
+        // filter rejected the option (e.g. opt.customerName saved as an internal name that the
+        // upstream filter cannot reconcile with the active external customer).
+        // This guarantees that what the user typed in the Pricing grid is what they see here.
+        try {
+            const rowsForScan = Array.isArray(data.pricingValueRows) ? data.pricingValueRows : [];
+            if (rowsForScan.length > 0) {
+                const reqNoScan = String(
+                    enquiryData?.enquiry?.RequestNo ?? enquiryData?.RequestNo ?? ''
+                ).trim();
+                const sameReqNo = (a) => {
+                    if (!reqNoScan) return true;
+                    const s = String(a ?? '').trim();
+                    if (s === reqNoScan) return true;
+                    const na = parseInt(s, 10);
+                    const nb = parseInt(reqNoScan, 10);
+                    return Number.isFinite(na) && Number.isFinite(nb) && na === nb;
+                };
+                const branchPrefixForScan = String(
+                    enquiryData?.leadJobPrefix || data?.leadJob || ''
+                ).trim();
+                const optionsById = new Map();
+                (data.options || []).forEach((o) => {
+                    const id = String(o?.id ?? o?.ID ?? '').trim();
+                    if (id) optionsById.set(id, o);
+                });
+                const jobByIdScan = new Map();
+                const jobByItemNorm = new Map();
+                (data.jobs || []).forEach((j) => {
+                    const jid = String(j?.id ?? j?.ItemID ?? j?.ID ?? '').trim();
+                    if (jid) jobByIdScan.set(jid, j);
+                    const nm = collapseSpacesLower(
+                        stripQuoteJobPrefix(j?.itemName || j?.DivisionName || j?.ItemName || '')
+                    );
+                    if (nm && !jobByItemNorm.has(nm)) jobByItemNorm.set(nm, j);
+                });
+
+                rowsForScan.forEach((row) => {
+                    if (!row) return;
+                    if (!sameReqNo(row.RequestNo ?? row.requestNo)) return;
+                    const priceRaw = row.Price ?? row.price;
+                    const priceNum = parseFloat(priceRaw);
+                    if (!Number.isFinite(priceNum) || priceNum <= 0) return;
+
+                    if (!leadJobRowMatches(
+                        row.LeadJobName ?? row.leadJobName,
+                        branchPrefixForScan,
+                        data.jobs || []
+                    )) {
+                        return;
+                    }
+
+                    const optId = String(row.OptionID ?? row.optionID ?? row.OptionId ?? '').trim();
+                    const opt = optId ? optionsById.get(optId) : null;
+                    let optName = String(row.PriceOption ?? row.priceOption ?? '').trim();
+                    if (!optName) optName = String(opt?.name || opt?.OptionName || '').trim();
+                    if (!optName) optName = 'Base Price';
+
+                    const jobIdRaw = String(row.EnquiryForID ?? row.enquiryForID ?? '').trim();
+                    let job = jobIdRaw ? jobByIdScan.get(jobIdRaw) : null;
+                    if (!job) {
+                        const efi = collapseSpacesLower(
+                            stripQuoteJobPrefix(row.EnquiryForItem ?? row.enquiryForItem ?? '')
+                        );
+                        if (efi) job = jobByItemNorm.get(efi) || null;
+                    }
+                    if (!job) return;
+
+                    const jobIdStr = String(job.id || job.ItemID || job.ID || '');
+                    if (branchIds.size > 0 && jobIdStr && !branchIds.has(jobIdStr)) {
+                        return;
+                    }
+
+                    const groupName = job.itemName || job.DivisionName || job.ItemName;
+                    if (!groupName) return;
+                    if (!groups[groupName]) {
+                        groups[groupName] = { total: 0, items: [], hasOptional: false };
+                    }
+                    const optNameLc = String(optName).trim().toLowerCase();
+                    const existing = groups[groupName].items.find(
+                        (it) => String(it.name || '').trim().toLowerCase() === optNameLc
+                    );
+                    if (existing) {
+                        if (priceNum > existing.total) {
+                            groups[groupName].total += (priceNum - existing.total);
+                            existing.total = priceNum;
+                        }
+                    } else {
+                        groups[groupName].items.push({ name: optName, total: priceNum });
+                        groups[groupName].total += priceNum;
+                    }
+                    if (optName === 'Optional' || optName === 'Option') {
+                        groups[groupName].hasOptional = true;
+                        if (optName === 'Optional') foundPricedOptional = true;
+                    } else if (optName === 'Base Price') {
+                        const isThisJobActive =
+                            activeJobs.length === 0 ||
+                            jobNameMatchesActiveJobsList(groupName, activeJobs);
+                        if (isThisJobActive) {
+                            calculatedGrandTotal += priceNum;
+                        }
+                    }
+                    userHasEnteredPrice = true;
+                });
+            }
+        } catch (scanErr) {
+            if (import.meta.env.DEV) {
+                console.warn('[calculateSummary] safety-net scan failed:', scanErr);
+            }
+        }
+
         // POST-PROCESSING: Calculate NET Prices for Parent Jobs
         // If a Parent Job (e.g. Civil) includes the cost of its Children (e.g. Electrical),
         // and both are being displayed in the summary, we must subtract the Child's cost from the Parent
@@ -7727,18 +8090,34 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     // Template Handlers
+    /**
+     * A clause template snapshots the *full* clause configuration so a user can re-apply it
+     * later on any quote:
+     *   - clauses         : visibility flags for standard clauses (show/hide each section)
+     *   - clauseContent   : rich-text body of every standard clause (Scope of Work, Basis of
+     *                       Offer, Exclusions, **Pricing Terms (4. Pricing)**, Bill of Quantity,
+     *                       Schedule, Warranty, Responsibility Matrix, Terms & Conditions,
+     *                       Acceptance). Without this the user's edits to the clause editor
+     *                       were silently dropped on save.
+     *   - customClauses   : user-added clauses (title + content + visibility).
+     *   - orderedClauses  : display order of all clauses (standard + custom).
+     */
     const handleSaveTemplate = async () => {
         if (!savedTemplateName.trim()) return alert('Please enter a template name');
 
         const clausesConfig = {
             clauses,
+            clauseContent,
             customClauses,
-            orderedClauses
+            orderedClauses,
         };
 
         try {
+            // Backend route is upsert-aware (POST /config/templates updates by templateName
+            // when one exists, else inserts). There is no PUT handler — previously sending
+            // PUT here whenever a quote was loaded (`quoteId` truthy) caused a 404.
             const res = await fetch(`${API_BASE}/api/quotes/config/templates`, {
-                method: quoteId ? 'PUT' : 'POST',
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     templateName: savedTemplateName,
@@ -7754,7 +8133,13 @@ const QuoteForm = ({ openContext = null }) => {
                 const listRes = await fetch(`${API_BASE}/api/quotes/config/templates`);
                 if (listRes.ok) setTemplates(await listRes.json());
             } else {
-                alert('Failed to save template');
+                let serverMsg = '';
+                try {
+                    const errBody = await res.json();
+                    serverMsg = errBody?.details || errBody?.error || '';
+                } catch { /* ignore */ }
+                console.error('[handleSaveTemplate] HTTP', res.status, serverMsg);
+                alert(`Failed to save template${serverMsg ? `: ${serverMsg}` : ` (HTTP ${res.status})`}`);
             }
         } catch (err) {
             console.error('Error saving template:', err);
@@ -7762,22 +8147,38 @@ const QuoteForm = ({ openContext = null }) => {
         }
     };
 
-    const handleLoadTemplate = () => {
-        if (!selectedTemplateId) return;
-        const tmpl = templates.find(t => t.ID == selectedTemplateId);
+    /**
+     * Apply a saved template to the current quote.
+     * Accepts an explicit templateId so callers (dropdown auto-load, folder-icon click) can
+     * pass the freshly-selected value without waiting for `selectedTemplateId` state to commit.
+     * Pass `{ silent: true }` to suppress the success alert (used by auto-load on dropdown).
+     */
+    const handleLoadTemplate = useCallback((templateIdOrEvent, opts = {}) => {
+        // Support both <button onClick={handleLoadTemplate}> (event arg) and explicit-id callers.
+        const explicitId =
+            typeof templateIdOrEvent === 'string' || typeof templateIdOrEvent === 'number'
+                ? String(templateIdOrEvent)
+                : '';
+        const tid = explicitId || selectedTemplateId;
+        if (!tid) return;
+        const tmpl = templates.find(t => String(t.ID) === String(tid));
         if (!tmpl) return;
 
         try {
             const config = JSON.parse(tmpl.ClausesConfig);
             if (config.clauses) setClauses(config.clauses);
+            if (config.clauseContent) {
+                // Merge so any new default clause keys not present in older templates are kept.
+                setClauseContent(prev => ({ ...prev, ...config.clauseContent }));
+            }
             if (config.customClauses) setCustomClauses(config.customClauses);
             if (config.orderedClauses) setOrderedClauses(config.orderedClauses);
-            alert('Template loaded successfully!');
+            if (!opts.silent) alert('Template loaded successfully!');
         } catch (err) {
             console.error('Error parsing template:', err);
-            alert('Failed to load template configuration');
+            if (!opts.silent) alert('Failed to load template configuration');
         }
-    };
+    }, [selectedTemplateId, templates, setClauses, setClauseContent, setCustomClauses, setOrderedClauses]);
 
     const handleDeleteTemplate = async () => {
         if (!selectedTemplateId) return;
@@ -8667,10 +9068,18 @@ const QuoteForm = ({ openContext = null }) => {
     ]);
 
     const browsePrevQuotesLatchRef = useRef(false);
+    /**
+     * Snap-to-first-tab gate: fires ONCE per browse-mode enable so the user can freely click
+     * subjob tabs afterwards. Without this, the effect would re-snap to the first tab every
+     * time `activeQuoteTab` changes (e.g. clicking AC Maint-HVAC), trapping the user on the
+     * own-job tab.
+     */
+    const browsePrevQuotesInitSnapDoneRef = useRef(false);
 
     /** New enquiry: allow Browse-mode initializer to run again (expand + load latest). */
     useEffect(() => {
         browsePrevQuotesLatchRef.current = false;
+        browsePrevQuotesInitSnapDoneRef.current = false;
     }, [enquiryData?.enquiry?.RequestNo]);
 
     /** Browse mode on (once per enable): first tab, expand all revision groups, load latest saved quote for backend preview. */
@@ -8678,6 +9087,7 @@ const QuoteForm = ({ openContext = null }) => {
         if (DISABLE_QUOTE_TAB_AUTOMATION) return;
         if (!browsePreviousQuotesRevisions) {
             browsePrevQuotesLatchRef.current = false;
+            browsePrevQuotesInitSnapDoneRef.current = false;
             // Checkbox OFF => keep all revision groups collapsed.
             setExpandedGroups({});
             return;
@@ -8685,9 +9095,14 @@ const QuoteForm = ({ openContext = null }) => {
         if (!calculatedTabs?.length || !(toName || '').trim()) return;
 
         const firstId = calculatedTabs[0].id;
-        if (String(activeQuoteTab) !== String(firstId)) {
-            handleTabChange(firstId, { force: true });
-            return;
+        // Snap to first tab ONLY on the first run after browse mode is enabled.
+        // After this, the user is free to click any subjob tab without being yanked back.
+        if (!browsePrevQuotesInitSnapDoneRef.current) {
+            browsePrevQuotesInitSnapDoneRef.current = true;
+            if (String(activeQuoteTab) !== String(firstId)) {
+                handleTabChange(firstId, { force: true });
+                return;
+            }
         }
 
         const filtered = getFilteredQuotesForPreviousQuotesTab(firstId);
@@ -8843,21 +9258,17 @@ const QuoteForm = ({ openContext = null }) => {
         const effectiveReviseId =
             quoteId != null && String(quoteId).trim() !== '' ? quoteId : idFromTuple;
 
-        if (tupleLatest && (!quoteId || String(quoteId).trim() === '') && idFromTuple) {
-            loadQuote(tupleLatest, {
-                preserveRecipient: true,
-                skipPreparedSignatory: true,
-                applySavedDigitalSignatures: false,
-            });
-        }
-
         console.log('[handleRevise] Starting revision process. QuoteId:', effectiveReviseId);
         if (effectiveReviseId == null || String(effectiveReviseId).trim() === '') {
             console.log('[handleRevise] No quoteId found, aborting');
             return;
         }
 
-        // Validate mandatory fields before revision
+        // Validate mandatory fields BEFORE touching any state so a failed validation cannot
+        // alter what the user is seeing. (Previously a pre-validation `loadQuote(tupleLatest)`
+        // queued setState calls that React only committed after the user dismissed the
+        // mandatory-fields alert — silently replacing a user-loaded clause template's custom
+        // 4. Pricing & Payment Terms table with the saved quote's older pricing table.)
         if (!validateMandatoryFields()) return;
 
         const ownjobAmtRev = Number(ownjobBasePriceForEnquiryQuoteTotal);
@@ -9361,32 +9772,68 @@ const QuoteForm = ({ openContext = null }) => {
                     // Pending-list auto-open sets ToName directly (bypasses handleCustomerChange).
                     // Mirror manual customer-selection hydration for To-address/contact block.
                     const hintKey = normalizeCustomerDisplayKey(toNameForLoad);
-                    const matchedCustomer =
-                        (customersList || []).find((c) => {
-                            const nm = String(c?.CompanyName || '').trim();
-                            if (!nm) return false;
-                            const nNorm = normalize(nm);
-                            const nKey = normalizeCustomerDisplayKey(nm);
-                            return (
-                                nNorm === hintNorm ||
-                                nKey === hintKey ||
-                                (nNorm && hintNorm && (nNorm.includes(hintNorm) || hintNorm.includes(nNorm)))
-                            );
-                        }) || null;
+                    const isInternalRecipient = internalNamesNorm.has(hintNorm) && !!hintStripped;
 
-                    if (matchedCustomer) {
-                        const addr = [matchedCustomer.Address1, matchedCustomer.Address2].filter(Boolean).join('\n').trim();
-                        setToAddress(addr);
-                        setToPhone(`${matchedCustomer.Phone1 || ''} ${matchedCustomer.Phone2 ? '/ ' + matchedCustomer.Phone2 : ''} `.trim());
-                        setToEmail(matchedCustomer.EmailId || '');
-                        setToFax(matchedCustomer.FaxNo || '');
-                    } else if (data?.customerDetails) {
-                        const details = data.customerDetails;
-                        const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
-                        setToAddress(addr);
-                        setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
-                        setToEmail(details.EmailId || '');
-                        setToFax(details.FaxNo || '');
+                    // --- INTERNAL CUSTOMER: address/phone/fax/email come from Master_EnquiryFor ---
+                    // The server pre-joins Master_EnquiryFor into `availableProfiles`, exposing
+                    // `address`, `phone`, `fax`, `email`. Pick those for any internal recipient so the
+                    // left-panel receipt info matches the master record (and is NOT contaminated by the
+                    // external EnquiryMaster customer's contact details).
+                    let internalProfileApplied = false;
+                    if (isInternalRecipient) {
+                        const target = collapseSpacesLower(stripQuoteJobPrefix(toNameForLoad));
+                        const profile = (data?.availableProfiles || []).find((p) => {
+                            const a = collapseSpacesLower(stripQuoteJobPrefix(p?.itemName || ''));
+                            const b = collapseSpacesLower(stripQuoteJobPrefix(p?.name || ''));
+                            return (a && a === target) || (b && b === target);
+                        });
+                        if (profile) {
+                            console.log('[QuoteForm] Pending-list internal recipient → Master_EnquiryFor profile match:', profile.itemName);
+                            setToAddress(String(profile.address || ''));
+                            setToPhone(String(profile.phone || ''));
+                            setToEmail(String(profile.email || '').split(',')[0].trim());
+                            setToFax(String(profile.fax || ''));
+                            internalProfileApplied = true;
+                        } else {
+                            // No Master_EnquiryFor row matched — clear stale external contact so the
+                            // safety-net effect can re-hydrate later or the user can manually edit.
+                            console.log('[QuoteForm] Pending-list internal recipient → no Master_EnquiryFor profile, clearing contact');
+                            setToAddress('');
+                            setToPhone('');
+                            setToEmail('');
+                            setToFax('');
+                            internalProfileApplied = true;
+                        }
+                    }
+
+                    if (!internalProfileApplied) {
+                        const matchedCustomer =
+                            (customersList || []).find((c) => {
+                                const nm = String(c?.CompanyName || '').trim();
+                                if (!nm) return false;
+                                const nNorm = normalize(nm);
+                                const nKey = normalizeCustomerDisplayKey(nm);
+                                return (
+                                    nNorm === hintNorm ||
+                                    nKey === hintKey ||
+                                    (nNorm && hintNorm && (nNorm.includes(hintNorm) || hintNorm.includes(nNorm)))
+                                );
+                            }) || null;
+
+                        if (matchedCustomer) {
+                            const addr = [matchedCustomer.Address1, matchedCustomer.Address2].filter(Boolean).join('\n').trim();
+                            setToAddress(addr);
+                            setToPhone(`${matchedCustomer.Phone1 || ''} ${matchedCustomer.Phone2 ? '/ ' + matchedCustomer.Phone2 : ''} `.trim());
+                            setToEmail(matchedCustomer.EmailId || '');
+                            setToFax(matchedCustomer.FaxNo || '');
+                        } else if (data?.customerDetails) {
+                            const details = data.customerDetails;
+                            const addr = details.Address || [details.Address1, details.Address2].filter(Boolean).join('\n').trim();
+                            setToAddress(addr);
+                            setToPhone(`${details.Phone1 || ''} ${details.Phone2 ? '/ ' + details.Phone2 : ''} `.trim());
+                            setToEmail(details.EmailId || '');
+                            setToFax(details.FaxNo || '');
+                        }
                     }
                     quoteRowSyncDropdownCustomerRef.current = false;
                     quoteRowAwaitingLeadForCustomerRef.current = false;
@@ -11702,6 +12149,12 @@ const QuoteForm = ({ openContext = null }) => {
      * A4 cover "To," block:
      * - Browse mode ON: strict backend values from selected EnquiryQuotes row only (no left-panel fallback).
      * - Browse mode OFF: left form values.
+     *
+     * INTERNAL CUSTOMER OVERRIDE: Older `EnquiryQuotes` rows may have a stale `ToAddress`
+     * stored against an internal division. The address/phone/fax/email for ANY internal
+     * recipient must always reflect `Master_EnquiryFor` (which the server returns via
+     * `enquiryData.availableProfiles`), so we look up the matching profile by `toName`
+     * and override those four fields regardless of what is stored on the row.
      */
     const quotePreviewToBlockDisplay = React.useMemo(() => {
         const baseForm = {
@@ -11711,24 +12164,85 @@ const QuoteForm = ({ openContext = null }) => {
             toFax: String(toFax || '').trim(),
             toEmail: String(toEmail || '').trim(),
         };
-        /** Draft preview: always use left-panel recipient fields only (no DB row). */
-        if (!browsePreviousQuotesRevisions) return baseForm;
+
+        // Helper: if `name` matches an internal `availableProfiles` row, return its
+        // Master_EnquiryFor-sourced contact fields. Otherwise null.
+        const overrideFromInternalProfile = (name) => {
+            const tn = String(name || '').trim();
+            if (!tn) return null;
+            const profiles = enquiryData?.availableProfiles || [];
+            if (!profiles.length) return null;
+            const target = collapseSpacesLower(stripQuoteJobPrefix(tn));
+            if (!target) return null;
+            const profile = profiles.find((p) => {
+                const a = collapseSpacesLower(stripQuoteJobPrefix(p?.itemName || ''));
+                const b = collapseSpacesLower(stripQuoteJobPrefix(p?.name || ''));
+                return (a && a === target) || (b && b === target);
+            });
+            if (!profile) return null; // external customer — no override
+            return {
+                toAddress: String(profile.address || '').trim(),
+                toPhone: String(profile.phone || '').trim(),
+                toFax: String(profile.fax || '').trim(),
+                toEmail: String(profile.email || '').split(',')[0].trim(),
+            };
+        };
+
+        /**
+         * Draft preview (Previous Quotes / Revisions OFF): mirror the left-panel recipient
+         * fields verbatim so the user sees their edits live on the right side. The left panel
+         * is already hydrated from Master_EnquiryFor for internal recipients (see
+         * handleCustomerChange + internalToAddressSyncedRef), so no extra override is needed
+         * here. Only fall back to the internal profile for fields the user has cleared, so
+         * those don't show as empty in the preview while an internal recipient is selected.
+         */
+        if (!browsePreviousQuotesRevisions) {
+            const intOverride = overrideFromInternalProfile(baseForm.toName);
+            if (!intOverride) return baseForm;
+            return {
+                ...baseForm,
+                toAddress: baseForm.toAddress || intOverride.toAddress,
+                toPhone: baseForm.toPhone || intOverride.toPhone,
+                toFax: baseForm.toFax || intOverride.toFax,
+                toEmail: baseForm.toEmail || intOverride.toEmail,
+            };
+        }
 
         const sj = subjobQuoteA4HeaderDisplay;
         const row = loadedEnquiryQuoteRowForPreview;
-        if (!sj || !row) return baseForm;
+        if (!sj || !row) {
+            const intOverride = overrideFromInternalProfile(baseForm.toName);
+            if (!intOverride) return baseForm;
+            return {
+                ...baseForm,
+                toAddress: intOverride.toAddress || baseForm.toAddress,
+                toPhone: intOverride.toPhone || baseForm.toPhone,
+                toFax: intOverride.toFax || baseForm.toFax,
+                toEmail: intOverride.toEmail || baseForm.toEmail,
+            };
+        }
 
-        return {
+        const fromRow = {
             toName: String(sj.toName || '').trim(),
             toAddress: String(sj.toAddress || '').trim(),
             toPhone: String(sj.toPhone || '').trim(),
             toFax: String(sj.toFax || '').trim(),
             toEmail: String(sj.toEmail || '').trim(),
         };
+        const intOverride = overrideFromInternalProfile(fromRow.toName);
+        if (!intOverride) return fromRow;
+        return {
+            ...fromRow,
+            toAddress: intOverride.toAddress || fromRow.toAddress,
+            toPhone: intOverride.toPhone || fromRow.toPhone,
+            toFax: intOverride.toFax || fromRow.toFax,
+            toEmail: intOverride.toEmail || fromRow.toEmail,
+        };
     }, [
         browsePreviousQuotesRevisions,
         subjobQuoteA4HeaderDisplay,
         loadedEnquiryQuoteRowForPreview,
+        enquiryData?.availableProfiles,
         toName,
         toAddress,
         toPhone,
@@ -11890,50 +12404,6 @@ const QuoteForm = ({ openContext = null }) => {
             cancelled = true;
         };
     }, [toName, enquiryLoadSig, pricingStableSig]);
-
-    const showAttentionAsSelect = React.useMemo(
-        () =>
-            isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName) ||
-            attentionSelectOptions.length > 0,
-        [enquiryData, pricingData?.jobs, toName, attentionSelectOptions]
-    );
-
-    const attentionSelectMerged = React.useMemo(() => {
-        if (isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName)) {
-            return attentionSelectOptions;
-        }
-        return [...new Set([...attentionSelectOptions, toAttention].filter(Boolean))];
-    }, [enquiryData, pricingData?.jobs, toName, attentionSelectOptions, toAttention]);
-
-    const attentionOptionsContentSig = React.useMemo(() => {
-        if (!attentionSelectOptions.length) return '';
-        try {
-            return attentionSelectOptions.map((s) => String(s || '').trim()).sort().join('\x1e');
-        } catch {
-            return `n:${attentionSelectOptions.length}`;
-        }
-    }, [attentionSelectOptions]);
-
-    // Drop stale Attention values that are not in the dropdown list (internal customers only).
-    // Do not depend on `enquiryData` / `attentionSelectOptions` identity — they churned and re-fired this every render.
-    useEffect(() => {
-        const ed = enquiryDataRef.current;
-        if (!toName?.trim() || !ed) return;
-        if (quoteId != null && String(quoteId).trim() !== '') return;
-        if (!isQuoteInternalCustomer(ed, pricingData?.jobs, toName)) return;
-        const allowed = attentionSelectOptions;
-        if (allowed.length === 0) return;
-        const cur = String(toAttention || '').trim();
-        if (!cur) return;
-        if (allowed.some((o) => normLooseAttention(o) === normLooseAttention(cur))) return;
-        const intAtt = resolveQuoteInternalAttentionFlexible(ed, toName);
-        const next = String(intAtt?.defaultAttention || allowed[0] || '').trim();
-        setToAttention((prev) => {
-            const p = String(prev || '').trim();
-            if (normLooseAttention(p) === normLooseAttention(next)) return prev;
-            return next;
-        });
-    }, [toName, toAttention, attentionOptionsContentSig, pricingStableSig, quoteId]);
 
     // --- READ-ONLY TAB LOGIC ---
     const activeGlobalTabObj = (effectiveQuoteTabs || []).find(t => String(t.id) === String(activeQuoteTab));
@@ -12396,13 +12866,14 @@ const QuoteForm = ({ openContext = null }) => {
                                         Load draft… <ChevronDown size={11} />
                                     </button>
                                 </div>
-                                {formDraftPanelOpen && (
+                                {formDraftPanelOpen && createPortal(
                                     <div
+                                        ref={formDraftMenuPanelRef}
                                         style={{
-                                            position: 'absolute',
-                                            top: 'calc(100% + 6px)',
-                                            left: 0,
-                                            minWidth: '300px',
+                                            position: 'fixed',
+                                            top: formDraftMenuAnchor.top,
+                                            left: formDraftMenuAnchor.left,
+                                            minWidth: `${formDraftMenuAnchor.width}px`,
                                             maxWidth: 'min(380px, 94vw)',
                                             maxHeight: '260px',
                                             overflowY: 'auto',
@@ -12410,7 +12881,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             border: '1px solid #cbd5e1',
                                             borderRadius: '8px',
                                             boxShadow: '0 10px 28px rgba(15,23,42,0.14)',
-                                            zIndex: 80,
+                                            zIndex: 2000,
                                             padding: '4px 0',
                                         }}
                                     >
@@ -12512,7 +12983,8 @@ const QuoteForm = ({ openContext = null }) => {
                                                 );
                                             })
                                         ) : null}
-                                    </div>
+                                    </div>,
+                                    document.body
                                 )}
                             </div>
 
@@ -12651,20 +13123,26 @@ const QuoteForm = ({ openContext = null }) => {
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                         {/* Tab Headers */}
                                         <div style={{ display: 'flex', gap: '4px', borderBottom: '1px solid #e2e8f0', marginBottom: '4px', flexWrap: 'wrap' }}>
-                                            {tabs.map(tab => (
+                                            {tabs.map(tab => {
+                                                const isActive = String(activeQuoteTab) === String(tab.id);
+                                                return (
                                                 <button
                                                     key={tab.id}
                                                     type="button"
-                                                    onClick={() => browsePreviousQuotesRevisions && handleTabChange(tab.id)}
+                                                    onClick={() => {
+                                                        if (!browsePreviousQuotesRevisions) return;
+                                                        if (String(activeQuoteTab) === String(tab.id)) return;
+                                                        handleTabChange(tab.id);
+                                                    }}
                                                     disabled={!browsePreviousQuotesRevisions}
                                                     style={{
                                                         padding: '4px 8px',
                                                         fontSize: '11px',
                                                         fontWeight: '600',
                                                         border: 'none',
-                                                        background: activeQuoteTab === tab.id ? '#e0f2fe' : 'transparent',
-                                                        color: activeQuoteTab === tab.id ? '#0284c7' : '#64748b',
-                                                        borderBottom: activeQuoteTab === tab.id ? '2px solid #0284c7' : '2px solid transparent',
+                                                        background: isActive ? '#e0f2fe' : 'transparent',
+                                                        color: isActive ? '#0284c7' : '#64748b',
+                                                        borderBottom: isActive ? '2px solid #0284c7' : '2px solid transparent',
                                                         cursor: browsePreviousQuotesRevisions ? 'pointer' : 'not-allowed',
                                                         borderRadius: '4px 4px 0 0',
                                                         opacity: browsePreviousQuotesRevisions ? 1 : 0.55,
@@ -12674,7 +13152,8 @@ const QuoteForm = ({ openContext = null }) => {
                                                         <span>{tab.name || tab.label}</span>
                                                     </div>
                                                 </button>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
 
                                         {/* Content for Active Tab */}
@@ -13192,26 +13671,26 @@ const QuoteForm = ({ openContext = null }) => {
                                         </div>
                                         <div style={{ marginBottom: '0' }}>
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>Attention of <span style={{ color: '#ef4444' }}>*</span></label>
-                                            {showAttentionAsSelect ? (
-                                                <select
-                                                    value={attentionSelectMerged.includes(toAttention) ? toAttention : ''}
-                                                    onChange={(e) => setToAttention(e.target.value)}
-                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px', background: '#fff' }}
-                                                >
-                                                    <option value="">— Select —</option>
-                                                    {attentionSelectMerged.map((opt) => (
-                                                        <option key={opt} value={opt}>{opt}</option>
+                                            <input
+                                                type="text"
+                                                list={attentionSelectOptions.length > 0 ? quoteAttentionDatalistId : undefined}
+                                                value={toAttention}
+                                                onChange={(e) => setToAttention(e.target.value)}
+                                                placeholder={
+                                                    attentionSelectOptions.length > 0
+                                                        ? 'Type or pick a suggested name…'
+                                                        : 'Contact Person…'
+                                                }
+                                                autoComplete="off"
+                                                style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px', background: '#fff' }}
+                                            />
+                                            {attentionSelectOptions.length > 0 ? (
+                                                <datalist id={quoteAttentionDatalistId}>
+                                                    {attentionSelectOptions.map((opt) => (
+                                                        <option key={opt} value={opt} />
                                                     ))}
-                                                </select>
-                                            ) : (
-                                                <input
-                                                    type="text"
-                                                    value={toAttention}
-                                                    onChange={(e) => setToAttention(e.target.value)}
-                                                    placeholder="Contact Person..."
-                                                    style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '13px' }}
-                                                />
-                                            )}
+                                                </datalist>
+                                            ) : null}
                                         </div>
                                     </div>
 
@@ -13380,11 +13859,19 @@ const QuoteForm = ({ openContext = null }) => {
                                         </button>
                                     </div>
 
-                                    {/* Load template */}
+                                    {/* Load template — selecting a name auto-applies the template.
+                                        Folder icon is kept as an explicit "re-load" affordance for the same
+                                        already-selected template (no longer required for first load). */}
                                     <div style={{ display: 'flex', gap: '8px' }}>
                                         <select
                                             value={selectedTemplateId}
-                                            onChange={(e) => setSelectedTemplateId(e.target.value)}
+                                            onChange={(e) => {
+                                                const nextId = e.target.value;
+                                                setSelectedTemplateId(nextId);
+                                                if (nextId) {
+                                                    handleLoadTemplate(nextId, { silent: true });
+                                                }
+                                            }}
                                             style={{
                                                 flex: 1,
                                                 ...QUOTE_LEFT_COMPACT_CONTROL,
@@ -13401,7 +13888,7 @@ const QuoteForm = ({ openContext = null }) => {
                                         </select>
                                         <button
                                             type="button"
-                                            onClick={handleLoadTemplate}
+                                            onClick={() => handleLoadTemplate(selectedTemplateId, { silent: true })}
                                             disabled={!selectedTemplateId}
                                             style={{
                                                 padding: '6px',
@@ -13412,7 +13899,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                 color: '#166534',
                                                 opacity: selectedTemplateId ? 1 : 0.45,
                                             }}
-                                            title="Load"
+                                            title="Re-load template"
                                         >
                                             <FolderOpen size={14} />
                                         </button>
@@ -13563,28 +14050,82 @@ const QuoteForm = ({ openContext = null }) => {
                                                 {expandedClause === contentKey && (
                                                     <div style={{ marginLeft: '28px' }}>
                                                         {(() => {
-                                                            const editorHtml =
-                                                                !isCustom && contentKey === 'pricingTerms'
-                                                                    ? syncPricingTerms41LumpSumProse(
-                                                                          mergePricingTermsClauseHtml(
-                                                                              clauseContent[contentKey],
-                                                                              pricingTermsAutoTablePreviewHtml || '',
-                                                                              defaultClauses.pricingTerms
-                                                                          ),
-                                                                          fallbackGrandBaseTotal,
-                                                                          false,
-                                                                          numberToWordsBHD
-                                                                      )
-                                                                    : (isCustom
-                                                                          ? customClause.content
-                                                                          : clauseContent[contentKey]);
+                                                            // For Pricing & Payment Terms, do NOT re-merge the auto-table on every render —
+                                                            // the parent useEffect already does that whenever the summary structure changes.
+                                                            // Re-merging here clobbered user selections (multi-row/column delete) and resets the
+                                                            // caret on every keystroke.
+                                                            const editorHtml = isCustom
+                                                                ? customClause.content
+                                                                : clauseContent[contentKey];
                                                             return (
                                                         <ClauseEditor
                                                             key={`clause-editor-${id}`}
                                                             html={editorHtml}
                                                             onChange={(val) => {
-                                                                if (isCustom) updateCustomClause(id, 'content', val);
-                                                                else updateClauseContent(contentKey, val);
+                                                                if (isCustom) {
+                                                                    updateCustomClause(id, 'content', val);
+                                                                    return val;
+                                                                }
+                                                                // Pricing & Payment Terms: edits to a price cell instantly drive both
+                                                                // the Grand Total row AND clause 4.1 (figures + words).
+                                                                if (contentKey === 'pricingTerms') {
+                                                                    const livePrice = parseLumpSumFromAutoTableHtml(val);
+                                                                    if (livePrice != null && livePrice >= 0) {
+                                                                        const newGrandText = formatBhdAmount(livePrice);
+                                                                        const newWords = numberToWordsBHD(livePrice);
+                                                                        const newProseTotal = `${newGrandText} (${newWords})`;
+
+                                                                        // 1. Rewrite the canonical HTML so save/reload reflect the new total.
+                                                                        let synced = updateGrandTotalCellInHtml(val, livePrice);
+                                                                        synced = syncPricingTerms41LumpSumProse(
+                                                                            synced,
+                                                                            livePrice,
+                                                                            false,
+                                                                            numberToWordsBHD
+                                                                        );
+
+                                                                        // 2. Patch the visible editor DOM in-place so the user sees the change
+                                                                        // instantly WITHOUT a caret reset. Jodit's value prop will not refire
+                                                                        // setValue because `lastEmittedRef` in ClauseEditor is updated to the
+                                                                        // returned `synced` string. We scope by walking up from the auto-table
+                                                                        // we just edited, so prose in unrelated clauses (or duplicate matches)
+                                                                        // are never touched.
+                                                                        try {
+                                                                            const autoTable = document.getElementById(EMS_AUTO_PRICE_SUMMARY_TABLE_ID);
+                                                                            const wys = autoTable && autoTable.closest('.jodit-wysiwyg');
+                                                                            if (wys) {
+                                                                                // Update Grand Total cell.
+                                                                                autoTable.querySelectorAll('td[data-ems-amount="grand"]').forEach((c) => {
+                                                                                    if ((c.textContent || '').trim() !== newGrandText) {
+                                                                                        c.textContent = newGrandText;
+                                                                                    }
+                                                                                });
+
+                                                                                // Update the 4.1 "BD … (Bahraini Dinars …)" prose. Walk text
+                                                                                // nodes so we don't rewrite anything inside the auto table.
+                                                                                const bdRe = /BD\s+[\d,]+\.\d{2,4}\s*\(Bahraini Dinars[^)]*\)/g;
+                                                                                const walker = document.createTreeWalker(wys, NodeFilter.SHOW_TEXT);
+                                                                                const nodes = [];
+                                                                                let n;
+                                                                                while ((n = walker.nextNode())) nodes.push(n);
+                                                                                nodes.forEach((node) => {
+                                                                                    if (node.parentElement && node.parentElement.closest(
+                                                                                        `#${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}`
+                                                                                    )) return;
+                                                                                    if (bdRe.test(node.nodeValue || '')) {
+                                                                                        bdRe.lastIndex = 0;
+                                                                                        node.nodeValue = node.nodeValue.replace(bdRe, newProseTotal);
+                                                                                    }
+                                                                                });
+                                                                            }
+                                                                        } catch (_domErr) { /* DOM patching is best-effort */ }
+
+                                                                        updateClauseContent(contentKey, synced);
+                                                                        return synced;
+                                                                    }
+                                                                }
+                                                                updateClauseContent(contentKey, val);
+                                                                return val;
                                                             }}
                                                             style={{
                                                                 width: '100%',
@@ -15247,8 +15788,11 @@ const QuoteForm = ({ openContext = null }) => {
                                     >
                                         {activeClausesList.map((clause, clauseMeasureIdx) => (
                                             <div
-                                                key={`measure-${clause.key}`}
-                                                id={`measure-clause-${clause.key}`}
+                                                // Custom clauses use `id`/`listKey`; standard clauses use `key`.
+                                                // Using `listKey` (always set) prevents duplicate React keys when
+                                                // multiple custom clauses are present (was `measure-undefined`).
+                                                key={`measure-${clause.listKey ?? clause.key ?? clause.id ?? clauseMeasureIdx}`}
+                                                id={`measure-clause-${clause.listKey ?? clause.key ?? clause.id ?? clauseMeasureIdx}`}
                                                 data-clause-measure-index={clauseMeasureIdx}
                                                 className="quote-clause-block quote-clause-section"
                                                 style={{
@@ -15473,7 +16017,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                             displayMajor
                                                         );
                                                         return (
-                                                            <div key={clause.key} className="quote-clause-block">
+                                                            <div key={clause.listKey ?? clause.key ?? clause.id} className="quote-clause-block">
                                                                 <h3 style={{ fontSize: '14px', fontWeight: 'bold' }}>
                                                                     {displayMajor}. {clause.title}
                                                                 </h3>

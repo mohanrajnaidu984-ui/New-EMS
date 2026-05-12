@@ -5,7 +5,9 @@
   "main": "dbConfig.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node --watch index.js"
+    "start": "node --watch index.js",
+    "mail:test": "node verify_smtp_auth.js",
+    "mail:ping": "node smtp-ping.js"
   },
   "keywords": [],
   "author": "",

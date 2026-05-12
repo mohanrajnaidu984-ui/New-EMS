@@ -131,6 +131,18 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
         return format(date, 'dd-MMM-yyyy hh:mm a');
     };
 
+    const isOwnNote = (note) => {
+        if (!currentUser || !note) return false;
+        const uid = note.UserID != null ? Number(note.UserID) : null;
+        const curId = currentUser.id != null ? Number(currentUser.id) : null;
+        if (uid != null && curId != null && !Number.isNaN(uid) && !Number.isNaN(curId) && uid === curId) {
+            return true;
+        }
+        const a = (note.UserName || '').trim().toLowerCase();
+        const b = (currentUser.name || '').trim().toLowerCase();
+        return Boolean(a && b && a === b);
+    };
+
     const [mentionQuery, setMentionQuery] = useState('');
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [filteredUsers, setFilteredUsers] = useState([]);
@@ -216,32 +228,57 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                     {notes.length === 0 ? (
                         <p className="text-muted text-center small my-3">No notes yet. Start the conversation!</p>
                     ) : (
-                        notes.map(note => (
-                            <div key={note.ID} className="d-flex mb-3">
-                                <div className="me-2">
-                                    {note.UserProfileImage ? (
-                                        <img src={note.UserProfileImage} alt={note.UserName} className="rounded-circle" style={{ width: 32, height: 32, objectFit: 'cover' }} />
-                                    ) : (
-                                        <div className="bg-secondary text-white rounded-circle d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
-                                            {note.UserName ? note.UserName.charAt(0).toUpperCase() : 'U'}
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="flex-grow-1">
-                                    <div className="bg-white p-2 rounded shadow-sm">
-                                        <div className="d-flex justify-content-between align-items-center mb-1">
-                                            <small className="fw-bold text-dark">{note.UserName}</small>
-                                            <small className="text-muted" style={{ fontSize: '0.75rem' }}>{formatTime(note.CreatedAt)}</small>
-                                        </div>
-                                        <p className="mb-0 text-secondary" style={{ fontSize: '0.9rem' }}>
-                                            {note.NoteContent.split(' ').map((word, i) =>
-                                                word.startsWith('@') ? <span key={i} className="text-primary fw-bold me-1">{word}</span> : word + ' '
+                        notes.map(note => {
+                            const own = isOwnNote(note);
+                            return (
+                                <div
+                                    key={note.ID}
+                                    className={`d-flex mb-3 ${own ? 'justify-content-end' : 'justify-content-start'}`}
+                                >
+                                    <div
+                                        className={`d-flex gap-2 min-w-0 ${own ? 'flex-row-reverse' : 'flex-row'}`}
+                                        style={{ maxWidth: 'min(88%, 26rem)' }}
+                                    >
+                                        <div className="flex-shrink-0">
+                                            {note.UserProfileImage ? (
+                                                <img src={note.UserProfileImage} alt="" className="rounded-circle" style={{ width: 32, height: 32, objectFit: 'cover' }} />
+                                            ) : (
+                                                <div
+                                                    className={`rounded-circle d-flex align-items-center justify-content-center text-white ${own ? 'bg-primary' : 'bg-secondary'}`}
+                                                    style={{ width: 32, height: 32, fontSize: '0.85rem' }}
+                                                >
+                                                    {note.UserName ? note.UserName.charAt(0).toUpperCase() : 'U'}
+                                                </div>
                                             )}
-                                        </p>
+                                        </div>
+                                        <div className="flex-shrink-1 min-w-0">
+                                            <div
+                                                className={`p-2 rounded-3 shadow-sm ${own
+                                                    ? 'bg-primary bg-opacity-10 border border-primary border-opacity-25'
+                                                    : 'bg-white border'
+                                                    }`}
+                                            >
+                                                <div className="d-flex justify-content-between align-items-center mb-1 gap-2">
+                                                    <small className={`fw-bold ${own ? 'text-primary' : 'text-dark'}`}>
+                                                        {own ? 'You' : note.UserName}
+                                                    </small>
+                                                    <small className="text-muted text-nowrap" style={{ fontSize: '0.75rem' }}>
+                                                        {formatTime(note.CreatedAt)}
+                                                    </small>
+                                                </div>
+                                                <p className="mb-0 text-secondary text-start" style={{ fontSize: '0.9rem', wordBreak: 'break-word' }}>
+                                                    {note.NoteContent.split(' ').map((word, i) =>
+                                                        word.startsWith('@')
+                                                            ? <span key={`${note.ID}-${i}`} className="text-primary fw-bold me-1">{word}</span>
+                                                            : <span key={`${note.ID}-${i}`}>{word} </span>
+                                                    )}
+                                                </p>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        ))
+                            );
+                        })
                     )}
                 </div>
 
@@ -270,6 +307,8 @@ const CollaborativeNotes = ({ enquiryId, enquiryData }) => {
                                         e.preventDefault();
                                         selectUser(filteredUsers[0].FullName);
                                     } else {
+                                        // Must prevent default or Enter submits the parent Enquiry form
+                                        e.preventDefault();
                                         handlePost();
                                     }
                                 }

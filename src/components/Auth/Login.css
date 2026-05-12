@@ -15,7 +15,7 @@
 .login-background {
     width: 100%;
     min-height: 100vh;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(165deg, #fafafa 0%, #f2f2f2 42%, #ebebeb 100%);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -28,7 +28,7 @@
     position: absolute;
     width: 200%;
     height: 200%;
-    background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+    background: radial-gradient(circle, rgba(180, 180, 180, 0.12) 1px, transparent 1px);
     background-size: 50px 50px;
     /* animation: backgroundMove 20s linear infinite; */
 }
@@ -47,7 +47,7 @@
     background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     border-radius: 20px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
     padding: 40px;
     width: 100%;
     max-width: 450px;
@@ -71,6 +71,11 @@
 .login-header {
     text-align: center;
     margin-bottom: 30px;
+}
+
+/* Login screen only: extra space above EMS mark + wordmark */
+.login-brand-header {
+    padding-top: 20px;
 }
 
 .login-logo {
@@ -225,6 +230,21 @@
     box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
     transition: all 0.3s ease;
     margin-top: 10px;
+}
+
+/* Login page only: ~75% narrower than full-width card; height/font scaled down */
+.login-page-submit.btn-login {
+    width: fit-content;
+    min-width: 25%;
+    max-width: 100%;
+    height: auto;
+    min-height: 2.375rem;
+    padding: 0.45rem 0.85rem;
+    margin-left: auto;
+    margin-right: auto;
+    display: block;
+    font-size: 0.875rem;
+    box-shadow: 0 4px 14px rgba(102, 126, 234, 0.28);
 }
 
 .btn-login:hover:not(:disabled) {

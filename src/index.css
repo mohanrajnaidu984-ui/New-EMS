@@ -1144,6 +1144,12 @@ input[type="date"]:focus::-webkit-datetime-edit {
   width: max-content;
 }
 
+/* Lost rows host an extra Quote Reference column up front, so widen cols 2 (Lost To) and 3 (Reason)
+ * to keep the dropdowns readable. Won/FollowUp keep the default template above. */
+.prob-probability-page .prob-probability-list-table tbody td.prob-td .prob-detail-controls.prob-detail-lost-layout {
+  grid-template-columns: 320px 260px 180px 120px 130px 200px;
+}
+
 .prob-probability-page .prob-probability-list-table tbody td.prob-td .prob-detail-controls > .d-flex.flex-column,
 .prob-probability-page .prob-probability-list-table tbody td.prob-td .prob-detail-controls > .d-flex.flex-column.prob-detail-field-num {
   justify-content: flex-start;

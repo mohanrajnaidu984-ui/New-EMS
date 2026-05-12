@@ -1,6 +1,7 @@
 /**
  * Shared access rules for Pricing and Quote modules:
  * - CC coordinators: Master_EnquiryFor.CCMailIds contains login email (CommonMailIds alone does not).
+ *   They may have no Master_ConcernedSE row — we still resolve a synthetic `user` so pricing list/divisions work.
  * - Assigned sales engineers: ConcernedSE.SEName = FullName, scoped by department ↔ EnquiryFor.ItemName (+ subjobs).
  */
 const sql = require('mssql');
@@ -13,30 +14,123 @@ async function resolvePricingAccessContext(userEmail) {
     const raw = (userEmail || '').trim();
     const normalizedEmail = normalizePricingEmail(raw);
     if (!normalizedEmail) {
-        return { user: null, isAdmin: false, isCcUser: false, normalizedEmail: '', userFullName: '', userDepartment: '' };
+        return {
+            user: null,
+            isAdmin: false,
+            isCcUser: false,
+            normalizedEmail: '',
+            userFullName: '',
+            userDepartment: '',
+            ccCoordinatorDepartmentNames: null,
+        };
     }
     const userRes = await sql.query`
         SELECT FullName, Roles, Department FROM Master_ConcernedSE
         WHERE LOWER(REPLACE(REPLACE(LTRIM(RTRIM(ISNULL(EmailId, N''))), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')) = ${normalizedEmail}`;
-    const user = userRes.recordset[0];
-    if (!user) {
-        return { user: null, isAdmin: false, isCcUser: false, normalizedEmail, userFullName: '', userDepartment: '' };
+    let user = userRes.recordset[0];
+
+    const localPart = (normalizedEmail.split('@')[0] || '').trim();
+    const ccListPatFull = `%,${normalizedEmail},%`;
+    const ccListPatLocal = localPart.length >= 2 ? `%,${localPart},%` : null;
+
+    let isCcFromMaster = false;
+    const ccResFull = await sql.query`
+        SELECT TOP 1 1 AS ok
+        FROM dbo.Master_EnquiryFor
+        WHERE N',' + REPLACE(REPLACE(ISNULL(CCMailIds, N''), N' ', N''), N';', N',') + N','
+            LIKE ${ccListPatFull}
+    `;
+    if ((ccResFull.recordset?.length || 0) > 0) {
+        isCcFromMaster = true;
+    } else if (ccListPatLocal) {
+        const ccResLocal = await sql.query`
+            SELECT TOP 1 1 AS ok
+            FROM dbo.Master_EnquiryFor
+            WHERE N',' + REPLACE(REPLACE(ISNULL(CCMailIds, N''), N' ', N''), N';', N',') + N','
+                LIKE ${ccListPatLocal}
+        `;
+        isCcFromMaster = (ccResLocal.recordset?.length || 0) > 0;
     }
+
+    if (!user) {
+        if (!isCcFromMaster) {
+            return {
+                user: null,
+                isAdmin: false,
+                isCcUser: false,
+                normalizedEmail,
+                userFullName: '',
+                userDepartment: '',
+                ccCoordinatorDepartmentNames: null,
+            };
+        }
+        /** CC-only coordinators often have no Master_ConcernedSE row; still need a session for pricing list / anchors. */
+        user = {
+            FullName: localPart || normalizedEmail,
+            Roles: '',
+            Department: '',
+        };
+    }
+
     const roleStr = String(user.Roles || '').toLowerCase();
     const isAdmin = roleStr.includes('admin') || roleStr.includes('system');
-    const ccRes = await sql.query`
-        SELECT TOP 1 1 AS ok
-        FROM Master_EnquiryFor
-        WHERE ',' + REPLACE(REPLACE(ISNULL(CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${`%,${normalizedEmail},%`}
-    `;
-    const isCcUser = (ccRes.recordset?.length || 0) > 0;
+    const deptNorm = normalizePricingJobName(user.Department || '');
+    const isManagementDept = deptNorm === 'management';
+    // Management users act as a division proxy: pricing should behave like the selected Division's coordinator (CC scope).
+    // They may not appear in CCMailIds, so we treat them as CC-like with global division coordinator permissions.
+    const isCcUser = isCcFromMaster || isManagementDept;
+
+    /** Departments where this user appears on any Master_EnquiryFor.CCMailIds (used to align list anchors with division dropdown). */
+    let ccCoordinatorDepartmentNames = null;
+    if (isCcUser) {
+        // Management: allow selecting any division; treat as coordinator for all departments.
+        if (isManagementDept) {
+            const allDeptRes = await sql.query`
+                SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, N''))) AS DepartmentName
+                FROM dbo.Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ISNULL(DepartmentName, N''))) <> N''
+            `;
+            ccCoordinatorDepartmentNames = new Set(
+                (allDeptRes.recordset || [])
+                    .map((r) => String(r.DepartmentName || '').trim().toLowerCase())
+                    .filter(Boolean)
+            );
+        } else {
+        const deptRes = ccListPatLocal
+            ? await sql.query`
+                SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, N''))) AS DepartmentName
+                FROM dbo.Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ISNULL(DepartmentName, N''))) <> N''
+                  AND (
+                    N',' + REPLACE(REPLACE(ISNULL(CCMailIds, N''), N' ', N''), N';', N',') + N','
+                        LIKE ${ccListPatFull}
+                    OR N',' + REPLACE(REPLACE(ISNULL(CCMailIds, N''), N' ', N''), N';', N',') + N','
+                        LIKE ${ccListPatLocal}
+                  )
+            `
+            : await sql.query`
+                SELECT DISTINCT LTRIM(RTRIM(ISNULL(DepartmentName, N''))) AS DepartmentName
+                FROM dbo.Master_EnquiryFor
+                WHERE LTRIM(RTRIM(ISNULL(DepartmentName, N''))) <> N''
+                  AND N',' + REPLACE(REPLACE(ISNULL(CCMailIds, N''), N' ', N''), N';', N',') + N','
+                      LIKE ${ccListPatFull}
+            `;
+        ccCoordinatorDepartmentNames = new Set(
+            (deptRes.recordset || [])
+                .map((r) => String(r.DepartmentName || '').trim().toLowerCase())
+                .filter(Boolean)
+        );
+        }
+    }
     return {
         user,
         isAdmin,
         isCcUser,
+        isManagementDept,
         normalizedEmail,
         userFullName: (user.FullName || '').trim(),
         userDepartment: (user.Department || '').trim(),
+        ccCoordinatorDepartmentNames,
     };
 }
 
@@ -58,6 +152,27 @@ function normalizePricingJobName(s) {
     return (s || '').toString().replace(/^(L\d+|Sub Job)\s*-\s*/i, '').trim().toLowerCase();
 }
 
+/** Jobs on this enquiry whose ItemName matches Master.Department (used for SE scoping and pending checks). */
+function getDepartmentPricingAnchors(enqJobs, userDepartment) {
+    const myJobs = [];
+    const deptNorm = normalizePricingJobName(userDepartment);
+    if (!deptNorm) return myJobs;
+    enqJobs.forEach((job) => {
+        const jNorm = normalizePricingJobName(job.ItemName);
+        const deptAnchors =
+            jNorm === deptNorm ||
+            (deptNorm.length >= 3 && jNorm.includes(deptNorm)) ||
+            (deptNorm.length >= 3 && deptNorm.includes(jNorm));
+        if (deptAnchors) {
+            const jId = jobIdOfPricing(job);
+            if (jId != null && !myJobs.find((x) => String(jobIdOfPricing(x)) === String(jId))) {
+                myJobs.push(job);
+            }
+        }
+    });
+    return myJobs;
+}
+
 function getPricingAnchorJobs(enqJobs, ctx, userEmail) {
     const { isAdmin, isCcUser, userDepartment } = ctx;
     if (isAdmin) return [...enqJobs];
@@ -72,23 +187,43 @@ function getPricingAnchorJobs(enqJobs, ctx, userEmail) {
             }
         });
     } else {
-        const deptNorm = normalizePricingJobName(userDepartment);
-        enqJobs.forEach(job => {
-            const jNorm = normalizePricingJobName(job.ItemName);
-            const deptAnchors =
-                deptNorm &&
-                (jNorm === deptNorm ||
-                    (deptNorm.length >= 3 && jNorm.includes(deptNorm)) ||
-                    (deptNorm.length >= 3 && deptNorm.includes(jNorm)));
-            if (deptAnchors) {
-                const jId = jobIdOfPricing(job);
-                if (jId != null && !myJobs.find(x => String(jobIdOfPricing(x)) === String(jId))) {
-                    myJobs.push(job);
-                }
-            }
-        });
+        myJobs = getDepartmentPricingAnchors(enqJobs, userDepartment);
     }
     return myJobs;
+}
+
+/**
+ * True when a job row (EnquiryFor + MEF) belongs to a session "Division" filter (Master_EnquiryFor.DepartmentName
+ * or fuzzy ItemName match, same as {@link getDepartmentPricingAnchors} when MEF has no DepartmentName on this row).
+ */
+function jobBelongsToSessionDivision(job, divTrim) {
+    const d = (divTrim || '').trim();
+    if (!d) return true;
+    const mefDept = (job.DepartmentName ?? job.departmentName ?? '').toString().trim();
+    if (mefDept) {
+        return mefDept.toLowerCase() === d.toLowerCase();
+    }
+    return getDepartmentPricingAnchors([job], d).length > 0;
+}
+
+/**
+ * Like {@link getPricingAnchorJobs} but when `sessionDivision` is set, anchors are limited to that division
+ * (Pricing module dropdown). Empty string keeps legacy behaviour.
+ */
+function getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, sessionDivision) {
+    const d = (sessionDivision || '').trim();
+    if (!d) {
+        return getPricingAnchorJobs(enqJobs, ctx, userEmail);
+    }
+    const { isAdmin } = ctx;
+    if (isAdmin) {
+        return enqJobs.filter((job) => jobBelongsToSessionDivision(job, d));
+    }
+    /**
+     * Session Division set: same own-job anchors for everyone (CC vs non-CC only differs in how many divisions
+     * appear in the toolbar — not in job-tree / pricing tuple behaviour).
+     */
+    return getDepartmentPricingAnchors(enqJobs, d);
 }
 
 function expandVisibleJobIdsFromAnchors(anchorJobs, enqJobs) {
@@ -147,29 +282,112 @@ function expandVisibleJobIdsWithAncestors(anchorJobs, enqJobs) {
 /**
  * Enquiry-level gate + job anchors (matches pricing list/detail).
  */
-async function userHasQuotePricingEnquiryAccess(userEmail, requestNo) {
+async function userHasQuotePricingEnquiryAccess(userEmail, requestNo, sessionDivision = '') {
     const ctx = await resolvePricingAccessContext(userEmail);
     if (!ctx.user) return false;
     if (ctx.isAdmin) return true;
     const rn = parseInt(String(requestNo), 10);
     if (Number.isNaN(rn)) return false;
+    const sessionDivTrim = (sessionDivision || '').toString().trim();
+
+    /** Assigned SE on this enquiry (email join) — same as pending-quote list; CC coordinators may also be ConcernedSE. */
+    const concernedSeByEmailRes = await sql.query`
+        SELECT TOP 1 1 AS ok
+        FROM ConcernedSE cs
+        INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+        WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
+          AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
+    `;
+    const allowedByConcernedSe = (concernedSeByEmailRes.recordset?.length || 0) > 0;
 
     if (!ctx.isCcUser) {
-        const cse = await sql.query`
-            SELECT TOP 1 1 AS ok FROM ConcernedSE
-            WHERE RequestNo = ${rn}
-              AND UPPER(LTRIM(RTRIM(ISNULL(SEName, '')))) = UPPER(LTRIM(RTRIM(${ctx.userFullName})))
-        `;
-        if ((cse.recordset?.length || 0) === 0) return false;
+        if (!allowedByConcernedSe) return false;
     } else {
-        const cc = await sql.query`
-            SELECT TOP 1 1 AS ok
-            FROM EnquiryFor ef
-            INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
-            WHERE ef.RequestNo = ${rn}
-              AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${`%,${ctx.normalizedEmail},%`}
-        `;
-        if ((cc.recordset?.length || 0) === 0) return false;
+        const tdProfile = (ctx.userDepartment || '').trim();
+        const deptNormProfile = normalizePricingJobName(tdProfile);
+        const ccListPat = `%,${ctx.normalizedEmail},%`;
+        let cc;
+        if (sessionDivTrim) {
+            cc = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+                  AND LTRIM(RTRIM(ISNULL(mef.DepartmentName, N''))) = ${sessionDivTrim}
+            `;
+            if ((cc.recordset?.length || 0) === 0) {
+                cc = await sql.query`
+                    SELECT TOP 1 1 AS ok
+                    FROM dbo.EnquiryFor efCcDiv
+                    INNER JOIN dbo.Master_EnquiryFor mefCcDiv
+                        ON (efCcDiv.ItemName = mefCcDiv.ItemName OR efCcDiv.ItemName LIKE N'% - ' + mefCcDiv.ItemName)
+                    WHERE efCcDiv.RequestNo = ${rn}
+                      AND LTRIM(RTRIM(ISNULL(mefCcDiv.DepartmentName, N''))) = ${sessionDivTrim}
+                      AND EXISTS (
+                          SELECT 1
+                          FROM dbo.Master_EnquiryFor mefTpl
+                          WHERE LTRIM(RTRIM(ISNULL(mefTpl.DepartmentName, N''))) = ${sessionDivTrim}
+                            AND ',' + REPLACE(REPLACE(ISNULL(mefTpl.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+                      )
+                `;
+            }
+        } else if (!tdProfile) {
+            cc = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+        } else {
+            const deptLike = `%${tdProfile.toLowerCase()}%`;
+            const normLike = `%${deptNormProfile}%`;
+            cc = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+                  AND (
+                    LOWER(LTRIM(RTRIM(mef.ItemName))) LIKE ${deptLike}
+                    OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${deptLike}
+                    OR LOWER(LTRIM(RTRIM(mef.ItemName))) LIKE ${normLike}
+                    OR LOWER(LTRIM(RTRIM(ef.ItemName))) LIKE ${normLike}
+                  )
+            `;
+        }
+        let allowedByCc = (cc.recordset?.length || 0) > 0;
+        /**
+         * Profile-scoped CC query is easy to miss (e.g. Department "Management", or short "BMS" vs line text).
+         * Fall back to "any CCMailIds hit on this enquiry" — same as `!tdProfile` branch — so coordinators match pricing list.
+         */
+        if (!allowedByCc && !sessionDivTrim && (ctx.userDepartment || '').trim()) {
+            const ccBroad = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+            allowedByCc = (ccBroad.recordset?.length || 0) > 0;
+        }
+        /**
+         * Division toolbar + CC: instance MEF may omit DepartmentName / CCMailIds while coordinator is still
+         * registered for that department on master — allow any CC line on the enquiry when dept is in their set.
+         */
+        if (!allowedByCc && sessionDivTrim && ctx.ccCoordinatorDepartmentNames?.has(sessionDivTrim.toLowerCase())) {
+            const ccBroadDiv = await sql.query`
+                SELECT TOP 1 1 AS ok
+                FROM EnquiryFor ef
+                INNER JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE N'% - ' + mef.ItemName)
+                WHERE ef.RequestNo = ${rn}
+                  AND ',' + REPLACE(REPLACE(ISNULL(mef.CCMailIds, ''), ' ', ''), ';', ',') + ',' LIKE ${ccListPat}
+            `;
+            allowedByCc = (ccBroadDiv.recordset?.length || 0) > 0;
+        }
+        /** Match pricing list: CC on master OR assigned SE — so Previous Quotes / by-enquiry are not blank for dual-role users. */
+        if (!allowedByCc && !allowedByConcernedSe) return false;
     }
 
     const jobsRes = await sql.query`
@@ -186,7 +404,34 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo) {
         seen.add(String(jid));
         enqJobs.push(row);
     }
-    return getPricingAnchorJobs(enqJobs, ctx, userEmail).length > 0;
+    let anchors = sessionDivTrim
+        ? getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, sessionDivTrim)
+        : getPricingAnchorJobs(enqJobs, ctx, userEmail);
+    /**
+     * CC users who are also ConcernedSE often pass the gate via email join while instance MEF.CCMailIds
+     * omits them — then CC-only anchor logic returns []. Use the same department anchors as a normal SE.
+     */
+    if (anchors.length === 0 && allowedByConcernedSe) {
+        anchors = sessionDivTrim
+            ? getDepartmentPricingAnchors(enqJobs, sessionDivTrim)
+            : getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+    }
+    /**
+     * CC coordinators passed the enquiry gate but CCMailIds-based anchor pick is empty (common with template/instance drift).
+     * Use session division anchors, then profile department, then all jobs on the enquiry for read access.
+     */
+    if (anchors.length === 0 && ctx.isCcUser) {
+        if (sessionDivTrim) {
+            anchors = getDepartmentPricingAnchors(enqJobs, sessionDivTrim);
+        }
+        if (anchors.length === 0 && (ctx.userDepartment || '').trim()) {
+            anchors = getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+        }
+        if (anchors.length === 0 && enqJobs.length > 0) {
+            anchors = [...enqJobs];
+        }
+    }
+    return anchors.length > 0;
 }
 
 module.exports = {
@@ -195,7 +440,10 @@ module.exports = {
     ccMailIdsContainsUser,
     jobIdOfPricing,
     normalizePricingJobName,
+    getDepartmentPricingAnchors,
     getPricingAnchorJobs,
+    getPricingAnchorJobsForDivision,
+    jobBelongsToSessionDivision,
     expandVisibleJobIdsFromAnchors,
     expandVisibleJobIdsWithAncestors,
     userHasQuotePricingEnquiryAccess,
