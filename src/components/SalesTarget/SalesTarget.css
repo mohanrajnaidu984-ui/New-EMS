@@ -107,3 +107,46 @@
 .sales-target-grid-table tfoot tr th:last-child {
     border-bottom-right-radius: 11px;
 }
+
+/* —— “Total committed target” (year history) table —— */
+.sales-target-history-wrap {
+    border-radius: 12px;
+    border: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: #ffffff;
+    -webkit-overflow-scrolling: touch;
+}
+
+.sales-target-history-table {
+    margin-bottom: 0;
+    border: none !important;
+    --bs-table-border-color: transparent;
+}
+
+.sales-target-history-table tbody > tr > td {
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.sales-target-history-table thead tr th:first-child {
+    border-top-left-radius: 11px;
+}
+
+.sales-target-history-table thead tr th:last-child {
+    border-top-right-radius: 11px;
+}
+
+/* White vertical separators between header columns (Bootstrap table-bordered adds grey; override in header only) */
+.sales-target-history-table thead th {
+    border-left: none !important;
+    border-top: none !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.55) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.22) !important;
+    background-color: transparent !important;
+    color: #ffffff !important;
+}
+
+.sales-target-history-table thead th:last-child {
+    border-right: none !important;
+}

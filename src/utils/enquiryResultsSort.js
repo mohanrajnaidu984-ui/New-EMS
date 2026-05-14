@@ -22,7 +22,15 @@ export function sortEnquiryRows(rows, sortConfig) {
         if (sortConfig.key === 'EnquiryDetails') valA = a.EnquiryDetails || a.DetailsOfEnquiry || '';
         if (sortConfig.key === 'EnquiryDetails') valB = b.EnquiryDetails || b.DetailsOfEnquiry || '';
 
-        if (sortConfig.key === 'EnquiryDate' || sortConfig.key === 'DueOn') {
+        if (sortConfig.key === 'EnquiryDate' || sortConfig.key === 'DueOn' || sortConfig.key === 'SiteVisitDate') {
+            if (sortConfig.key === 'DueOn') {
+                valA = a.DueOn ?? a.DueDate;
+                valB = b.DueOn ?? b.DueDate;
+            }
+            if (sortConfig.key === 'SiteVisitDate') {
+                valA = a.SiteVisitDate;
+                valB = b.SiteVisitDate;
+            }
             const d1 = valA ? new Date(valA).getTime() : 0;
             const d2 = valB ? new Date(valB).getTime() : 0;
             if (d1 !== d2) {

@@ -4,7 +4,7 @@ import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 import './SalesTarget.css';
 
 // ── Formatted Revenue Input (shows ###,###,### when not focused) ──
-const RevenueInput = ({ value, onChange, placeholder = '0', style = {} }) => {
+const RevenueInput = ({ value, onChange, placeholder = '0', style = {}, disabled = false }) => {
     const [isFocused, setIsFocused] = useState(false);
     const [localRaw, setLocalRaw] = useState('');
     const inputRef = useRef();
@@ -43,6 +43,7 @@ const RevenueInput = ({ value, onChange, placeholder = '0', style = {} }) => {
             ref={inputRef}
             type="text"
             inputMode="numeric"
+            disabled={disabled}
             className="form-control form-control-sm bg-white text-dark border-secondary text-center"
             style={{ fontSize: '12px', letterSpacing: '0.2px', paddingTop: '0.2rem', paddingBottom: '0.2rem', ...style }}
             value={displayValue}
@@ -81,6 +82,11 @@ const SalesTarget = () => {
     // Q*_GP stores the GP% (0-100); the BD amount is calculated as Revenue × (GP%/100)
     const [targetData, setTargetData] = useState({});
 
+    /** Last 3 financial years (anchor = selected year + two prior), division totals */
+    const [yearHistory, setYearHistory] = useState([]);
+    const [yearHistoryLoading, setYearHistoryLoading] = useState(false);
+    const [yearHistoryError, setYearHistoryError] = useState(null);
+
     // 1. Check Access
     useEffect(() => {
         const email = currentUser?.EmailId || currentUser?.email;
@@ -91,10 +97,18 @@ const SalesTarget = () => {
                 .then(res => res.json())
                 .then(data => {
                     setIsManager(data.isManager);
-                    setManagedDivisions(data.divisions || []);
-                    if (data.divisions && data.divisions.length > 0) {
-                        setSelectedDivision(data.divisions[0]);
-                    }
+                    const divs = data.divisions || [];
+                    setManagedDivisions(divs);
+                    const norm = (s) => String(s ?? '').trim();
+                    const divList = divs.map(norm);
+                    const savedDiv = norm(localStorage.getItem('target_division'));
+                    const preferred =
+                        savedDiv && divList.includes(savedDiv)
+                            ? savedDiv
+                            : divList.length > 0
+                              ? divList[0]
+                              : '';
+                    setSelectedDivision(preferred);
                     setLoading(false);
                 })
                 .catch(err => {
@@ -108,10 +122,19 @@ const SalesTarget = () => {
     // 2. Load Engineers & Items when Division Changes
     useEffect(() => {
         if (selectedDivision) {
+            setEngineers([]);
             // Load Engineers
             fetch(`/api/sales-targets/engineers?division=${encodeURIComponent(selectedDivision)}`)
                 .then(res => res.json())
-                .then(data => setEngineers(data))
+                .then(data => {
+                    const list = Array.isArray(data) ? data : [];
+                    setEngineers(list);
+                    setSelectedEngineer((prev) => {
+                        if (!prev || prev === 'ALL') return prev;
+                        const names = list.map((e) => e.FullName);
+                        return names.includes(prev) ? prev : '';
+                    });
+                })
                 .catch(err => console.error(err));
 
             // Load Items
@@ -147,6 +170,65 @@ const SalesTarget = () => {
         }
     }, [selectedYear, selectedDivision, selectedEngineer]);
 
+    // 4. Division-level totals for last 3 financial years (all SEs) — below main grid
+    useEffect(() => {
+        if (!selectedDivision || !selectedYear) {
+            setYearHistory([]);
+            setYearHistoryError(null);
+            return;
+        }
+        let cancelled = false;
+        setYearHistoryLoading(true);
+        setYearHistoryError(null);
+        const qs = new URLSearchParams({
+            division: selectedDivision.trim(),
+            anchorYear: String(selectedYear).trim(),
+        });
+        fetch(`/api/sales-targets/year-history?${qs.toString()}`)
+            .then(async (r) => {
+                const text = await r.text();
+                let data;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch {
+                    if (!cancelled) {
+                        setYearHistoryError(`Invalid response (${r.status})`);
+                        setYearHistory([]);
+                    }
+                    return;
+                }
+                if (!r.ok) {
+                    if (!cancelled) {
+                        const msg = (data && (data.error || data.message)) || `Request failed (${r.status})`;
+                        setYearHistoryError(String(msg));
+                        setYearHistory([]);
+                    }
+                    return;
+                }
+                if (!cancelled) {
+                    if (Array.isArray(data)) {
+                        setYearHistory(data);
+                        setYearHistoryError(null);
+                    } else {
+                        setYearHistory([]);
+                        setYearHistoryError('Unexpected response shape');
+                    }
+                }
+            })
+            .catch((e) => {
+                if (!cancelled) {
+                    setYearHistoryError(e?.message || 'Network error');
+                    setYearHistory([]);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) setYearHistoryLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedDivision, selectedYear]);
+
     const handleInputChange = (item, field, value) => {
         setTargetData(prev => ({
             ...prev,
@@ -164,8 +246,13 @@ const SalesTarget = () => {
         return Number.isFinite(n) ? n : NaN;
     };
 
+    const isAllEngineersView = selectedEngineer === 'ALL';
+
     const handleSave = async () => {
         if (!selectedEngineer) return alert("Please select a Sales Engineer");
+        if (isAllEngineersView) {
+            return alert('ALL shows combined targets for every engineer in this division. Pick a specific Sales Engineer to edit and save.');
+        }
 
         const qs = ['Q1', 'Q2', 'Q3', 'Q4'];
         const problems = [];
@@ -287,7 +374,13 @@ const SalesTarget = () => {
                     <i className="bi bi-bullseye me-2 text-primary"></i>
                     Sales Target Settings
                 </h4>
-                <button className="btn btn-primary" onClick={handleSave}>
+                <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleSave}
+                    disabled={isAllEngineersView}
+                    title={isAllEngineersView ? 'Select a specific engineer to save' : undefined}
+                >
                     <i className="bi bi-save me-2"></i> Save Changes
                 </button>
             </div>
@@ -311,6 +404,7 @@ const SalesTarget = () => {
                         <label className="small text-muted mb-1">Sales Engineer</label>
                         <select className="form-select bg-white text-dark border-secondary" value={selectedEngineer} onChange={e => setSelectedEngineer(e.target.value)}>
                             <option value="">-- Select Engineer --</option>
+                            <option value="ALL">ALL (sum revenue · avg GP %)</option>
                             {engineers.map(e => <option key={e.EmailId} value={e.FullName}>{e.FullName}</option>)}
                         </select>
                     </div>
@@ -319,7 +413,13 @@ const SalesTarget = () => {
 
             {/* Legend */}
             {selectedEngineer && (
-                <div className="d-flex gap-4 mb-3" style={{ fontSize: '12px' }}>
+                <div className="d-flex flex-wrap gap-3 align-items-center mb-3" style={{ fontSize: '12px' }}>
+                    {isAllEngineersView && (
+                        <span className="text-secondary" style={{ fontSize: '11px' }}>
+                            <i className="bi bi-info-circle me-1" aria-hidden />
+                            View-only: revenue is summed per quarter; GP % is the average across engineers. Choose one engineer to edit.
+                        </span>
+                    )}
                     <span style={{ color: '#6c757d' }}>
                         <span style={{ display: 'inline-block', width: '10px', height: '10px', background: '#adb5bd', borderRadius: '2px', marginRight: '6px' }}></span>
                         Revenue Target (BD)
@@ -406,6 +506,7 @@ const SalesTarget = () => {
                                                         value={row[q] ?? ''}
                                                         onChange={(val) => handleInputChange(item, q, val)}
                                                         placeholder="0"
+                                                        disabled={isAllEngineersView}
                                                     />
                                                 </td>
                                             ))}
@@ -426,6 +527,7 @@ const SalesTarget = () => {
                                                             min="0"
                                                             max="100"
                                                             step="0.1"
+                                                            disabled={isAllEngineersView}
                                                             className="form-control form-control-sm text-center py-0"
                                                             style={{
                                                                 fontSize: '12px',
@@ -496,6 +598,81 @@ const SalesTarget = () => {
                 </div>
             )
             }
+
+            {/* Historical: total committed targets for division (all engineers), selected FY + 2 prior */}
+            {selectedDivision && selectedYear && (
+                <div className="mt-4 mb-4">
+                    <h5 className="fw-bold text-dark mb-3" style={{ fontSize: '15px' }}>
+                        <i className="bi bi-clock-history me-2 text-primary" aria-hidden />
+                        Total committed target for the year (Revenue &amp; GP%)
+                    </h5>
+                    {yearHistoryError && (
+                        <div className="alert alert-warning py-2 px-3 small mb-2" role="alert">
+                            {yearHistoryError}
+                        </div>
+                    )}
+                    <div className="sales-target-history-wrap">
+                        <table className="table mb-0 align-middle sales-target-history-table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                            <thead>
+                                <tr style={{ background: EMS_TABLE_HEADER_GRADIENT }}>
+                                    <th className="text-white ps-3" style={{ width: '10%', fontSize: '11px', padding: '8px 10px' }}>
+                                        Year
+                                    </th>
+                                    <th className="text-white" style={{ width: '22%', fontSize: '11px', padding: '8px 10px' }}>
+                                        Division
+                                    </th>
+                                    <th className="text-end text-white pe-2" style={{ width: '22%', fontSize: '11px', padding: '8px 10px' }}>
+                                        Revenue (BD)
+                                    </th>
+                                    <th className="text-end text-white pe-2" style={{ width: '23%', fontSize: '11px', padding: '8px 10px' }}>
+                                        GP value (BD)
+                                    </th>
+                                    <th className="text-end text-white pe-3" style={{ width: '23%', fontSize: '11px', padding: '8px 10px' }}>
+                                        GP %
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {yearHistoryLoading ? (
+                                    <tr>
+                                        <td colSpan={5} className="text-center text-muted py-4">
+                                            Loading history…
+                                        </td>
+                                    </tr>
+                                ) : yearHistory.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={5} className="text-center text-muted py-4">
+                                            No saved targets for these years.
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    yearHistory.map((row) => (
+                                        <tr key={row.year}>
+                                            <td className="ps-3 fw-semibold" style={{ fontSize: '12px' }}>
+                                                {row.year}
+                                            </td>
+                                            <td style={{ fontSize: '12px' }}>{row.division}</td>
+                                            <td className="text-end pe-2" style={{ fontSize: '12px', color: '#0d6efd' }}>
+                                                {fmt(Number(row.revenue) || 0)}
+                                            </td>
+                                            <td className="text-end pe-2 fw-semibold" style={{ fontSize: '12px', color: '#0f766e' }}>
+                                                {fmt(Number(row.gpValue) || 0)}
+                                            </td>
+                                            <td className="text-end pe-3 fw-semibold" style={{ fontSize: '12px', color: '#198754' }}>
+                                                {(Number(row.gpPct) || 0).toLocaleString('en-US', {
+                                                    minimumFractionDigits: 1,
+                                                    maximumFractionDigits: 2,
+                                                })}
+                                                %
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
             </div>
         </div >
     );

@@ -30,10 +30,10 @@ console.log('SMTP_ENCRYPTION:', process.env.SMTP_ENCRYPTION || '(not set)');
 const transporter = buildSmtpTransport({ logger: true, debug: true });
 
 async function normalizeEnquiryForLeadMeta(requestNo, txn = null) {
-    const reqNoInt = parseInt(String(requestNo), 10);
-    if (!Number.isFinite(reqNoInt) || reqNoInt <= 0) return;
+    const reqNoStr = String(requestNo ?? '').trim();
+    if (!reqNoStr) return;
     const runner = txn ? new sql.Request(txn) : new sql.Request();
-    runner.input('reqNo', sql.Int, reqNoInt);
+    runner.input('reqNo', sql.NVarChar, reqNoStr);
     await runner.query(`
         ;WITH RootList AS (
             SELECT
@@ -2958,73 +2958,102 @@ app.post('/api/enquiries/notify', async (req, res) => {
         console.log('Received notification request for:', requestNo);
         if (!requestNo) return res.status(400).json({ success: false, message: 'RequestNo required' });
 
-        // 1. Fetch Enquiry Data
-        const enqResult = await sql.query`SELECT * FROM EnquiryMaster WHERE RequestNo = ${requestNo}`;
+        // 1–2. Fetch enquiry + attachments in parallel (was sequential).
+        const [enqResult, attResult] = await Promise.all([
+            sql.query`SELECT * FROM EnquiryMaster WHERE RequestNo = ${requestNo}`,
+            sql.query`SELECT * FROM Attachments WHERE RequestNo = ${requestNo}`,
+        ]);
         if (enqResult.recordset.length === 0) return res.status(404).json({ success: false, message: 'Enquiry not found' });
         const enquiryData = enqResult.recordset[0];
-
-        // 2. Fetch Attachments
-        const attResult = await sql.query`SELECT * FROM Attachments WHERE RequestNo = ${requestNo}`;
-        const attachments = attResult.recordset;
+        const attachments = attResult.recordset || [];
         console.log(`Found ${attachments.length} attachments for RequestNo ${requestNo}`);
 
-        // 3. Determine Recipients (Same logic as createNotifications)
-        let recipientEmails = new Set();
-
-        // REMOVED Creator from recipient list as per user request
-
-        // Add Concerned SEs
-        const seRes = await sql.query`SELECT SEName FROM ConcernedSE WHERE RequestNo = ${requestNo}`;
-        console.log(`[Notify Debug] Found ${seRes.recordset.length} Concerned SEs for RequestNo ${requestNo}`);
-        for (const row of seRes.recordset) {
-            console.log(`[Notify Debug] Processing Concerned SE: ${row.SEName}`);
-            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${row.SEName}`;
-            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
-                recipientEmails.add(u.recordset[0].EmailId.toLowerCase());
-                console.log(`[Notify Debug] Added email: ${u.recordset[0].EmailId}`);
-            } else {
-                console.log(`[Notify Debug] No email found for SE: ${row.SEName}`);
-            }
+        // 3. To-recipients: one JOIN (replaces N+1 ConcernedSE → Master_ConcernedSE lookups).
+        const recipientEmails = new Set();
+        const seJoined = await sql.query`
+            SELECT DISTINCT LOWER(LTRIM(RTRIM(m.EmailId))) AS EmailIdNorm
+            FROM ConcernedSE cs
+            INNER JOIN Master_ConcernedSE m
+              ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+            WHERE cs.RequestNo = ${requestNo}
+              AND LTRIM(RTRIM(ISNULL(m.EmailId, N''))) <> N''
+        `;
+        for (const row of seJoined.recordset || []) {
+            if (row.EmailIdNorm) recipientEmails.add(row.EmailIdNorm);
         }
 
-        // Add Acknowledgement SE
         if (enquiryData.AcknowledgementSE) {
-            console.log(`[Notify Debug] Processing Acknowledgement SE: ${enquiryData.AcknowledgementSE}`);
-            const u = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${enquiryData.AcknowledgementSE}`;
-            if (u.recordset.length > 0 && u.recordset[0].EmailId) {
-                recipientEmails.add(u.recordset[0].EmailId.toLowerCase());
-                console.log(`[Notify Debug] Added email: ${u.recordset[0].EmailId}`);
-            } else {
-                console.log(`[Notify Debug] No email found for Ack SE: ${enquiryData.AcknowledgementSE}`);
-            }
+            const ackRes = await sql.query`
+                SELECT TOP 1 LOWER(LTRIM(RTRIM(EmailId))) AS EmailIdNorm
+                FROM Master_ConcernedSE
+                WHERE UPPER(LTRIM(RTRIM(ISNULL(FullName, N'')))) = UPPER(LTRIM(RTRIM(${String(enquiryData.AcknowledgementSE)})))
+                  AND LTRIM(RTRIM(ISNULL(EmailId, N''))) <> N''
+            `;
+            const ack = ackRes.recordset?.[0]?.EmailIdNorm;
+            if (ack) recipientEmails.add(ack);
         }
 
-        // 4. Fetch CCs from EnquiryItems
-        let ccEmails = new Set();
-        if (enquiryData.SelectedEnquiryFor) {
+        // 4. CC from EnquiryFor → Master_EnquiryFor (one query; mirrors quote/pricing join pattern).
+        const ccEmails = new Set();
+        try {
+            const ccRes = await sql.query`
+                SELECT DISTINCT M.CCMailIds
+                FROM dbo.EnquiryFor E
+                INNER JOIN dbo.Master_EnquiryFor M ON (
+                    E.ItemName = M.ItemName
+                    OR E.ItemName LIKE N'% - ' + M.ItemName
+                    OR E.ItemName LIKE N'%- ' + M.ItemName
+                    OR E.ItemName LIKE M.ItemName + N' %'
+                )
+                WHERE E.RequestNo = ${requestNo}
+                  AND LTRIM(RTRIM(ISNULL(M.CCMailIds, N''))) <> N''
+            `;
+            for (const row of ccRes.recordset || []) {
+                if (row.CCMailIds) {
+                    String(row.CCMailIds)
+                        .split(/[,;]/g)
+                        .map((e) => e.trim().toLowerCase())
+                        .filter(Boolean)
+                        .forEach((e) => ccEmails.add(e));
+                }
+            }
+        } catch (ccErr) {
+            console.error(`Error fetching Item CCs for notification: ${ccErr.message}`);
+        }
+
+        // Legacy path: EnquiryMaster may store SelectedEnquiryFor on some builds.
+        if (ccEmails.size === 0 && enquiryData.SelectedEnquiryFor) {
             let items = [];
             try {
-                // Try parsing as JSON first
                 items = JSON.parse(enquiryData.SelectedEnquiryFor);
             } catch (e) {
-                // If it's just a regular string or comma-separated
-                items = typeof enquiryData.SelectedEnquiryFor === 'string'
-                    ? enquiryData.SelectedEnquiryFor.split(',').map(s => s.trim())
-                    : [];
+                items =
+                    typeof enquiryData.SelectedEnquiryFor === 'string'
+                        ? enquiryData.SelectedEnquiryFor.split(',').map((s) => s.trim())
+                        : [];
             }
-
             if (Array.isArray(items) && items.length > 0) {
-                const itemsStr = items.map(i => `'${i}'`).join(',');
-                try {
-                    const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
-                    itemsRes.recordset.forEach(row => {
-                        if (row.CCMailIds) {
-                            const emails = row.CCMailIds.split(',').map(e => e.trim().toLowerCase());
-                            emails.forEach(e => ccEmails.add(e));
-                        }
-                    });
-                } catch (ccErr) {
-                    console.error(`Error fetching Item CCs for notification: ${ccErr.message}`);
+                const safe = items
+                    .map((i) => (typeof i === 'object' && i ? i.itemName || i.ItemName : i))
+                    .filter(Boolean)
+                    .map((s) => String(s).replace(/'/g, "''"));
+                if (safe.length > 0) {
+                    try {
+                        const itemsRes = await sql.query(
+                            `SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${safe.map((n) => `'${n}'`).join(',')})`
+                        );
+                        itemsRes.recordset.forEach((row) => {
+                            if (row.CCMailIds) {
+                                String(row.CCMailIds)
+                                    .split(/[,;]/g)
+                                    .map((e) => e.trim().toLowerCase())
+                                    .filter(Boolean)
+                                    .forEach((e) => ccEmails.add(e));
+                            }
+                        });
+                    } catch (ccErr2) {
+                        console.error(`Error fetching legacy Item CCs: ${ccErr2.message}`);
+                    }
                 }
             }
         }
@@ -3035,10 +3064,20 @@ app.post('/api/enquiries/notify', async (req, res) => {
         console.log(`Notification To: ${toList.join(', ')}`);
         console.log(`Notification CC: ${ccList.join(', ')}`);
 
-        // Send Email
-        await sendEnquiryEmail(enquiryData, { to: toList, cc: ccList }, attachments);
+        // Respond immediately — SMTP sendMail can take 30s+ and must not block HTTP.
+        res.json({ success: true, message: 'Notification queued', queued: true });
 
-        res.json({ success: true, message: 'Notification sent successfully' });
+        const mailPayload = {
+            enquiry: enquiryData,
+            to: toList,
+            cc: ccList,
+            attachments: attachments || [],
+        };
+        setImmediate(() => {
+            sendEnquiryEmail(mailPayload.enquiry, { to: mailPayload.to, cc: mailPayload.cc }, mailPayload.attachments).catch(
+                (err) => console.error('[notify] async sendEnquiryEmail failed:', err)
+            );
+        });
     } catch (error) {
         console.error('Error in /notify:', error);
         res.status(500).json({ success: false, message: error.message });

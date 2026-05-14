@@ -3,12 +3,14 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const PROJECT_ROOT = __dirname;
-const DEPLOY_DIR = path.join(PROJECT_ROOT, 'EMS_Deploy_2026-05-08');
+const dateStamp = new Date().toISOString().slice(0, 10);
+const DEPLOY_DIR = path.join(PROJECT_ROOT, `EMS_Deploy_${dateStamp}`);
 const FRONTEND_DIR = path.join(DEPLOY_DIR, 'frontend');
 const FRONTEND_DIST_DIR = path.join(FRONTEND_DIR, 'dist');
-const BACKEND_DIR = path.join(DEPLOY_DIR, 'backend');
+const BACKEND_DIR = path.join(DEPLOY_DIR, 'server'); // Using 'server' instead of 'backend' to match standard
 
 console.log('Starting Deployment Bundle Process...');
+console.log(`Target Directory: ${DEPLOY_DIR}`);
 
 // 1. Ensure deployment directories exist
 if (!fs.existsSync(DEPLOY_DIR)) {
@@ -55,8 +57,8 @@ fs.cpSync(serverDir, BACKEND_DIR, {
     recursive: true,
     filter: (src) => {
         const basename = path.basename(src);
-        // exclude node_modules, .env, and debug files
-        if (basename === 'node_modules' || basename === '.env') return false;
+        // exclude node_modules and debug files (keep .env if it exists, or we will generate one)
+        if (basename === 'node_modules') return false;
         if (src.includes('node_modules')) return false;
         
         // optionally filter out massive log files

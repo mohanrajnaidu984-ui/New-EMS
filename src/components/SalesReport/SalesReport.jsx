@@ -20,6 +20,8 @@ const defaultReport = () => ({
         { name: 'Q3', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 },
         { name: 'Q4', target: 0, actual: 0, targetSalesBase: 0, targetGpPct: 0 }
     ],
+    /** Mean of each won job's booked GrossMargin% (same Probability snapshot as summary); null = use blended fallback. */
+    avgWonBookedGpPct: null,
     winLoss: {
         won: 0, lost: 0, followUp: 0, quoted: 0,
         wonValue: 0, lostValue: 0, followUpValue: 0, quotedValue: 0
@@ -508,6 +510,10 @@ const SalesReport = () => {
                     ...prev,
                     targetVsActual: data.targetVsActual || d.targetVsActual,
                     grossMarginTargetVsActual: data.grossMarginTargetVsActual || d.grossMarginTargetVsActual,
+                    avgWonBookedGpPct:
+                        data.avgWonBookedGpPct !== undefined && data.avgWonBookedGpPct !== null
+                            ? Number(data.avgWonBookedGpPct)
+                            : d.avgWonBookedGpPct,
                     winLoss: { ...d.winLoss, ...(data.winLoss || {}) },
                     probabilityFunnel: data.probabilityFunnel || []
                 }));
@@ -708,8 +714,11 @@ const SalesReport = () => {
     const gmTotalSalesTargetBase = grossMarginData.reduce((acc, curr) => acc + (Number(curr.targetSalesBase) || 0), 0);
     const gmOverallTargetGpPct = gmTotalSalesTargetBase > 0 ? (gmTotalTarget / gmTotalSalesTargetBase) * 100 : 0;
     const gmOverallRatio = gmTotalTarget > 0 ? Math.round((gmTotalActual / gmTotalTarget) * 100) : 0;
-    /** Average Actual GP% (Actual GP amount / Actual booking amount). */
-    const gmOverallActualGpPct = totalActual > 0 ? (gmTotalActual / totalActual) * 100 : 0;
+    /** Actual GP% in GM summary: mean of each won job's booked GrossMargin% when API provides it; else blended GP/booking. */
+    const blendedActualGpPct = totalActual > 0 ? (gmTotalActual / totalActual) * 100 : 0;
+    const apiAvgGp = reportData.avgWonBookedGpPct;
+    const gmOverallActualGpPct =
+        apiAvgGp != null && Number.isFinite(Number(apiAvgGp)) ? Number(apiAvgGp) : blendedActualGpPct;
 
     const wl = reportData.winLoss || defaultReport().winLoss;
     /** Winning/Losing % always project-count based: won/lost projects over quoted enquiries. */
@@ -916,6 +925,50 @@ const SalesReport = () => {
         });
         return total;
     }, [topRowsFiltered]);
+    /** Unique enquiries in the filtered table (multiple quote lines per enquiry count once). */
+    const topRowsFilteredDistinctProjectCount = useMemo(() => {
+        const keys = new Set();
+        topRowsFiltered.forEach((row, idx) => {
+            const no = String(row.RequestNo ?? row.EnquiryNo ?? '').trim();
+            if (no) keys.add(`e:${no}`);
+            else {
+                const pn = String(row.ProjectName ?? '').trim();
+                keys.add(pn ? `p:${pn.toLowerCase()}` : `row:${idx}`);
+            }
+        });
+        return keys.size;
+    }, [topRowsFiltered]);
+    /** First table row index per enquiry whose JobValue equals the max for that enquiry (Quoted — chart only on that row). */
+    const quotedChartRowIndexByEnquiry = useMemo(() => {
+        if (topJobStatus !== 'Quoted') return null;
+        const maxBy = new Map();
+        topRowsFiltered.forEach((row) => {
+            const k = String(row.RequestNo || row.EnquiryNo || '').trim();
+            if (!k) return;
+            const v = Number(row.JobValue) || 0;
+            const cur = maxBy.get(k);
+            if (cur === undefined || v > cur) maxBy.set(k, v);
+        });
+        const firstIdxAtMax = new Map();
+        topRowsFiltered.forEach((row, idx) => {
+            const k = String(row.RequestNo || row.EnquiryNo || '').trim();
+            if (!k) return;
+            const v = Number(row.JobValue) || 0;
+            const mx = maxBy.get(k);
+            if (mx === undefined || Math.abs(v - mx) > 1e-6) return;
+            if (!firstIdxAtMax.has(k)) firstIdxAtMax.set(k, idx);
+        });
+        return firstIdxAtMax;
+    }, [topJobStatus, topRowsFiltered]);
+    /** Same basis as the blue “Total” row in the value column — bar length + % prefix use this (not max single job). */
+    const topJobChartDenominator = useMemo(() => {
+        const raw =
+            topJobStatus === 'Quoted'
+                ? topRowsFilteredQuotedMaxPerEnquiryTotal
+                : topRowsFilteredTotalValue;
+        const n = Math.abs(Number(raw)) || 0;
+        return Number.isFinite(n) ? n : 0;
+    }, [topJobStatus, topRowsFilteredQuotedMaxPerEnquiryTotal, topRowsFilteredTotalValue]);
     const topRowsFilteredWonGpTotal = useMemo(
         () =>
             topRowsFiltered.reduce((acc, row) => {
@@ -1765,7 +1818,10 @@ const SalesReport = () => {
                                         {renderFilterableHeader('projectName', 'Project Name')}
                                         {renderFilterableHeader('customerName', 'Customer Name')}
                                         {renderValueFilterHeader(topJobsTableConfig.valueHeader)}
-                                        <th className="sr-job-bar-th" title="Horizontal bar: job value relative to the largest value in this list">
+                                        <th
+                                            className="sr-job-bar-th"
+                                            title="Each row: % of the table Total (same as the blue Total row in the value column); bar length matches that %."
+                                        >
                                             {topJobsTableConfig.chartHeader}
                                         </th>
                                         {topJobStatus === 'Quoted' ? (
@@ -1820,7 +1876,20 @@ const SalesReport = () => {
                                         <>
                                         <tr className="sr-detail-table__total-row">
                                             <td />
-                                            <td colSpan={3} className="text-end fw-semibold">Total</td>
+                                            <td />
+                                            <td
+                                                className="text-center fw-semibold small text-nowrap"
+                                                title="Distinct projects: unique enquiry numbers in this list (multiple quotes for the same enquiry count once)."
+                                            >
+                                                {topRowsFilteredDistinctProjectCount > 0
+                                                    ? `${topRowsFilteredDistinctProjectCount} ${
+                                                          topRowsFilteredDistinctProjectCount === 1
+                                                              ? 'project'
+                                                              : 'projects'
+                                                      }`
+                                                    : ''}
+                                            </td>
+                                            <td className="text-end fw-semibold">Total</td>
                                             <td className="text-end fw-semibold">
                                                 {formatK(
                                                     topJobStatus === 'Quoted'
@@ -1865,8 +1934,19 @@ const SalesReport = () => {
                                         </tr>
                                         {topRowsFiltered.map((row, idx) => {
                                             const v = Math.abs(Number(row.JobValue)) || 0;
-                                            const pct = topJobValueMax > 0 ? Math.round((v / topJobValueMax) * 100) : 0;
-                                            const barW = topJobValueMax > 0 ? Math.min(100, (v / topJobValueMax) * 100) : 0;
+                                            const denom =
+                                                topJobChartDenominator > 0 ? topJobChartDenominator : topJobValueMax;
+                                            const pctNum = denom > 0 ? (v / denom) * 100 : 0;
+                                            const barW = denom > 0 ? Math.min(100, Math.max(0, pctNum)) : 0;
+                                            const pctRounded = Math.round(pctNum);
+                                            const pctTitle = `${pctRounded}% of ${topJobChartDenominator > 0 ? 'table total' : 'largest job in list'}`;
+                                            const basisLabel =
+                                                topJobChartDenominator > 0 ? 'table total' : 'largest job in list';
+                                            const enquiryKey = String(row.RequestNo || row.EnquiryNo || '').trim();
+                                            const showValueBar =
+                                                topJobStatus !== 'Quoted' ||
+                                                !enquiryKey ||
+                                                quotedChartRowIndexByEnquiry?.get(enquiryKey) === idx;
                                             const groupClass = idx === 0
                                                 ? 'sr-enquiry-strip-a'
                                                 : (topRowsFiltered[idx - 1].RequestNo === row.RequestNo
@@ -1878,21 +1958,34 @@ const SalesReport = () => {
                                             // eslint-disable-next-line no-param-reassign
                                             row.__stripClass = groupClass;
                                             return (
-                                                <tr key={`${row.ProjectName}-${idx}`} className={groupClass}>
+                                                <tr
+                                                    key={`${row.RequestNo || row.ProjectName || 'r'}-${String(row.LeadJob || '').slice(0, 40)}-${idx}`}
+                                                    className={groupClass}
+                                                >
                                                     <td>{idx + 1}</td>
                                                     <td>{row.RequestNo || row.EnquiryNo || '—'}</td>
                                                     <td>{row.ProjectName || '—'}</td>
                                                     <td>{row.CustomerName || '—'}</td>
-                                                    <td className="text-end">{formatK(row.JobValue)}</td>
+                                                    <td className="text-end">
+                                                        {formatK(row.JobValue)}
+                                                    </td>
                                                     <td className="sr-job-bar-cell">
-                                                        <div
-                                                            className="sr-job-bar-track"
-                                                            title={`${pct}% of max job value in this list (${formatExactAmountString(v)})`}
-                                                            role="img"
-                                                            aria-label={`Job value ${pct} percent of maximum in this list`}
-                                                        >
-                                                            <div className="sr-job-bar-fill" style={{ width: `${barW}%` }} />
+                                                        {showValueBar ? (
+                                                        <div className="sr-job-bar-wrap">
+                                                            <span className="sr-job-bar-pct" title={pctTitle}>
+                                                                <span className="sr-job-bar-pct-num">{pctRounded}</span>
+                                                                <span className="sr-job-bar-pct-sym">%</span>
+                                                            </span>
+                                                            <div
+                                                                className="sr-job-bar-track"
+                                                                title={`${pctRounded}% of ${basisLabel} (${formatExactAmountString(v)})`}
+                                                                role="img"
+                                                                aria-label={`Job value ${pctRounded} percent of ${basisLabel}`}
+                                                            >
+                                                                <div className="sr-job-bar-fill" style={{ width: `${barW}%` }} />
+                                                            </div>
                                                         </div>
+                                                        ) : null}
                                                     </td>
                                                     {topJobStatus === 'Quoted' ? (
                                                         <>

@@ -212,7 +212,7 @@ const SearchEnquiry = ({ onOpen }) => {
             return;
         }
 
-        const headers = ["Enquiry No.", "Enquiry Date", "Project", "Divisions & SE/EE/TE/QS Involved", "Enquiry Details", "Customer Name / Contractor Name", "Due Date", "Client", "Enquiry Type", "Source", "Status", "Created By"];
+        const headers = ["Enquiry No.", "Enquiry Date", "Project", "Divisions & SE/EE/TE/QS Involved", "Enquiry Details", "Customer Name / Contractor Name", "Due Date", "Site Visit Date", "Client", "Enquiry Type", "Source", "Status", "Created By"];
 
         const csvContent = [
             headers.join(","),
@@ -224,7 +224,8 @@ const SearchEnquiry = ({ onOpen }) => {
                     formatLeadJobLinesPlain(getLeadJobDisplayLines(r, { users: masters.users })),
                     getEnquiryDetailsDisplay(r),
                     getCustomerDisplayLines(r).join('\n'),
-                    formatEnquiryResultDate(r.DueOn),
+                    formatEnquiryResultDate(r.DueOn ?? r.DueDate),
+                    formatEnquiryResultDate(r.SiteVisitDate),
                     (r.ClientName || ''),
                     getEnquiryTypeDisplay(r),
                     (r.SourceOfInfo || ''),

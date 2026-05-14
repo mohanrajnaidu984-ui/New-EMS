@@ -93,6 +93,20 @@ WITH LatestProb AS (
 )
 `;
 
+/** Latest Probability row per enquiry **and job line** (OwnJob + LeadJob) — Jobs table lists every line for Probability updates. */
+const SQL_TOPJOB_LATEST_PROB_CTE = `
+WITH LatestProb AS (
+    SELECT * FROM (
+        SELECT P.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY P.RequestNo, LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), LTRIM(RTRIM(ISNULL(P.LeadJobName, N'')))
+                ORDER BY P.UpdatedDateTime DESC
+            ) AS __rn
+        FROM dbo.Probability P
+    ) __lp WHERE __lp.__rn = 1
+)
+`;
+
 /** Parse money stored as NVARCHAR on Probability (handles commas, BD prefix). */
 const SQL_PROB_JOB_VALUE = `
 CASE
@@ -237,11 +251,17 @@ function getTopJobProbValueExpr(topJobStatus) {
 /**
  * EnquiryMaster scope: non–CC → company + latest Probability.OwnJobName = division + ConcernedSE↔Master email;
  * CC / others → EnquiryFor division/company + optional ConcernedSE by name.
+ * @param {object} [opts]
+ * @param {boolean} [opts.omitEnquiryMasterDivisionForQuoteOwnJob] — Jobs (Quoted) only: do not require
+ *   EnquiryFor / latest Probability division on EnquiryMaster; division is applied on `EnquiryQuotes.OwnJob`
+ *   instead (avoids dropping enquiries that have BMS quotes but no BMS line in EnquiryFor).
  */
-function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole) {
+function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole, opts = {}) {
     let filterClause = '';
     const isNonCcSalesScope = req.salesReportNonCcScope === true;
     const srUserEmail = req.salesReportUserEmail ? String(req.salesReportUserEmail).trim() : '';
+    const omitMasterDivision =
+        opts && opts.omitEnquiryMasterDivisionForQuoteOwnJob === true;
 
     if (isNonCcSalesScope) {
         if (srUserEmail) {
@@ -256,7 +276,7 @@ function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision
                 request.input('company', sql.NVarChar, safeCompany);
                 filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.CompanyName)) = @company) `;
             }
-            if (safeDivision && safeDivision !== 'All') {
+            if (safeDivision && safeDivision !== 'All' && !omitMasterDivision) {
                 request.input('division', sql.NVarChar, safeDivision);
                 filterClause += `
                   AND EXISTS (
@@ -291,7 +311,7 @@ function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision
                   ) `;
             }
         }
-    } else if (safeDivision && safeDivision !== 'All') {
+    } else if (safeDivision && safeDivision !== 'All' && !omitMasterDivision) {
         request.input('division', sql.NVarChar, safeDivision);
         filterClause += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName) WHERE ef.RequestNo = E.RequestNo AND LTRIM(RTRIM(mef.DepartmentName)) = @division) `;
     } else if (safeCompany && safeCompany !== 'All') {
@@ -312,6 +332,10 @@ function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision
         }
     }
 
+    if (omitMasterDivision && safeDivision && safeDivision !== 'All') {
+        bindInputIfMissing(request, 'division', sql.NVarChar, safeDivision);
+    }
+
     return filterClause;
 }
 
@@ -319,7 +343,7 @@ function appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision
  * Shared request + item-value FROM clause for top-job table and /summary EnquiryMaster queries.
  * @returns {object|null}
  */
-function buildSalesReportItemValueContext(req) {
+function buildSalesReportItemValueContext(req, enquiryScopeOpts) {
     const { year, company, division, role } = req.query;
     if (!year) return null;
 
@@ -338,7 +362,14 @@ function buildSalesReportItemValueContext(req) {
         request.input('quarterStrs', sql.NVarChar, safeQuarter);
     }
 
-    const filterClause = appendSalesReportEnquiryFilters(req, request, safeCompany, safeDivision, safeRole);
+    const filterClause = appendSalesReportEnquiryFilters(
+        req,
+        request,
+        safeCompany,
+        safeDivision,
+        safeRole,
+        enquiryScopeOpts || {}
+    );
 
     const effectiveSeForTarget =
         (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
@@ -856,6 +887,8 @@ WITH LatestProbByUpdate AS (
 
         let gmTargetRes = { recordset: [] };
         let gmActualRes = { recordset: [] };
+        let wonAvgGpRes = { recordset: [] };
+        let avgWonBookedGpPct = null;
         try {
             gmTargetRes = await request.query(`
                 SELECT
@@ -877,6 +910,19 @@ WITH LatestProbByUpdate AS (
                   ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
                 GROUP BY DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate))
             `);
+            wonAvgGpRes = await request.query(`
+            ${latestProbByUpdateCte}
+                SELECT AVG(CAST(ISNULL(P.GrossMargin, 0) AS DECIMAL(18, 4))) AS AvgBookedGpPct
+                FROM LatestProbByUpdate P
+                INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
+                WHERE LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won'
+                  AND YEAR(COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @year
+                  ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(P.BookedDate, P.UpdatedDateTime, E.EnquiryDate)) = @quarterNums` : ''}
+            `);
+            const avgRow = wonAvgGpRes.recordset && wonAvgGpRes.recordset[0];
+            if (avgRow && avgRow.AvgBookedGpPct != null) {
+                avgWonBookedGpPct = Number(avgRow.AvgBookedGpPct);
+            }
         } catch (gmErr) {
             console.warn('[Sales Report] Gross margin summary skipped:', gmErr.message);
         }
@@ -1427,6 +1473,7 @@ WITH LatestProbByUpdate AS (
         res.json({
             targetVsActual: quarters,
             grossMarginTargetVsActual: gmQuarters,
+            avgWonBookedGpPct,
             winLoss: winLoss,
             topCustomers: topCustomersRes.recordset,
             topProjects: topProjectsRes.recordset,
@@ -1454,7 +1501,11 @@ WITH LatestProbByUpdate AS (
 router.get('/top-job-booked', async (req, res) => {
     try {
         await applySalesReportEmailScope(req);
-        const ctx = buildSalesReportItemValueContext(req);
+        const topJobStatusKey = sanitizeInput(req.query.topJobStatus) || 'Won';
+        const ctx = buildSalesReportItemValueContext(
+            req,
+            topJobStatusKey === 'Quoted' ? { omitEnquiryMasterDivisionForQuoteOwnJob: true } : {}
+        );
         if (!ctx) return res.status(400).json({ error: 'Year is required' });
 
         const { request, filterClause, itemValueApply, itemValueCol, safeQuarter, safeCompany, safeDivision, safeRole, nonCcBlock } = ctx;
@@ -1472,7 +1523,6 @@ router.get('/top-job-booked', async (req, res) => {
         if (safeDivision && safeDivision !== 'All') {
             bindInputIfMissing(request, 'division', sql.NVarChar, safeDivision);
         }
-        const topJobStatusKey = sanitizeInput(req.query.topJobStatus) || 'Won';
         const isQuotedTopJob = topJobStatusKey === 'Quoted';
         const isPendingTopJob = topJobStatusKey === 'Pending';
         const isFollowUpTopJob = topJobStatusKey === 'Follow Up';
@@ -1550,44 +1600,16 @@ router.get('/top-job-booked', async (req, res) => {
                 }
             }
         }
-        let quotedTopJobFilterClause = '';
-        if (isQuotedTopJob) {
-            if (nonCcBlock) {
-                quotedTopJobFilterClause += ' AND 1=0 ';
-            } else {
-                if (safeCompany && safeCompany !== 'All') {
-                    quotedTopJobFilterClause += ` AND EXISTS (
-                        SELECT 1
-                        FROM EnquiryFor ef
-                        JOIN Master_EnquiryFor mef
-                          ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '%- ' + mef.ItemName OR ef.ItemName LIKE '%-' + mef.ItemName)
-                        WHERE ef.RequestNo = E.RequestNo
-                          AND LTRIM(RTRIM(mef.CompanyName)) = @company
-                    ) `;
-                }
-                if (safeDivision && safeDivision !== 'All') {
-                    quotedTopJobFilterClause += ` AND EXISTS (
-                        SELECT 1
-                        FROM ConcernedSE cse
-                        JOIN Master_ConcernedSE mse
-                          ON UPPER(LTRIM(RTRIM(ISNULL(mse.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, ''))))
-                        WHERE cse.RequestNo = E.RequestNo
-                          AND UPPER(LTRIM(RTRIM(ISNULL(mse.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                    ) `;
-                }
-                if (effectiveQuotedSe) {
-                    request.input('quotedSeByName', sql.NVarChar, effectiveQuotedSe);
-                    quotedTopJobFilterClause += ` AND EXISTS (
-                        SELECT 1
-                        FROM ConcernedSE cse
-                        WHERE cse.RequestNo = E.RequestNo
-                          AND LTRIM(RTRIM(ISNULL(cse.SEName, ''))) = LTRIM(RTRIM(ISNULL(@quotedSeByName, '')))
-                    ) `;
-                }
-            }
-        }
+        /**
+         * Pending table scope:
+         * - **CC / unlocked:** use `filterClause` so the list matches other report widgets for the same dropdowns.
+         * - **Non–CC (`salesReportNonCcScope`):** `filterClause` ties division to **latest Probability per enquiry**;
+         *   the Pending CTE is **per job line** (`PARTITION BY RequestNo, OwnJobName, LeadJobName`). Applying
+         *   `filterClause` inside that CTE removes all lines for many enquiries → empty table. For non–CC Pending
+         *   only, use EnquiryFor + Master division + ConcernedSE-by-name (previous behaviour).
+         */
         let pendingTopJobFilterClause = '';
-        if (isPendingTopJob) {
+        if (isPendingTopJob && req.salesReportNonCcScope === true) {
             if (nonCcBlock) {
                 pendingTopJobFilterClause += ' AND 1=0 ';
             } else {
@@ -1612,7 +1634,7 @@ router.get('/top-job-booked', async (req, res) => {
                     ) `;
                 }
                 if (effectiveQuotedSe) {
-                    request.input('pendingSe', sql.NVarChar, effectiveQuotedSe);
+                    bindInputIfMissing(request, 'pendingSe', sql.NVarChar, effectiveQuotedSe);
                     pendingTopJobFilterClause += ` AND EXISTS (
                         SELECT 1
                         FROM ConcernedSE cse
@@ -1622,41 +1644,31 @@ router.get('/top-job-booked', async (req, res) => {
                 }
             }
         }
-        const topJobScopeClause = isQuotedTopJob
-            ? quotedTopJobFilterClause
-            : (isPendingTopJob ? pendingTopJobFilterClause : filterClause);
+        const topJobScopeClause =
+            isPendingTopJob && req.salesReportNonCcScope === true
+                ? pendingTopJobFilterClause
+                : filterClause;
 
         let topJobBookedRes = { recordset: [] };
         try {
             if (isQuotedTopJob) {
-                if (effectiveQuotedSe) {
-                    bindInputIfMissing(request, 'quotedTopJobSe', sql.NVarChar, effectiveQuotedSe);
-                }
-                const quotedPreparedByClause = effectiveQuotedSe
-                    ? ` AND LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedTopJobSe, '')))`
-                    : '';
-                const quotedPreparedByDivisionClause =
-                    safeDivision && safeDivision !== 'All' && !effectiveQuotedSe
-                        ? ` AND EXISTS (
-                                SELECT 1
-                                FROM ConcernedSE cse
-                                INNER JOIN Master_ConcernedSE ms
-                                  ON UPPER(LTRIM(RTRIM(ISNULL(ms.FullName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, ''))))
-                                WHERE cse.RequestNo = EQ.RequestNo
-                                  AND UPPER(LTRIM(RTRIM(ISNULL(cse.SEName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))))
-                                  AND UPPER(LTRIM(RTRIM(ISNULL(ms.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                            )`
-                        : '';
-                const quotedLeadJobDivisionClause =
+                /**
+                 * SE scope: only `filterClause` (ConcernedSE / non‑CC email). Never EnquiryQuotes.PreparedBy.
+                 * Division: dropdown matches **`EnquiryQuotes.OwnJob`** only (not LeadJob, not EnquiryFor).
+                 * For Jobs (Quoted), `omitEnquiryMasterDivisionForQuoteOwnJob` skips EnquiryFor / Probability
+                 * division on EnquiryMaster so enquiries with BMS quotes are not dropped when EnquiryFor has no BMS line.
+                 */
+                const quotedEqOwnJobExpr = `LTRIM(RTRIM(ISNULL(EQ.OwnJob, N'')))`;
+                const quotedOwnJobDivisionClause =
                     safeDivision && safeDivision !== 'All'
-                        ? ` AND UPPER(LTRIM(RTRIM(ISNULL(EQ.LeadJob, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
+                        ? ` AND UPPER(${quotedEqOwnJobExpr}) = UPPER(LTRIM(RTRIM(ISNULL(@division, N''))))`
                         : '';
                 topJobBookedRes = await request.query(`
             WITH LatestQuoted AS (
                 SELECT * FROM (
                     SELECT
                         EQ.RequestNo,
-                        LTRIM(RTRIM(ISNULL(EQ.LeadJob, ''))) AS LeadJob,
+                        ${quotedEqOwnJobExpr} AS LeadJob,
                         EQ.ToName,
                         EQ.PreparedBy,
                         LTRIM(RTRIM(ISNULL(EQ.QuoteNumber, ''))) AS QuoteRef,
@@ -1672,8 +1684,8 @@ router.get('/top-job-booked', async (req, res) => {
                         ROW_NUMBER() OVER (
                             PARTITION BY
                                 EQ.RequestNo,
-                                LTRIM(RTRIM(ISNULL(EQ.LeadJob, ''))),
-                                LTRIM(RTRIM(ISNULL(EQ.ToName, '')))
+                                ${quotedEqOwnJobExpr},
+                                LTRIM(RTRIM(ISNULL(EQ.ToName, N'')))
                             ORDER BY
                                 ISNULL(EQ.QuoteNo, 0) DESC,
                                 ISNULL(EQ.RevisionNo, 0) DESC,
@@ -1683,10 +1695,8 @@ router.get('/top-job-booked', async (req, res) => {
                     FROM EnquiryQuotes EQ
                     INNER JOIN EnquiryMaster E ON E.RequestNo = EQ.RequestNo
                     WHERE 1 = 1
-                      ${quotedPreparedByClause}
-                      ${quotedPreparedByDivisionClause}
-                      ${quotedLeadJobDivisionClause}
-                      ${topJobScopeClause}
+                      ${quotedOwnJobDivisionClause}
+                      ${filterClause}
                 ) __lq
                 WHERE __lq.__rn = 1
             )
@@ -1731,7 +1741,7 @@ router.get('/top-job-booked', async (req, res) => {
                     CAST(NULL AS DATETIME) AS LostDate
                 FROM EnquiryMaster E
                 INNER JOIN LatestQuoted LQ ON E.RequestNo = LQ.RequestNo
-                WHERE YEAR(COALESCE(LQ.QuoteDate, E.EnquiryDate)) = @year ${topJobScopeClause}
+                WHERE YEAR(COALESCE(LQ.QuoteDate, E.EnquiryDate)) = @year ${filterClause}
                   ${safeQuarter ? `AND DATEPART(QUARTER, COALESCE(LQ.QuoteDate, E.EnquiryDate)) = @quarterNums` : ''}
             ) x
             ORDER BY x.JobValue DESC
@@ -1760,7 +1770,10 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT * FROM (
                     SELECT
                         P.*,
-                        ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+                        ROW_NUMBER() OVER (
+                            PARTITION BY P.RequestNo, LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), LTRIM(RTRIM(ISNULL(P.LeadJobName, N'')))
+                            ORDER BY P.UpdatedDateTime DESC
+                        ) AS __rn
                     FROM dbo.Probability P
                     INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
                     WHERE 1 = 1
@@ -1773,6 +1786,7 @@ router.get('/top-job-booked', async (req, res) => {
             SELECT
                 x.RequestNo,
                 x.ProjectName,
+                x.LeadJob,
                 x.JobValue,
                 x.WonGrossProfit,
                 x.Status,
@@ -1790,6 +1804,11 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT
                     E.RequestNo,
                     E.ProjectName,
+                    LTRIM(RTRIM(COALESCE(
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), N''),
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.LeadJobName, N''))), N''),
+                        N''
+                    ))) AS LeadJob,
                     ${SQL_PROB_WON_VALUE} AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     P.Status,
@@ -1834,12 +1853,26 @@ router.get('/top-job-booked', async (req, res) => {
                 const statusOwnJobClause = safeDivision && safeDivision !== 'All'
                     ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
                     : '';
+                /**
+                 * Lost: one row per enquiry — take the single **latest** Probability row (any status), then keep
+                 * only those whose **current** status is Lost (not an older Lost row after Won/Follow-up, etc.).
+                 * Follow-up: still one latest row per (enquiry, OwnJob, LeadJob) for multi-line follow-ups.
+                 */
+                const latestProbStatusScopePartition = isLostTopJob
+                    ? `PARTITION BY P.RequestNo`
+                    : `PARTITION BY P.RequestNo, LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), LTRIM(RTRIM(ISNULL(P.LeadJobName, N'')))`;
+                const latestProbStatusScopeOrderBy = isLostTopJob
+                    ? `P.UpdatedDateTime DESC, P.ID DESC`
+                    : `P.UpdatedDateTime DESC`;
                 topJobBookedRes = await request.query(`
             WITH LatestProbStatusScope AS (
                 SELECT * FROM (
                     SELECT
                         P.*,
-                        ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+                        ROW_NUMBER() OVER (
+                            ${latestProbStatusScopePartition}
+                            ORDER BY ${latestProbStatusScopeOrderBy}
+                        ) AS __rn
                     FROM dbo.Probability P
                     INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
                     WHERE 1 = 1
@@ -1852,6 +1885,7 @@ router.get('/top-job-booked', async (req, res) => {
             SELECT
                 x.RequestNo,
                 x.ProjectName,
+                x.LeadJob,
                 x.JobValue,
                 x.WonGrossProfit,
                 x.Status,
@@ -1869,6 +1903,11 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT
                     E.RequestNo,
                     E.ProjectName,
+                    LTRIM(RTRIM(COALESCE(
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), N''),
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.LeadJobName, N''))), N''),
+                        N''
+                    ))) AS LeadJob,
                     ${topJobValueExpr} AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     P.Status,
@@ -1891,6 +1930,9 @@ router.get('/top-job-booked', async (req, res) => {
             ORDER BY x.JobValue DESC
             `);
             } else if (isPendingTopJob) {
+                if (effectiveQuotedSe) {
+                    bindInputIfMissing(request, 'pendingSe', sql.NVarChar, effectiveQuotedSe);
+                }
                 const pendingPreparedByClause = effectiveQuotedSe
                     ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@pendingSe, '')))`
                     : '';
@@ -1907,7 +1949,10 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT * FROM (
                     SELECT
                         P.*,
-                        ROW_NUMBER() OVER (PARTITION BY P.RequestNo ORDER BY P.UpdatedDateTime DESC) AS __rn
+                        ROW_NUMBER() OVER (
+                            PARTITION BY P.RequestNo, LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), LTRIM(RTRIM(ISNULL(P.LeadJobName, N'')))
+                            ORDER BY P.UpdatedDateTime DESC
+                        ) AS __rn
                     FROM dbo.Probability P
                     INNER JOIN EnquiryMaster E ON E.RequestNo = P.RequestNo
                     WHERE 1 = 1
@@ -1919,6 +1964,7 @@ router.get('/top-job-booked', async (req, res) => {
             SELECT
                 x.RequestNo,
                 x.ProjectName,
+                x.LeadJob,
                 x.JobValue,
                 x.WonGrossProfit,
                 x.Status,
@@ -1936,6 +1982,11 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT
                     E.RequestNo,
                     E.ProjectName,
+                    LTRIM(RTRIM(COALESCE(
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), N''),
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.LeadJobName, N''))), N''),
+                        N''
+                    ))) AS LeadJob,
                     ${topJobValueExpr} AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     P.Status,
@@ -1967,10 +2018,11 @@ router.get('/top-job-booked', async (req, res) => {
             } else {
                 const followUpStatusWhere = `(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')`;
                 topJobBookedRes = await request.query(`
-            ${SQL_LATEST_PROB_CTE}
+            ${SQL_TOPJOB_LATEST_PROB_CTE}
             SELECT
                 x.RequestNo,
                 x.ProjectName,
+                x.LeadJob,
                 x.JobValue,
                 x.WonGrossProfit,
                 x.Status,
@@ -1988,6 +2040,11 @@ router.get('/top-job-booked', async (req, res) => {
                 SELECT
                     E.RequestNo,
                     E.ProjectName,
+                    LTRIM(RTRIM(COALESCE(
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.OwnJobName, N''))), N''),
+                        NULLIF(LTRIM(RTRIM(ISNULL(P.LeadJobName, N''))), N''),
+                        N''
+                    ))) AS LeadJob,
                     ${topJobValueExpr} AS JobValue,
                     P.GrossMargin AS WonGrossProfit,
                     P.Status,

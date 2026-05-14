@@ -29,13 +29,45 @@ function AppContent() {
   );
 }
 
+const SESSION_ACTIVE_TAB = 'ems_activeTab';
+const SESSION_ENQUIRY_OPEN = 'ems_enquiryToOpen';
+
+/** Per-tab navigation memory (sessionStorage). localStorage was shared across tabs so refresh showed the wrong module. */
+function readSessionActiveTab() {
+  try {
+    const s = sessionStorage.getItem(SESSION_ACTIVE_TAB);
+    if (s) return s;
+    const legacy = localStorage.getItem('activeTab');
+    if (legacy) {
+      sessionStorage.setItem(SESSION_ACTIVE_TAB, legacy);
+      localStorage.removeItem('activeTab');
+      return legacy;
+    }
+  } catch (_) {
+    /* private mode / quota */
+  }
+  return 'Enquiry';
+}
+
+function readSessionEnquiryToOpen() {
+  try {
+    const s = sessionStorage.getItem(SESSION_ENQUIRY_OPEN);
+    if (s) return s;
+    const legacy = localStorage.getItem('enquiryToOpen');
+    if (legacy) {
+      sessionStorage.setItem(SESSION_ENQUIRY_OPEN, legacy);
+      localStorage.removeItem('enquiryToOpen');
+      return legacy;
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
 function MainLayoutWrapper() {
-  const [activeTab, setActiveTab] = useState(() => {
-    return localStorage.getItem('activeTab') || 'Enquiry';
-  });
-  const [enquiryToOpen, setEnquiryToOpen] = useState(() => {
-    return localStorage.getItem('enquiryToOpen') || null;
-  });
+  const [activeTab, setActiveTab] = useState(readSessionActiveTab);
+  const [enquiryToOpen, setEnquiryToOpen] = useState(readSessionEnquiryToOpen);
   const [openContext, setOpenContext] = useState(null);
 
   const handleOpenEnquiry = (target) => {
@@ -45,27 +77,47 @@ function MainLayoutWrapper() {
       setOpenContext(target);
       if (requestNo) {
         setEnquiryToOpen(requestNo);
-        localStorage.setItem('enquiryToOpen', requestNo);
+        try {
+          sessionStorage.setItem(SESSION_ENQUIRY_OPEN, requestNo);
+        } catch (_) {
+          /* ignore */
+        }
       }
       setActiveTab(tab);
-      localStorage.setItem('activeTab', tab);
+      try {
+        sessionStorage.setItem(SESSION_ACTIVE_TAB, tab);
+      } catch (_) {
+        /* ignore */
+      }
       return;
     }
     const requestNo = String(target || '').trim();
     if (!requestNo) return;
     setOpenContext(null);
     setEnquiryToOpen(requestNo);
-    localStorage.setItem('enquiryToOpen', requestNo);
+    try {
+      sessionStorage.setItem(SESSION_ENQUIRY_OPEN, requestNo);
+      sessionStorage.setItem(SESSION_ACTIVE_TAB, 'Enquiry');
+    } catch (_) {
+      /* ignore */
+    }
     setActiveTab('Enquiry');
-    localStorage.setItem('activeTab', 'Enquiry');
   };
 
   const handleTabChange = (tab) => {
     setActiveTab(tab);
-    localStorage.setItem('activeTab', tab);
+    try {
+      sessionStorage.setItem(SESSION_ACTIVE_TAB, tab);
+    } catch (_) {
+      /* ignore */
+    }
     if (tab !== 'Enquiry') {
       setEnquiryToOpen(null);
-      localStorage.removeItem('enquiryToOpen');
+      try {
+        sessionStorage.removeItem(SESSION_ENQUIRY_OPEN);
+      } catch (_) {
+        /* ignore */
+      }
     }
   };
 

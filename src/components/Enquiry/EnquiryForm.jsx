@@ -68,6 +68,28 @@ function contactCompanyMatchesCustomer(contactCompany, selectedCustomerName, cus
     return false;
 }
 
+/** Same contractor / customer display name for duplicate checks (spacing & master-data variants). */
+function isSameCompanyName(a, b, customers = []) {
+    const ta = (a || '').trim();
+    const tb = (b || '').trim();
+    if (!ta || !tb) return false;
+    if (ta.toLowerCase() === tb.toLowerCase()) return true;
+    const na = normalizeCompanyKey(ta);
+    const nb = normalizeCompanyKey(tb);
+    if (na && nb && na === nb) return true;
+    return contactCompanyMatchesCustomer(tb, ta, customers) || contactCompanyMatchesCustomer(ta, tb, customers);
+}
+
+function findDuplicateCustomerIndex(customerList, customers = []) {
+    const list = customerList || [];
+    for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+            if (isSameCompanyName(list[i], list[j], customers)) return j;
+        }
+    }
+    return -1;
+}
+
 const EnquiryForm = ({ requestNoToOpen }) => {
     const { masters, addEnquiry, updateEnquiry, getEnquiry, updateMasters, addMaster, updateMaster, enquiries } = useData();
 
@@ -440,14 +462,8 @@ const EnquiryForm = ({ requestNoToOpen }) => {
 
         const cust = (formData.CustomerName || '').trim();
         const rf = formData.ReceivedFrom;
+        const customersCatalog = masters.customers || [];
         const pairedLen = Math.min(customerList.length, receivedFromList.length);
-        const duplicatePair = customerList.slice(0, pairedLen).some(
-            (c, i) => (c || '').trim() === cust && receivedFromList[i] === rf
-        );
-        if (duplicatePair) {
-            alert('This customer and contact pair is already in the list');
-            return;
-        }
 
         // When the Customer row already exists but its Received From slot is empty
         // (user removed the RF in modify mode to update the contact while pricing
@@ -456,7 +472,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
         if (customerList.length > receivedFromList.length) {
             const nextSlotIdx = receivedFromList.length;
             const customerAtNextSlot = (customerList[nextSlotIdx] || '').trim();
-            if (customerAtNextSlot === cust) {
+            if (isSameCompanyName(customerAtNextSlot, cust, customersCatalog)) {
                 setReceivedFromList((prev) => [...prev, rf]);
                 handleInputChange('ReceivedFrom', '');
                 handleInputChange('CustomerName', '');
@@ -474,6 +490,21 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 }
                 return;
             }
+        }
+
+        const duplicatePair = customerList.slice(0, pairedLen).some(
+            (c, i) => isSameCompanyName(c, cust, customersCatalog) && receivedFromList[i] === rf
+        );
+        if (duplicatePair) {
+            alert('This customer and contact pair is already in the list');
+            return;
+        }
+
+        if (customerList.some((c) => isSameCompanyName(c, cust, customersCatalog))) {
+            alert(
+                'This customer / contractor is already in the list. Each company can appear only once — add another contact only when a row is still waiting for a Received From.'
+            );
+            return;
         }
 
         setCustomerList((prev) => [...prev, formData.CustomerName]);
@@ -742,14 +773,30 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             handleInputChange('CustomerName', data.CompanyName);
             const val = `${data.ContactName}|${data.CompanyName}`;
             handleInputChange('ReceivedFrom', val);
+            const customersCatalog = masters.customers || [];
             const pairedLen = Math.min(customerList.length, receivedFromList.length);
+
+            if (customerList.length > receivedFromList.length) {
+                const nextSlotIdx = receivedFromList.length;
+                const slotCust = customerList[nextSlotIdx] || '';
+                if (isSameCompanyName(slotCust, data.CompanyName, customersCatalog)) {
+                    setReceivedFromList((prev) => [...prev, val]);
+                    return;
+                }
+            }
+
             const duplicatePair = customerList.slice(0, pairedLen).some(
-                (c, i) =>
-                    (c || '').trim() === (data.CompanyName || '').trim() &&
-                    receivedFromList[i] === val
+                (c, i) => isSameCompanyName(c, data.CompanyName, customersCatalog) && receivedFromList[i] === val
             );
             if (duplicatePair) {
                 alert('This customer and contact pair is already in the list');
+                return;
+            }
+
+            if (customerList.some((c) => isSameCompanyName(c, data.CompanyName, customersCatalog))) {
+                alert(
+                    'This customer / contractor is already in the list. Each company can appear only once — add another contact only when a row is still waiting for a Received From.'
+                );
                 return;
             }
             setCustomerList((prev) => [...prev, data.CompanyName]);
@@ -951,6 +998,10 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             newErrors.EnquiryForAssigneeIds = missingAssigneeIds;
         }
 
+        if (findDuplicateCustomerIndex(customerList, masters.customers || []) !== -1) {
+            newErrors.CustomerName = 'Duplicate customer / contractor name in the list — keep one row per company';
+        }
+
         // Date Validation Check
         if (formData.EnquiryDate && formData.DueOn && new Date(formData.DueOn) < new Date(formData.EnquiryDate)) {
             newErrors.DueOn = 'Due Date cannot be before Enquiry Date';
@@ -1071,16 +1122,22 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                 }
 
                 if (result.success) {
-                    // Upload pending files if any BEFORE triggering notification
+                    const savedRequestNo = String(formData.RequestNo || '').trim();
+                    // Upload pending files if any BEFORE showing success (order matters for attachments).
                     if (pendingFiles.length > 0) {
-                        await uploadPendingFiles(formData.RequestNo);
+                        await uploadPendingFiles(savedRequestNo);
                     }
 
-                    // Trigger Email Notification (Created Mode only)
-                    await sendNotification(formData.RequestNo);
-
-                    alert(`Enquiry Added: ${formData.RequestNo}`);
+                    alert(`Enquiry Added: ${savedRequestNo}`);
                     resetForm();
+
+                    // Do not await: /api/enquiries/notify loads data and sends SMTP mail synchronously,
+                    // which routinely exceeds 30s and blocked the UI. Email runs in the background.
+                    if (savedRequestNo) {
+                        void sendNotification(savedRequestNo).catch((err) =>
+                            console.error('[EnquiryForm] post-create notification failed:', err)
+                        );
+                    }
                 }
             }
         } catch (err) {

@@ -4,6 +4,27 @@
  * Scoped under .enquiry-results-table-root to beat Bootstrap table defaults.
  */
 
+.enquiry-results-table-root > .enquiry-results-table-project-total {
+    background: linear-gradient(180deg, #f8fafc 0%, #eef2f9 100%);
+    border: 1px solid rgba(203, 213, 225, 0.85);
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    margin-bottom: 0;
+}
+
+/* Join count strip + scroll frame when count is shown (single card silhouette). */
+.enquiry-results-table-root:has(> .enquiry-results-table-project-total) .enquiry-search-table-wrap {
+    border-radius: 0 0 18px 18px;
+}
+
+.enquiry-results-table-root:has(> .enquiry-results-table-project-total) .enquiry-search-table-wrap thead tr:first-child th:first-child {
+    border-top-left-radius: 0 !important;
+}
+
+.enquiry-results-table-root:has(> .enquiry-results-table-project-total) .enquiry-search-table-wrap thead tr:first-child th:last-child {
+    border-top-right-radius: 0 !important;
+}
+
 .enquiry-results-table-root .action-icon-hover:hover {
     background-color: rgba(13, 110, 253, 0.25) !important;
     transform: translateY(-2px);

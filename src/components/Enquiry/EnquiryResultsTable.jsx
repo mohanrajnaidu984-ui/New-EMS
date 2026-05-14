@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { getLeadJobDisplayLines } from '../../utils/leadJobDisplayLines';
 import {
     formatEnquiryResultDate,
@@ -28,6 +28,8 @@ const EnquiryResultsTable = ({
     masters,
     onRowOpen,
     emptyLabel = 'No results.',
+    /** When set (e.g. dashboard Quote Date modal), show total quote lines next to project count. */
+    headerQuotedTotal = null,
 }) => {
     const SortIcon = ({ column }) => {
         if (sortConfig?.key !== column) return <i className="bi bi-arrow-down-up ms-1 text-muted" style={{ fontSize: '10px' }}></i>;
@@ -35,6 +37,20 @@ const EnquiryResultsTable = ({
             ? <i className="bi bi-arrow-up ms-1 text-primary"></i>
             : <i className="bi bi-arrow-down ms-1 text-primary"></i>;
     };
+
+    /** Unique enquiries in the list (one row per enquiry counts once). */
+    const distinctProjectCount = useMemo(() => {
+        const keys = new Set();
+        (sortedRows || []).forEach((row, idx) => {
+            const no = getEnquiryRowRequestNo(row);
+            if (no) keys.add(`e:${no}`);
+            else {
+                const pn = String(row?.ProjectName ?? '').trim();
+                keys.add(pn ? `p:${pn.toLowerCase()}` : `row:${idx}`);
+            }
+        });
+        return keys.size;
+    }, [sortedRows]);
 
     const headerThStyle = {
         position: 'sticky',
@@ -54,6 +70,29 @@ const EnquiryResultsTable = ({
 
     return (
         <div className="enquiry-results-table-root w-100 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
+            {distinctProjectCount > 0 ? (
+                <div
+                    className="enquiry-results-table-project-total flex-shrink-0 px-2 py-1 d-flex align-items-center justify-content-between gap-2 flex-wrap"
+                    role="status"
+                    aria-live="polite"
+                >
+                    <div className="d-flex align-items-center gap-3 flex-wrap">
+                        <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
+                            Total projects:{' '}
+                            <span className="text-primary">{distinctProjectCount}</span>
+                        </span>
+                        {headerQuotedTotal != null && Number.isFinite(Number(headerQuotedTotal)) ? (
+                            <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
+                                Total quotes:{' '}
+                                <span className="text-success">{Number(headerQuotedTotal)}</span>
+                            </span>
+                        ) : null}
+                    </div>
+                    <span className="small text-muted" style={{ fontSize: '10px' }} title="Each enquiry number counts once, even if multiple lines appear.">
+                        Unique enquiries
+                    </span>
+                </div>
+            ) : null}
             <div className="enquiry-search-table-wrap">
                 <table
                     className="table table-sm table-hover align-middle"
@@ -89,6 +128,9 @@ const EnquiryResultsTable = ({
                             <th className="sortable-header" onClick={() => onSort('DueOn')} style={headerThStyle}>
                                 <div className="header-content">Due <SortIcon column="DueOn" /></div>
                             </th>
+                            <th className="sortable-header text-nowrap" onClick={() => onSort('SiteVisitDate')} style={headerThStyle}>
+                                <div className="header-content">Site visit date <SortIcon column="SiteVisitDate" /></div>
+                            </th>
                             <th className="sortable-header" style={headerThStyle} onClick={() => onSort('ClientName')}>
                                 <div className="header-content">Client <SortIcon column="ClientName" /></div>
                             </th>
@@ -108,7 +150,7 @@ const EnquiryResultsTable = ({
                     </thead>
                     <tbody>
                         {sortedRows.length === 0 ? (
-                            <tr><td colSpan="13" className="text-muted text-center">{emptyLabel}</td></tr>
+                            <tr><td colSpan="14" className="text-muted text-center">{emptyLabel}</td></tr>
                         ) : (
                             sortedRows.map((r, idx) => {
                                 const jobLines = getLeadJobDisplayLines(r, { users: masters?.users });
@@ -212,6 +254,7 @@ const EnquiryResultsTable = ({
                                             ))}
                                         </td>
                                         <td onClick={openThisRow} style={{ cursor: canActivate ? 'pointer' : 'default' }}>{formatEnquiryResultDate(r.DueOn ?? r.DueDate)}</td>
+                                        <td onClick={openThisRow} style={{ cursor: canActivate ? 'pointer' : 'default' }}>{formatEnquiryResultDate(r.SiteVisitDate)}</td>
                                         <td onClick={openThisRow} style={{ cursor: canActivate ? 'pointer' : 'default' }}>{r.ClientName}</td>
                                         <td onClick={openThisRow} style={{ cursor: canActivate ? 'pointer' : 'default' }}>{getEnquiryTypeDisplay(r)}</td>
                                         <td onClick={openThisRow} style={{ cursor: canActivate ? 'pointer' : 'default' }}>{getSourceOfInfoDisplay(r)}</td>

@@ -986,6 +986,7 @@ function buildEnquiryLeadQuoteDetailLines(requestNo, groupRows, allQuotes, price
                 textLine,
                 bdTotal: bdTotal != null && bdTotal > 0 ? bdTotal : null,
                 preparedBy,
+                quoteDate: qt && qt.QuoteDate != null && qt.QuoteDate !== '' ? qt.QuoteDate : null,
             });
         }
     }

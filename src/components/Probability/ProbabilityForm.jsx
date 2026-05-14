@@ -22,6 +22,16 @@ const PROB_LIST_DATE_PICKER_POPPER_MODIFIERS = [
     }),
 ];
 
+/** Portal + popper: above fixed header (9999) and probability thead stacking — all Probability date pickers. */
+const PROB_DATE_PICKER_POPPER_COMMON = {
+    popperClassName: 'prob-datepicker-popper',
+    portalId: 'prob-datepicker-portal',
+    popperProps: { strategy: 'fixed' },
+    popperPlacement: 'bottom-start',
+    showPopperArrow: false,
+    popperModifiers: PROB_LIST_DATE_PICKER_POPPER_MODIFIERS,
+};
+
 /** Lost To — search Master directory (contractors + clients) only after this many characters. */
 const LOST_TO_MIN_SEARCH_CHARS = 3;
 
@@ -172,6 +182,19 @@ const ProbabilityForm = () => {
             fetchList();
         }
     }, [listMode, fromDate, toDate, filterProbability, selectedDivision, currentUser]);
+
+    useEffect(() => {
+        if (!historyReqNo) return undefined;
+        const onKeyDown = (e) => {
+            if (e.key !== 'Escape') return;
+            e.preventDefault();
+            setHistoryReqNo('');
+            setHistoryRows([]);
+            setHistoryHeader({ projectName: '', leadJobName: '' });
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [historyReqNo]);
 
     const fetchList = async () => {
         setLoadingList(true);
@@ -1146,12 +1169,7 @@ const ProbabilityForm = () => {
                                                     dateFormat="dd-MMM-yy"
                                                     placeholderText="DD-MMM-YY"
                                                     className="form-control prob-date-input"
-                                                    popperClassName="prob-datepicker-popper"
-                                                    popperPlacement="bottom-start"
-                                                    showPopperArrow={false}
-                                                    popperProps={{ strategy: 'fixed' }}
-                                                    portalId="prob-datepicker-portal"
-                                                    popperModifiers={PROB_LIST_DATE_PICKER_POPPER_MODIFIERS}
+                                                    {...PROB_DATE_PICKER_POPPER_COMMON}
                                                     todayButton="Today"
                                                     clearButtonTitle="Clear"
                                                     isClearable
@@ -1168,12 +1186,7 @@ const ProbabilityForm = () => {
                                                     dateFormat="dd-MMM-yy"
                                                     placeholderText="DD-MMM-YY"
                                                     className="form-control prob-date-input"
-                                                    popperClassName="prob-datepicker-popper"
-                                                    popperPlacement="bottom-start"
-                                                    showPopperArrow={false}
-                                                    popperProps={{ strategy: 'fixed' }}
-                                                    portalId="prob-datepicker-portal"
-                                                    popperModifiers={PROB_LIST_DATE_PICKER_POPPER_MODIFIERS}
+                                                    {...PROB_DATE_PICKER_POPPER_COMMON}
                                                     todayButton="Today"
                                                     clearButtonTitle="Clear"
                                                     isClearable
@@ -1989,6 +2002,7 @@ const ProbabilityForm = () => {
                                                                                     dateFormat="dd-MMM-yyyy"
                                                                                     className="form-control form-control-sm"
                                                                                     placeholderText="dd-MMM-yyyy"
+                                                                                    {...PROB_DATE_PICKER_POPPER_COMMON}
                                                                                     onClick={(e) => e.stopPropagation()}
                                                                                     onKeyDown={(e) => e.stopPropagation()}
                                                                                     wrapperClassName="w-100"
@@ -2182,6 +2196,7 @@ const ProbabilityForm = () => {
                                                                                 dateFormat="dd-MMM-yyyy"
                                                                                 className="form-control form-control-sm"
                                                                                 placeholderText="dd-MMM-yyyy"
+                                                                                {...PROB_DATE_PICKER_POPPER_COMMON}
                                                                                 onClick={(e) => e.stopPropagation()}
                                                                                 onKeyDown={(e) => e.stopPropagation()}
                                                                                 wrapperClassName="w-100"

@@ -1016,6 +1016,8 @@ const PricingForm = ({ openContext = null }) => {
     /** Start true so first paint does not flash "No pending items" before the initial fetch runs. */
     const [pendingListLoading, setPendingListLoading] = useState(true);
     const [pendingListError, setPendingListError] = useState(null);
+    /** Shown when GET /api/pricing/:id fails (e.g. 500) — replaces broken `setError` reference. */
+    const [pricingLoadError, setPricingLoadError] = useState(null);
     const [pendingSortConfig, setPendingSortConfig] = useState({
         field: 'LatestPriceUpdated',
         direction: 'desc',
@@ -1158,6 +1160,7 @@ const PricingForm = ({ openContext = null }) => {
     const closePricingEditor = useCallback(() => {
         setPricingEditorStandalone(false);
         setPricingData(null);
+        setPricingLoadError(null);
         setSelectedEnquiry(null);
         setSelectedLeadId(null);
         try {
@@ -1370,6 +1373,7 @@ const PricingForm = ({ openContext = null }) => {
         setSuggestions([]);
         setShowSuggestions(false);
         setPricingData(null);
+        setPricingLoadError(null);
         setSelectedEnquiry(null);
         setValues({});
         setSelectedCustomer('');
@@ -1384,7 +1388,10 @@ const PricingForm = ({ openContext = null }) => {
         const forcePreserveZeroKeys = new Set(loadOptions?.forcePreserveZeroKeys || []);
         const preserveSourceCustomerKey = normalizePricingCustomerKey(loadOptions?.preserveSourceCustomerKey || '');
         const silentRefresh = loadOptions?.silentRefresh === true;
-        if (!silentRefresh) setLoading(true);
+        if (!silentRefresh) {
+            setLoading(true);
+            setPricingLoadError(null);
+        }
         setSelectedEnquiry(requestNo);
 
         try {
@@ -1398,11 +1405,21 @@ const PricingForm = ({ openContext = null }) => {
             const res = await fetch(url, { cache: 'no-store' });
 
             if (!res.ok) {
-                const errData = await res.json();
-                console.error('Failed to load pricing:', errData);
+                let errMessage = `Failed to load pricing (${res.status})`;
+                let errPayload = null;
+                try {
+                    errPayload = await res.json();
+                    console.error('Failed to load pricing:', errPayload);
+                    if (errPayload && (errPayload.error || errPayload.message)) {
+                        errMessage = String(errPayload.error || errPayload.message);
+                    }
+                } catch {
+                    /* non-JSON error body */
+                }
                 if (res.status === 404) {
+                    setPricingLoadError(null);
                     setPricingData({
-                        enquiry: errData.enquiry || { RequestNo: requestNo },
+                        enquiry: (errPayload && errPayload.enquiry) || { RequestNo: requestNo },
                         jobs: [],
                         options: [],
                         values: [],
@@ -1410,9 +1427,11 @@ const PricingForm = ({ openContext = null }) => {
                         access: { canEditAll: false, visibleJobs: [], editableJobs: [], hasLeadAccess: false }
                     });
                 } else {
-                    setError(errData.error || 'Failed to load pricing');
+                    setPricingData(null);
+                    if (!silentRefresh) setPricingLoadError(errMessage);
                 }
             } else {
+                setPricingLoadError(null);
                 const data = await res.json();
 
                 // SANITIZATION: Globally Trim Customer Names to prevent mismatch (Step 944)
@@ -2299,6 +2318,10 @@ const PricingForm = ({ openContext = null }) => {
             }
         } catch (err) {
             console.error('Error loading pricing:', err);
+            if (!silentRefresh) {
+                setPricingData(null);
+                setPricingLoadError(err?.message || 'Network error while loading pricing.');
+            }
         } finally {
             if (!silentRefresh) setLoading(false);
         }
@@ -4482,6 +4505,45 @@ const PricingForm = ({ openContext = null }) => {
                         <ChevronLeft size={14} aria-hidden />
                         Back to pricing list
                     </button>
+                </div>
+            )}
+
+            {pricingEditorStandalone && !loading && !pricingData && pricingLoadError && (
+                <div
+                    style={{
+                        marginBottom: '16px',
+                        padding: '16px 18px',
+                        borderRadius: '8px',
+                        border: '1px solid #fecaca',
+                        background: '#fef2f2',
+                        color: '#991b1b',
+                        fontSize: '13px',
+                        lineHeight: 1.45,
+                    }}
+                >
+                    <div style={{ marginBottom: '10px', display: 'flex', alignItems: 'center' }}>
+                        <button
+                            type="button"
+                            onClick={closePricingEditor}
+                            style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                padding: '5px 10px',
+                                fontSize: '11.5px',
+                                fontWeight: '600',
+                                color: '#1e40af',
+                                background: '#fff',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            <ChevronLeft size={14} aria-hidden />
+                            Back to pricing list
+                        </button>
+                    </div>
+                    <strong>Could not load pricing.</strong> {pricingLoadError}
                 </div>
             )}
 

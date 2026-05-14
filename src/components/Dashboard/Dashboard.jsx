@@ -6,6 +6,7 @@ import DashboardFilters from './LeftPanel/DashboardFilters';
 import CalendarView from './LeftPanel/CalendarView';
 import CalendarBarChart from './LeftPanel/CalendarBarChart';
 import EnquiryResultsTable from '../Enquiry/EnquiryResultsTable';
+import DashboardQuoteSummaryTable from './DashboardQuoteSummaryTable';
 import { attachCanEditFlag } from '../../utils/enquiryResultsHelpers';
 import { sortEnquiryRows } from '../../utils/enquiryResultsSort';
 import { resolveEffectiveSalesEngineerFilter } from '../../utils/dashboardCcAccess';
@@ -97,6 +98,29 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
     const [resultsModalOpen, setResultsModalOpen] = useState(false);
     const [modalSortConfig, setModalSortConfig] = useState({ key: 'EnquiryDate', direction: 'desc' });
+    const [quoteSummaryRows, setQuoteSummaryRows] = useState([]);
+    /** Same as GET /calendar quoted total (EnquiryQuotes row count); not UI lead-line sum. */
+    const [quoteSummaryCalendarQuotedCount, setQuoteSummaryCalendarQuotedCount] = useState(null);
+    const [quoteSummaryLoading, setQuoteSummaryLoading] = useState(false);
+
+    const showDashboardQuoteSummaryTable = useMemo(() => {
+        if (!resultsModalOpen) return false;
+        if (dateState.selectedType === 'quote') return true;
+        if (filters.dateType === 'Quote Date' && !dateState.selectedDate) return true;
+        return false;
+    }, [resultsModalOpen, dateState.selectedType, dateState.selectedDate, filters.dateType]);
+
+    /** Quote summary header totals: count only lines whose QuoteDate falls in this window (day chip or monthly Quote Date). */
+    const quoteSummaryDateScope = useMemo(() => {
+        if (!showDashboardQuoteSummaryTable) return null;
+        const day = String(dateState.selectedDate || '').trim();
+        if (day) return { day };
+        const dt = (filters.dateType || '').toString();
+        if ((dt === 'Quote Date' || dt === 'Quote date') && filters.fromDate && filters.toDate) {
+            return { from: String(filters.fromDate).trim(), to: String(filters.toDate).trim() };
+        }
+        return null;
+    }, [showDashboardQuoteSummaryTable, dateState.selectedDate, filters.dateType, filters.fromDate, filters.toDate]);
 
     const modalTableRows = useMemo(() => {
         const normalized = (filteredTableData || []).map((r) => ({
@@ -113,6 +137,18 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         [modalTableRows, modalSortConfig]
     );
 
+    /** Sum of scoped quote rows in the modal list when filtering by Quote Date — only after the Quoted calendar chip (not Enquiry/Due/Lapsed/Visit). */
+    const dashboardModalHeaderQuotedTotal = useMemo(() => {
+        if (!resultsModalOpen || showDashboardQuoteSummaryTable) return undefined;
+        if (dateState.selectedType !== 'quote') return undefined;
+        const dt = (filters.dateType || '').toString();
+        if (dt !== 'Quote Date' && dt !== 'Quote date') return undefined;
+        return modalSortedRows.reduce(
+            (s, r) => s + (Number.isFinite(Number(r.ScopedQuotesCount)) ? Number(r.ScopedQuotesCount) : 0),
+            0,
+        );
+    }, [resultsModalOpen, showDashboardQuoteSummaryTable, dateState.selectedType, filters.dateType, modalSortedRows]);
+
     const handleModalSort = (key) => {
         let direction = 'asc';
         if (modalSortConfig.key === key && modalSortConfig.direction === 'asc') {
@@ -125,6 +161,90 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         setResultsModalOpen(false);
         if (onOpenEnquiry) onOpenEnquiry(reqNo);
     };
+
+    useEffect(() => {
+        if (!showDashboardQuoteSummaryTable || !currentUser) {
+            setQuoteSummaryRows([]);
+            setQuoteSummaryCalendarQuotedCount(null);
+            setQuoteSummaryLoading(false);
+            return undefined;
+        }
+        const ac = new AbortController();
+        (async () => {
+            setQuoteSummaryLoading(true);
+            try {
+                const salesEngineerForApi = resolveEffectiveSalesEngineerFilter({
+                    salesEngineer: filters.salesEngineer,
+                    division: filters.division,
+                    enqItems: masters.enqItems,
+                    users: masters.users,
+                    currentUserEmail: currentUser?.email || currentUser?.EmailId || '',
+                });
+                const listParams = new URLSearchParams({
+                    division: filters.division,
+                    salesEngineer: salesEngineerForApi,
+                    mode: filters.mode,
+                    userEmail: currentUser.email || currentUser.EmailId || '',
+                    userName: currentUser.name || '',
+                    userRole: currentUser.role || currentUser.Roles || 'User',
+                });
+                if (dateState.selectedDate) {
+                    listParams.set('date', dateState.selectedDate);
+                } else {
+                    if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
+                    if (filters.toDate) listParams.set('toDate', filters.toDate);
+                    if (filters.dateType === 'Lapsed') {
+                        listParams.set('dateType', 'Due Date');
+                        listParams.set('status', 'Lapsed');
+                    } else {
+                        listParams.set('dateType', filters.dateType);
+                        if (filters.status && filters.status !== 'All') listParams.set('status', filters.status);
+                    }
+                    if (filters.search) listParams.set('search', filters.search);
+                }
+                const res = await fetch(`${API_URL}/quote-summary-rows?${listParams}`, {
+                    signal: ac.signal,
+                    cache: 'no-store',
+                });
+                const data = res.ok ? await res.json() : null;
+                if (!ac.signal.aborted) {
+                    if (Array.isArray(data)) {
+                        setQuoteSummaryRows(data);
+                        setQuoteSummaryCalendarQuotedCount(null);
+                    } else {
+                        setQuoteSummaryRows(Array.isArray(data?.rows) ? data.rows : []);
+                        setQuoteSummaryCalendarQuotedCount(
+                            typeof data?.calendarQuotedCount === 'number' ? data.calendarQuotedCount : null,
+                        );
+                    }
+                }
+            } catch (e) {
+                if (e?.name !== 'AbortError') console.error('Dashboard quote-summary fetch:', e);
+                if (!ac.signal.aborted) {
+                    setQuoteSummaryRows([]);
+                    setQuoteSummaryCalendarQuotedCount(null);
+                }
+            } finally {
+                if (!ac.signal.aborted) setQuoteSummaryLoading(false);
+            }
+        })();
+        return () => ac.abort();
+    }, [
+        showDashboardQuoteSummaryTable,
+        currentUser,
+        filters.division,
+        filters.salesEngineer,
+        filters.fromDate,
+        filters.toDate,
+        filters.dateType,
+        filters.mode,
+        filters.status,
+        filters.search,
+        dateState.selectedDate,
+        masters.enqItems,
+        masters.users,
+        dashboardRefreshCounter,
+    ]);
 
     useEffect(() => {
         if (currentUser && masters.enquiryFor && masters.enqItems) {
@@ -187,8 +307,8 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         }
     }, [currentUser, masters.enqItems, masters.enquiryFor]);
 
-    // Fetch Data — all dashboard endpoints in parallel; AbortSignal drops stale runs when filters change quickly
-    const fetchData = async (signal) => {
+    // Fetch calendars + summary always; enquiry list only when the results modal is open (heavy query).
+    const fetchData = async (signal, includeEnquiries) => {
         setLoading(true);
         try {
             // preparing params
@@ -258,40 +378,51 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
             const fetchOpts = signal ? { signal } : {};
 
-            const [calLeftRes, calRightRes, sumRes, listRes] = await Promise.all([
+            const calFetches = [
                 fetch(`${API_URL}/calendar?${calLeftParams}`, fetchOpts),
                 fetch(`${API_URL}/calendar?${calRightParams}`, fetchOpts),
                 fetch(`${API_URL}/summary?${sumParams}`, fetchOpts),
-                fetch(`${API_URL}/enquiries?${listParams}`, fetchOpts),
-            ]);
+            ];
 
-            if (signal?.aborted) return;
-
-            const [calLeftRaw, calRightRaw, sumDataRaw, listDataRaw] = await Promise.all([
-                calLeftRes.ok ? calLeftRes.json() : Promise.resolve([]),
-                calRightRes.ok ? calRightRes.json() : Promise.resolve([]),
-                sumRes.ok ? sumRes.json() : Promise.resolve({}),
-                listRes.ok ? listRes.json() : Promise.resolve([]),
-            ]);
-
-            if (signal?.aborted) return;
-
-            if (!listRes.ok) {
-                console.error('Enquiry API Failed:', listRes.status, listRes.statusText);
+            if (includeEnquiries) {
+                calFetches.push(fetch(`${API_URL}/enquiries?${listParams}`, fetchOpts));
             }
 
-            let listData = Array.isArray(listDataRaw) ? listDataRaw : [];
+            const responses = await Promise.all(calFetches);
 
-            const leftCal = normalizeCalendarPayload(calLeftRaw);
-            const rightCal = normalizeCalendarPayload(calRightRaw);
+            if (signal?.aborted) return;
+
+            const calLeftRes = responses[0];
+            const calRightRes = responses[1];
+            const sumRes = responses[2];
+            const listRes = includeEnquiries ? responses[3] : null;
+
+            const calLeftParsed = calLeftRes.ok ? await calLeftRes.json() : [];
+            const calRightParsed = calRightRes.ok ? await calRightRes.json() : [];
+            const sumParsed = sumRes.ok ? await sumRes.json() : {};
+
+            let listData = [];
+            if (includeEnquiries && listRes) {
+                if (!listRes.ok) {
+                    console.error('Enquiry API Failed:', listRes.status, listRes.statusText);
+                } else {
+                    const raw = await listRes.json();
+                    listData = Array.isArray(raw) ? raw : [];
+                }
+            }
+
+            if (signal?.aborted) return;
+
+            const leftCal = normalizeCalendarPayload(calLeftParsed);
+            const rightCal = normalizeCalendarPayload(calRightParsed);
 
             setData({
                 calendarLeft: leftCal.daily,
                 calendarTotalsLeft: leftCal.totals,
                 calendarRight: rightCal.daily,
                 calendarTotalsRight: rightCal.totals,
-                summary: sumDataRaw || {},
-                table: listData,
+                summary: sumParsed || {},
+                table: includeEnquiries ? listData : [],
             });
         } catch (err) {
             if (err?.name === 'AbortError') return;
@@ -338,11 +469,28 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
 
         const dueVal = (row) => row.DueDate ?? row.DueOn;
 
+        /** YYYY-MM-DD for "today" in local timezone (matches calendar cell dates). */
+        const todayLocalYmd = () => {
+            const d = new Date();
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        };
+        const quotedLikeStatuses = new Set(['Quote', 'Won', 'Lost', 'Quoted', 'Submitted']);
+
         const filtered = data.table.filter((row) => {
             const compareDate = (dateVal) => localYmd(dateVal) === targetDate;
 
             if (type === 'enquiry') return compareDate(row.EnquiryDate);
-            if (type === 'due') return compareDate(dueVal(row));
+            if (type === 'due') {
+                if (!compareDate(dueVal(row))) return false;
+                const dueY = localYmd(dueVal(row));
+                if (!dueY || dueY > todayLocalYmd()) return false;
+                if (Number(row.HasQuoteInScope) === 1) return false;
+                if (row.Status && quotedLikeStatuses.has(row.Status)) return false;
+                return true;
+            }
             if (type === 'visit') return compareDate(row.SiteVisitDate);
             if (type === 'lapsed') {
                 const isDueOnDate = compareDate(dueVal(row));
@@ -358,6 +506,16 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         setFilteredTableData(filtered);
     }, [data.table, dateState.selectedDate, dateState.selectedType]);
 
+    useEffect(() => {
+        if (!resultsModalOpen) return undefined;
+        const onKeyDown = (e) => {
+            if (e.key !== 'Escape') return;
+            e.preventDefault();
+            setResultsModalOpen(false);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [resultsModalOpen]);
 
     // Effects
     useEffect(() => {
@@ -371,8 +529,8 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     useEffect(() => {
         const ac = new AbortController();
         const timer = setTimeout(() => {
-            fetchData(ac.signal);
-        }, 120); // Short debounce — parallel /calendar/summary/enquiries already minimize wall time
+            fetchData(ac.signal, resultsModalOpen);
+        }, 120); // Short debounce — skip heavy /enquiries until the results modal is open
         return () => {
             clearTimeout(timer);
             ac.abort();
@@ -392,6 +550,7 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         filters.search,
         filters.status,
         dashboardRefreshCounter,
+        resultsModalOpen,
     ]);
 
     // Handlers
@@ -603,22 +762,38 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                                     minHeight: '260px',
                                 }}
                             >
-                                {loading && modalSortedRows.length === 0 ? (
-                                    <div className="text-center text-muted py-3 small flex-shrink-0">Loading enquiries…</div>
-                                ) : null}
+                                {showDashboardQuoteSummaryTable
+                                    ? quoteSummaryLoading && quoteSummaryRows.length === 0 && (
+                                          <div className="text-center text-muted py-3 small flex-shrink-0">Loading quote summary…</div>
+                                      )
+                                    : loading &&
+                                      modalSortedRows.length === 0 && (
+                                          <div className="text-center text-muted py-3 small flex-shrink-0">Loading enquiries…</div>
+                                      )}
                                 {/* Table inner layout uses flex:1 + minHeight:0; needs a parent with real height or the scroll area collapses to blank */}
                                 <div
                                     className="d-flex flex-column flex-grow-1"
                                     style={{ minHeight: 0, height: 'min(72vh, 780px)' }}
                                 >
-                                    <EnquiryResultsTable
-                                        sortedRows={modalSortedRows}
-                                        sortConfig={modalSortConfig}
-                                        onSort={handleModalSort}
-                                        masters={masters}
-                                        onRowOpen={handleModalRowOpen}
-                                        emptyLabel="No enquiries for this selection."
-                                    />
+                                    {showDashboardQuoteSummaryTable ? (
+                                        <DashboardQuoteSummaryTable
+                                            rows={quoteSummaryRows}
+                                            onOpenEnquiry={handleModalRowOpen}
+                                            emptyLabel="No quoted enquiries for this selection."
+                                            quoteDateScope={quoteSummaryDateScope}
+                                            calendarAlignedQuoteTotal={quoteSummaryCalendarQuotedCount}
+                                        />
+                                    ) : (
+                                        <EnquiryResultsTable
+                                            sortedRows={modalSortedRows}
+                                            sortConfig={modalSortConfig}
+                                            onSort={handleModalSort}
+                                            masters={masters}
+                                            onRowOpen={handleModalRowOpen}
+                                            emptyLabel="No enquiries for this selection."
+                                            headerQuotedTotal={dashboardModalHeaderQuotedTotal}
+                                        />
+                                    )}
                                 </div>
                             </div>
                         </div>

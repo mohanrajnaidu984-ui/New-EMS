@@ -3194,8 +3194,11 @@ router.get('/:requestNo', async (req, res) => {
         let userDepartmentRaw = '';
 
         if (userEmail) {
+            const normalizedUserEmail = String(userEmail || '')
+                .trim()
+                .toLowerCase()
+                .replace(/@almcg\.com/g, '@almoayyedcg.com');
             try {
-                const normalizedUserEmail = String(userEmail || '').trim().toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
                 const userResult = await sql.query`
                     SELECT FullName, Roles, Department FROM Master_ConcernedSE WHERE EmailId = ${userEmail}
                 `;
