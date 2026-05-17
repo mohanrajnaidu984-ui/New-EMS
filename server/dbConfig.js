@@ -18,9 +18,15 @@ const config = {
 };
 
 const connectDB = async () => {
-    if (!config.server) {
+    const missing = [];
+    if (!String(config.user || '').trim()) missing.push('DB_USER');
+    if (config.password === undefined || config.password === null) missing.push('DB_PASSWORD');
+    if (!String(config.server || '').trim()) missing.push('DB_SERVER');
+    if (!String(config.database || '').trim()) missing.push('DB_DATABASE');
+    if (missing.length) {
         const msg =
-            'DB_SERVER is missing or empty. Ensure server/.env exists next to dbConfig.js with DB_USER, DB_PASSWORD, DB_SERVER, and DB_DATABASE (see EMS_Active/server/.env in the repo root).';
+            `Missing or empty in server/.env: ${missing.join(', ')}. ` +
+            'Set these for SQL Server authentication, then restart the server.';
         console.error(msg);
         throw new Error(msg);
     }

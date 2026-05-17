@@ -76,8 +76,6 @@ async function runQuotedQuoteListQuery(sqlConn, rawUserEmail, extraWhereSql = ''
     if (userEmail) {
         userEmail = userEmail.toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com').trim();
     }
-    console.log(`[API] Quoted quote list query for ${userEmail || 'All'}...`);
-
     const accessCtx = userEmail ? await resolvePricingAccessContext(userEmail) : null;
     if (userEmail && (!accessCtx || !accessCtx.user)) {
         return { enquiries: [], accessCtx: accessCtx || null, userEmail };

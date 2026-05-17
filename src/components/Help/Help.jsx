@@ -94,22 +94,25 @@ const Help = () => {
           <div className="text-secondary mb-3">
             <p className="mb-1"><strong>1. Dashboard</strong></p>
             <p className="mb-1">
-              <strong>Purpose:</strong> Quick business snapshot and navigation center.
+              <strong>Purpose:</strong> Calendar-based snapshot of enquiry activity with drill-down lists for daily and monthly review.
             </p>
             <p className="mb-1">
-              <strong>What to review:</strong> latest activities, pending items, summary visuals, and movement trends.
+              <strong>Calendar views:</strong> Two calendars—Enquiry Received and Due Date—with monthly bar charts for Enquiry Received, Due, Lapsed, and Quoted. Filter by division and sales engineer (SE).
             </p>
             <p className="mb-1">
-              <strong>Typical user action:</strong> Start the day on Dashboard, identify priority items, then open Enquiry/Pricing/Probability directly.
+              <strong>Due and Lapsed rules:</strong> Due counts enquiries with no quote and due date today or later. Lapsed counts enquiries with no quote and due date before today. Once any quote exists on an enquiry, it is excluded from Due and Lapsed on both calendars and in list popups. Monthly bar totals match the sum of day-by-day chips.
+            </p>
+            <p className="mb-1">
+              <strong>Typical user action:</strong> Start on Dashboard, click a day chip or monthly bar segment to open the matching enquiry list, then open records in Enquiry or Pricing as needed.
             </p>
             <p className="mb-0">
-              <strong>Example:</strong> If pending follow-ups increased today, navigate to Probability and update due records first.
+              <strong>Example:</strong> On the Due Date calendar, click today&apos;s Due chip to see open enquiries due today with no quote yet; follow up before they move to Lapsed.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Process view:</strong> Dashboard &rarr; identify priority &rarr; open specific module &rarr; complete update &rarr; return for next priority.
+              <strong>Process view:</strong> Dashboard &rarr; filter division/SE &rarr; review chips or bars &rarr; open list popup &rarr; complete action in Enquiry/Pricing/Quote.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Expected output:</strong> Clear daily action queue and faster navigation to pending records.
+              <strong>Expected output:</strong> Consistent due/lapsed visibility aligned between calendar chips, monthly bars, and enquiry list popups.
             </p>
           </div>
 
@@ -119,22 +122,28 @@ const Help = () => {
               <strong>Purpose:</strong> Create and maintain enquiry master data.
             </p>
             <p className="mb-1">
-              <strong>Key fields:</strong> enquiry number, customer, project name, source, division, assigned SE, scope details.
+              <strong>Key fields:</strong> enquiry number, customers, received-from contacts, enquiry-for hierarchy, concerned SEs, due date, attachments, division, and status.
             </p>
             <p className="mb-1">
-              <strong>How to use:</strong> Create new enquiry, validate mandatory fields, save, then use modify/search flows for updates.
+              <strong>How to use:</strong> Create or modify enquiry, validate mandatory fields, save. Use search and modify flows for updates. On Windows with classic Outlook installed, email actions run from the EMS server or optional local helper.
+            </p>
+            <p className="mb-1">
+              <strong>Internal notification (on Add Enquiry):</strong> After a successful add, EMS can send an internal notification email via Outlook to all concerned SEs (To), with division CC addresses from master data. This is sent automatically when Outlook integration is available.
+            </p>
+            <p className="mb-1">
+              <strong>Customer acknowledgement (optional):</strong> Before saving a new active enquiry, check <strong>Send acknowledgement mail</strong>, select the point-of-contact SE, and ensure customer/received-from email pairs are complete. EMS opens one Outlook draft per customer (not auto-sent). Each draft is addressed to the received-from contact, with concerned SEs and division CCs. The selected SE appears as contact in the body; your default Outlook signature is used.
             </p>
             <p className="mb-0">
-              <strong>Example:</strong> Customer submits a new MEP request. Register enquiry with project location, assign division, then pass to Pricing.
+              <strong>Example:</strong> Register a new enquiry with two customers, enable acknowledgement, choose the lead SE, save—review and send each Outlook draft to the respective customer contact.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> New Enquiry &rarr; fill mandatory fields &rarr; save &rarr; verify generated enquiry reference &rarr; move to Pricing.
+              <strong>Step process:</strong> New Enquiry &rarr; fill mandatory fields &rarr; set concerned SEs and emails &rarr; optionally enable acknowledgement &rarr; save &rarr; review Outlook mail &rarr; move to Pricing.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Validation notes:</strong> Ensure customer name, project name, division, and contact context are complete before save.
+              <strong>Validation notes:</strong> Customer name, project name, division, due date, and contact emails must be complete. Acknowledgement requires a selected SE and valid received-from email per customer row.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Expected output:</strong> One reliable enquiry record that all downstream modules can reference.
+              <strong>Expected output:</strong> One reliable enquiry record, internal team notified, and optional customer acknowledgement drafts ready to send.
             </p>
           </div>
 
@@ -169,22 +178,25 @@ const Help = () => {
               <strong>Purpose:</strong> Manage customer-facing quotes and revisions.
             </p>
             <p className="mb-1">
-              <strong>Key activities:</strong> select enquiry, create quote reference, track quote date, update revision, map lead job and customer.
+              <strong>Key activities:</strong> select enquiry, create quote reference and revisions, edit clauses, map lead job and customer, preview A4 layout, download PDF, send via Outlook.
             </p>
             <p className="mb-1">
-              <strong>How to use:</strong> Create initial quote, then issue revisions when required. Ensure latest revision reflects final commercial terms.
+              <strong>Preview and PDF:</strong> Use A4 preview to verify cover letter, headers, clause content, and pricing summary tables before download. PDF download produces a protected document (editing/copying restricted; printing allowed). Preview styling matches the generated PDF.
+            </p>
+            <p className="mb-1">
+              <strong>Outlook email:</strong> On Windows with classic Outlook, open a draft or send the quote PDF as an attachment from the quote screen. Ensure Outlook is running and the EMS server (or local helper on port 39281) can reach Outlook.
             </p>
             <p className="mb-0">
-              <strong>Example:</strong> Quote Ref R0 issued on first submission; after negotiation, create R1 with changed value and keep both in history.
+              <strong>Example:</strong> Finalize R0 in preview, download protected PDF for records, then open Outlook draft to attach PDF and send to the customer contact.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Select enquiry &rarr; create quote reference &rarr; publish/send &rarr; if revised, create next revision with reason.
+              <strong>Step process:</strong> Select enquiry &rarr; create quote &rarr; edit clauses and pricing summary &rarr; preview &rarr; download PDF or Outlook draft &rarr; create revisions when terms change.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Validation notes:</strong> Always confirm latest revision selection before status updates in Probability.
+              <strong>Validation notes:</strong> Confirm latest revision before Probability updates. Creating any quote removes the enquiry from Dashboard Due/Lapsed counts.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Expected output:</strong> Complete quote trail with clear revision history and dates.
+              <strong>Expected output:</strong> Complete quote trail with aligned preview/PDF and optional customer delivery via Outlook.
             </p>
           </div>
 
@@ -397,6 +409,17 @@ const Help = () => {
               <li>If alignment or field rendering appears incorrect, refresh page and reopen the record.</li>
               <li>If status-based fields are not visible, ensure selected status is saved before editing details.</li>
               <li>If target impact is not visible, verify that the opportunity is marked Won with final values.</li>
+            </ul>
+          </div>
+
+          <h6 className="mb-2 mt-2" style={sectionTitleStyle}>Outlook Integration (Windows)</h6>
+          <div className="text-secondary mb-4">
+            <ul className="mb-0" style={{ paddingLeft: '1.1rem' }}>
+              <li>Enquiry internal notifications and customer acknowledgement drafts require <strong>classic Outlook on Windows</strong>.</li>
+              <li>Internal enquiry mail is sent automatically after add; customer acknowledgement opens drafts for you to review and send.</li>
+              <li>Quote PDF mail uses the same Outlook integration for draft or send with attachment.</li>
+              <li>Keep the EMS server running after backend updates. Optional: run <code>node scripts/quote-outlook-local-helper.js</code> if your environment uses the local helper on port 39281.</li>
+              <li>Ensure contact emails exist in master data for SEs and received-from contacts used in To/CC fields.</li>
             </ul>
           </div>
 

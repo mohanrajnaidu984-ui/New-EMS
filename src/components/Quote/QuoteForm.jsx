@@ -1,6 +1,29 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useId } from 'react';
 import { createPortal } from 'react-dom';
-import { FileText, Save, Printer, Mail, Plus, ChevronDown, ChevronUp, X, Trash2, FolderOpen, Paperclip, Download, PenTool, GripVertical } from 'lucide-react';
+import {
+    FileText,
+    Save,
+    Printer,
+    Mail,
+    MapPin,
+    Plus,
+    ChevronDown,
+    ChevronUp,
+    X,
+    Trash2,
+    FolderOpen,
+    Paperclip,
+    BookUser,
+    Download,
+    PenTool,
+    GripVertical,
+    Calendar,
+    User,
+    Phone,
+    Smartphone,
+    Tag,
+    Clock,
+} from 'lucide-react';
 import CreatableSelect from 'react-select/creatable';
 import { format, parseISO, addDays } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
@@ -9,13 +32,60 @@ import {
     EMS_LIST_SEARCH_DISABLED_STYLE,
     EMS_LIST_CLEAR_STYLE,
 } from '../../constants/emsSearchButtons';
-import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
+import {
+    EMS_TABLE_HEADER_GRADIENT,
+    EMS_QUOTE_ACCENT_HEADER_PADDING,
+    EMS_QUOTE_ACCENT_HEADER_FONT_SIZE,
+    EMS_QUOTE_ACCENT_HEADER_LINE_HEIGHT,
+    EMS_QUOTE_COVER_META_MID_BG,
+    EMS_QUOTE_CLAUSE_HEADING_BG,
+    EMS_QUOTE_CLAUSE_HEADING_TEXT_COLOR,
+    EMS_QUOTE_CLAUSE_HEADING_BORDER_RADIUS,
+    EMS_QUOTE_CLAUSE_HEADING_PADDING_Y,
+    EMS_QUOTE_CLAUSE_HEADING_PADDING_X,
+    EMS_QUOTE_CLAUSE_HEADING_MARGIN_TOP,
+    EMS_QUOTE_CLAUSE_HEADING_MARGIN_BOTTOM,
+    EMS_QUOTE_CLAUSE_HEADING_FONT_SIZE,
+    EMS_QUOTE_CLAUSE_HEADING_LINE_HEIGHT,
+    EMS_QUOTE_COVER_SIGN_OFF_MIN_HEIGHT,
+    EMS_QUOTE_COVER_SIGN_OFF_MIN_HEIGHT_PREVIEW,
+    EMS_QUOTE_COVER_SIGN_OFF_BODY_PAD_BOTTOM_PREVIEW,
+    EMS_QUOTE_COVER_SIGN_OFF_FOR_GAP_EM,
+    EMS_QUOTE_COVER_SIGN_OFF_PREVIEW_HEIGHT_SCALE,
+    EMS_QUOTE_PANEL_LABEL_NAV_GRADIENT,
+    EMS_QUOTE_HEADER_ADDRESS_COL_MAX_WIDTH,
+    EMS_QUOTE_HEADER_QUOTE_COL_WIDTH,
+    EMS_QUOTE_HEADER_QUOTE_LABEL_WIDTH,
+    EMS_QUOTE_PRINT_FOOTER_MIN_HEIGHT,
+    EMS_QUOTE_PRINT_FOOTER_RULE_WIDTH,
+    EMS_QUOTE_LOGO_ROW_MARGIN_BOTTOM,
+    EMS_QUOTE_PRICING_TABLE_CELL_BORDER,
+    EMS_QUOTE_PRICING_TABLE_OUTER_BORDER,
+    EMS_QUOTE_PRICING_TABLE_HEAD_CELL_BORDER,
+    EMS_QUOTE_PRICING_TABLE_MARGIN_TOP,
+    EMS_QUOTE_PRICING_TABLE_HEADER_BG,
+    EMS_QUOTE_PRICING_TABLE_HEADER_COLOR,
+    EMS_QUOTE_PRICING_TABLE_TOTAL_BG,
+} from '../../constants/emsTheme';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
 import { resolveQuoteSummaryPriceFromRows, leadJobRowMatches } from './quoteEnquiryPricingLookup';
 import ListBoxControl from '../Enquiry/ListBoxControl';
 import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
-import { buildQuotePrintDocumentHtml, captureQuotePrintRootInnerHtmlForPdf } from './quotePrintDocumentHtml';
+import {
+    applyEqualCoverGaps,
+    buildQuotePrintDocumentHtml,
+    captureQuotePrintRootInnerHtmlForPdf,
+    COVER_LETTER_PAD_BOTTOM_BASE_PX,
+    syncCoverLetterGapBeforePdfCapture,
+} from './quotePrintDocumentHtml';
+import {
+    buildClauseSegmentsForPagination,
+    mergeSegmentsIntoSheetBlocks,
+    packSegmentIndicesByMergedHeight,
+    rebalanceSegmentPageGroups,
+    segmentPageGroupsEqual,
+} from './quoteClausePagination';
 import {
     SignatureVaultModal,
     QuoteSignatureStamp,
@@ -28,12 +98,18 @@ import {
     parseDigitalSignaturesFromQuoteRow,
     serializeDigitalStampsForApi,
 } from './QuoteDigitalSignature';
+import { openQuoteOutlookDraft, fetchQuoteOutlookEmailFields } from '../../utils/quoteOutlookDraft';
 
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
 console.log("QUOTE FILE LOADED");
 
 /** Match Pricing/Probability: when set, all `/api/*` calls (including PDF) hit the Express host. */
 const API_BASE = String(import.meta.env?.VITE_API_BASE ?? '').replace(/\/+$/, '');
+
+/** Must match `PORT` in server/.env and `VITE_API_PORT` in vite.config.js / .env.development (default 5002). */
+function getEmsDevApiPort() {
+    return String(import.meta.env?.VITE_API_PORT || import.meta.env?.VITE_DEV_API_PORT || '5002').trim() || '5002';
+}
 
 /**
  * `<base href>` + `/uploads` in PDF HTML — must match API `PORT` (see server/.env) and Vite `VITE_API_PORT` proxy.
@@ -42,10 +118,136 @@ const API_BASE = String(import.meta.env?.VITE_API_BASE ?? '').replace(/\/+$/, ''
 function getQuotePdfServerOrigin() {
     const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
     if (envOrigin) return String(envOrigin).replace(/\/$/, '');
-    const apiPort =
-        String(import.meta.env?.VITE_API_PORT || import.meta.env?.VITE_DEV_API_PORT || '5001').trim() || '5001';
+    const apiPort = getEmsDevApiPort();
     if (typeof window === 'undefined') return `http://127.0.0.1:${apiPort}`;
     return `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
+}
+
+function quotePdfApiUnreachableMessage(port) {
+    return (
+        `The EMS API server is not running or not reachable (expected port ${port}). ` +
+        'In a second terminal: cd EMS/server, then npm start — keep it running while you use PDF download. ' +
+        'The Vite dev server (npm run dev) only serves the UI; quote PDFs are generated by Express + Puppeteer on the API port. ' +
+        'Ensure server/.env PORT matches VITE_API_PORT in .env.development.'
+    );
+}
+
+/** Dev: try Vite proxy first, then loopback Express (when proxy returns empty 500 but API is up). */
+function getQuotePdfApiCandidateUrls(apiPath) {
+    const path = apiPath.startsWith('/') ? apiPath : `/${apiPath}`;
+    const out = [];
+    const add = (base) => {
+        const b = String(base || '').replace(/\/+$/, '');
+        const url = b ? `${b}${path}` : path;
+        if (!out.includes(url)) out.push(url);
+    };
+    add(API_BASE);
+    const port = getEmsDevApiPort();
+    add(`http://127.0.0.1:${port}`);
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+        add(`http://${window.location.hostname}:${port}`);
+    }
+    return out;
+}
+
+/**
+ * @param {string} apiPath e.g. `/api/quote-pdf/health`
+ * @param {RequestInit} init
+ */
+async function fetchQuotePdfApi(apiPath, init) {
+    const urls = getQuotePdfApiCandidateUrls(apiPath);
+    let lastRes = null;
+    let lastNetworkErr = null;
+    for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        const isLast = i === urls.length - 1;
+        try {
+            const res = await fetch(url, init);
+            lastRes = res;
+            if (res.ok) return res;
+            const text = await res.clone().text();
+            const trimmed = text.trim();
+            const proxyEmpty500 =
+                res.status === 500 && !trimmed && /^internal server error$/i.test(String(res.statusText || ''));
+            const gateway = res.status === 502 || res.status === 503 || res.status === 504;
+            if ((proxyEmpty500 || gateway) && !isLast) continue;
+            return res;
+        } catch (e) {
+            lastNetworkErr = e;
+            if (!isLast) continue;
+        }
+    }
+    if (lastRes) return lastRes;
+    const port = getEmsDevApiPort();
+    if (lastNetworkErr) {
+        if (lastNetworkErr.name === 'AbortError') {
+            throw new Error(quotePdfApiUnreachableMessage(port));
+        }
+        if (
+            lastNetworkErr instanceof TypeError ||
+            /fetch|network|Failed to fetch/i.test(String(lastNetworkErr.message || lastNetworkErr))
+        ) {
+            throw new Error(quotePdfApiUnreachableMessage(port));
+        }
+        throw lastNetworkErr;
+    }
+    throw new Error(quotePdfApiUnreachableMessage(port));
+}
+
+function parseQuotePdfErrorResponse(res, raw) {
+    const trimmed = String(raw || '').trim();
+    let detail = res.statusText || `HTTP ${res.status}`;
+    try {
+        const j = JSON.parse(raw);
+        detail = j.message || j.error || detail;
+        if (j.hint && String(j.hint).trim()) {
+            detail = `${detail}\n\n${String(j.hint).trim()}`;
+        }
+    } catch {
+        if (trimmed) detail = trimmed.slice(0, 600);
+    }
+    const detailStr = String(detail || '').trim();
+    const proxyEmpty500 =
+        res.status === 500 && !trimmed && /^internal server error$/i.test(detailStr);
+    const gateway = res.status === 502 || res.status === 503 || res.status === 504;
+    if (proxyEmpty500 || gateway) {
+        throw new Error(quotePdfApiUnreachableMessage(getEmsDevApiPort()));
+    }
+    throw new Error(detailStr || `HTTP ${res.status}`);
+}
+
+/** Fail fast before building large HTML when Express is down or Vite proxy target is wrong. */
+async function assertQuotePdfApiReachable() {
+    const port = getEmsDevApiPort();
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
+    try {
+        const res = await fetchQuotePdfApi('/api/quote-pdf/health', {
+            method: 'GET',
+            cache: 'no-store',
+            signal: ctrl?.signal,
+        });
+        if (!res.ok) {
+            const raw = await res.text();
+            parseQuotePdfErrorResponse(res, raw);
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data && data.puppeteer === false) {
+            throw new Error(
+                'Puppeteer is not installed on the API server. In EMS/server run: npm install, then npx puppeteer browsers install chrome'
+            );
+        }
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            throw new Error(quotePdfApiUnreachableMessage(port));
+        }
+        if (e instanceof TypeError || (e && /fetch|network|Failed to fetch/i.test(String(e.message || e)))) {
+            throw new Error(quotePdfApiUnreachableMessage(port));
+        }
+        throw e;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 /**
@@ -72,12 +274,12 @@ const QUOTE_LEFT_COMPACT_CONTROL = {
     lineHeight: 1.2,
 };
 
-/** All “Quote Details” sub-blocks use the same light blue as the first card (~#EBF2FF / blue-50). */
+/** All “Quote Details” sub-blocks — same light sky blue as `EMS_QUOTE_COVER_META_MID_BG` / A4 preview panels. */
 const QUOTE_DETAILS_SUBBLOCK_STYLE = {
     padding: '8px 10px',
     borderRadius: '6px',
-    background: '#eff6ff',
-    border: '1px solid #bfdbfe',
+    background: EMS_QUOTE_COVER_META_MID_BG,
+    border: '1px solid #e0f2fe',
 };
 
 /** Must match server `normalizeQuoteFormDraftUserEmail` (draft list is scoped to this user only). */
@@ -116,6 +318,22 @@ function quoteNumberToDraftDisplay(quoteNumber) {
     const s = String(quoteNumber || '').trim();
     if (!s) return 'Draft';
     return s.replace(/-R\d+$/i, '-Draft');
+}
+
+/** A4 To block: when the address contains Bahrain, keep "Kingdom of Bahrain" on its own line (case-insensitive). */
+function formatQuotePreviewToAddressText(raw) {
+    let s = String(raw || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    const re = /Kingdom of Bahrain/i;
+    const m = s.match(re);
+    if (!m || m.index === undefined) return s;
+    const i = m.index;
+    const matched = m[0];
+    const lineStart = i === 0 ? 0 : s.lastIndexOf('\n', i - 1) + 1;
+    const lineThrough = s.slice(lineStart, i + matched.length);
+    if (lineThrough.trim() === matched) return s;
+    const before = s.slice(0, i);
+    const after = s.slice(i + matched.length);
+    return `${before.trimEnd()}\n${matched}${after}`;
 }
 
 /** Resolve customer reference from enquiry payload shape variants (EnquiryMaster.CustomerRefNo). */
@@ -218,16 +436,14 @@ function buildSubjobQuoteHeaderDisplayFromRow(q, usersList, preparedByOptions) {
         if (pMob) contact = pMob.replace(/^tel\s*:?\s*/i, '').trim();
     }
     const ymd = quoteRowDateToInputYmd(q);
+    const validityDayCount = parseInt(q.ValidityDays ?? q.validitydays ?? 30, 10);
     let validityDisplay = '';
     try {
         const base = /^\d{4}-\d{2}-\d{2}$/.test(String(ymd).trim())
             ? parseISO(String(ymd).trim())
             : new Date(ymd);
         if (!Number.isNaN(base.getTime())) {
-            validityDisplay = format(
-                addDays(base, parseInt(q.ValidityDays ?? q.validitydays ?? 30, 10)),
-                'dd-MMM-yyyy'
-            );
+            validityDisplay = format(addDays(base, validityDayCount), 'dd-MMM-yyyy');
         }
     } catch {
         validityDisplay = '';
@@ -249,6 +465,7 @@ function buildSubjobQuoteHeaderDisplayFromRow(q, usersList, preparedByOptions) {
         quoteNumber: String(q.QuoteNumber ?? q.quoteNumber ?? '').trim(),
         quoteDateYmd: ymd,
         validityDisplay,
+        validityDayCount,
         quoteTypeLine,
         customerReference: String(
             q.CustomerReference ?? q.customerreference ?? q.YourRef ?? q.yourref ?? ''
@@ -276,6 +493,15 @@ function formatQuoteYmdForDisplay(ymd) {
     }
 }
 
+/** Quote Details validity value: end date plus day span from quote date, e.g. "12-Jun-2026 (30 days)". */
+function formatQuoteValidityLineForDetails(validityDisplay, dayCount) {
+    const disp = String(validityDisplay || '').trim();
+    if (!disp) return '';
+    const n = parseInt(String(dayCount), 10);
+    if (Number.isNaN(n) || n < 0) return disp;
+    return `${disp} (${n} day${n === 1 ? '' : 's'})`;
+}
+
 /**
  * Rollup key from API for colour + label. Accepts optional trailing "(…)" and ignores it for display.
  * Canonical key text is: None Quoted | Partial Quoted | All Quoted.
@@ -286,6 +512,24 @@ function normalizeListQuoteRollupKey(raw) {
     const base = s.replace(/\s*\([^)]*\)\s*$/g, '').trim();
     if (base === 'All Quoted' || base === 'Partial Quoted' || base === 'None Quoted') return base;
     return 'None Quoted';
+}
+
+/** Pick enquiry row when user presses Enter in the left-panel search box. */
+function pickEnquiryForSearchEnter(term, suggestions) {
+    const t = String(term || '').trim();
+    if (!t) return null;
+    const tl = t.toLowerCase();
+    const list = Array.isArray(suggestions) ? suggestions : [];
+    if (list.length) {
+        const exactNo = list.find((e) => String(e.RequestNo || '').trim().toLowerCase() === tl);
+        if (exactNo) return exactNo;
+        const exactProj = list.find((e) => String(e.ProjectName || '').trim().toLowerCase() === tl);
+        if (exactProj) return exactProj;
+        const exactCust = list.find((e) => String(e.CustomerName || '').trim().toLowerCase() === tl);
+        if (exactCust) return exactCust;
+        if (list.length === 1) return list[0];
+    }
+    return { RequestNo: t, ProjectName: '' };
 }
 
 /** Two-line label under enquiry no.: "{None|Partial|All} Quoted" / "for Ownjob" */
@@ -480,14 +724,15 @@ function syncPricingTerms41LumpSumProse(html, grandTotalNum, foundPricedOptional
  * @returns {{ tableHtml: string, htmlGrandTotal: number }}
  */
 function buildEmsAutoPricingTableHtml(summary, activeJobs) {
-    const pad = '4px 8px';
-    const padGroup = '5px 8px';
-    const padIndent = '4px 8px 4px 14px';
+    const pad = '5px 10px';
+    const padGroup = '6px 10px';
+    const padIndent = '5px 10px 5px 16px';
+    const cellBorder = EMS_QUOTE_PRICING_TABLE_CELL_BORDER;
     const fmtBhd = (n) =>
         `BD ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}`;
-    let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-bottom:6px;font-size:11px;line-height:1.25;">`;
+    let tableHtml = `<table id="${EMS_AUTO_PRICE_SUMMARY_TABLE_ID}" style="width:100%;border-collapse:collapse;margin-top:${EMS_QUOTE_PRICING_TABLE_MARGIN_TOP};margin-bottom:6px;font-size:11px;line-height:1.35;border:${EMS_QUOTE_PRICING_TABLE_OUTER_BORDER};">`;
     tableHtml +=
-        `<thead><tr style="background:#f8fafc;"><th style="padding:${pad};border:1px solid #64748b;text-align:left;font-size:11px;">Description</th><th style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">Amount (BHD)</th></tr></thead>`;
+        `<thead><tr><th style="padding:${pad};border:${cellBorder};text-align:left;font-size:11px;font-weight:600;background:${EMS_QUOTE_PRICING_TABLE_HEADER_BG};color:${EMS_QUOTE_PRICING_TABLE_HEADER_COLOR};">Description</th><th style="padding:${pad};border:${cellBorder};text-align:right;font-size:11px;font-weight:600;background:${EMS_QUOTE_PRICING_TABLE_HEADER_BG};color:${EMS_QUOTE_PRICING_TABLE_HEADER_COLOR};">Amount (BHD)</th></tr></thead>`;
     tableHtml += '<tbody>';
 
     let htmlGrandTotal = 0;
@@ -505,15 +750,15 @@ function buildEmsAutoPricingTableHtml(summary, activeJobs) {
 
         // Division name now shares its row with the Base Price (single row when no other items).
         // `data-ems-row` lets `parseLumpSumFromAutoTableHtml` find division-row amounts even after user edits.
-        tableHtml += `<tr data-ems-row="division" style="background-color:#f1f5f9;"><td style="padding:${padGroup};border:1px solid #64748b;font-weight:bold;font-size:11px;">${cleanedName}</td><td data-ems-amount="division" style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-weight:bold;font-size:11px;">${baseItem ? fmtBhd(basePrice) : ''}</td></tr>`;
+        tableHtml += `<tr data-ems-row="division"><td style="padding:${padGroup};border:${cellBorder};font-weight:600;font-size:11px;background:#ffffff;color:#0f172a;">${cleanedName}</td><td data-ems-amount="division" style="padding:${padGroup};border:${cellBorder};text-align:right;font-weight:600;font-size:11px;background:#ffffff;color:#0f172a;">${baseItem ? fmtBhd(basePrice) : ''}</td></tr>`;
 
         otherItems.forEach((item) => {
-            tableHtml += `<tr data-ems-row="item"><td style="padding:${padIndent};border:1px solid #64748b;font-size:11px;">${item.name}</td><td data-ems-amount="item" style="padding:${pad};border:1px solid #64748b;text-align:right;font-size:11px;">${fmtBhd(item.total)}</td></tr>`;
+            tableHtml += `<tr data-ems-row="item"><td style="padding:${padIndent};border:${cellBorder};font-size:11px;color:#0f172a;">${item.name}</td><td data-ems-amount="item" style="padding:${pad};border:${cellBorder};text-align:right;font-size:11px;color:#0f172a;">${fmtBhd(item.total)}</td></tr>`;
         });
     });
 
     if (htmlGrandTotal > 0) {
-        tableHtml += `<tr data-ems-row="grand" style="background:#f8fafc;font-weight:700;"><td style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">Grand Total (Base Price)</td><td data-ems-amount="grand" style="padding:${padGroup};border:1px solid #64748b;text-align:right;font-size:11px;">${fmtBhd(htmlGrandTotal)}</td></tr>`;
+        tableHtml += `<tr data-ems-row="grand"><td style="padding:${padGroup};border:${cellBorder};border-top:1px solid #94a3b8;text-align:right;font-size:11px;font-weight:700;background:${EMS_QUOTE_PRICING_TABLE_TOTAL_BG};color:#0f172a;">Grand Total (Base Price)</td><td data-ems-amount="grand" style="padding:${padGroup};border:${cellBorder};border-top:1px solid #94a3b8;text-align:right;font-size:11px;font-weight:700;background:${EMS_QUOTE_PRICING_TABLE_TOTAL_BG};color:#0f172a;">${fmtBhd(htmlGrandTotal)}</td></tr>`;
     }
     tableHtml += '</tbody></table>';
 
@@ -1122,6 +1367,17 @@ const resolveQuoteInternalAttentionFlexible = (enquiryData, toName) => {
 
 const normLooseAttention = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
+/** Salutation from Attention of prefix (Mr. → Dear Sir,; Miss./Mrs. → Dear Madam,). */
+function quoteEmailSalutationFromAttention(attention) {
+    const raw = String(attention || '').trim();
+    const m = raw.match(/^(mr|mrs|miss|ms)\.?\s+/i);
+    if (!m) return 'Dear Sir/Madam,';
+    const prefix = m[1].toLowerCase();
+    if (prefix === 'mr') return 'Dear Sir,';
+    if (prefix === 'mrs' || prefix === 'miss' || prefix === 'ms') return 'Dear Madam,';
+    return 'Dear Sir/Madam,';
+}
+
 /** Same rules as attentionSelectOptions: internal = hierarchy / profiles / pricing, or server internalAttention map hit. */
 function isQuoteInternalCustomer(enquiryData, pricingJobs, toName) {
     if (!toName || !enquiryData) return false;
@@ -1660,7 +1916,11 @@ const tableStyles = `
         page-break-inside: auto !important;
     }
     .clause-content tr {
-        page-break-inside: avoid !important;
+        page-break-inside: auto !important;
+        break-inside: auto !important;
+    }
+    .clause-content thead {
+        display: table-header-group !important;
     }
     .clause-content table th, .clause-content table td {
         border: 1px solid #64748b !important;
@@ -1675,11 +1935,36 @@ const tableStyles = `
         background-color: #f8fafc !important;
         font-weight: 600 !important;
     }
-    /* EMS auto pricing summary is OUR generated table — give it a comfier explicit padding
-       so the compact 2px/6px default above does not shrink it. */
+    /* EMS auto pricing summary — visible outer border, navy header (overrides generic clause table + inline). */
+    .clause-content table#ems-auto-price-summary-table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+        margin-top: ${EMS_QUOTE_PRICING_TABLE_MARGIN_TOP} !important;
+        margin-bottom: 6px !important;
+        font-size: 11px !important;
+        line-height: 1.35 !important;
+        border: ${EMS_QUOTE_PRICING_TABLE_OUTER_BORDER} !important;
+        box-sizing: border-box !important;
+    }
     .clause-content table#ems-auto-price-summary-table th,
     .clause-content table#ems-auto-price-summary-table td {
-        padding: 6px 8px !important;
+        border: ${EMS_QUOTE_PRICING_TABLE_CELL_BORDER} !important;
+        padding: 5px 10px !important;
+        font-size: 11px !important;
+        line-height: 1.35 !important;
+        color: #0f172a !important;
+        vertical-align: middle !important;
+    }
+    .clause-content table#ems-auto-price-summary-table thead th {
+        background: ${EMS_QUOTE_PRICING_TABLE_HEADER_BG} !important;
+        color: ${EMS_QUOTE_PRICING_TABLE_HEADER_COLOR} !important;
+        font-weight: 600 !important;
+        border: ${EMS_QUOTE_PRICING_TABLE_HEAD_CELL_BORDER} !important;
+    }
+    .clause-content table#ems-auto-price-summary-table tr[data-ems-row="grand"] td {
+        background: ${EMS_QUOTE_PRICING_TABLE_TOTAL_BG} !important;
+        font-weight: 700 !important;
+        border-top: 1px solid #94a3b8 !important;
     }
     /* Pasted tables (Excel/Word) often wrap text in <p>/<div> per cell. The .clause-content
        'p + p' and '> * + *' rules below would otherwise add vertical rhythm INSIDE each cell
@@ -1713,6 +1998,10 @@ const tableStyles = `
     .clause-content table#ems-auto-price-summary-table td[data-ems-amount],
     .clause-content table#ems-auto-price-summary-table tr[data-ems-row="grand"] td:first-child {
         text-align: right !important;
+    }
+    .clause-content table#ems-auto-price-summary-table tr[data-ems-row="division"],
+    .clause-content table#ems-auto-price-summary-table tr[data-ems-row="division"] td {
+        background-color: #ffffff !important;
     }
     /* normal: pre-wrap preserved newline TEXT NODES between injected </p><p> — looked like huge gaps in preview/PDF */
     .clause-content {
@@ -1786,6 +2075,16 @@ const tableStyles = `
         margin-left: 0 !important;
         margin-right: 0 !important;
         box-sizing: border-box !important;
+        border: 0 !important;
+        border-top: 0.35px solid #94a3b8 !important;
+        height: 0 !important;
+    }
+    .footer-section .quote-print-page-indicator {
+        padding-bottom: 3px !important;
+    }
+    .footer-section .quote-print-footer-company > div {
+        margin: 0 !important;
+        line-height: 1.1 !important;
     }
     .quote-print-footer-wrap {
         display: block !important;
@@ -1826,7 +2125,7 @@ const packClauseIndicesByHeights = (heights, usablePx) => {
     if (!heights?.length) return [];
     const usable = Math.max(usablePx, 240);
     /** Small tolerance only — large fudge caused packed sheets to exceed one printed page (footer jumped to next page). */
-    const packFudgePx = Math.min(32, Math.round(usable * 0.035));
+    const packFudgePx = Math.min(24, Math.round(usable * 0.02));
     const pages = [];
     let cur = [];
     let sum = 0;
@@ -1858,7 +2157,7 @@ const packGlobalClauseSubset = (globalIndices, heights, usablePx) => {
  */
 const rebalanceClausePageGroupsOnce = (groups, heights, usablePx) => {
     if (!groups?.length) return [];
-    const slackPx = Math.min(48, Math.round(usablePx * 0.055));
+    const slackPx = Math.min(32, Math.round(usablePx * 0.03));
     const cap = Math.max(usablePx + slackPx, 300);
     const hAt = (idx) => Math.max(heights[idx] || 0, 1);
     const out = groups.map((g) => [...g]);
@@ -3194,11 +3493,12 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     const quotePreviewLayoutRef = useRef(null);
+    const quoteCoverLetterRef = useRef(null);
     const clauseMeasureHostRef = useRef(null);
     const lastClausePackSigRef = useRef('');
-    /** pageOne reserved for letterhead→signatory only (no clauses); continuation = clause groups on sheet 2+. */
-    const [clausePaginate, setClausePaginate] = useState({ pageOne: [], continuation: [] });
-
+    /** Continuation sheets (index 0 = cover); each entry is segment indices packed for that sheet. */
+    const [clauseSegmentPageGroups, setClauseSegmentPageGroups] = useState([]);
+    const [coverLetterExtraPadPx, setCoverLetterExtraPadPx] = useState(0);
     /** Checked clauses in UI order (preview + measurement source). */
     const activeClausesList = React.useMemo(() => {
         return orderedClauses
@@ -3254,6 +3554,11 @@ const QuoteForm = ({ openContext = null }) => {
         return `${ordered}|${std}|${cust}`;
     }, [orderedClauses, clauses, clauseContent, customClauses]);
 
+    const clauseSegmentsForPagination = React.useMemo(() => {
+        if (!activeClausesList.length) return [];
+        return buildClauseSegmentsForPagination(activeClausesList, getClauseDisplayBodyHtml);
+    }, [activeClausesList, clausePaginationLayoutKey]);
+
     const isQuotePreviewVisible = Boolean(
         enquiryData && enquiryData.leadJobPrefix && String(toName || '').trim()
     );
@@ -3267,10 +3572,8 @@ const QuoteForm = ({ openContext = null }) => {
 
         lastClausePackSigRef.current = '';
 
-        if (activeClausesList.length === 0) {
-            setClausePaginate((prev) =>
-                prev.pageOne.length || prev.continuation.length ? { pageOne: [], continuation: [] } : prev
-            );
+        if (clauseSegmentsForPagination.length === 0) {
+            setClauseSegmentPageGroups((prev) => (prev.length ? [] : prev));
             return;
         }
 
@@ -3280,8 +3583,8 @@ const QuoteForm = ({ openContext = null }) => {
         host.style.width = `${Math.max(280, innerW)}px`;
 
         const measureHeights = () =>
-            activeClausesList.map((_, i) => {
-                const n = host.querySelector(`[data-clause-measure-index="${i}"]`);
+            clauseSegmentsForPagination.map((_, i) => {
+                const n = host.querySelector(`[data-segment-measure-index="${i}"]`);
                 if (!n) return 0;
                 const rect = n.getBoundingClientRect();
                 const cs = typeof window !== 'undefined' ? window.getComputedStyle(n) : null;
@@ -3292,87 +3595,109 @@ const QuoteForm = ({ openContext = null }) => {
 
         const applyPack = () => {
             const heights = measureHeights();
-            const fallback = { pageOne: [], continuation: [activeClausesList.map((_, i) => i)] };
+            const allSegIdx = clauseSegmentsForPagination.map((_, i) => i);
+            const fallback = [allSegIdx];
             if (heights.some((h) => !h)) {
                 const sigFb = JSON.stringify(fallback);
                 if (lastClausePackSigRef.current === sigFb) return;
                 lastClausePackSigRef.current = sigFb;
-                setClausePaginate((prev) => (clausePaginateEqual(prev, fallback) ? prev : fallback));
+                setClauseSegmentPageGroups((prev) =>
+                    segmentPageGroupsEqual(prev, fallback) ? prev : fallback
+                );
                 return;
             }
             const sheetInnerMm = 297 - 15 * 2;
-            /**
-             * Sheet 2+ chrome (logo row + footer + print margins). Extra mm → shorter clause stacks per sheet
-             * so the browser is less likely to split one `.quote-a4-sheet` across two printed pages.
-             * Min usable height must stay below (sheetInnerMm - chrome) or Math.max() clamps and ignores extra chrome.
-             */
-            /**
-             * Reserve for logo row + page indicator/footer block (mm). Was 96 — too conservative:
-             * packer left large unused space on continuation sheets; next clauses started on the following page.
-             * Tuned to ~measured chrome + small print safety margin (A4 + header/footer positions unchanged).
-             */
-            const continuationChromeMm = 72;
+            /** Logo row + footer block + print safety (mm). Header/footer grid positions unchanged. */
+            const continuationChromeMm = 80;
             const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 118));
 
-            const pageOne = [];
-            const remaining = activeClausesList.map((_, i) => i);
-            const contPacked = packGlobalClauseSubset(remaining, heights, contUsablePx);
-            const continuation = rebalanceClausePageGroups(contPacked, heights, contUsablePx);
-            const next = { pageOne, continuation };
-            const sig = JSON.stringify(next);
+            let mergeMeasureEl = host.querySelector('[data-pack-merge-measure]');
+            if (!mergeMeasureEl) {
+                mergeMeasureEl = document.createElement('div');
+                mergeMeasureEl.setAttribute('data-pack-merge-measure', '1');
+                mergeMeasureEl.style.width = `${Math.max(280, innerW)}px`;
+                mergeMeasureEl.style.boxSizing = 'border-box';
+                host.appendChild(mergeMeasureEl);
+            }
+
+            const measureMergedGroupPx = (groupIndices) => {
+                if (!groupIndices?.length) return 0;
+                const blocks = mergeSegmentsIntoSheetBlocks(groupIndices, clauseSegmentsForPagination);
+                const html = blocks
+                    .map((block) => {
+                        const heading = block.showHeading
+                            ? `<div class="quote-clause-heading-panel quote-cover-body-panel quote-preview-panel-shell"><h3>${block.displayMajor}. ${block.clause.title}</h3></div>`
+                            : '';
+                        return `<div class="quote-clause-block quote-clause-block--continuation">${heading}<div class="clause-content" style="font-size:13px">${block.bodyHtml}</div></div>`;
+                    })
+                    .join('');
+                mergeMeasureEl.innerHTML = html;
+                const rect = mergeMeasureEl.getBoundingClientRect();
+                const cs = window.getComputedStyle(mergeMeasureEl);
+                const marginY =
+                    (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+                const h = Math.round(rect.height + marginY);
+                if (h > 0) return h;
+                return groupIndices.reduce((s, gi) => s + Math.max(heights[gi] || 0, 1), 0);
+            };
+
+            const remaining = clauseSegmentsForPagination.map((_, i) => i);
+            const contPacked = packSegmentIndicesByMergedHeight(
+                remaining,
+                measureMergedGroupPx,
+                contUsablePx
+            );
+            const continuation = rebalanceSegmentPageGroups(
+                contPacked,
+                measureMergedGroupPx,
+                contUsablePx
+            );
+            const sig = JSON.stringify(continuation);
             if (lastClausePackSigRef.current === sig) return;
             lastClausePackSigRef.current = sig;
-            setClausePaginate((prev) => (clausePaginateEqual(prev, next) ? prev : next));
+            setClauseSegmentPageGroups((prev) =>
+                segmentPageGroupsEqual(prev, continuation) ? prev : continuation
+            );
         };
 
-        /* One deferred pass: sync applyPack + immediate remeasure fought calculateSummary’s pricingTerms updates. */
+        /* Two rAFs: let segment measure DOM settle before merged-height pack (pricing table + 4.x prose). */
+        let raf2 = 0;
         const id = requestAnimationFrame(() => {
-            applyPack();
+            raf2 = requestAnimationFrame(() => {
+                applyPack();
+            });
         });
-        return () => cancelAnimationFrame(id);
-    }, [clausePaginationLayoutKey, isQuotePreviewVisible]);
+        return () => {
+            cancelAnimationFrame(id);
+            cancelAnimationFrame(raf2);
+        };
+    }, [clausePaginationLayoutKey, clauseSegmentsForPagination, isQuotePreviewVisible]);
 
-    const sanitizedPageOneClauseIndices = React.useMemo(() => {
-        if (!activeClausesList.length) return [];
-        return (clausePaginate.pageOne || []).filter(
-            (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
-        );
-    }, [clausePaginate.pageOne, activeClausesList]);
-
-    /** Continuation-only groups; drop empty / invalid; if none left but clauses exist, show all on one sheet. */
-    const sanitizedClausePageGroups = React.useMemo(() => {
-        if (!activeClausesList.length) return [];
-        const p1f = (clausePaginate.pageOne || []).filter(
-            (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
-        );
-        const filtered = (clausePaginate.continuation || [])
+    /** Continuation segment groups; if none, one sheet with all segments. */
+    const sanitizedClauseSegmentPageGroups = React.useMemo(() => {
+        if (!clauseSegmentsForPagination.length) return [];
+        const n = clauseSegmentsForPagination.length;
+        const filtered = (clauseSegmentPageGroups || [])
             .map((group) =>
-                group.filter(
-                    (idx) => Number.isInteger(idx) && idx >= 0 && idx < activeClausesList.length
-                )
+                group.filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < n)
             )
             .filter((g) => g.length > 0);
         if (filtered.length) return filtered;
-        if (p1f.length) return [];
-        return [activeClausesList.map((_, i) => i)];
-    }, [clausePaginate.continuation, clausePaginate.pageOne, activeClausesList]);
- 
+        return [clauseSegmentsForPagination.map((_, i) => i)];
+    }, [clauseSegmentPageGroups, clauseSegmentsForPagination]);
+
     const sheets = React.useMemo(() => {
-        const res = [];
-        // Page 1
-        res.push({
-            isFirstPage: true,
-            clauses: sanitizedPageOneClauseIndices.map((idx) => activeClausesList[idx]),
-        });
-        // Subsequent continuation pages
-        sanitizedClausePageGroups.forEach((group) => {
+        const res = [{ isFirstPage: true, blocks: [] }];
+        sanitizedClauseSegmentPageGroups.forEach((group) => {
+            const blocks = mergeSegmentsIntoSheetBlocks(group, clauseSegmentsForPagination);
+            if (!blocks.length) return;
             res.push({
                 isFirstPage: false,
-                clauses: group.map((idx) => activeClausesList[idx]),
+                blocks,
             });
         });
         return res;
-    }, [sanitizedPageOneClauseIndices, sanitizedClausePageGroups, activeClausesList]);
+    }, [sanitizedClauseSegmentPageGroups, clauseSegmentsForPagination]);
 
     const quotePreviewTotalPages =
         activeClausesList.length === 0 ? 1 : sheets.length;
@@ -3383,6 +3708,50 @@ const QuoteForm = ({ openContext = null }) => {
             window.__EMS_QUOTE_PREVIEW_TOTAL_PAGES = quotePreviewTotalPages;
         }
     }, [quotePreviewTotalPages]);
+
+    /** Grow Dear Sir (padding-bottom only) until gap above matches gap below; spacer absorbs change — signatory/footer stay put. */
+    useLayoutEffect(() => {
+        const letter = quoteCoverLetterRef.current;
+        const preview = quotePreviewLayoutRef.current;
+        if (!isQuotePreviewVisible || !letter || !preview) {
+            setCoverLetterExtraPadPx(0);
+            return undefined;
+        }
+
+        let raf2 = 0;
+        const runEqualCoverGaps = () => {
+            const result = applyEqualCoverGaps(letter);
+            if (!result) {
+                setCoverLetterExtraPadPx(0);
+                return;
+            }
+            setCoverLetterExtraPadPx((prev) => (prev === result.extra ? prev : result.extra));
+        };
+
+        runEqualCoverGaps();
+        const raf1 = requestAnimationFrame(() => {
+            runEqualCoverGaps();
+            raf2 = requestAnimationFrame(runEqualCoverGaps);
+        });
+        const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(runEqualCoverGaps) : null;
+        if (ro) {
+            ro.observe(preview);
+            const contentSection = letter.closest('.content-section');
+            if (contentSection) ro.observe(contentSection);
+        }
+        return () => {
+            cancelAnimationFrame(raf1);
+            cancelAnimationFrame(raf2);
+            if (ro) ro.disconnect();
+        };
+    }, [
+        isQuotePreviewVisible,
+        quotePreviewTotalPages,
+        clausePaginationLayoutKey,
+        sanitizedClauseSegmentPageGroups.length,
+        enquiryData?.leadJobPrefix,
+        toName,
+    ]);
 
     /** Same tab *structure* → same array reference, even when `enquiryData`/`pricingData` get new object identities. */
     const calculatedTabsCacheRef = React.useRef({ sig: '', tabs: EMPTY_CALCULATED_TABS });
@@ -8053,40 +8422,62 @@ const QuoteForm = ({ openContext = null }) => {
         calculateSummaryRef.current(pricingData, selectedJobs, toName, quoteContextScope);
     }, [activeQuoteTab, selectedJobsSig, quoteTabsFingerprint, quoteContextScope, pricingStableSig, toName]);
 
-    // Search suggestions
+    const buildEnquirySuggestUrl = (q) => {
+        const userEmail = encodeURIComponent(currentUser?.EmailId || currentUser?.email || '');
+        const userRole = encodeURIComponent(currentUser?.role || currentUser?.Roles || '');
+        const userName = encodeURIComponent(currentUser?.FullName || currentUser?.name || '');
+        return `${API_BASE}/api/enquiries?search=${encodeURIComponent(q)}&userEmail=${userEmail}&userRole=${userRole}&userName=${userName}`;
+    };
+
+    const fetchEnquirySuggestions = async (q) => {
+        const res = await fetch(buildEnquirySuggestUrl(q.trim()));
+        if (!res.ok) return [];
+        const data = await res.json();
+        return Array.isArray(data) ? data.slice(0, 10) : [];
+    };
+
+    // Search suggestions (enquiry no, project name, customer name)
     const handleSearchInput = (value) => {
         setSearchTerm(value);
         if (debounceRef.current) clearTimeout(debounceRef.current);
 
-        console.log('Search Input:', value, 'Length:', value.length);
-
-        if (value.trim().length >= 1) { // Changed to 1 to allow single digit testing if needed, though user typed 2
+        if (value.trim().length >= 1) {
             debounceRef.current = setTimeout(async () => {
                 try {
-                    console.log('Fetching suggestions for:', value.trim());
-                    const url = `${API_BASE}/api/enquiries?search=${encodeURIComponent(value.trim())}`;
-                    console.log('Search URL:', url);
-
-                    const res = await fetch(url);
-                    console.log('Search Res Status:', res.status);
-
-                    if (res.ok) {
-                        const data = await res.json();
-                        console.log('Search Data:', data);
-                        setSuggestions(data.slice(0, 10));
-                        setShowSuggestions(data.length > 0);
-                    } else {
-                        console.error('Search API Failed');
-                    }
+                    const data = await fetchEnquirySuggestions(value);
+                    setSuggestions(data);
+                    setShowSuggestions(data.length > 0);
                 } catch (err) {
                     console.error('Search error:', err);
                 }
             }, 300);
         } else {
-            console.log('Clearing suggestions');
             setSuggestions([]);
             setShowSuggestions(false);
         }
+    };
+
+    const handleEnquirySearchKeyDown = async (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const term = searchTerm.trim();
+        if (!term) return;
+        if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+            debounceRef.current = null;
+        }
+        setShowSuggestions(false);
+        let list = suggestions;
+        if (!list.length) {
+            try {
+                list = await fetchEnquirySuggestions(term);
+                setSuggestions(list);
+            } catch (err) {
+                console.error('Search error:', err);
+            }
+        }
+        const picked = pickEnquiryForSearchEnter(term, list);
+        if (picked) await handleSelectEnquiry(picked);
     };
 
     // Template Handlers
@@ -11351,6 +11742,9 @@ const QuoteForm = ({ openContext = null }) => {
 
     /** Same PDF bytes as Download PDF — used by download + Outlook email flow */
     const fetchQuotePdfBlob = async () => {
+        await assertQuotePdfApiReachable();
+        syncCoverLetterGapBeforePdfCapture(quoteCoverLetterRef.current);
+
         const printRoot = document.getElementById('quote-print-root');
         const printContent = document.getElementById('quote-preview');
         const fragmentHtml = printRoot
@@ -11367,40 +11761,23 @@ const QuoteForm = ({ openContext = null }) => {
         });
         const safeRef = String(quoteNumber || quoteId || 'Draft').replace(/\//g, '_');
         const fname = `Quote_${safeRef}.pdf`;
-        const res = await fetch(`${API_BASE}/api/quote-pdf/generate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ html, filename: fname, emulateScreen: true }),
-            cache: 'no-store',
-        });
+        const pdfCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const pdfTimer = pdfCtrl ? setTimeout(() => pdfCtrl.abort(), 180000) : null;
+        let res;
+        try {
+            res = await fetchQuotePdfApi('/api/quote-pdf/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ html, filename: fname, emulateScreen: true }),
+                cache: 'no-store',
+                signal: pdfCtrl?.signal,
+            });
+        } finally {
+            if (pdfTimer) clearTimeout(pdfTimer);
+        }
         if (!res.ok) {
             const raw = await res.text();
-            const trimmed = raw.trim();
-            let detail = res.statusText;
-            try {
-                const j = JSON.parse(raw);
-                detail = j.message || j.error || detail;
-                if (j.hint && String(j.hint).trim()) {
-                    detail = `${detail}\n\n${String(j.hint).trim()}`;
-                }
-            } catch {
-                if (trimmed) detail = trimmed.slice(0, 400);
-            }
-            /** Vite proxy often returns 500 with an empty body when Express is stopped (ECONNREFUSED) — avoid useless "Internal Server Error". */
-            const detailStr = String(detail || '').trim();
-            const apiProbablyDown =
-                res.status === 502 ||
-                res.status === 503 ||
-                res.status === 504 ||
-                (res.status === 500 && !trimmed && /^internal server error$/i.test(detailStr));
-            if (apiProbablyDown) {
-                throw new Error(
-                    'The EMS API server is not running or not reachable on the proxied port (default 5001). ' +
-                        'Open a second terminal, cd to the project server folder, run npm start, and keep it running while you use PDF download. ' +
-                        'The Vite dev server only serves the UI; quote PDFs are generated by Express + Puppeteer.'
-                );
-            }
-            throw new Error(detail || `HTTP ${res.status}`);
+            parseQuotePdfErrorResponse(res, raw);
         }
         const ab = await res.arrayBuffer();
         const head = new Uint8Array(ab.byteLength ? ab.slice(0, 5) : ab);
@@ -11464,11 +11841,14 @@ const QuoteForm = ({ openContext = null }) => {
             }
             triggerBlobDownload(typedBlob, safeName);
         } catch (err) {
-                    console.error('PDF generation error:', err);
+            console.error('PDF generation error:', err);
+            const msg = String(err?.message || err || 'Unknown error');
+            const needsServerHint = /not running|not reachable|puppeteer/i.test(msg);
             alert(
-                `PDF download failed: ${err.message || err}\n\n` +
-                    'Ensure the API server is running and Puppeteer is installed (cd server && npm install). ' +
-                    'You can still use Print → Save as PDF for a vector file.'
+                `PDF download failed: ${msg}` +
+                    (needsServerHint
+                        ? '\n\nYou can still use Print → Save as PDF from the quote preview.'
+                        : '\n\nIf this persists, ensure EMS/server is running (npm start) and try Print → Save as PDF.')
             );
         } finally {
                     setIsUploading(false);
@@ -11583,7 +11963,7 @@ const QuoteForm = ({ openContext = null }) => {
 
         const mailBodyCompact = [
             ...(to ? [] : ['(Fill the To line in Outlook; the Email field on this quote in EMS is empty.)']),
-            'Dear Sir/Madam,',
+            quoteEmailSalutationFromAttention(toAttention),
             '',
             `EMS will download the quote PDF and ${attCount} saved attachment(s) to your Downloads folder.${pendingNote}`,
             'Attach those files to this message in Outlook.',
@@ -11725,36 +12105,134 @@ const QuoteForm = ({ openContext = null }) => {
         }
     };
 
-    /** Sync entry from the button — now shows the internal Email Compose modal. */
+    /** Resolve To from Attention of (internal → Master_ConcernedSE, external → Master_ReceivedFrom). */
+    const resolveAttentionPersonEmailClient = (isInternal) => {
+        const att = normLooseAttention(toAttention);
+        if (!att) return '';
+        if (isInternal && Array.isArray(usersList)) {
+            for (const u of usersList) {
+                const fn = normLooseAttention(u.FullName);
+                if (!fn) continue;
+                if (fn === att || fn.includes(att) || att.includes(fn)) {
+                    return String(u.EmailId || u.email || '')
+                        .trim()
+                        .toLowerCase()
+                        .replace(/@almcg\.com$/i, '@almoayyedcg.com');
+                }
+            }
+        }
+        return '';
+    };
+
+    /** Email button — opens Outlook draft with quote PDF attached (VBScript/COM on Windows). */
     const startQuoteEmailFlow = async () => {
         if (!hasUserPricing) return;
-        
+        if (!toAttention?.trim()) {
+            alert('Select Attention of before emailing the quote.');
+            return;
+        }
+
         setIsUploading(true);
         try {
-            // 1. Generate the PDF
-            const { blob, fileName } = await fetchQuotePdfBlob();
-            
-            // 2. Build default mail details
             const payload = buildQuoteEmailDraftPayload();
             if (!payload) return;
 
-            // 3. Prepare body with a nice message
-            const initialBody = `Dear Sir/Madam,\n\nPlease find the attached quotation regarding Enquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'} for the ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}.\n\nWe have detailed the pricing, scope, and terms for your review. Should you have any questions or require further techno-commercial clarification regarding this proposal, please do not hesitate to contact us.\n\nWe look forward to the possibility of working with you on this project.\n\nBest Regards,\n${(currentUser?.FullName || currentUser?.name || '').trim()}`;
+            const { blob, fileName } = await fetchQuotePdfBlob();
 
-            setEmailDetails({
-                to: payload.toAddr || '',
-                cc: '', // Can be pre-filled from division CCMailIds if needed
-                bcc: '',
-                subject: payload.subjectLine || `Quotation - ${enquiryData?.enquiry?.ProjectName || ''}`,
-                body: initialBody,
-                pdfBlob: blob,
-                pdfName: fileName
+            const isInternal = isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName);
+            const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
+            const outlookFields = await fetchQuoteOutlookEmailFields(API_BASE, {
+                userEmail,
+                toName: toName || '',
+                toAttention: toAttention || '',
+                requestNo: enquiryData?.enquiry?.RequestNo || '',
+                isInternal,
             });
 
-            setShowEmailModal(true);
+            let toAddr = (outlookFields.to || '').trim();
+            if (!toAddr) {
+                toAddr = resolveAttentionPersonEmailClient(isInternal);
+            }
+            if (!toAddr) {
+                toAddr = (toEmail || '').trim();
+            }
+            if (!toAddr) {
+                alert(
+                    'No email found for the selected Attention of person. Check Master_ConcernedSE (internal) or Master_ReceivedFrom (external).'
+                );
+                return;
+            }
+
+            const salutation = quoteEmailSalutationFromAttention(toAttention);
+            const initialBody = `${salutation}\n\nPlease find the attached quotation regarding Enquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'} for the ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}.\n\nWe have detailed the pricing, scope, and terms for your review. Should you have any questions or require further techno-commercial clarification regarding this proposal, please do not hesitate to contact us.\n\nWe look forward to the possibility of working with you on this project.`;
+
+            const extraAttachmentFileNames = [];
+            const extraAttachmentsBase64 = [];
+            for (const att of quoteAttachments || []) {
+                if (!att?.ID) continue;
+                try {
+                    const url = `${API_BASE}/api/quotes/attachments/download/${att.ID}?download=true`;
+                    const r = await fetch(url, { credentials: 'include' });
+                    if (!r.ok) continue;
+                    const b = await r.blob();
+                    const nm = String(att.FileName || `attachment-${att.ID}`).replace(/[/\\?%*:|"<>]/g, '_');
+                    extraAttachmentFileNames.push(nm);
+                    extraAttachmentsBase64.push({
+                        filename: nm,
+                        base64: await blobToBase64(b),
+                    });
+                } catch (e) {
+                    console.warn('[email-quote] attachment skip', att?.ID, e);
+                }
+            }
+
+            const result = await openQuoteOutlookDraft({
+                apiBase: API_BASE,
+                pdfBlob: blob,
+                displayFileName: fileName,
+                emailFields: {
+                    to: toAddr,
+                    cc: (outlookFields.cc || '').trim(),
+                    bcc: '',
+                    subject: payload.subjectLine || `Quotation - ${enquiryData?.enquiry?.ProjectName || ''}`,
+                    body: initialBody,
+                    extraAttachments: extraAttachmentsBase64,
+                },
+                extraAttachmentFileNames,
+                triggerBlobDownload,
+                sleep,
+                blobToBase64,
+            });
+
+            if (result.method === 'server' || result.method === 'local-helper') {
+                return;
+            }
+
+            for (let i = 0; i < extraAttachmentsBase64.length; i++) {
+                const item = extraAttachmentsBase64[i];
+                const bin = Uint8Array.from(atob(item.base64), (c) => c.charCodeAt(0));
+                triggerBlobDownload(new Blob([bin]), extraAttachmentFileNames[i]);
+                await sleep(350);
+            }
+
+            if (result.method === 'vbs-prompt') {
+                alert(
+                    'If Outlook did not open, choose Open on EMS_OpenQuoteDraft.vbs in your browser download bar.\n\nThe quote PDF is in Downloads as EMS_QuoteDraft.pdf.'
+                );
+                return;
+            }
+
+            alert(
+                'Outlook could not be started automatically from the EMS server.\n\n' +
+                    'In your Downloads folder:\n' +
+                    '1. Wait for EMS_QuoteDraft.pdf to finish downloading\n' +
+                    '2. Double-click EMS_OpenQuoteDraft.vbs\n\n' +
+                    'This opens an Outlook draft with the quote attached (classic Outlook desktop required).' +
+                    (result.serverError ? `\n\n(${result.serverError})` : '')
+            );
         } catch (err) {
             console.error('Email preparation failed:', err);
-            alert('Failed to prepare quote PDF for email.');
+            alert(`Failed to prepare quote for Outlook: ${err.message || err}`);
         } finally {
             setIsUploading(false);
         }
@@ -11800,14 +12278,57 @@ const QuoteForm = ({ openContext = null }) => {
         }
     };
 
-    const handleOpenInOutlook = () => {
-        const href = buildMailtoHrefFromEmailModal();
-        if (!href) return;
+    const handleOpenInOutlook = async () => {
+        if (!emailDetails.pdfBlob) {
+            alert('The quote PDF is not available. Close this dialog and try again.');
+            return;
+        }
+        setEmailSending(true);
+        try {
+            const isInternal = isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName);
+            const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
+            const outlookFields = await fetchQuoteOutlookEmailFields(API_BASE, {
+                userEmail,
+                toName: toName || '',
+                toAttention: toAttention || '',
+                requestNo: enquiryData?.enquiry?.RequestNo || '',
+                isInternal,
+            });
+            let toAddr = (emailDetails.to || outlookFields.to || '').trim();
+            if (!toAddr) toAddr = resolveAttentionPersonEmailClient(isInternal);
+            const bodyNoSig = String(emailDetails.body || '')
+                .replace(/\n*Best Regards,?\s*\n[\s\S]*$/i, '')
+                .trimEnd();
 
-        setQuoteEmailDraftHref(href);
-        openMailtoFromUserClick(href);
-        triggerBlobDownload(emailDetails.pdfBlob, emailDetails.pdfName);
-        setShowEmailModal(false);
+            const result = await openQuoteOutlookDraft({
+                apiBase: API_BASE,
+                pdfBlob: emailDetails.pdfBlob,
+                displayFileName: emailDetails.pdfName,
+                emailFields: {
+                    to: toAddr,
+                    cc: (emailDetails.cc || outlookFields.cc || '').trim(),
+                    bcc: emailDetails.bcc || '',
+                    subject: emailDetails.subject || '',
+                    body: bodyNoSig,
+                },
+                extraAttachmentFileNames: [],
+                triggerBlobDownload,
+                sleep,
+                blobToBase64,
+            });
+            if (result.method === 'vbs-manual' || result.method === 'vbs-prompt') {
+                alert(
+                    result.method === 'vbs-prompt'
+                        ? 'Choose Open on EMS_OpenQuoteDraft.vbs if prompted. PDF: EMS_QuoteDraft.pdf in Downloads.'
+                        : 'Double-click EMS_OpenQuoteDraft.vbs in Downloads after the PDF finishes downloading.'
+                );
+            }
+            setShowEmailModal(false);
+        } catch (e) {
+            alert(`Could not open Outlook: ${e.message || e}`);
+        } finally {
+            setEmailSending(false);
+        }
     };
 
     const blobToBase64 = (blob) => {
@@ -12424,9 +12945,10 @@ const QuoteForm = ({ openContext = null }) => {
                             <div style={{ flex: '0 0 50%', position: 'relative' }}>
                                 <input
                                     type="text"
-                                    placeholder="Enquiry No."
+                                    placeholder="Enq. no / project / customer"
                                     value={searchTerm}
                                     onChange={(e) => handleSearchInput(e.target.value)}
+                                    onKeyDown={handleEnquirySearchKeyDown}
                                     onFocus={() => setShowSuggestions(true)}
                                     style={{
                                         width: '100%',
@@ -12458,6 +12980,11 @@ const QuoteForm = ({ openContext = null }) => {
                                             >
                                                 <div style={{ fontWeight: '600', fontSize: '13px' }}>{enq.RequestNo}</div>
                                                 <div style={{ fontSize: '11px', color: '#64748b' }}>{enq.ProjectName}</div>
+                                                {String(enq.CustomerName || '').trim() ? (
+                                                    <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                                                        {enq.CustomerName}
+                                                    </div>
+                                                ) : null}
                                             </div>
                                         ))}
                                     </div>
@@ -13337,7 +13864,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                                                 padding: '8px',
                                                                                 background:
                                                                                     String(quoteRowId(rev) ?? '') === String(quoteId ?? '')
-                                                                                        ? '#eff6ff'
+                                                                                        ? EMS_QUOTE_COVER_META_MID_BG
                                                                                         : '#f8fafc',
                                                                                 border: `1px solid ${
                                                                                     String(quoteRowId(rev) ?? '') === String(quoteId ?? '')
@@ -14020,18 +14547,35 @@ const QuoteForm = ({ openContext = null }) => {
                                                         )}
                                                         <style>
                                                             {`
-                                                            .quote-pricing-terms-auto-table-preview table,
-                                                            .quote-pricing-terms-auto-table-preview td,
-                                                            .quote-pricing-terms-auto-table-preview th {
-                                                                border: 1px solid #64748b !important;
-                                                                border-collapse: collapse !important;
-                                                            }
                                                             .quote-pricing-terms-auto-table-preview table {
                                                                 width: 100%;
                                                                 border-collapse: collapse;
+                                                                margin-top: ${EMS_QUOTE_PRICING_TABLE_MARGIN_TOP};
                                                                 margin-bottom: 6px;
                                                                 font-size: 11px;
-                                                                line-height: 1.25;
+                                                                line-height: 1.35;
+                                                                border: ${EMS_QUOTE_PRICING_TABLE_OUTER_BORDER};
+                                                                box-sizing: border-box;
+                                                            }
+                                                            .quote-pricing-terms-auto-table-preview td,
+                                                            .quote-pricing-terms-auto-table-preview th {
+                                                                border: ${EMS_QUOTE_PRICING_TABLE_CELL_BORDER} !important;
+                                                                padding: 5px 10px !important;
+                                                            }
+                                                            .quote-pricing-terms-auto-table-preview thead th {
+                                                                background: ${EMS_QUOTE_PRICING_TABLE_HEADER_BG} !important;
+                                                                color: ${EMS_QUOTE_PRICING_TABLE_HEADER_COLOR} !important;
+                                                                font-weight: 600 !important;
+                                                                border: ${EMS_QUOTE_PRICING_TABLE_HEAD_CELL_BORDER} !important;
+                                                            }
+                                                            .quote-pricing-terms-auto-table-preview tr[data-ems-row="division"],
+                                                            .quote-pricing-terms-auto-table-preview tr[data-ems-row="division"] td {
+                                                                background-color: #ffffff !important;
+                                                            }
+                                                            .quote-pricing-terms-auto-table-preview tr[data-ems-row="grand"] td {
+                                                                background: ${EMS_QUOTE_PRICING_TABLE_TOTAL_BG} !important;
+                                                                font-weight: 700 !important;
+                                                                border-top: 1px solid #94a3b8 !important;
                                                             }
                                                             `}
                                                         </style>
@@ -14849,8 +15393,8 @@ const QuoteForm = ({ openContext = null }) => {
                                             disabled={!hasUserPricing || isUploading}
                                             title={
                                                 !toEmail?.trim()
-                                                    ? 'Opens a draft without To — fill recipient in Outlook. Enter Email on the quote (left) to pre-fill next time.'
-                                                    : 'Tries desktop Outlook (mailto), then downloads the quote PDF and saved attachments to Downloads — attach them in Outlook.'
+                                                    ? 'Open Outlook draft with quote PDF attached. Enter customer Email on the quote to pre-fill To.'
+                                                    : 'Open Outlook draft with quote PDF attached (Windows desktop Outlook).'
                                             }
                                             aria-label="Email quote"
                                             style={{
@@ -15263,13 +15807,178 @@ const QuoteForm = ({ openContext = null }) => {
                                         text-align: right;
                                         box-sizing: border-box;
                                     }
+                                    .footer-section .quote-print-page-indicator {
+                                        padding-bottom: 3px;
+                                    }
+                                    .footer-section > hr.quote-section-rule {
+                                        border: 0;
+                                        border-top: ${EMS_QUOTE_PRINT_FOOTER_RULE_WIDTH} solid #94a3b8;
+                                        height: 0;
+                                        box-sizing: border-box;
+                                    }
+                                    .footer-section .quote-print-footer-company > div {
+                                        margin: 0;
+                                        line-height: 1.1;
+                                    }
                                     .header-section.quote-header-row {
+                                        display: flex;
+                                        flex-direction: row;
+                                        align-items: stretch;
+                                        gap: 16px;
                                         width: 100%;
                                         box-sizing: border-box;
+                                        margin-bottom: 6px;
                                     }
                                     .quote-header-address-col,
                                     .quote-header-quote-col {
                                         min-width: 0;
+                                        display: flex;
+                                        flex-direction: column;
+                                        align-self: stretch;
+                                    }
+                                    .quote-header-address-col {
+                                        flex: 1 1 0;
+                                        max-width: ${EMS_QUOTE_HEADER_ADDRESS_COL_MAX_WIDTH};
+                                    }
+                                    .quote-header-quote-col {
+                                        flex: 0 1 ${EMS_QUOTE_HEADER_QUOTE_COL_WIDTH};
+                                        max-width: ${EMS_QUOTE_HEADER_QUOTE_COL_WIDTH};
+                                    }
+                                    .quote-header-quote-stack {
+                                        display: flex;
+                                        flex-direction: column;
+                                        gap: 10px;
+                                        width: 100%;
+                                        flex: 1 1 auto;
+                                        min-height: 0;
+                                    }
+                                    /* Same border + shadow as project meta table / cover letter */
+                                    .quote-preview-panel-shell {
+                                        border: 1px solid #e2e8f0;
+                                        border-radius: 5px;
+                                        overflow: hidden;
+                                        box-shadow:
+                                            0 2px 10px rgba(15, 23, 42, 0.08),
+                                            0 1px 2px rgba(15, 23, 42, 0.06);
+                                    }
+                                    .quote-header-address-panel {
+                                        display: flex;
+                                        flex-direction: column;
+                                        flex: 1 1 auto;
+                                        min-height: 0;
+                                        width: 100%;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-address-panel-row--header {
+                                        display: flex;
+                                        flex-direction: row;
+                                        align-items: center;
+                                        background: ${EMS_QUOTE_PANEL_LABEL_NAV_GRADIENT} !important;
+                                        border: none !important;
+                                        outline: none !important;
+                                        box-shadow: none !important;
+                                        border-radius: 5px 5px 0 0;
+                                        overflow: hidden;
+                                        -webkit-print-color-adjust: exact;
+                                        print-color-adjust: exact;
+                                        padding: ${EMS_QUOTE_ACCENT_HEADER_PADDING} !important;
+                                        margin: 0;
+                                        box-sizing: border-box;
+                                        line-height: ${EMS_QUOTE_ACCENT_HEADER_LINE_HEIGHT} !important;
+                                    }
+                                    .quote-header-address-panel-row--header .quote-header-address-panel-label--solo {
+                                        flex: 1 1 auto;
+                                        max-width: none;
+                                        width: 100%;
+                                        padding-right: 0;
+                                        font-weight: 600 !important;
+                                        color: rgba(252, 252, 253, 0.96) !important;
+                                        font-size: ${EMS_QUOTE_ACCENT_HEADER_FONT_SIZE} !important;
+                                        letter-spacing: 0.02em;
+                                        box-sizing: border-box;
+                                        line-height: ${EMS_QUOTE_ACCENT_HEADER_LINE_HEIGHT} !important;
+                                    }
+                                    .quote-header-address-panel-customer {
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        color: #0f172a;
+                                        line-height: 1.45;
+                                        margin: 0 0 4px 0;
+                                    }
+                                    .quote-header-address-panel-body {
+                                        flex: 1 1 auto;
+                                        min-height: 0;
+                                        background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                        border-radius: 0 0 5px 5px;
+                                        padding: 6px 8px 8px 8px;
+                                        box-sizing: border-box;
+                                        -webkit-print-color-adjust: exact;
+                                        print-color-adjust: exact;
+                                    }
+                                    .quote-header-address-panel-address-with-icon {
+                                        display: flex;
+                                        flex-direction: row;
+                                        align-items: flex-start;
+                                        gap: 6px;
+                                        margin-top: 2px;
+                                    }
+                                    .quote-header-address-meta-ic-wrap {
+                                        display: inline-flex;
+                                        align-items: center;
+                                        justify-content: center;
+                                        flex-shrink: 0;
+                                        width: 17px;
+                                        height: 17px;
+                                        border-radius: 4px;
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-header-address-meta-ic-wrap svg {
+                                        display: block;
+                                        stroke: #ffffff;
+                                    }
+                                    .quote-header-address-meta-ic-wrap--map {
+                                        background: #0369a1;
+                                    }
+                                    .quote-header-address-meta-ic-wrap--tel {
+                                        background: #047857;
+                                    }
+                                    .quote-header-address-meta-ic-wrap--fax {
+                                        background: #475569;
+                                    }
+                                    .quote-header-address-meta-ic-wrap--mail {
+                                        background: #4f46e5;
+                                    }
+                                    .quote-header-address-panel-address {
+                                        font-size: 12px;
+                                        color: #475569;
+                                        white-space: pre-line;
+                                        line-height: 1.32;
+                                        flex: 1 1 auto;
+                                        min-width: 0;
+                                    }
+                                    .quote-header-address-panel-contact {
+                                        font-size: 12px;
+                                        color: #475569;
+                                        margin-top: 6px;
+                                        line-height: 1.32;
+                                        display: flex;
+                                        flex-direction: column;
+                                        align-items: stretch;
+                                        gap: 4px;
+                                    }
+                                    .quote-header-address-panel-contact-line {
+                                        display: flex;
+                                        flex-direction: row;
+                                        align-items: flex-start;
+                                        gap: 6px;
+                                        width: 100%;
+                                    }
+                                    .quote-header-address-panel-contact-line span:last-child {
+                                        flex: 1 1 auto;
+                                        min-width: 0;
+                                    }
+                                    .quote-header-quote-panel > .quote-header-address-panel-row--header {
+                                        flex-shrink: 0;
                                     }
                                     .quote-clause-measure-host {
                                         position: absolute;
@@ -15319,6 +16028,7 @@ const QuoteForm = ({ openContext = null }) => {
                                         margin-bottom: 0;
                                         padding: 15mm;
                                         min-height: 297mm;
+                                        height: 297mm;
                                         border: none !important;
                                         outline: none !important;
                                         box-shadow:
@@ -15340,17 +16050,30 @@ const QuoteForm = ({ openContext = null }) => {
                                     /* Continuation: clause stack may shrink; main column stays height:100% so footer margin-top:auto pins to A4 bottom when content is short. */
                                     .quote-a4-sheet--continuation .quote-sheet-main-flex {
                                         min-height: 0 !important;
+                                        overflow: visible;
                                     }
                                     .quote-a4-sheet--continuation .content-section {
                                         flex: 0 1 auto !important;
+                                        overflow: visible;
                                     }
                                     .quote-sheet-main-flex {
+                                        grid-row: 2;
                                         min-width: 0;
                                         min-height: 0;
                                         height: 100%;
                                         width: 100%;
                                         display: flex;
                                         flex-direction: column;
+                                        overflow: hidden;
+                                    }
+                                    .quote-a4-sheet > .footer-section {
+                                        grid-row: 3;
+                                        align-self: end;
+                                        flex-shrink: 0;
+                                        margin-top: 0;
+                                        padding-top: 3px;
+                                        min-height: ${EMS_QUOTE_PRINT_FOOTER_MIN_HEIGHT};
+                                        box-sizing: border-box;
                                     }
                                     .content-section {
                                         width: 100%;
@@ -15368,10 +16091,12 @@ const QuoteForm = ({ openContext = null }) => {
                                         text-align: left;
                                     }
                                     .quote-sheet-logo-row {
+                                        grid-row: 1;
                                         flex-shrink: 0;
                                         display: flex;
                                         justify-content: flex-end;
                                         width: 100%;
+                                        margin-bottom: ${EMS_QUOTE_LOGO_ROW_MARGIN_BOTTOM};
                                     }
                                     /**
                                      * With Header off: letterhead invisible but space preserved (no vertical shift).
@@ -15389,7 +16114,82 @@ const QuoteForm = ({ openContext = null }) => {
                                     }
                                     .quote-cover-first-page {
                                         flex-shrink: 0;
-                                        margin-bottom: 22px;
+                                        margin-top: 6px;
+                                        margin-bottom: 0;
+                                        display: flex;
+                                        flex-direction: column;
+                                        gap: 18px;
+                                        /* Match project meta label cell padding-left (see .quote-cover-meta-row-mid td:first-child). */
+                                        --quote-cover-text-inset: 8px;
+                                    }
+                                    .quote-cover-first-page .quote-cover-body-panel {
+                                        margin-top: 0;
+                                    }
+                                    .quote-cover-body-panel {
+                                        --quote-cover-text-inset: 8px;
+                                        border-radius: 5px;
+                                        border: 1px solid #e2e8f0;
+                                        background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                        box-sizing: border-box;
+                                        box-shadow:
+                                            0 2px 10px rgba(15, 23, 42, 0.08),
+                                            0 1px 2px rgba(15, 23, 42, 0.06);
+                                        text-align: left;
+                                        -webkit-print-color-adjust: exact;
+                                        print-color-adjust: exact;
+                                    }
+                                    .quote-cover-body-panel:not(.quote-cover-letter):not(.quote-clause-heading-panel) {
+                                        margin-top: 18px;
+                                        padding: calc(12px * 1.69) calc(14px * 1.69) calc(12px * 1.69)
+                                            var(--quote-cover-text-inset);
+                                    }
+                                    /* Clause title bar — navy panel; body stays on white below */
+                                    .quote-clause-block--continuation {
+                                        margin-bottom: 12px;
+                                    }
+                                    .quote-clause-heading-panel.quote-cover-body-panel.quote-preview-panel-shell {
+                                        margin-top: ${EMS_QUOTE_CLAUSE_HEADING_MARGIN_TOP} !important;
+                                        margin-bottom: ${EMS_QUOTE_CLAUSE_HEADING_MARGIN_BOTTOM} !important;
+                                        padding: ${EMS_QUOTE_CLAUSE_HEADING_PADDING_Y} ${EMS_QUOTE_CLAUSE_HEADING_PADDING_X}
+                                            ${EMS_QUOTE_CLAUSE_HEADING_PADDING_Y} var(--quote-cover-text-inset) !important;
+                                        border-radius: ${EMS_QUOTE_CLAUSE_HEADING_BORDER_RADIUS};
+                                        background: ${EMS_QUOTE_CLAUSE_HEADING_BG} !important;
+                                        border-color: ${EMS_QUOTE_CLAUSE_HEADING_BG} !important;
+                                        box-sizing: border-box !important;
+                                    }
+                                    .content-section
+                                        > .quote-clause-block--continuation:first-child
+                                        .quote-clause-heading-panel {
+                                        margin-top: 0;
+                                    }
+                                    .quote-clause-heading-panel > h3 {
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        font-size: ${EMS_QUOTE_CLAUSE_HEADING_FONT_SIZE} !important;
+                                        font-weight: 600 !important;
+                                        line-height: ${EMS_QUOTE_CLAUSE_HEADING_LINE_HEIGHT} !important;
+                                        color: ${EMS_QUOTE_CLAUSE_HEADING_TEXT_COLOR} !important;
+                                    }
+                                    .quote-clause-block--continuation .clause-content {
+                                        font-size: 13px;
+                                        color: #0f172a;
+                                        padding-left: var(--quote-cover-text-inset, 8px);
+                                        padding-right: calc(14px * 1.69);
+                                        box-sizing: border-box;
+                                    }
+                                    .quote-cover-first-page .quote-cover-letter.quote-cover-body-panel {
+                                        margin-top: 0;
+                                        padding-top: calc(12px * 1.69);
+                                        padding-right: calc(14px * 1.69);
+                                        padding-left: var(--quote-cover-text-inset);
+                                        padding-bottom: 12px;
+                                    }
+                                    .quote-cover-sign-off.quote-cover-body-panel {
+                                        margin-top: 18px;
+                                    }
+                                    .quote-cover-sign-off.quote-cover-body-panel.quote-preview-panel-shell {
+                                        overflow: visible;
+                                        height: auto;
                                     }
                                     .quote-section-rule {
                                         border: 0;
@@ -15407,38 +16207,119 @@ const QuoteForm = ({ openContext = null }) => {
                                         margin-bottom: 20px;
                                     }
                                     .quote-cover-letter {
-                                        padding-top: 10px;
+                                        margin-top: 0;
                                     }
                                     .quote-header-quote-panel {
                                         width: 100%;
-                                        border: none;
-                                        border-radius: 0;
-                                        overflow: visible;
                                         font-size: 13px;
                                         box-sizing: border-box;
+                                        flex: 0 0 auto;
+                                        min-height: 0;
+                                        display: flex;
+                                        flex-direction: column;
+                                    }
+                                    .quote-header-quote-panel--no-header .quote-header-quote-panel-mid {
+                                        border-radius: 5px;
                                     }
                                     .quote-header-quote-panel-body {
                                         display: flex;
                                         flex-direction: column;
                                         width: 100%;
-                                        padding: 4px 0 14px 0;
+                                        padding: 0;
+                                        box-sizing: border-box;
+                                        flex: 1 1 auto;
+                                        min-height: 0;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap {
+                                        display: inline-flex;
+                                        align-items: center;
+                                        justify-content: center;
+                                        flex-shrink: 0;
+                                    }
+                                    .quote-header-quote-panel-mid .quote-header-quote-meta-ic-wrap {
+                                        width: 17px;
+                                        height: 17px;
+                                        border-radius: 4px;
                                         box-sizing: border-box;
                                     }
-                                    .quote-header-quote-panel-row--ref {
-                                        background: #e8edf4 !important;
+                                    .quote-header-quote-meta-ic-wrap svg {
+                                        display: block;
+                                    }
+                                    .quote-header-quote-panel-mid .quote-header-quote-meta-ic-wrap svg {
+                                        stroke: #ffffff;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--ref {
+                                        color: #ffffff !important;
+                                        background: #2563eb !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--date {
+                                        color: #ffffff !important;
+                                        background: #059669 !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--user {
+                                        color: #ffffff !important;
+                                        background: #7c3aed !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--phone {
+                                        color: #ffffff !important;
+                                        background: #0d9488 !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--tag {
+                                        color: #ffffff !important;
+                                        background: #d97706 !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--custref {
+                                        color: #ffffff !important;
+                                        background: #4f46e5 !important;
+                                    }
+                                    .quote-header-quote-meta-ic-wrap--clock {
+                                        color: #ffffff !important;
+                                        background: #db2777 !important;
+                                    }
+                                    .quote-header-quote-panel-mid {
+                                        background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                        border-radius: 0 0 5px 5px;
+                                        overflow: hidden;
+                                        padding: 2px 10px 7px 10px;
+                                        box-sizing: border-box;
                                         -webkit-print-color-adjust: exact;
                                         print-color-adjust: exact;
-                                        padding: 9px 0 9px 0 !important;
-                                        margin: 0 0 2px 0;
-                                        box-sizing: border-box;
+                                        flex: 1 1 auto;
+                                        min-height: 0;
                                     }
-                                    .quote-header-quote-panel-row--ref .quote-header-quote-panel-label {
-                                        font-weight: 600 !important;
-                                        color: #475569 !important;
+                                    .quote-header-quote-panel-mid .quote-header-quote-panel-row {
+                                        padding: 5px 0;
+                                        margin: 0;
+                                        line-height: 1.28;
                                     }
-                                    .quote-header-quote-panel-row--ref .quote-header-quote-panel-value {
-                                        font-weight: 700 !important;
+                                    .quote-header-quote-panel-mid
+                                        .quote-header-quote-panel-row
+                                        + .quote-header-quote-panel-row
+                                        .quote-header-quote-panel-value {
+                                        border-top: 1px solid #e2e8f0;
+                                    }
+                                    .quote-header-quote-panel-mid .quote-header-quote-panel-label {
+                                        display: flex;
+                                        align-items: center;
+                                        gap: 6px;
+                                        flex: 0 0 ${EMS_QUOTE_HEADER_QUOTE_LABEL_WIDTH};
+                                        max-width: ${EMS_QUOTE_HEADER_QUOTE_LABEL_WIDTH};
+                                        color: #334155 !important;
+                                        font-weight: 400 !important;
+                                    }
+                                    .quote-header-quote-panel-mid .quote-header-quote-panel-value {
                                         color: #0f172a !important;
+                                        font-weight: 400 !important;
+                                    }
+                                    .quote-header-quote-panel:not(.quote-header-quote-panel--no-header)
+                                        .quote-header-quote-panel-mid
+                                        .quote-header-quote-panel-row:first-child
+                                        .quote-header-quote-panel-label,
+                                    .quote-header-quote-panel:not(.quote-header-quote-panel--no-header)
+                                        .quote-header-quote-panel-mid
+                                        .quote-header-quote-panel-row:first-child
+                                        .quote-header-quote-panel-value {
+                                        font-weight: 700 !important;
                                     }
                                     .quote-header-quote-panel-row {
                                         display: flex;
@@ -15449,11 +16330,11 @@ const QuoteForm = ({ openContext = null }) => {
                                         line-height: 1.38;
                                     }
                                     .quote-header-quote-panel-label {
-                                        flex: 0 0 34%;
-                                        max-width: 132px;
+                                        flex: 0 0 ${EMS_QUOTE_HEADER_QUOTE_LABEL_WIDTH};
+                                        max-width: ${EMS_QUOTE_HEADER_QUOTE_LABEL_WIDTH};
                                         color: #000;
                                         font-weight: 400;
-                                        padding-right: 12px;
+                                        padding-right: 10px;
                                         box-sizing: border-box;
                                     }
                                     .quote-header-quote-panel-value {
@@ -15464,16 +16345,29 @@ const QuoteForm = ({ openContext = null }) => {
                                     }
                                     .quote-cover-page1-spacer {
                                         flex: 1 1 auto;
-                                        min-height: 8mm;
+                                        min-height: 0;
                                     }
                                     .quote-cover-sign-off {
                                         flex-shrink: 0;
                                         width: 100%;
                                         box-sizing: border-box;
-                                        padding-top: 4px;
+                                        min-height: ${EMS_QUOTE_COVER_SIGN_OFF_MIN_HEIGHT};
+                                        height: auto;
+                                        display: flex;
+                                        flex-direction: column;
+                                        overflow: visible;
+                                    }
+                                    .quote-cover-signatory-block {
+                                        flex: 0 0 auto;
+                                        display: flex;
+                                        flex-direction: column;
+                                        justify-content: flex-start;
+                                        min-height: calc(13px * 1.58 + 4px + 12px * 1.45);
+                                        margin-top: auto;
                                     }
                                     .quote-cover-sign-off-for {
-                                        margin: 0 0 calc(1.58em * 3) 0;
+                                        flex-shrink: 0;
+                                        margin: 0 0 calc(1.58em * 3.15) 0;
                                         font-size: 13px;
                                         line-height: 1.58;
                                         color: #0f172a;
@@ -15481,11 +16375,14 @@ const QuoteForm = ({ openContext = null }) => {
                                     }
                                     .quote-cover-signatory-line {
                                         margin-top: 0;
+                                        min-height: calc(13px * 1.58);
                                         font-size: 13px;
+                                        line-height: 1.58;
                                         color: #0f172a;
                                     }
                                     .quote-cover-signatory-designation {
                                         margin-top: 4px;
+                                        min-height: calc(12px * 1.45);
                                         font-size: 12px;
                                         line-height: 1.45;
                                         color: #475569;
@@ -15494,9 +16391,17 @@ const QuoteForm = ({ openContext = null }) => {
                                     .quote-cover-meta-table {
                                         width: 100%;
                                         table-layout: fixed;
-                                        border-collapse: collapse;
-                                        font-size: 13px;
+                                        border-collapse: separate;
+                                        border-spacing: 0;
+                                        font-size: calc(13px * 1.075);
                                         margin-bottom: 0;
+                                        flex-shrink: 0;
+                                        border: 1px solid #e2e8f0;
+                                        border-radius: 5px;
+                                        overflow: hidden;
+                                        box-shadow:
+                                            0 2px 10px rgba(15, 23, 42, 0.08),
+                                            0 1px 2px rgba(15, 23, 42, 0.06);
                                     }
                                     .quote-cover-meta-table td {
                                         border: none !important;
@@ -15505,34 +16410,64 @@ const QuoteForm = ({ openContext = null }) => {
                                         line-height: 1.45;
                                     }
                                     .quote-cover-meta-table td:first-child {
-                                        width: 26%;
-                                        max-width: 132px;
+                                        width: 22%;
+                                        max-width: 150px;
+                                        padding-right: 4px !important;
                                         color: #64748b;
-                                        font-weight: 500;
+                                        font-weight: 400;
                                     }
                                     .quote-cover-meta-table td:last-child {
                                         color: #0f172a;
                                         font-weight: 400;
+                                        padding-left: 4px !important;
                                     }
-                                    .quote-cover-meta-row-project td {
-                                        background: #e8edf4 !important;
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:first-child td:first-child {
+                                        border-radius: 5px 0 0 0;
+                                    }
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:first-child td:last-child {
+                                        border-radius: 0 5px 0 0;
+                                    }
+                                    .quote-cover-meta-row-mid td {
+                                        border-left: none !important;
+                                        border-right: none !important;
+                                        border-bottom: none !important;
+                                        border-top: none;
+                                        border-radius: 0 !important;
                                         -webkit-print-color-adjust: exact !important;
                                         print-color-adjust: exact !important;
-                                        padding-top: 9px;
-                                        padding-bottom: 9px;
+                                        padding: 7px 6px 7px 8px !important;
                                     }
-                                    .quote-cover-meta-row-project td:first-child {
-                                        font-weight: 600 !important;
-                                        color: #475569 !important;
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid + tr.quote-cover-meta-row-mid td:first-child {
+                                        border-top: none !important;
                                     }
-                                    .quote-cover-meta-row-project td:last-child {
-                                        font-weight: 700 !important;
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid + tr.quote-cover-meta-row-mid td:last-child {
+                                        border-top: 1px solid #e2e8f0 !important;
+                                        border-bottom: none !important;
+                                        border-left: none !important;
+                                        border-right: none !important;
+                                    }
+                                    .quote-cover-meta-row-mid td:first-child {
+                                        background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                        color: #334155 !important;
+                                        font-weight: 400 !important;
+                                        padding: 7px 4px 7px 8px !important;
+                                    }
+                                    .quote-cover-meta-row-mid td:last-child {
+                                        background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
                                         color: #0f172a !important;
+                                        font-weight: 400 !important;
+                                        padding: 7px 8px 7px 4px !important;
+                                    }
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:last-child td:first-child {
+                                        border-radius: 0 0 0 5px;
+                                    }
+                                    .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:last-child td:last-child {
+                                        border-radius: 0 0 5px 0;
                                     }
                                     .quote-cover-letter p {
-                                        margin: 0 0 11px 0;
-                                        font-size: 13px;
-                                        line-height: 1.58;
+                                        margin: 0 0 10px 0;
+                                        font-size: calc(13px * 1.1);
+                                        line-height: 1.45;
                                         color: #0f172a;
                                     }
                                     .quote-cover-letter p:last-of-type {
@@ -15564,7 +16499,7 @@ const QuoteForm = ({ openContext = null }) => {
                                         font-size: 11px;
                                         font-weight: 600;
                                         color: #64748b;
-                                        padding-bottom: 6px;
+                                        padding-bottom: 3px;
                                     }
                                     /*
                                      * Right-hand A4 preview only (#quote-preview): compact clause stacking.
@@ -15573,10 +16508,39 @@ const QuoteForm = ({ openContext = null }) => {
                                     #quote-preview .quote-clause-block {
                                         margin-bottom: 12px !important;
                                     }
-                                    #quote-preview .quote-clause-block > h3 {
+                                    #quote-preview .quote-clause-block:not(.quote-clause-block--continuation) > h3 {
                                         margin: 0 0 4px 0 !important;
                                         padding: 0 !important;
                                         line-height: 1.3 !important;
+                                    }
+                                    #quote-preview .quote-header-address-panel-row--header {
+                                        padding: ${EMS_QUOTE_ACCENT_HEADER_PADDING} !important;
+                                        line-height: ${EMS_QUOTE_ACCENT_HEADER_LINE_HEIGHT} !important;
+                                    }
+                                    #quote-preview .quote-header-address-panel-row--header .quote-header-address-panel-label--solo {
+                                        font-size: ${EMS_QUOTE_ACCENT_HEADER_FONT_SIZE} !important;
+                                        line-height: ${EMS_QUOTE_ACCENT_HEADER_LINE_HEIGHT} !important;
+                                    }
+                                    #quote-preview .quote-clause-heading-panel.quote-cover-body-panel.quote-preview-panel-shell {
+                                        margin-top: ${EMS_QUOTE_CLAUSE_HEADING_MARGIN_TOP} !important;
+                                        margin-bottom: ${EMS_QUOTE_CLAUSE_HEADING_MARGIN_BOTTOM} !important;
+                                        padding-top: ${EMS_QUOTE_CLAUSE_HEADING_PADDING_Y} !important;
+                                        padding-bottom: ${EMS_QUOTE_CLAUSE_HEADING_PADDING_Y} !important;
+                                        padding-left: var(--quote-cover-text-inset) !important;
+                                        padding-right: ${EMS_QUOTE_CLAUSE_HEADING_PADDING_X} !important;
+                                    }
+                                    #quote-preview .quote-clause-heading-panel > h3 {
+                                        margin: 0 !important;
+                                        padding: 0 !important;
+                                        font-size: ${EMS_QUOTE_CLAUSE_HEADING_FONT_SIZE} !important;
+                                        line-height: ${EMS_QUOTE_CLAUSE_HEADING_LINE_HEIGHT} !important;
+                                        font-weight: 600 !important;
+                                        color: ${EMS_QUOTE_CLAUSE_HEADING_TEXT_COLOR} !important;
+                                    }
+                                    #quote-preview .quote-clause-block--continuation .clause-content {
+                                        padding-left: var(--quote-cover-text-inset, 8px) !important;
+                                        padding-right: calc(14px * 1.69) !important;
+                                        box-sizing: border-box !important;
                                     }
                                     #quote-preview .clause-content {
                                         line-height: 1.45 !important;
@@ -15611,6 +16575,26 @@ const QuoteForm = ({ openContext = null }) => {
                                     #quote-preview .clause-content table {
                                         margin-top: 4px !important;
                                         margin-bottom: 4px !important;
+                                    }
+                                    #quote-preview .quote-clause-heading-panel + .clause-content > table#ems-auto-price-summary-table:first-child,
+                                    #quote-preview .clause-content > table#ems-auto-price-summary-table:first-child {
+                                        margin-top: ${EMS_QUOTE_PRICING_TABLE_MARGIN_TOP} !important;
+                                        border: ${EMS_QUOTE_PRICING_TABLE_OUTER_BORDER} !important;
+                                        border-collapse: collapse !important;
+                                        box-sizing: border-box !important;
+                                    }
+                                    #quote-preview .clause-content table#ems-auto-price-summary-table thead th {
+                                        border: ${EMS_QUOTE_PRICING_TABLE_HEAD_CELL_BORDER} !important;
+                                    }
+                                    /* Sign-off panel: 3% shorter from bottom; top (margin-top) unchanged */
+                                    #quote-preview .quote-cover-sign-off.quote-cover-body-panel:not(.quote-cover-letter):not(.quote-clause-heading-panel) {
+                                        padding-bottom: ${EMS_QUOTE_COVER_SIGN_OFF_BODY_PAD_BOTTOM_PREVIEW} !important;
+                                    }
+                                    #quote-preview .quote-cover-sign-off {
+                                        min-height: ${EMS_QUOTE_COVER_SIGN_OFF_MIN_HEIGHT_PREVIEW} !important;
+                                    }
+                                    #quote-preview .quote-cover-sign-off-for {
+                                        margin-bottom: calc(1.58em * ${EMS_QUOTE_COVER_SIGN_OFF_FOR_GAP_EM} * ${EMS_QUOTE_COVER_SIGN_OFF_PREVIEW_HEIGHT_SCALE}) !important;
                                     }
                                     @media print {
                                         /* Hide everything first */
@@ -15680,9 +16664,11 @@ const QuoteForm = ({ openContext = null }) => {
 
                                         .quote-a4-sheet--continuation .quote-sheet-main-flex {
                                             min-height: 0 !important;
+                                            overflow: visible !important;
                                         }
                                         .quote-a4-sheet--continuation .content-section {
                                             flex: 0 1 auto !important;
+                                            overflow: visible !important;
                                         }
 
                                         .quote-sheet-logo-row,
@@ -15692,6 +16678,11 @@ const QuoteForm = ({ openContext = null }) => {
                                             justify-content: flex-end !important;
                                             align-items: flex-start !important;
                                             visibility: visible !important;
+                                        }
+                                        .quote-a4-sheet > .footer-section {
+                                            grid-row: 3 !important;
+                                            align-self: end !important;
+                                            margin-top: 0 !important;
                                         }
                                         .footer-section {
                                             display: flex !important;
@@ -15725,6 +16716,19 @@ const QuoteForm = ({ openContext = null }) => {
                                             text-align: right !important;
                                             box-sizing: border-box !important;
                                         }
+                                        .footer-section .quote-print-page-indicator {
+                                            padding-bottom: 3px !important;
+                                        }
+                                        .footer-section > hr.quote-section-rule {
+                                            border: 0 !important;
+                                            border-top: ${EMS_QUOTE_PRINT_FOOTER_RULE_WIDTH} solid #94a3b8 !important;
+                                            height: 0 !important;
+                                            box-sizing: border-box !important;
+                                        }
+                                        .footer-section .quote-print-footer-company > div {
+                                            margin: 0 !important;
+                                            line-height: 1.1 !important;
+                                        }
 
                                         img {
                                             -webkit-print-color-adjust: exact !important;
@@ -15742,10 +16746,61 @@ const QuoteForm = ({ openContext = null }) => {
                                         }
                                         .no-print { display: none !important; }
                                         .quote-a4-sheet { box-shadow: none !important; }
-                                        .quote-cover-meta-row-project td {
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:first-child td:first-child {
+                                            border-radius: 5px 0 0 0 !important;
+                                        }
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:first-child td:last-child {
+                                            border-radius: 0 5px 0 0 !important;
+                                        }
+                                        .quote-header-quote-meta-ic-wrap svg,
+                                        .quote-header-quote-meta-ic-wrap--ref,
+                                        .quote-header-quote-meta-ic-wrap--date,
+                                        .quote-header-quote-meta-ic-wrap--user,
+                                        .quote-header-quote-meta-ic-wrap--phone,
+                                        .quote-header-quote-meta-ic-wrap--tag,
+                                        .quote-header-quote-meta-ic-wrap--custref,
+                                        .quote-header-quote-meta-ic-wrap--clock,
+                                        .quote-header-address-meta-ic-wrap,
+                                        .quote-header-address-meta-ic-wrap svg {
                                             -webkit-print-color-adjust: exact !important;
                                             print-color-adjust: exact !important;
-                                            background: #e8edf4 !important;
+                                        }
+                                        .quote-header-quote-panel-mid {
+                                            background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                            border-radius: 0 0 5px 5px !important;
+                                            -webkit-print-color-adjust: exact !important;
+                                            print-color-adjust: exact !important;
+                                        }
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:last-child td:first-child {
+                                            border-radius: 0 0 0 5px !important;
+                                        }
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid:last-child td:last-child {
+                                            border-radius: 0 0 5px 0 !important;
+                                        }
+                                        .quote-cover-meta-row-mid td {
+                                            border-left: none !important;
+                                            border-right: none !important;
+                                            border-bottom: none !important;
+                                            border-top: none !important;
+                                            border-radius: 0 !important;
+                                            padding: 7px 6px 7px 8px !important;
+                                            -webkit-print-color-adjust: exact !important;
+                                            print-color-adjust: exact !important;
+                                        }
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid + tr.quote-cover-meta-row-mid td:first-child {
+                                            border-top: none !important;
+                                        }
+                                        .quote-cover-meta-table tbody tr.quote-cover-meta-row-mid + tr.quote-cover-meta-row-mid td:last-child {
+                                            border-top: 1px solid #e2e8f0 !important;
+                                            border-bottom: none !important;
+                                            border-left: none !important;
+                                            border-right: none !important;
+                                        }
+                                        .quote-cover-meta-row-mid td:first-child {
+                                            background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
+                                        }
+                                        .quote-cover-meta-row-mid td:last-child {
+                                            background: ${EMS_QUOTE_COVER_META_MID_BG} !important;
                                         }
                                 }
                             `}
@@ -15786,39 +16841,28 @@ const QuoteForm = ({ openContext = null }) => {
                                         className="quote-clause-measure-host"
                                         aria-hidden
                                     >
-                                        {activeClausesList.map((clause, clauseMeasureIdx) => (
+                                        {clauseSegmentsForPagination.map((seg, segIdx) => (
                                             <div
-                                                // Custom clauses use `id`/`listKey`; standard clauses use `key`.
-                                                // Using `listKey` (always set) prevents duplicate React keys when
-                                                // multiple custom clauses are present (was `measure-undefined`).
-                                                key={`measure-${clause.listKey ?? clause.key ?? clause.id ?? clauseMeasureIdx}`}
-                                                id={`measure-clause-${clause.listKey ?? clause.key ?? clause.id ?? clauseMeasureIdx}`}
-                                                data-clause-measure-index={clauseMeasureIdx}
-                                                className="quote-clause-block quote-clause-section"
+                                                key={`measure-${seg.key}`}
+                                                data-segment-measure-index={segIdx}
+                                                className="quote-clause-block quote-clause-block--continuation quote-clause-section"
                                                 style={{
                                                     width: '180mm',
                                                     maxWidth: '100%',
                                                     boxSizing: 'border-box',
                                                 }}
                                             >
-                                                <h3
-                                                    style={{
-                                                        fontSize: '14px',
-                                                        fontWeight: 'bold',
-                                                    }}
-                                                >
-                                                    {clauseMeasureIdx + 1}. {clause.title}
-                                                </h3>
+                                                {seg.showHeading ? (
+                                                    <div className="quote-clause-heading-panel quote-cover-body-panel quote-preview-panel-shell">
+                                                        <h3>
+                                                            {seg.displayMajor}. {seg.clause.title}
+                                                        </h3>
+                                                    </div>
+                                                ) : null}
                                                 <div
                                                     className="clause-content"
                                                     style={{ fontSize: '13px' }}
-                                                    dangerouslySetInnerHTML={{
-                                                        __html: getClauseDisplayBodyHtml(
-                                                            clause.content,
-                                                            clause.listKey,
-                                                            clauseMeasureIdx + 1
-                                                        ),
-                                                    }}
+                                                    dangerouslySetInnerHTML={{ __html: seg.html }}
                                                 />
                                             </div>
                                         ))}
@@ -15832,7 +16876,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             onDrop={handleQuotePreviewSignatureDrop}
                                         >
                                             {/* Repeating Header (Logo) for Print */}
-                                            <div className="quote-sheet-logo-row" aria-hidden="true" style={{ width: '100%', marginBottom: '20px' }}>
+                                            <div className="quote-sheet-logo-row" aria-hidden="true" style={{ width: '100%' }}>
                                                 <div style={{ textAlign: 'right', width: '100%' }}>
                                                     {quoteLogoDisplaySrc ? (
                                                         <img src={quoteLogoDisplaySrc} alt="" style={{ height: '68px', width: 'auto', maxWidth: '212px', objectFit: 'contain' }} />
@@ -15844,66 +16888,232 @@ const QuoteForm = ({ openContext = null }) => {
                                             <div
                                                 className="quote-sheet-main-flex"
                                                 style={{
-                                                    minHeight: sheetIdx === 0 ? '250mm' : 0,
-                                    display: 'flex',
-                                    flexDirection: 'column',
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
                                                 }}
                                             >
                                                 {sheetIdx === 0 && (
-                                                    <div className="header-section quote-header-row" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0' }}>
-                                                        <div className="quote-header-address-col" style={{ width: '50%' }}>
-                                                            <div style={{ fontWeight: '600', marginBottom: '8px' }}>To,</div>
-                                                            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>
-                                                                {quotePreviewToBlockDisplay.toName}
-                                                            </div>
-                                                            <div style={{ fontSize: '13px', color: '#475569', whiteSpace: 'pre-line' }}>
-                                                                {quotePreviewToBlockDisplay.toAddress}
-                                                            </div>
-                                                            {(quotePreviewToBlockDisplay.toPhone || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569', marginTop: '6px' }}>
-                                                                    Tel: {quotePreviewToBlockDisplay.toPhone.trim()}
+                                                    <div className="header-section quote-header-row">
+                                                        <div className="quote-header-address-col">
+                                                            <div className="quote-header-address-panel quote-preview-panel-shell">
+                                                                <div className="quote-header-address-panel-row quote-header-address-panel-row--header">
+                                                                    <span className="quote-header-address-panel-label quote-header-address-panel-label--solo">
+                                                                        To,
+                                                                    </span>
                                                                 </div>
-                                                            ) : null}
-                                                            {(quotePreviewToBlockDisplay.toFax || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569' }}>Fax: {quotePreviewToBlockDisplay.toFax.trim()}</div>
-                                                            ) : null}
-                                                            {(quotePreviewToBlockDisplay.toEmail || '').trim() ? (
-                                                                <div style={{ fontSize: '13px', color: '#475569' }}>E-mail: {quotePreviewToBlockDisplay.toEmail.trim()}</div>
-                                                            ) : null}
-                                            </div>
-                                                        <div className="quote-header-quote-col" style={{ width: '45%' }}>
-                                                            <div className="quote-header-quote-panel">
-                                                                <div className="quote-header-quote-panel-body">
-                                                                    <div className="quote-header-quote-panel-row quote-header-quote-panel-row--ref">
-                                                                        <span className="quote-header-quote-panel-label">Quote Ref:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {quoteRefDisplayForPreview}
-                                                                        </span>
+                                                                <div className="quote-header-address-panel-body">
+                                                                    {String(quotePreviewToBlockDisplay.toName || '').trim() ? (
+                                                                        <div className="quote-header-address-panel-customer">
+                                                                            {quotePreviewToBlockDisplay.toName}
+                                                                        </div>
+                                                                    ) : null}
+                                                                    {String(
+                                                                        formatQuotePreviewToAddressText(
+                                                                            quotePreviewToBlockDisplay.toAddress || ''
+                                                                        ) || ''
+                                                                    ).trim() ? (
+                                                                        <div className="quote-header-address-panel-address-with-icon">
+                                                                            <span
+                                                                                className="quote-header-address-meta-ic-wrap quote-header-address-meta-ic-wrap--map"
+                                                                                aria-hidden="true"
+                                                                            >
+                                                                                <MapPin size={10} strokeWidth={2} />
+                                                                            </span>
+                                                                            <div className="quote-header-address-panel-address">
+                                                                                {formatQuotePreviewToAddressText(
+                                                                                    quotePreviewToBlockDisplay.toAddress || ''
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : null}
+                                                                    {(() => {
+                                                                        const phone = String(quotePreviewToBlockDisplay.toPhone || '').trim();
+                                                                        const fax = String(quotePreviewToBlockDisplay.toFax || '').trim();
+                                                                        const em = String(quotePreviewToBlockDisplay.toEmail || '').trim();
+                                                                        if (!phone && !(fax && fax !== phone) && !em) return null;
+                                                                        return (
+                                                                            <div className="quote-header-address-panel-contact">
+                                                                                {phone ? (
+                                                                                    <div
+                                                                                        key="to-tel"
+                                                                                        className="quote-header-address-panel-contact-line"
+                                                                                    >
+                                                                                        <span
+                                                                                            className="quote-header-address-meta-ic-wrap quote-header-address-meta-ic-wrap--tel"
+                                                                                            aria-hidden="true"
+                                                                                        >
+                                                                                            <Phone size={10} strokeWidth={2} />
+                                                                                        </span>
+                                                                                        <span>Tel: {phone}</span>
+                                                                                    </div>
+                                                                                ) : null}
+                                                                                {fax && fax !== phone ? (
+                                                                                    <div
+                                                                                        key="to-fax"
+                                                                                        className="quote-header-address-panel-contact-line"
+                                                                                    >
+                                                                                        <span
+                                                                                            className="quote-header-address-meta-ic-wrap quote-header-address-meta-ic-wrap--fax"
+                                                                                            aria-hidden="true"
+                                                                                        >
+                                                                                            <Printer size={10} strokeWidth={2} />
+                                                                                        </span>
+                                                                                        <span>Fax: {fax}</span>
+                                                                                    </div>
+                                                                                ) : null}
+                                                                                {em ? (
+                                                                                    <div
+                                                                                        key="to-mail"
+                                                                                        className="quote-header-address-panel-contact-line"
+                                                                                    >
+                                                                                        <span
+                                                                                            className="quote-header-address-meta-ic-wrap quote-header-address-meta-ic-wrap--mail"
+                                                                                            aria-hidden="true"
+                                                                                        >
+                                                                                            <Mail size={10} strokeWidth={2} />
+                                                                                        </span>
+                                                                                        <span>E-mail: {em}</span>
+                                                                                    </div>
+                                                                                ) : null}
+                                                                            </div>
+                                                                        );
+                                                                    })()}
+                                                                </div>
                                                             </div>
-                                                                    <div className="quote-header-quote-panel-row">
-                                                                        <span className="quote-header-quote-panel-label">Date:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
-                                                                                ? formatQuoteYmdForDisplay(
-                                                                                      subjobQuoteA4HeaderDisplay.quoteDateYmd
-                                                                                  ) || ''
-                                                                                : formatQuoteYmdForDisplay(quoteDate) || ''}
-                                                                        </span>
-                                                </div>
-                                                                    <div className="quote-header-quote-panel-row">
-                                                                        <span className="quote-header-quote-panel-label">Prepared By:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {String(
-                                                                                browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
-                                                                                    ? subjobQuoteA4HeaderDisplay.preparedBy
-                                                                                    : preparedBy || ''
-                                                                            ).trim() || ''}
-                                                                        </span>
-                                            </div>
+                                                        </div>
+                                                        <div className="quote-header-quote-col">
+                                                            <div className="quote-header-quote-stack">
+                                                            <div className="quote-header-quote-panel quote-preview-panel-shell">
+                                                                <div className="quote-header-address-panel-row quote-header-address-panel-row--header">
+                                                                    <span className="quote-header-address-panel-label quote-header-address-panel-label--solo">
+                                                                        Quote Details
+                                                                    </span>
+                                                                </div>
+                                                                <div className="quote-header-quote-panel-body">
+                                                                    <div className="quote-header-quote-panel-mid">
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--ref"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <FileText size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Quote Ref:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {quoteRefDisplayForPreview}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--date"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <Calendar size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Quote Date:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                    ? formatQuoteYmdForDisplay(
+                                                                                          subjobQuoteA4HeaderDisplay.quoteDateYmd
+                                                                                      ) || ''
+                                                                                    : formatQuoteYmdForDisplay(quoteDate) || ''}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--clock"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <Clock size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Validity:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {formatQuoteValidityLineForDetails(
+                                                                                    browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                        ? subjobQuoteA4HeaderDisplay.validityDisplay || ''
+                                                                                        : getValidityDate() || '',
+                                                                                    browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                        ? subjobQuoteA4HeaderDisplay.validityDayCount
+                                                                                        : parseInt(validityDays || 0, 10)
+                                                                                )}
+                                                                            </span>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <div className="quote-header-quote-panel quote-header-quote-panel--no-header quote-preview-panel-shell">
+                                                                <div className="quote-header-quote-panel-body">
+                                                                    <div className="quote-header-quote-panel-mid">
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--custref"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <BookUser size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Customer Ref:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {String(
+                                                                                    browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                        ? subjobQuoteA4HeaderDisplay.customerReference
+                                                                                        : customerReference || ''
+                                                                                ).trim() || ''}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--tag"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <Tag size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Type:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                    ? subjobQuoteA4HeaderDisplay.quoteTypeLine
+                                                                                    : quotePreviewTypeLine}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="quote-header-quote-panel-row">
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--user"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <User size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Prepared By:
+                                                                            </span>
+                                                                            <span className="quote-header-quote-panel-value">
+                                                                                {String(
+                                                                                    browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
+                                                                                        ? subjobQuoteA4HeaderDisplay.preparedBy
+                                                                                        : preparedBy || ''
+                                                                                ).trim() || ''}
+                                                                            </span>
+                                                                        </div>
                                                                     {subjobQuoteA4HeaderDisplay?.preparedByContact ||
                                                                     quotePreviewPreparedByContactDisplay ? (
                                                                         <div className="quote-header-quote-panel-row">
-                                                                            <span className="quote-header-quote-panel-label">Contact:</span>
+                                                                            <span className="quote-header-quote-panel-label">
+                                                                                <span
+                                                                                    className="quote-header-quote-meta-ic-wrap quote-header-quote-meta-ic-wrap--phone"
+                                                                                    aria-hidden="true"
+                                                                                >
+                                                                                    <Smartphone size={11} strokeWidth={2} />
+                                                                                </span>
+                                                                                Contact:
+                                                                            </span>
                                                                             <span className="quote-header-quote-panel-value">
                                                                                 {browsePreviousQuotesRevisions
                                                                                     ? subjobQuoteA4HeaderDisplay?.preparedByContact ||
@@ -15912,41 +17122,13 @@ const QuoteForm = ({ openContext = null }) => {
                                                                             </span>
                                         </div>
                                                                     ) : null}
-                                                                    <div className="quote-header-quote-panel-row">
-                                                                        <span className="quote-header-quote-panel-label">Type:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
-                                                                                ? subjobQuoteA4HeaderDisplay.quoteTypeLine
-                                                                                : quotePreviewTypeLine}
-                                                                        </span>
-                                                                    </div>
-                                                                    <div className="quote-header-quote-panel-row">
-                                                                        <span className="quote-header-quote-panel-label">Your Ref:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {String(
-                                                                                browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
-                                                                                    ? subjobQuoteA4HeaderDisplay.customerReference
-                                                                                    : customerReference || ''
-                                                                            ).trim() || ''}
-                                                                        </span>
-                                                                    </div>
-                                                                    <div className="quote-header-quote-panel-row">
-                                                                        <span className="quote-header-quote-panel-label">Validity:</span>
-                                                                        <span className="quote-header-quote-panel-value">
-                                                                            {browsePreviousQuotesRevisions && subjobQuoteA4HeaderDisplay
-                                                                                ? subjobQuoteA4HeaderDisplay.validityDisplay || ''
-                                                                                : getValidityDate() || ''}
-                                                                        </span>
                                                                     </div>
                                                                 </div>
+                                                            </div>
                                                             </div>
                                                         </div>
                                                     </div>
                                                 )}
-
-                                                {sheetIdx === 0 ? (
-                                                    <hr className="quote-section-rule quote-section-rule--after-header" aria-hidden="true" />
-                                                ) : null}
 
                                                 <div
                                                     className="content-section"
@@ -15961,11 +17143,11 @@ const QuoteForm = ({ openContext = null }) => {
                                                         <div className="quote-cover-first-page">
                                                             <table className="quote-cover-meta-table" role="presentation">
                                             <tbody>
-                                                                    <tr className="quote-cover-meta-row-project">
+                                                                    <tr className="quote-cover-meta-row-mid">
                                                                         <td>Project Name:</td>
                                                                         <td>{String(quotePreviewProjectName || '').trim() || ''}</td>
                                                 </tr>
-                                                <tr>
+                                                <tr className="quote-cover-meta-row-mid">
                                                                         <td>Subject:</td>
                                                                         <td>
                                                                             {String(
@@ -15976,7 +17158,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                                             ).trim() || ''}
                                                                         </td>
                                                 </tr>
-                                                <tr>
+                                                <tr className="quote-cover-meta-row-mid">
                                                                         <td>Attention of:</td>
                                                                         <td>
                                                                             {String(
@@ -15988,8 +17170,14 @@ const QuoteForm = ({ openContext = null }) => {
                                                 </tr>
                                             </tbody>
                                         </table>
-                                                            <hr className="quote-section-rule quote-section-rule--before-cover-letter" aria-hidden="true" />
-                                                            <div className="quote-cover-letter">
+                                                            <div
+                                                                ref={quoteCoverLetterRef}
+                                                                className="quote-cover-letter quote-cover-body-panel quote-preview-panel-shell"
+                                                                style={{
+                                                                    ['--quote-cover-letter-pad-bottom']: `${COVER_LETTER_PAD_BOTTOM_BASE_PX + coverLetterExtraPadPx}px`,
+                                                                    paddingBottom: `${COVER_LETTER_PAD_BOTTOM_BASE_PX + coverLetterExtraPadPx}px`,
+                                                                }}
+                                                            >
                                             <p>Dear Sir/Madam,</p>
                                                                 <p>
                                                                     Thank you for providing us with this opportunity to submit our
@@ -16008,63 +17196,68 @@ const QuoteForm = ({ openContext = null }) => {
                                                         </div>
                                                     )}
 
-                                                    {sheet.clauses.map((clause) => {
-                                                        const globalIdx = activeClausesList.findIndex((c) => c.listKey === clause.listKey);
-                                                        const displayMajor = globalIdx >= 0 ? globalIdx + 1 : 1;
-                                                        const bodyHtml = getClauseDisplayBodyHtml(
-                                                            clause.content,
-                                                            clause.listKey,
-                                                            displayMajor
-                                                        );
-                                                        return (
-                                                            <div key={clause.listKey ?? clause.key ?? clause.id} className="quote-clause-block">
-                                                                <h3 style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                                                                    {displayMajor}. {clause.title}
-                                                                </h3>
+                                                    {(sheet.blocks || []).map((block) => (
+                                                            <div
+                                                                key={`${block.listKey}-${block.showHeading ? 'h' : 'c'}-${String(block.bodyHtml).length}`}
+                                                                className={`quote-clause-block${
+                                                                    sheetIdx > 0 ? ' quote-clause-block--continuation' : ''
+                                                                }`}
+                                                            >
+                                                                {block.showHeading ? (
+                                                                    <div className="quote-clause-heading-panel quote-cover-body-panel quote-preview-panel-shell">
+                                                                        <h3>
+                                                                            {block.displayMajor}. {block.clause.title}
+                                                                        </h3>
+                                                                    </div>
+                                                                ) : null}
                                                                 <div
                                                                     className="clause-content"
                                                                     style={{ fontSize: '13px' }}
-                                                                    dangerouslySetInnerHTML={{ __html: bodyHtml }}
+                                                                    dangerouslySetInnerHTML={{ __html: block.bodyHtml }}
                                                                 />
                                                             </div>
-                                                        );
-                                                    })}
+                                                    ))}
 
                                                     {sheetIdx === 0 ? (
                                                         <>
                                                             <div className="quote-cover-page1-spacer" aria-hidden="true" />
-                                                            <div className="quote-cover-sign-off">
+                                                            <div className="quote-cover-sign-off quote-cover-body-panel quote-preview-panel-shell">
                                                                 <p className="quote-cover-sign-off-for">For {quoteCoverOfferCompanyName},</p>
-                                                                <div className="quote-cover-signatory-line">
-                                                                    {String(
-                                                                        subjobQuoteA4HeaderDisplay
-                                                                            ? subjobQuoteA4HeaderDisplay.signatory
-                                                                            : signatory || ''
-                                                                    ).trim() || ''}
-                                                                </div>
-                                                                {String(
-                                                                    subjobQuoteA4HeaderDisplay
-                                                                        ? subjobQuoteA4HeaderDisplay.signatoryDesignation
-                                                                        : signatoryDesignation || ''
-                                                                ).trim() ? (
+                                                                <div className="quote-cover-signatory-block">
+                                                                    <div className="quote-cover-signatory-line">
+                                                                        {String(
+                                                                            subjobQuoteA4HeaderDisplay
+                                                                                ? subjobQuoteA4HeaderDisplay.signatory
+                                                                                : signatory || ''
+                                                                        ).trim() || '\u00A0'}
+                                                                    </div>
                                                                     <div className="quote-cover-signatory-designation">
                                                                         {String(
                                                                             subjobQuoteA4HeaderDisplay
                                                                                 ? subjobQuoteA4HeaderDisplay.signatoryDesignation
-                                                                                : signatoryDesignation
-                                                                        ).trim()}
+                                                                                : signatoryDesignation || ''
+                                                                        ).trim() || '\u00A0'}
                                                                     </div>
-                                                                ) : null}
+                                                                </div>
                                                             </div>
                                                         </>
                                                     ) : null}
                                         </div>
 
-                                                <div className="footer-section" style={{ marginTop: 'auto', paddingTop: '20px' }}>
-                                                     <div className="quote-print-page-indicator" style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>
+                                            </div>
+
+                                            <div className="footer-section">
+                                                     <div
+                                                         className="quote-print-page-indicator"
+                                                         style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, paddingBottom: '3px' }}
+                                                     >
                                                          Page {sheetIdx + 1} of {sheets.length}
                                                      </div>
-                                                     <hr className="quote-section-rule" style={{ marginTop: '8px', marginBottom: '10px' }} aria-hidden="true" />
+                                                     <hr
+                                                         className="quote-section-rule"
+                                                         style={{ marginTop: '1px', marginBottom: '1.5px' }}
+                                                         aria-hidden="true"
+                                                     />
                                                      <div className="quote-print-footer-wrap">
                                                          <div
                                                              className="quote-print-footer-company"
@@ -16081,9 +17274,8 @@ const QuoteForm = ({ openContext = null }) => {
                                                                  Fax: {footerDetails?.fax || quotePreviewEnquiryCompanyFallback?.fax || '(+973) 17 400 396'}
                                             </div>
                                                              <div>E-mail: {footerDetails?.email || quotePreviewEnquiryCompanyFallback?.email || 'bms@almcg.com'}</div>
-                                        </div>
-                                    </div>
-                                                </div>
+                                                         </div>
+                                                     </div>
                                             </div>
 
                                             {/* Digital Stamps (parent tab includes subjob signatures as read-only overlays) */}
@@ -16208,7 +17400,7 @@ const QuoteForm = ({ openContext = null }) => {
                                     className="btn btn-outline-secondary me-auto"
                                     onClick={handleOpenInOutlook}
                                     disabled={emailSending}
-                                    title="Opens your mail app with subject and message. The PDF is saved to Downloads so you can attach it (browsers cannot attach files via mail links)."
+                                    title="Open Outlook draft with the quote PDF attached (VBScript / classic Outlook on Windows)."
                                 >
                                     <i className="bi bi-microsoft me-2"></i>
                                     Open in Outlook
@@ -16250,4 +17442,5 @@ const QuoteForm = ({ openContext = null }) => {
     );
 };
 
+export { QuoteForm };
 export default QuoteForm;

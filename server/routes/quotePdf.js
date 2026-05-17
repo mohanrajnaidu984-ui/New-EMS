@@ -6,8 +6,25 @@ const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const express = require('express');
+const { applyQuotePdfRestrictions, isQuotePdfRestrictEnabled } = require('../lib/restrictQuotePdf');
 
 const router = express.Router();
+
+/** Quick reachability check for Quote tab PDF download (Vite proxies /api → Express). */
+router.get('/health', (_req, res) => {
+    let puppeteerOk = false;
+    try {
+        require.resolve('puppeteer');
+        puppeteerOk = true;
+    } catch {
+        puppeteerOk = false;
+    }
+    return res.json({
+        ok: true,
+        port: serverListenPort(),
+        puppeteer: puppeteerOk,
+    });
+});
 
 /**
  * Beyond this, Page.setContent can hit CDP limits on some setups — load via file:// instead.
@@ -15,7 +32,60 @@ const router = express.Router();
  */
 const SETCONTENT_SAFE_MAX = 8_000_000;
 
-const serverListenPort = () => String(process.env.PORT || 5001);
+const serverListenPort = () => String(process.env.PORT || 5002);
+
+/** Same font as on-screen #quote-preview (QuoteForm.jsx) — do not switch to Inter in PDF. */
+const QUOTE_PREVIEW_FONT_STACK =
+    "'Segoe UI', 'Segoe UI Web (West European)', system-ui, -apple-system, sans-serif";
+
+/** Injected last in <head> — strip compositing that rasterizes text; keep Segoe UI from hoisted CSS. */
+function buildPdfSharpTextHeadCss() {
+    return `<style id="ems-pdf-sharp-text">
+html[data-preview-pdf="1"] #quote-preview {
+    background: #fff !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    font-family: ${QUOTE_PREVIEW_FONT_STACK} !important;
+    -webkit-font-smoothing: antialiased !important;
+    -moz-osx-font-smoothing: grayscale !important;
+    text-rendering: auto !important;
+}
+html[data-preview-pdf="1"] #quote-preview * {
+    -webkit-font-smoothing: antialiased !important;
+    -moz-osx-font-smoothing: grayscale !important;
+    text-rendering: auto !important;
+    transform: none !important;
+    filter: none !important;
+    backdrop-filter: none !important;
+}
+html[data-preview-pdf="1"] .quote-a4-sheet,
+html[data-preview-pdf="1"] .quote-preview-panel-shell,
+html[data-preview-pdf="1"] .quote-cover-body-panel,
+html[data-preview-pdf="1"] .quote-clause-heading-panel,
+html[data-preview-pdf="1"] .quote-cover-meta-table {
+    box-shadow: none !important;
+}
+html[data-preview-pdf="1"] .clause-content,
+html[data-preview-pdf="1"] .clause-content p,
+html[data-preview-pdf="1"] .clause-content li,
+html[data-preview-pdf="1"] .clause-content td,
+html[data-preview-pdf="1"] .clause-content th,
+html[data-preview-pdf="1"] .quote-clause-heading-panel h3 {
+    font-family: inherit !important;
+}
+</style>`;
+}
+
+function injectPdfSharpTextHead(html) {
+    let out = String(html);
+    out = out.replace(/<link[^>]*fonts\.googleapis\.com[^>]*>\s*/gi, '');
+    out = out.replace(/<link[^>]*fonts\.gstatic\.com[^>]*>\s*/gi, '');
+    const block = buildPdfSharpTextHeadCss();
+    if (out.includes('</head>')) {
+        return out.replace('</head>', `${block}</head>`);
+    }
+    return `${block}${out}`;
+}
 
 /**
  * HTML is built in the browser; `<base href>` and `/uploads` URLs often use the LAN host (e.g. 192.168.x.x).
@@ -71,8 +141,8 @@ async function waitForImagesLoaded(page) {
 async function loadHtmlInPage(page, html) {
     const baseURL = extractBaseHrefFromHtml(html);
     const setOpts = {
-        /** `load` waits for stylesheets (e.g. Google Fonts); blocked/slow networks hang until timeout → 500 */
-        waitUntil: 'domcontentloaded',
+        /** Wait for self-hosted Inter @font-face so PDF embeds vector text, not blurry fallback glyphs. */
+        waitUntil: 'networkidle0',
         timeout: 180000,
         ...(baseURL ? { baseURL } : {}),
     };
@@ -123,7 +193,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         return res.status(400).json({ error: 'html_required' });
     }
 
-    const htmlForPdf = rewriteHtmlAssetHostsForPuppeteer(html);
+    let htmlForPdf = rewriteHtmlAssetHostsForPuppeteer(html);
+    htmlForPdf = injectPdfSharpTextHead(htmlForPdf);
 
     if (process.env.DEBUG_QUOTE_PDF_HTML === '1') {
         try {
@@ -168,8 +239,8 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         page.setDefaultNavigationTimeout(180000);
         // screen = same cascade as Quote preview (embedded fragment styles target screen; @media print ignored).
         await page.emulateMediaType(useScreenMedia ? 'screen' : 'print');
-        /** ~A4 width at 96 CSS px/mm; deviceScaleFactor 2 improves border/text rasterization in PDF output. */
-        await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 2 });
+        /** A4 @ 96dpi; 1× = true vector PDF (2× rasterizes and softens text when scaled into A4). */
+        await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 });
         tmpHtmlPath = await loadHtmlInPage(page, htmlForPdf);
         try {
             await waitForImagesLoaded(page);
@@ -177,27 +248,48 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
             /* ignore */
         }
         try {
-            await page.evaluate(() =>
-                Promise.race([
-                    document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(),
-                    new Promise((r) => setTimeout(r, 3000)),
-                ])
-            );
+            await page.evaluate(async () => {
+                if (document.fonts && document.fonts.ready) {
+                    await document.fonts.ready;
+                }
+                const root = document.getElementById('quote-print-root');
+                if (!root) return;
+                root.querySelectorAll('[style]').forEach((el) => {
+                    if (!el.style) return;
+                    const fam = el.style.fontFamily || '';
+                    if (/inter|calibri|arial/i.test(fam)) {
+                        el.style.removeProperty('font-family');
+                    }
+                    if (el.style.transform && el.style.transform !== 'none') {
+                        el.style.removeProperty('transform');
+                    }
+                    if (el.style.filter && el.style.filter !== 'none') {
+                        el.style.removeProperty('filter');
+                    }
+                    if (el.style.webkitFontSmoothing) {
+                        el.style.removeProperty('-webkit-font-smoothing');
+                    }
+                });
+            });
         } catch {
             /* ignore */
         }
         /* Removed manual element removal to avoid layout shifts; visibility is handled via CSS in quotePrintDocumentHtml.js */
 
-        const buf = await renderPdfBuffer(page);
+        let buf = Buffer.from(await renderPdfBuffer(page));
+        buf = await applyQuotePdfRestrictions(buf);
         const safeName = String(filename || 'quote.pdf').replace(/[^\w.\-]+/g, '_');
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
-        return res.send(Buffer.from(buf));
+        if (isQuotePdfRestrictEnabled()) {
+            res.setHeader('X-EMS-PDF-Restricted', '1');
+        }
+        return res.send(buf);
     } catch (err) {
         const raw = err && err.message ? String(err.message) : String(err);
         let msg = raw.trim() || 'pdf_generation_failed';
         let hint =
-            'If logos fail to load, set QUOTE_PDF_ASSET_ORIGIN in server/.env (e.g. http://127.0.0.1:5001). ' +
+            'If logos fail to load, set QUOTE_PDF_ASSET_ORIGIN in server/.env (e.g. http://127.0.0.1:5002). ' +
             'Ensure Puppeteer can launch Chrome: cd server && npx puppeteer browsers install chrome (or set PUPPETEER_EXECUTABLE_PATH).';
         if (/Could not find Chrome|browser.*executable|Executable doesn't exist|Browser closed|spawn .* ENOENT/i.test(raw)) {
             hint =

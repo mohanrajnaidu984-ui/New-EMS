@@ -29,6 +29,38 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ACG brand rasters: default smooth scaling (avoid crisp-edges on photos/anti-aliased logos). */
+.acg-header-logo,
+.acg-login-footer-logo {
+  image-rendering: auto;
+  -ms-interpolation-mode: bicubic;
+}
+
+/* Header right: logo + controls use absolute slots (see Header.jsx inline styles). */
+.navbar .acg-header-right {
+  position: relative;
+  margin-left: auto;
+  align-self: stretch;
+  height: 100%;
+  width: min(240px, 40vw);
+  flex-shrink: 0;
+}
+
+.navbar .acg-header-logo-slot {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  line-height: 0;
+  z-index: 1;
+}
+
+.navbar .acg-header-controls {
+  position: absolute;
+  right: 0;
+  bottom: 4px;
+  z-index: 2;
+}
+
 /* Smooth scrolling */
 html {
   scroll-behavior: smooth;

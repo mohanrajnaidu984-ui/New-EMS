@@ -4,6 +4,10 @@ const { sql } = require('../dbConfig');
 const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const mapQuoteListingRows = require('../lib/mapQuoteListingRows');
 
+/** Avoid duplicate Master_ConcernedSE / Master_EnquiryFor hits on rapid dashboard + modal calls. */
+const DASHBOARD_ACCESS_CACHE_MS = 90_000;
+const dashboardAccessCache = new Map();
+
 // Helper to construct filter clauses (kept for reference or future use if needed, though active logic is inline below)
 // --- Helper: Apply Access Control Logic ---
 const applyAccessControl = (request, params) => {
@@ -56,6 +60,12 @@ async function resolveDashboardAccessMode(userEmail) {
     const email = (userEmail || '').toString().trim().toLowerCase().replace(/@almcg\.com/g, '@almoayyedcg.com');
     if (!email) return { accessMode: 'assigned', fullName: '' };
 
+    const now = Date.now();
+    const cached = dashboardAccessCache.get(email);
+    if (cached && now - cached.t < DASHBOARD_ACCESS_CACHE_MS) {
+        return cached.v;
+    }
+
     // Resolve FullName (for ConcernedSE match) and detect CC mail membership
     const [userRes, ccRes] = await Promise.all([
         sql.query`
@@ -72,7 +82,9 @@ async function resolveDashboardAccessMode(userEmail) {
 
     const fullName = (userRes.recordset?.[0]?.FullName || '').toString().trim();
     const isCcUser = (ccRes.recordset?.length || 0) > 0;
-    return { accessMode: isCcUser ? 'department' : 'assigned', fullName };
+    const v = { accessMode: isCcUser ? 'department' : 'assigned', fullName };
+    dashboardAccessCache.set(email, { t: now, v });
+    return v;
 }
 
 /**
@@ -106,6 +118,199 @@ function buildDashboardQuoteScopeFilter(isDeptMode, salesEngineer) {
             )`;
     if (se) q += seFrag;
     return q;
+}
+
+/** True when the enquiry has no row in EnquiryQuotes (any preparer — hides Due/Lapsed once any quote exists). */
+const SQL_NO_QUOTE_FOR_ENQUIRY = (emAlias = 'em') =>
+    `NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = ${emAlias}.RequestNo)`;
+
+/** Local calendar "today" (YYYY-MM-DD) — optional client override to match dashboard cells. */
+function getDashboardTodayYmd(query) {
+    const raw = String(query?.today || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+/** Monthly KPI totals = sum of daily grid (guarantees bar chart matches calendar chips). */
+function reconcileCalendarTotalsFromDaily(daily, totalsFromSql) {
+    const dailyRows = Array.isArray(daily) ? daily : [];
+    const sum = (key) => dailyRows.reduce((acc, row) => acc + (Number(row[key]) || 0), 0);
+    return {
+        enquiries: sum('Enquiries'),
+        due: sum('Due'),
+        lapsed: sum('Lapsed'),
+        quoted: sum('Quoted'),
+        siteVisits: sum('SiteVisits'),
+        _sqlTotals: totalsFromSql || null,
+    };
+}
+
+/** Shared calendar filter SQL + parameter binding (matches legacy GET /calendar). */
+function bindDashboardCalendarFilters(request, query, resolved) {
+    const { division, salesEngineer, userEmail, userName, userRole } = query;
+    const effectiveUserName = (resolved.fullName || userName || '').toString().trim();
+    const isDeptMode = resolved.accessMode === 'department';
+
+    let baseFilter = '';
+    if (division && division !== 'All') {
+        if (isDeptMode) {
+            baseFilter += ` AND EXISTS (
+                    SELECT 1
+                    FROM EnquiryFor ef
+                    JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName)
+                    WHERE ef.RequestNo = em.RequestNo
+                      AND mef.DepartmentName = @division
+                ) `;
+        } else {
+            baseFilter += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName = @division) `;
+        }
+        request.input('division', sql.NVarChar, division);
+    }
+    if (salesEngineer && salesEngineer !== 'All') {
+        baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
+        request.input('salesEngineer', sql.NVarChar, salesEngineer);
+    }
+
+    const accessFilter = applyAccessControl(request, {
+        userRole,
+        userName: effectiveUserName,
+        userEmail,
+        accessMode: resolved.accessMode,
+    });
+    baseFilter += accessFilter;
+
+    let quoteScopeFilter = buildDashboardQuoteScopeFilter(isDeptMode, salesEngineer);
+    if (division && division !== 'All') {
+        quoteScopeFilter += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM Master_EnquiryFor mefQ
+                    WHERE (
+                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                    )
+                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+                      AND (
+                        CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                        OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
+                      )
+                )
+            `;
+    }
+
+    const todayStr = getDashboardTodayYmd(query);
+    request.input('today', sql.VarChar(10), todayStr);
+
+    return { baseFilter, quoteScopeFilter, todayStr };
+}
+
+/** Daily grid + monthly totals in one DB round-trip (two result sets). */
+function buildDashboardCalendarMergedBatchSql(baseFilter, quoteScopeFilter) {
+    const dailyPart = `
+            WITH FilteredEnquiries AS (
+                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
+                FROM EnquiryMaster em
+                WHERE 1=1 ${baseFilter}
+            ),
+            FilteredQuotes AS (
+                SELECT eq.CreatedAt, eq.UpdatedAt, eq.QuoteDate, eq.RequestNo
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
+            ),
+            Dates AS (
+                SELECT EnquiryDate as DateVal, 'Enquiry' as Type FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year
+                UNION ALL
+                SELECT fe.DueDate as DateVal, 'Due' as Type
+                FROM FilteredEnquiries fe
+                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                  AND CAST(fe.DueDate AS DATE) >= CAST(@today AS DATE)
+                  AND ${SQL_NO_QUOTE_FOR_ENQUIRY('fe')}
+                UNION ALL
+                SELECT fe.DueDate as DateVal, 'Lapsed' as Type 
+                FROM FilteredEnquiries fe
+                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
+                AND ${SQL_NO_QUOTE_FOR_ENQUIRY('fe')}
+                UNION ALL
+                SELECT SiteVisitDate as DateVal, 'SiteVisit' as Type FROM FilteredEnquiries WHERE MONTH(SiteVisitDate) = @month AND YEAR(SiteVisitDate) = @year
+                UNION ALL
+                SELECT CAST(eq.QuoteDate AS DATE) AS DateVal, 'Quote' AS Type
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
+                  AND eq.QuoteDate IS NOT NULL
+                  AND MONTH(eq.QuoteDate) = @month AND YEAR(eq.QuoteDate) = @year
+            )
+            SELECT 
+                CONVERT(VARCHAR(10), DateVal, 23) as Date,
+                SUM(CASE WHEN Type = 'Enquiry' THEN 1 ELSE 0 END) as Enquiries,
+                SUM(CASE WHEN Type = 'Due' THEN 1 ELSE 0 END) as Due,
+                SUM(CASE WHEN Type = 'Lapsed' THEN 1 ELSE 0 END) as Lapsed,
+                SUM(CASE WHEN Type = 'SiteVisit' THEN 1 ELSE 0 END) as SiteVisits,
+                SUM(CASE WHEN Type = 'Quote' THEN 1 ELSE 0 END) as Quoted
+            FROM Dates
+            WHERE DateVal IS NOT NULL
+            GROUP BY CONVERT(VARCHAR(10), DateVal, 23)`;
+
+    const totalsPart = `
+            WITH FilteredEnquiries AS (
+                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
+                FROM EnquiryMaster em
+                WHERE 1=1 ${baseFilter}
+            ),
+            FilteredQuotes AS (
+                SELECT eq.CreatedAt, eq.UpdatedAt, eq.QuoteDate, eq.RequestNo
+                FROM EnquiryQuotes eq
+                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
+            )
+            SELECT 
+                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
+                (SELECT COUNT(DISTINCT fe.RequestNo)
+                 FROM FilteredEnquiries fe
+                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                   AND CAST(fe.DueDate AS DATE) >= CAST(@today AS DATE)
+                   AND ${SQL_NO_QUOTE_FOR_ENQUIRY('fe')}) as due,
+                (SELECT COUNT(DISTINCT fe.RequestNo)
+                 FROM FilteredEnquiries fe
+                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
+                   AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
+                   AND ${SQL_NO_QUOTE_FOR_ENQUIRY('fe')}) as lapsed,
+                (SELECT COUNT(*)
+                 FROM EnquiryQuotes eq
+                 JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
+                 WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
+                   AND eq.QuoteDate IS NOT NULL
+                   AND MONTH(eq.QuoteDate) = @month AND YEAR(eq.QuoteDate) = @year) as quoted`;
+
+    return `${dailyPart} ; ${totalsPart}`;
+}
+
+function splitDashboardCalendarBatchResult(result) {
+    const rss = result.recordsets;
+    if (Array.isArray(rss) && rss.length >= 2) {
+        const daily = rss[0] || [];
+        const sqlTotals = rss[1] && rss[1][0] ? rss[1][0] : null;
+        return { daily, totals: reconcileCalendarTotalsFromDaily(daily, sqlTotals) };
+    }
+    const daily = result.recordset || [];
+    return { daily, totals: reconcileCalendarTotalsFromDaily(daily, null) };
+}
+
+async function runDashboardCalendarMonthQuery(reqQuery, month, year) {
+    const resolved = await resolveDashboardAccessMode(reqQuery.userEmail);
+    const request = new sql.Request();
+    const { baseFilter, quoteScopeFilter } = bindDashboardCalendarFilters(request, reqQuery, resolved);
+    request.input('month', sql.Int, parseInt(month, 10));
+    request.input('year', sql.Int, parseInt(year, 10));
+    const result = await request.query(buildDashboardCalendarMergedBatchSql(baseFilter, quoteScopeFilter));
+    return splitDashboardCalendarBatchResult(result);
 }
 
 /**
@@ -179,12 +384,11 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
                 )
             `;
     }
-    const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
+    const todayStr = getDashboardTodayYmd(req.query);
     request.input('today', sql.VarChar(10), todayStr);
 
     if (status === 'Lapsed' && !isSearchActive) {
-        whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND (em.Status IS NULL OR em.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted')) `;
+        whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) < CONVERT(VARCHAR(10), @today, 23) AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
     } else if (status && status !== 'All' && !isSearchActive) {
         whereClause += ` AND em.Status = @status `;
         request.input('status', sql.NVarChar, status);
@@ -195,7 +399,11 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
 
         if (type === 'Due Date') {
             whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) `;
-            whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
+            whereClause += ` AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
+            // Open due (matches calendar chips): today/future only; Lapsed uses status=Lapsed + < today below.
+            if (String(status || '').trim().toLowerCase() !== 'lapsed') {
+                whereClause += ` AND CAST(em.DueDate AS DATE) >= CAST(@today AS DATE) `;
+            }
         } else if (type === 'Quote Date') {
             whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND eq.QuoteDate IS NOT NULL AND CONVERT(VARCHAR(10), eq.QuoteDate, 23) BETWEEN CONVERT(VARCHAR(10), @fromDate, 23) AND CONVERT(VARCHAR(10), @toDate, 23) ${quoteScopeFilter}) `;
         } else {
@@ -205,8 +413,31 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
         request.input('fromDate', sql.VarChar(10), fromDate);
         request.input('toDate', sql.VarChar(10), toDate);
     } else if (date) {
+        const calendarChip = (req.query.calendarChip || '').toString().trim().toLowerCase();
+        const narrowChip =
+            calendarChip &&
+            ['enquiry', 'due', 'lapsed', 'visit', 'quote'].includes(calendarChip);
+
         if (restrictSingleDayToQuoteActivity) {
             whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND eq.QuoteDate IS NOT NULL AND CONVERT(VARCHAR(10), eq.QuoteDate, 23) = CONVERT(VARCHAR(10), @date, 23) ${quoteScopeFilter}) `;
+            request.input('date', sql.VarChar(10), date);
+        } else if (narrowChip) {
+            request.input('date', sql.VarChar(10), date);
+            if (calendarChip === 'enquiry') {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.EnquiryDate, 23) = CONVERT(VARCHAR(10), @date, 23) `;
+            } else if (calendarChip === 'due') {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @date, 23)
+                    AND CAST(em.DueDate AS DATE) >= CAST(@today AS DATE)
+                    AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
+            } else if (calendarChip === 'lapsed') {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @date, 23)
+                    AND CAST(em.DueDate AS DATE) < CAST(@today AS DATE)
+                    AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
+            } else if (calendarChip === 'visit') {
+                whereClause += ` AND CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @date, 23) `;
+            } else if (calendarChip === 'quote') {
+                whereClause += ` AND EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND eq.QuoteDate IS NOT NULL AND CONVERT(VARCHAR(10), eq.QuoteDate, 23) = CONVERT(VARCHAR(10), @date, 23) ${quoteScopeFilter}) `;
+            }
         } else {
             whereClause += ` AND (
                 CONVERT(VARCHAR(10), em.EnquiryDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
@@ -214,8 +445,8 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
                 CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @date, 23) OR
                 EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo AND eq.QuoteDate IS NOT NULL AND CONVERT(VARCHAR(10), eq.QuoteDate, 23) = CONVERT(VARCHAR(10), @date, 23) ${quoteScopeFilter})
             ) `;
+            request.input('date', sql.VarChar(10), date);
         }
-        request.input('date', sql.VarChar(10), date);
     }
 
     if (!fromDate && !toDate && !date && !isSearchActive) {
@@ -226,10 +457,10 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
                     CONVERT(VARCHAR(10), em.DueDate, 23) = CONVERT(VARCHAR(10), @today, 23) OR
                     CONVERT(VARCHAR(10), em.SiteVisitDate, 23) = CONVERT(VARCHAR(10), @today, 23)
                 ) `;
-            whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
+            whereClause += ` AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
         } else if (currentMode === 'future') {
             whereClause += ` AND CONVERT(VARCHAR(10), em.DueDate, 23) >= CONVERT(VARCHAR(10), @today, 23) `;
-            whereClause += ` AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}) `;
+            whereClause += ` AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')} `;
         }
     }
 
@@ -274,171 +505,43 @@ async function buildDashboardEnquiryListWhere(req, options = {}) {
     };
 }
 
-// 1. Calendar Aggregation
+// 1. Calendar Aggregation (single month; one merged SQL batch)
 router.get('/calendar', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-        const { month, year, division, salesEngineer, userEmail, userName, userRole } = req.query;
-
+        const { month, year } = req.query;
         if (!month || !year) return res.status(400).json({ error: 'Month and Year required' });
-
-        const resolved = await resolveDashboardAccessMode(userEmail);
-        const effectiveUserName = (resolved.fullName || userName || '').toString().trim();
-        const isDeptMode = resolved.accessMode === 'department';
-
-        const request = new sql.Request();
-        request.input('month', sql.Int, parseInt(month));
-        request.input('year', sql.Int, parseInt(year));
-
-        let baseFilter = '';
-        if (division && division !== 'All') {
-            // Department mode uses Master_EnquiryFor.DepartmentName (EnquiryFor doesn't have DepartmentName column)
-            if (isDeptMode) {
-                baseFilter += ` AND EXISTS (
-                    SELECT 1
-                    FROM EnquiryFor ef
-                    JOIN Master_EnquiryFor mef ON (ef.ItemName = mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName OR ef.ItemName LIKE '% - ' + mef.ItemName)
-                    WHERE ef.RequestNo = em.RequestNo
-                      AND mef.DepartmentName = @division
-                ) `;
-            } else {
-                baseFilter += ` AND EXISTS (SELECT 1 FROM EnquiryFor ef WHERE ef.RequestNo = em.RequestNo AND ef.ItemName = @division) `;
-            }
-            request.input('division', sql.NVarChar, division);
-        }
-        if (salesEngineer && salesEngineer !== 'All') {
-            baseFilter += ` AND EXISTS (SELECT 1 FROM ConcernedSE cse WHERE cse.RequestNo = em.RequestNo AND cse.SEName = @salesEngineer) `;
-            request.input('salesEngineer', sql.NVarChar, salesEngineer);
-        }
-
-        // Apply Access Control
-        const accessFilter = applyAccessControl(request, { userRole, userName: effectiveUserName, userEmail, accessMode: resolved.accessMode });
-        baseFilter += accessFilter;
-        let quoteScopeFilter = buildDashboardQuoteScopeFilter(isDeptMode, salesEngineer);
-        if (division && division !== 'All') {
-            quoteScopeFilter += `
-                AND EXISTS (
-                    SELECT 1
-                    FROM Master_EnquiryFor mefQ
-                    WHERE (
-                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                    )
-                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
-                      AND (
-                        CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
-                        OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
-                        OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(eq.QuoteNumber, ''))) > 0
-                      )
-                )
-            `;
-        }
-        console.log('Calendar Access Filter:', accessFilter);
-        console.log('Calendar Params:', { month, year, division, salesEngineer, userEmail, userName, userRole });
-        console.log('Calendar baseFilter:', baseFilter);
-
-        // Input for Quote Filtering (Unique name to avoid conflict)
-
-
-        // We need counts for EnquiryDate, DueDate, SiteVisitDate per day in the month
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0];
-        request.input('today', sql.VarChar(10), todayStr);
-
-        const query = `
-            WITH FilteredEnquiries AS (
-                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
-                FROM EnquiryMaster em
-                WHERE 1=1 ${baseFilter}
-            ),
-            FilteredQuotes AS (
-                SELECT eq.CreatedAt, eq.UpdatedAt, eq.QuoteDate, eq.RequestNo
-                FROM EnquiryQuotes eq
-                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
-                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
-            ),
-            Dates AS (
-                SELECT EnquiryDate as DateVal, 'Enquiry' as Type FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year
-                UNION ALL
-                SELECT fe.DueDate as DateVal, 'Due' as Type
-                FROM FilteredEnquiries fe
-                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
-                  AND CAST(fe.DueDate AS DATE) <= CAST(@today AS DATE)
-                  AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)
-                UNION ALL
-                SELECT fe.DueDate as DateVal, 'Lapsed' as Type 
-                FROM FilteredEnquiries fe
-                WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
-                AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
-                AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
-                AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)
-                UNION ALL
-                SELECT SiteVisitDate as DateVal, 'SiteVisit' as Type FROM FilteredEnquiries WHERE MONTH(SiteVisitDate) = @month AND YEAR(SiteVisitDate) = @year
-                UNION ALL
-                -- Quote chips: one count per scoped quote row on its EnquiryQuotes.QuoteDate only
-                SELECT CAST(eq.QuoteDate AS DATE) AS DateVal, 'Quote' AS Type
-                FROM EnquiryQuotes eq
-                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
-                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
-                  AND eq.QuoteDate IS NOT NULL
-                  AND MONTH(eq.QuoteDate) = @month AND YEAR(eq.QuoteDate) = @year
-            )
-            SELECT 
-                CONVERT(VARCHAR(10), DateVal, 23) as Date,
-                SUM(CASE WHEN Type = 'Enquiry' THEN 1 ELSE 0 END) as Enquiries,
-                SUM(CASE WHEN Type = 'Due' THEN 1 ELSE 0 END) as Due,
-                SUM(CASE WHEN Type = 'Lapsed' THEN 1 ELSE 0 END) as Lapsed,
-                SUM(CASE WHEN Type = 'SiteVisit' THEN 1 ELSE 0 END) as SiteVisits,
-                SUM(CASE WHEN Type = 'Quote' THEN 1 ELSE 0 END) as Quoted
-            FROM Dates
-            WHERE DateVal IS NOT NULL
-            GROUP BY CONVERT(VARCHAR(10), DateVal, 23)
-        `;
-
-        const result = await request.query(query);
-
-        // --- Added: Calculate Unique Monthly Totals to match the list counts ---
-        const totalsQuery = `
-            WITH FilteredEnquiries AS (
-                SELECT RequestNo, EnquiryDate, DueDate, SiteVisitDate, Status 
-                FROM EnquiryMaster em
-                WHERE 1=1 ${baseFilter}
-            ),
-            FilteredQuotes AS (
-                SELECT eq.CreatedAt, eq.UpdatedAt, eq.QuoteDate, eq.RequestNo
-                FROM EnquiryQuotes eq
-                JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
-                WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
-            )
-            SELECT 
-                (SELECT COUNT(DISTINCT RequestNo) FROM FilteredEnquiries WHERE MONTH(EnquiryDate) = @month AND YEAR(EnquiryDate) = @year) as enquiries,
-                (SELECT COUNT(DISTINCT fe.RequestNo)
-                 FROM FilteredEnquiries fe
-                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
-                   AND CAST(fe.DueDate AS DATE) <= CAST(@today AS DATE)
-                   AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)) as due,
-                (SELECT COUNT(DISTINCT fe.RequestNo)
-                 FROM FilteredEnquiries fe
-                 WHERE MONTH(fe.DueDate) = @month AND YEAR(fe.DueDate) = @year
-                   AND CAST(fe.DueDate AS DATE) < CAST(@today AS DATE)
-                   AND (fe.Status IS NULL OR fe.Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
-                   AND NOT EXISTS (SELECT 1 FROM FilteredQuotes fq WHERE fq.RequestNo = fe.RequestNo)) as lapsed,
-                (SELECT COUNT(*)
-                 FROM EnquiryQuotes eq
-                 JOIN EnquiryMaster em ON eq.RequestNo = em.RequestNo
-                 WHERE 1=1 ${baseFilter} ${quoteScopeFilter}
-                   AND eq.QuoteDate IS NOT NULL
-                   AND MONTH(eq.QuoteDate) = @month AND YEAR(eq.QuoteDate) = @year) as quoted
-        `;
-        const totalsResult = await request.query(totalsQuery);
-
-        res.json({
-            daily: result.recordset,
-            totals: totalsResult.recordset[0]
-        });
-
+        const { daily, totals } = await runDashboardCalendarMonthQuery(req.query, month, year);
+        res.json({ daily, totals });
     } catch (err) {
         console.error('Calendar API Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/** Two dashboard months in one HTTP call: one access resolve + two merged calendar batches in parallel. */
+router.get('/calendars-pair', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const { leftMonth, leftYear, rightMonth, rightYear } = req.query;
+        if (!leftMonth || !leftYear || !rightMonth || !rightYear) {
+            return res.status(400).json({ error: 'leftMonth, leftYear, rightMonth, and rightYear are required' });
+        }
+        const resolved = await resolveDashboardAccessMode(req.query.userEmail);
+
+        const runOne = async (m, y) => {
+            const request = new sql.Request();
+            const { baseFilter, quoteScopeFilter } = bindDashboardCalendarFilters(request, req.query, resolved);
+            request.input('month', sql.Int, parseInt(m, 10));
+            request.input('year', sql.Int, parseInt(y, 10));
+            const result = await request.query(buildDashboardCalendarMergedBatchSql(baseFilter, quoteScopeFilter));
+            return splitDashboardCalendarBatchResult(result);
+        };
+
+        const [left, right] = await Promise.all([runOne(leftMonth, leftYear), runOne(rightMonth, rightYear)]);
+        res.json({ left, right });
+    } catch (err) {
+        console.error('Calendar pair API Error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -502,21 +605,20 @@ router.get('/summary', async (req, res) => {
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE CONVERT(VARCHAR(10), EnquiryDate, 23) = CONVERT(VARCHAR(10), @today, 23) ${baseFilter}) as EnquiriesToday,
                 (SELECT COUNT(*) FROM EnquiryMaster em
                  WHERE CONVERT(VARCHAR(10), DueDate, 23) = CONVERT(VARCHAR(10), @today, 23)
-                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')}
                    ${baseFilter}) as DueToday,
                 (SELECT COUNT(*) FROM EnquiryMaster em
                  WHERE CONVERT(VARCHAR(10), DueDate, 23) > CONVERT(VARCHAR(10), @today, 23)
-                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')}
                    ${baseFilter}) as UpcomingDues,
                 (SELECT COUNT(*) FROM EnquiryMaster em WHERE Status IN ('Quoted', 'Quote', 'Submitted') ${baseFilter}) as QuotedCount,
                 (SELECT COUNT(*) FROM EnquiryMaster em
                  WHERE CONVERT(VARCHAR(10), DueDate, 23) < CONVERT(VARCHAR(10), @today, 23)
-                   AND (Status IS NULL OR Status NOT IN ('Quote', 'Won', 'Lost', 'Quoted', 'Submitted'))
-                   AND NOT EXISTS (SELECT 1 FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter})
+                   AND ${SQL_NO_QUOTE_FOR_ENQUIRY('em')}
                    ${baseFilter}) as LapsedCount
         `;
 
-        const todayStr = today.toISOString().split('T')[0];
+        const todayStr = getDashboardTodayYmd(req.query);
         request.input('today', sql.VarChar(10), todayStr);
         const result = await request.query(query);
         res.json(result.recordset[0]);
@@ -536,7 +638,7 @@ router.get('/quote-summary-rows', async (req, res) => {
         const isQuoteMonth = fromDate && toDate && (dtLabel === 'Quote Date' || dtLabel === 'Quote date');
         const isQuoteDay = !!date;
         if (!isQuoteMonth && !isQuoteDay) {
-            return res.json([]);
+            return res.json({ rows: [], calendarQuotedCount: null });
         }
 
         const ctx = await buildDashboardEnquiryListWhere(req, {
@@ -609,7 +711,6 @@ router.get('/enquiries', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
         const { date, userEmail, userName, userRole, division, salesEngineer, fromDate, toDate, status, dateType, search } = req.query;
-        console.log('API /enquiries params:', { division, salesEngineer, date, fromDate, toDate, status, dateType, search, userEmail, userName, userRole });
 
         const {
             request,
@@ -639,6 +740,10 @@ router.get('/enquiries', async (req, res) => {
                     WHERE eq.RequestNo = em.RequestNo
                     ${quoteScopeFilter}
                 ) THEN 1 ELSE 0 END AS HasQuoteInScope,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM EnquiryQuotes eq
+                    WHERE eq.RequestNo = em.RequestNo
+                ) THEN 1 ELSE 0 END AS HasQuoteAny,
                 (SELECT COUNT(*) FROM EnquiryQuotes eq WHERE eq.RequestNo = em.RequestNo ${quoteScopeFilter}${scopedQuoteCountDateClause}) AS ScopedQuotesCount,
                 NULLIF(STUFF((SELECT ', ' + et.TypeName FROM EnquiryType et WHERE et.RequestNo = em.RequestNo FOR XML PATH('')), 1, 2, ''), '') AS EnquiryType,
                 em.SourceOfEnquiry AS SourceOfInfo,

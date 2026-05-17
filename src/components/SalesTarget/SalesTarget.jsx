@@ -55,6 +55,21 @@ const RevenueInput = ({ value, onChange, placeholder = '0', style = {}, disabled
     );
 };
 
+/** BD amounts in history/summary: ≤1M as #.##k, >1M as #.##M (2 decimals). */
+function formatBdCompactKm(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '0.00k';
+    const neg = num < 0;
+    const abs = Math.abs(num);
+    let body;
+    if (abs <= 1_000_000) {
+        body = `${(abs / 1000).toFixed(2)}k`;
+    } else {
+        body = `${(abs / 1_000_000).toFixed(2)}M`;
+    }
+    return neg ? `-${body}` : body;
+}
+
 const SalesTarget = () => {
     const { currentUser } = useAuth();
     const [loading, setLoading] = useState(true);
@@ -653,10 +668,10 @@ const SalesTarget = () => {
                                             </td>
                                             <td style={{ fontSize: '12px' }}>{row.division}</td>
                                             <td className="text-end pe-2" style={{ fontSize: '12px', color: '#0d6efd' }}>
-                                                {fmt(Number(row.revenue) || 0)}
+                                                {formatBdCompactKm(Number(row.revenue) || 0)}
                                             </td>
                                             <td className="text-end pe-2 fw-semibold" style={{ fontSize: '12px', color: '#0f766e' }}>
-                                                {fmt(Number(row.gpValue) || 0)}
+                                                {formatBdCompactKm(Number(row.gpValue) || 0)}
                                             </td>
                                             <td className="text-end pe-3 fw-semibold" style={{ fontSize: '12px', color: '#198754' }}>
                                                 {(Number(row.gpPct) || 0).toLocaleString('en-US', {

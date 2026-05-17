@@ -5,6 +5,7 @@ import {
     consultantNames, concernedSEs, enquiryFor, storedUsers,
     storedContacts, storedCustomers, storedEnqItems, initialEnquiries
 } from '../data/mockData';
+import { readApiJson } from '../utils/apiJson';
 
 const DataContext = createContext();
 
@@ -39,36 +40,54 @@ export const DataProvider = ({ children }) => {
     useEffect(() => {
         const fetchData = async () => {
             try {
+                const asArray = (parsed, label) => {
+                    if (parsed.invalidJson) {
+                        console.warn(`[DataContext] ${label}: response was not JSON`);
+                        return [];
+                    }
+                    if (!parsed.ok) {
+                        console.warn(`[DataContext] ${label}: HTTP ${parsed.status}`, parsed.data);
+                        return [];
+                    }
+                    const d = parsed.data;
+                    return Array.isArray(d) ? d : [];
+                };
 
                 const [enqRes, custRes, contRes, userRes, itemRes] = await Promise.all([
-                    fetch(`${API_URL}/enquiries`).catch(err => {
+                    fetch(`${API_URL}/enquiries`).catch((err) => {
                         console.error('[DataContext] Enquiries fetch failed:', err);
-                        return { ok: false, json: () => [] };
+                        return null;
                     }),
-                    fetch(`${API_URL}/customers`).catch(err => {
+                    fetch(`${API_URL}/customers`).catch((err) => {
                         console.error('[DataContext] Customers fetch failed:', err);
-                        return { ok: false, json: () => [] };
+                        return null;
                     }),
-                    fetch(`${API_URL}/contacts`).catch(err => {
+                    fetch(`${API_URL}/contacts`).catch((err) => {
                         console.error('[DataContext] Contacts fetch failed:', err);
-                        return { ok: false, json: () => [] };
+                        return null;
                     }),
-                    fetch(`${API_URL}/users`).catch(err => {
+                    fetch(`${API_URL}/users`).catch((err) => {
                         console.error('[DataContext] Users fetch failed:', err);
-                        return { ok: false, json: () => [] };
+                        return null;
                     }),
-                    fetch(`${API_URL}/enquiry-items`).catch(err => {
+                    fetch(`${API_URL}/enquiry-items`).catch((err) => {
                         console.error('[DataContext] Enquiry items fetch failed:', err);
-                        return { ok: false, json: () => [] };
+                        return null;
                     })
                 ]);
 
+                const emptyParsed = { ok: false, status: 0, data: {} };
+                const enqParsed = enqRes ? await readApiJson(enqRes) : emptyParsed;
+                const custParsed = custRes ? await readApiJson(custRes) : emptyParsed;
+                const contParsed = contRes ? await readApiJson(contRes) : emptyParsed;
+                const userParsed = userRes ? await readApiJson(userRes) : emptyParsed;
+                const itemParsed = itemRes ? await readApiJson(itemRes) : emptyParsed;
 
-                const enqData = await enqRes.json();
-                const custData = await custRes.json();
-                const contData = await contRes.json();
-                const userData = await userRes.json();
-                const itemData = await itemRes.json();
+                const enqData = asArray(enqParsed, 'enquiries');
+                const custData = asArray(custParsed, 'customers');
+                const contData = asArray(contParsed, 'contacts');
+                const userData = asArray(userParsed, 'users');
+                const itemData = asArray(itemParsed, 'enquiry-items');
 
                 const enqMap = {};
                 enqData.forEach(e => { enqMap[e.RequestNo] = e; });

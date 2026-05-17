@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Draggable from 'react-draggable';
 import { useData } from '../../context/DataContext'; // Reuse for masters if needed
 import { useAuth } from '../../context/AuthContext';
@@ -12,6 +12,22 @@ import { sortEnquiryRows } from '../../utils/enquiryResultsSort';
 import { resolveEffectiveSalesEngineerFilter } from '../../utils/dashboardCcAccess';
 import './DashboardLayout.css';
 
+function sumCalendarDaily(daily, key) {
+    return (Array.isArray(daily) ? daily : []).reduce((acc, row) => acc + (Number(row[key]) || 0), 0);
+}
+
+/** Monthly overview totals always match sum of calendar day chips. */
+function normalizeDashboardCalendarPayload(raw) {
+    if (raw == null) return { daily: [], totals: null };
+    const daily = Array.isArray(raw) ? raw : raw?.daily || [];
+    const totals = {
+        enquiries: sumCalendarDaily(daily, 'Enquiries'),
+        due: sumCalendarDaily(daily, 'Due'),
+        lapsed: sumCalendarDaily(daily, 'Lapsed'),
+        quoted: sumCalendarDaily(daily, 'Quoted'),
+    };
+    return { daily, totals };
+}
 
 const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props passed from Main
     const { masters, dashboardRefreshCounter } = useData();
@@ -95,6 +111,8 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     const [filteredTableData, setFilteredTableData] = useState([]);
 
     const [loading, setLoading] = useState(false);
+    /** Modal enquiry grid only — opening the modal no longer refetches calendars. */
+    const [modalEnquiryListLoading, setModalEnquiryListLoading] = useState(false);
 
     const [resultsModalOpen, setResultsModalOpen] = useState(false);
     const [modalSortConfig, setModalSortConfig] = useState({ key: 'EnquiryDate', direction: 'desc' });
@@ -307,138 +325,211 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
         }
     }, [currentUser, masters.enqItems, masters.enquiryFor]);
 
-    // Fetch calendars + summary always; enquiry list only when the results modal is open (heavy query).
-    const fetchData = async (signal, includeEnquiries) => {
-        setLoading(true);
-        try {
-            // preparing params
-            // CC coordinator display names → treat as "All SEs" for the division (see dashboardCcAccess.js)
-            const salesEngineerForApi = resolveEffectiveSalesEngineerFilter({
-                salesEngineer: filters.salesEngineer,
-                division: filters.division,
-                enqItems: masters.enqItems,
-                users: masters.users,
-                currentUserEmail: currentUser?.email || currentUser?.EmailId || '',
-            });
-            const baseParams = {
-                division: filters.division,
-                salesEngineer: salesEngineerForApi,
-            };
-
-            // Add User Context for Access Control
-            if (currentUser) {
-                baseParams.userEmail = currentUser.email || currentUser.EmailId || '';
-                baseParams.userName = currentUser.name || '';
-                // Handle different role structures
-                baseParams.userRole = currentUser.role || currentUser.Roles || 'User';
-            }
-
-            const normalizeCalendarPayload = (raw) => {
-                if (raw == null) return { daily: [], totals: null };
-                return {
-                    daily: Array.isArray(raw) ? raw : (raw?.daily || []),
-                    totals: Array.isArray(raw) ? null : raw?.totals ?? null,
+    // Fetch calendars + summary (one paired calendar HTTP + merged SQL per month on server).
+    const fetchCalendarSummary = useCallback(
+        async (signal) => {
+            if (!currentUser) return;
+            setLoading(true);
+            try {
+                const salesEngineerForApi = resolveEffectiveSalesEngineerFilter({
+                    salesEngineer: filters.salesEngineer,
+                    division: filters.division,
+                    enqItems: masters.enqItems,
+                    users: masters.users,
+                    currentUserEmail: currentUser?.email || currentUser?.EmailId || '',
+                });
+                const baseParams = {
+                    division: filters.division,
+                    salesEngineer: salesEngineerForApi,
+                    userEmail: currentUser.email || currentUser.EmailId || '',
+                    userName: currentUser.name || '',
+                    userRole: currentUser.role || currentUser.Roles || 'User',
                 };
-            };
 
-            const calLeftParams = new URLSearchParams({
-                ...baseParams,
-                month: dateState.leftCalendar.month,
-                year: dateState.leftCalendar.year,
-            });
-            const calRightParams = new URLSearchParams({
-                ...baseParams,
-                month: dateState.rightCalendar.month,
-                year: dateState.rightCalendar.year,
-            });
+                const todayParam = (() => {
+                    const d = new Date();
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    return `${y}-${m}-${day}`;
+                })();
 
-            const sumParams = new URLSearchParams(baseParams);
+                const pairParams = new URLSearchParams({
+                    ...baseParams,
+                    leftMonth: String(dateState.leftCalendar.month),
+                    leftYear: String(dateState.leftCalendar.year),
+                    rightMonth: String(dateState.rightCalendar.month),
+                    rightYear: String(dateState.rightCalendar.year),
+                    today: todayParam,
+                });
+                const sumParams = new URLSearchParams({ ...baseParams, today: todayParam });
 
-            const listParams = new URLSearchParams({
-                ...baseParams,
-                mode: filters.mode,
-            });
+                const calLeftParams = new URLSearchParams({
+                    ...baseParams,
+                    month: dateState.leftCalendar.month,
+                    year: dateState.leftCalendar.year,
+                    today: todayParam,
+                });
+                const calRightParams = new URLSearchParams({
+                    ...baseParams,
+                    month: dateState.rightCalendar.month,
+                    year: dateState.rightCalendar.year,
+                    today: todayParam,
+                });
 
-            if (dateState.selectedDate) {
-                listParams.set('date', dateState.selectedDate);
-            } else {
-                if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
-                if (filters.toDate) listParams.set('toDate', filters.toDate);
+                const fetchOpts = signal ? { signal, cache: 'no-store' } : { cache: 'no-store' };
 
-                if (filters.dateType === 'Lapsed') {
-                    listParams.set('dateType', 'Due Date');
-                    listParams.set('status', 'Lapsed');
+                const pairPromise = fetch(`${API_URL}/calendars-pair?${pairParams}`, fetchOpts).then(async (r) => {
+                    if (!r.ok) return { ok: false };
+                    return { ok: true, json: await r.json() };
+                });
+                const sumPromise = fetch(`${API_URL}/summary?${sumParams}`, fetchOpts).then((r) => (r.ok ? r.json() : {}));
+
+                const [pairResult, sumParsed] = await Promise.all([pairPromise, sumPromise]);
+
+                let leftCal;
+                let rightCal;
+
+                if (pairResult.ok && pairResult.json) {
+                    leftCal = normalizeDashboardCalendarPayload(pairResult.json.left);
+                    rightCal = normalizeDashboardCalendarPayload(pairResult.json.right);
                 } else {
-                    listParams.set('dateType', filters.dateType);
-                    if (filters.status && filters.status !== 'All') listParams.set('status', filters.status);
+                    const [lr, rr] = await Promise.all([
+                        fetch(`${API_URL}/calendar?${calLeftParams}`, fetchOpts),
+                        fetch(`${API_URL}/calendar?${calRightParams}`, fetchOpts),
+                    ]);
+                    leftCal = normalizeDashboardCalendarPayload(lr.ok ? await lr.json() : null);
+                    rightCal = normalizeDashboardCalendarPayload(rr.ok ? await rr.json() : null);
                 }
 
-                if (filters.search) listParams.set('search', filters.search);
+                if (signal?.aborted) return;
+
+                setData((prev) => ({
+                    ...prev,
+                    calendarLeft: leftCal.daily,
+                    calendarTotalsLeft: leftCal.totals,
+                    calendarRight: rightCal.daily,
+                    calendarTotalsRight: rightCal.totals,
+                    summary: sumParsed || {},
+                }));
+            } catch (err) {
+                if (err?.name === 'AbortError') return;
+                console.error('Dashboard calendar fetch error:', err);
+                setData((prev) => ({
+                    ...prev,
+                    calendarLeft: [],
+                    calendarTotalsLeft: null,
+                    calendarRight: [],
+                    calendarTotalsRight: null,
+                    summary: {},
+                }));
+            } finally {
+                if (!signal?.aborted) setLoading(false);
             }
+        },
+        [
+            currentUser,
+            filters.division,
+            filters.salesEngineer,
+            dateState.leftCalendar.month,
+            dateState.leftCalendar.year,
+            dateState.rightCalendar.month,
+            dateState.rightCalendar.year,
+            masters.enqItems,
+            masters.users,
+            dashboardRefreshCounter,
+        ],
+    );
 
-            const fetchOpts = signal ? { signal } : {};
+    const fetchModalEnquiries = useCallback(
+        async (signal) => {
+            if (!currentUser) return;
+            setModalEnquiryListLoading(true);
+            try {
+                const salesEngineerForApi = resolveEffectiveSalesEngineerFilter({
+                    salesEngineer: filters.salesEngineer,
+                    division: filters.division,
+                    enqItems: masters.enqItems,
+                    users: masters.users,
+                    currentUserEmail: currentUser?.email || currentUser?.EmailId || '',
+                });
+                const todayParam = (() => {
+                    const d = new Date();
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    return `${y}-${m}-${day}`;
+                })();
 
-            const calFetches = [
-                fetch(`${API_URL}/calendar?${calLeftParams}`, fetchOpts),
-                fetch(`${API_URL}/calendar?${calRightParams}`, fetchOpts),
-                fetch(`${API_URL}/summary?${sumParams}`, fetchOpts),
-            ];
+                const listParams = new URLSearchParams({
+                    division: filters.division,
+                    salesEngineer: salesEngineerForApi,
+                    mode: filters.mode,
+                    userEmail: currentUser.email || currentUser.EmailId || '',
+                    userName: currentUser.name || '',
+                    userRole: currentUser.role || currentUser.Roles || 'User',
+                    today: todayParam,
+                });
 
-            if (includeEnquiries) {
-                calFetches.push(fetch(`${API_URL}/enquiries?${listParams}`, fetchOpts));
-            }
+                if (dateState.selectedDate) {
+                    listParams.set('date', dateState.selectedDate);
+                    const chip = String(dateState.selectedType || '').trim().toLowerCase();
+                    if (chip && chip !== 'all') {
+                        listParams.set('calendarChip', chip);
+                    }
+                } else {
+                    if (filters.fromDate) listParams.set('fromDate', filters.fromDate);
+                    if (filters.toDate) listParams.set('toDate', filters.toDate);
 
-            const responses = await Promise.all(calFetches);
+                    if (filters.dateType === 'Lapsed') {
+                        listParams.set('dateType', 'Due Date');
+                        listParams.set('status', 'Lapsed');
+                    } else {
+                        listParams.set('dateType', filters.dateType);
+                        if (filters.status && filters.status !== 'All') listParams.set('status', filters.status);
+                    }
 
-            if (signal?.aborted) return;
+                    if (filters.search) listParams.set('search', filters.search);
+                }
 
-            const calLeftRes = responses[0];
-            const calRightRes = responses[1];
-            const sumRes = responses[2];
-            const listRes = includeEnquiries ? responses[3] : null;
+                const fetchOpts = signal ? { signal, cache: 'no-store' } : { cache: 'no-store' };
+                const listRes = await fetch(`${API_URL}/enquiries?${listParams}`, fetchOpts);
 
-            const calLeftParsed = calLeftRes.ok ? await calLeftRes.json() : [];
-            const calRightParsed = calRightRes.ok ? await calRightRes.json() : [];
-            const sumParsed = sumRes.ok ? await sumRes.json() : {};
-
-            let listData = [];
-            if (includeEnquiries && listRes) {
+                let listData = [];
                 if (!listRes.ok) {
                     console.error('Enquiry API Failed:', listRes.status, listRes.statusText);
                 } else {
                     const raw = await listRes.json();
                     listData = Array.isArray(raw) ? raw : [];
                 }
+
+                if (signal?.aborted) return;
+                setData((prev) => ({ ...prev, table: listData }));
+            } catch (err) {
+                if (err?.name === 'AbortError') return;
+                console.error('Dashboard modal enquiries fetch error:', err);
+                if (!signal?.aborted) setData((prev) => ({ ...prev, table: [] }));
+            } finally {
+                if (!signal?.aborted) setModalEnquiryListLoading(false);
             }
-
-            if (signal?.aborted) return;
-
-            const leftCal = normalizeCalendarPayload(calLeftParsed);
-            const rightCal = normalizeCalendarPayload(calRightParsed);
-
-            setData({
-                calendarLeft: leftCal.daily,
-                calendarTotalsLeft: leftCal.totals,
-                calendarRight: rightCal.daily,
-                calendarTotalsRight: rightCal.totals,
-                summary: sumParsed || {},
-                table: includeEnquiries ? listData : [],
-            });
-        } catch (err) {
-            if (err?.name === 'AbortError') return;
-            console.error('Dashboard Fetch Error:', err);
-            setData({
-                calendarLeft: [],
-                calendarTotalsLeft: null,
-                calendarRight: [],
-                calendarTotalsRight: null,
-                summary: {},
-                table: [],
-            });
-        } finally {
-            setLoading(false);
-        }
-    };
+        },
+        [
+            currentUser,
+            filters.division,
+            filters.salesEngineer,
+            filters.mode,
+            filters.fromDate,
+            filters.toDate,
+            filters.dateType,
+            filters.search,
+            filters.status,
+            dateState.selectedDate,
+            dateState.selectedType,
+            masters.enqItems,
+            masters.users,
+            dashboardRefreshCounter,
+        ],
+    );
 
     // Filter Table Data based on selectedType (Frontend Filtering)
     useEffect(() => {
@@ -477,25 +568,26 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
             const day = String(d.getDate()).padStart(2, '0');
             return `${y}-${m}-${day}`;
         };
-        const quotedLikeStatuses = new Set(['Quote', 'Won', 'Lost', 'Quoted', 'Submitted']);
-
         const filtered = data.table.filter((row) => {
             const compareDate = (dateVal) => localYmd(dateVal) === targetDate;
+            const todayYmd = todayLocalYmd();
+            const hasAnyQuote = Number(row.HasQuoteAny ?? row.HasQuoteInScope) === 1;
 
             if (type === 'enquiry') return compareDate(row.EnquiryDate);
             if (type === 'due') {
                 if (!compareDate(dueVal(row))) return false;
                 const dueY = localYmd(dueVal(row));
-                if (!dueY || dueY > todayLocalYmd()) return false;
-                if (Number(row.HasQuoteInScope) === 1) return false;
-                if (row.Status && quotedLikeStatuses.has(row.Status)) return false;
+                if (!dueY || dueY < todayYmd) return false;
+                if (hasAnyQuote) return false;
                 return true;
             }
             if (type === 'visit') return compareDate(row.SiteVisitDate);
             if (type === 'lapsed') {
-                const isDueOnDate = compareDate(dueVal(row));
-                const isLapsedStatus = !row.Status || !['Quote', 'Won', 'Lost', 'Quoted', 'Submitted'].includes(row.Status);
-                return isDueOnDate && isLapsedStatus;
+                if (!compareDate(dueVal(row))) return false;
+                const dueY = localYmd(dueVal(row));
+                if (!dueY || dueY >= todayYmd) return false;
+                if (hasAnyQuote) return false;
+                return true;
             }
             if (type === 'quote') {
                 return compareDate(row.QuoteDate);
@@ -529,29 +621,27 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
     useEffect(() => {
         const ac = new AbortController();
         const timer = setTimeout(() => {
-            fetchData(ac.signal, resultsModalOpen);
-        }, 120); // Short debounce — skip heavy /enquiries until the results modal is open
+            fetchCalendarSummary(ac.signal);
+        }, 50);
         return () => {
             clearTimeout(timer);
             ac.abort();
         };
-    }, [
-        dateState.leftCalendar.month,
-        dateState.leftCalendar.year,
-        dateState.rightCalendar.month,
-        dateState.rightCalendar.year,
-        dateState.selectedDate,
-        filters.division,
-        filters.salesEngineer,
-        filters.mode,
-        filters.fromDate,
-        filters.toDate,
-        filters.dateType,
-        filters.search,
-        filters.status,
-        dashboardRefreshCounter,
-        resultsModalOpen,
-    ]);
+    }, [fetchCalendarSummary]);
+
+    useEffect(() => {
+        if (!resultsModalOpen) {
+            setData((prev) => ({ ...prev, table: [] }));
+            setFilteredTableData([]);
+            setModalEnquiryListLoading(false);
+            return undefined;
+        }
+        const ac = new AbortController();
+        fetchModalEnquiries(ac.signal);
+        return () => {
+            ac.abort();
+        };
+    }, [resultsModalOpen, fetchModalEnquiries]);
 
     // Handlers
     const handleLeftCalendarMonthChange = (m, y) => {
@@ -766,7 +856,7 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                                     ? quoteSummaryLoading && quoteSummaryRows.length === 0 && (
                                           <div className="text-center text-muted py-3 small flex-shrink-0">Loading quote summary…</div>
                                       )
-                                    : loading &&
+                                    : modalEnquiryListLoading &&
                                       modalSortedRows.length === 0 && (
                                           <div className="text-center text-muted py-3 small flex-shrink-0">Loading enquiries…</div>
                                       )}

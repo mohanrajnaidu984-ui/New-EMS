@@ -387,6 +387,7 @@ app.get('/api/debug/check-user-status', async (req, res) => {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve uploaded files from server/uploads
+app.use('/fonts', express.static(path.join(__dirname, '../public/fonts'))); // Inter etc. for quote PDF (Puppeteer)
 
 // Request Logger
 app.use((req, res, next) => {
@@ -412,7 +413,7 @@ app.get('/api/master/divisions', async (req, res) => {
         res.json(divisions);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -984,9 +985,12 @@ app.get('/api/enquiries', async (req, res) => {
         res.json(filteredEnquiries);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
+
+const enquiryOutlookRoutes = require('./routes/enquiryOutlook');
+app.use('/api/enquiries', enquiryOutlookRoutes);
 
 /** Must be registered before `/api/enquiries/:id` so `check-project-name` is not captured as an id. */
 app.get('/api/enquiries/check-project-name', async (req, res) => {
@@ -1349,52 +1353,7 @@ app.post('/api/enquiries', async (req, res) => {
 
         // Post-commit tasks (emails + notifications) should not block API response.
         setImmediate(async () => {
-            try {
-                if (AutoAck === true || AutoAck === 'true') {
-                    log('Processing AutoAck...');
-                    const emailData = {
-                        RequestNo,
-                        EnquiryDate,
-                        CustomerName: SelectedCustomers ? SelectedCustomers.join(', ') : '',
-                        ProjectName,
-                        ClientName,
-                        ConsultantName: SelectedConsultants ? SelectedConsultants.join(', ') : ConsultantName,
-                        DetailsOfEnquiry,
-                    };
-                    let ccString = '';
-                    if (AcknowledgementSE) {
-                        const ccRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${AcknowledgementSE}`;
-                        if (ccRes.recordset.length > 0 && ccRes.recordset[0].EmailId) {
-                            ccString = ccRes.recordset[0].EmailId;
-                        }
-                    }
-                    if (SelectedReceivedFroms && SelectedReceivedFroms.length > 0) {
-                        const processedEmails = new Set();
-                        for (const item of SelectedReceivedFroms) {
-                            const [contact, company] = item.split('|');
-                            const rfRes = await sql.query`SELECT EmailId FROM Master_ReceivedFrom WHERE ContactName = ${contact} AND CompanyName = ${company}`;
-                            if (!(rfRes.recordset.length > 0 && rfRes.recordset[0].EmailId)) continue;
-                            const recipientEmail = rfRes.recordset[0].EmailId.trim();
-                            if (processedEmails.has(recipientEmail)) continue;
-                            let itemCCs = [];
-                            if (SelectedEnquiryFor && SelectedEnquiryFor.length > 0) {
-                                const itemsStr = SelectedEnquiryFor.map(i => `'${i}'`).join(',');
-                                const itemsRes = await sql.query(`SELECT CCMailIds FROM Master_EnquiryFor WHERE ItemName IN (${itemsStr})`);
-                                itemsRes.recordset.forEach(row => {
-                                    if (row.CCMailIds) {
-                                        itemCCs.push(...row.CCMailIds.split(',').map(e => e.trim().toLowerCase()));
-                                    }
-                                });
-                            }
-                            const finalCCString = [...new Set([...(ccString ? [ccString] : []), ...itemCCs])].filter(Boolean).join(',');
-                            await sendAcknowledgementEmail(emailData, recipientEmail, finalCCString, ceosign);
-                            processedEmails.add(recipientEmail);
-                        }
-                    }
-                }
-            } catch (emailErr) {
-                console.error('Failed async post-create email notification:', emailErr);
-            }
+            // Enquiry notification is opened as a local Outlook draft from the client (VBScript), not sent via SMTP.
             try {
                 const currentUserEmailRes = await sql.query`SELECT EmailId FROM Master_ConcernedSE WHERE FullName = ${req.body.CreatedBy}`;
                 const currentUserEmail = currentUserEmailRes.recordset.length > 0 ? currentUserEmailRes.recordset[0].EmailId : null;
@@ -1426,7 +1385,7 @@ app.post('/api/enquiries', async (req, res) => {
                 error: `Enquiry number ${req.body.RequestNo} already exists. Please refresh to try again.`
             });
         }
-        res.status(500).send(err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -1552,7 +1511,7 @@ app.get('/api/enquiries/:id', async (req, res) => {
         res.json(fullEnquiry);
     } catch (err) {
         console.error('Error fetching single enquiry:', err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2191,7 +2150,7 @@ app.put('/api/enquiries/:id', async (req, res) => {
             return res.status(409).json(err.payload);
         }
         console.error(err);
-        res.status(500).send(err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -2236,7 +2195,7 @@ app.get('/api/customers', async (req, res) => {
         res.json(all);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2261,7 +2220,7 @@ app.post('/api/customers', async (req, res) => {
         res.status(201).json({ message: 'Customer added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2279,7 +2238,7 @@ app.put('/api/customers/:id', async (req, res) => {
         res.json({ message: 'Customer updated' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2290,7 +2249,7 @@ app.get('/api/contacts', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2304,7 +2263,7 @@ app.post('/api/contacts', async (req, res) => {
         res.status(201).json({ message: 'Contact added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2319,7 +2278,7 @@ app.put('/api/contacts/:id', async (req, res) => {
         res.json({ message: 'Contact updated' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2330,7 +2289,7 @@ app.get('/api/users', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2371,7 +2330,7 @@ app.post('/api/users', async (req, res) => {
         res.status(201).json({ message: 'User added', id: newUserId });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2397,7 +2356,7 @@ app.put('/api/users/:id', async (req, res) => {
         res.json({ message: 'User updated and notified' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2417,7 +2376,7 @@ app.delete('/api/users/:id', async (req, res) => {
         res.json({ message: 'User deleted' });
     } catch (err) {
         console.error('Delete User Error:', err);
-        res.status(500).send('Server Error: ' + err.message);
+        res.status(500).json({ message: 'Server Error', detail: err.message });
     }
 });
 
@@ -2432,7 +2391,7 @@ app.get('/api/enquiry-items', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2445,7 +2404,7 @@ app.post('/api/enquiry-items', async (req, res) => {
         res.status(201).json({ message: 'Item added', id: result.recordset[0].ID });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2457,7 +2416,7 @@ app.put('/api/enquiry-items/:id', async (req, res) => {
         res.json({ message: 'Item updated' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 // --- Attachments API ---
@@ -2526,7 +2485,7 @@ app.post('/api/attachments/upload', (req, res, next) => {
         }
     } catch (err) {
         console.error('[attachments/upload] Cannot create ENQUIRY_ATTACHMENTS_ROOT:', err.message);
-        return res.status(500).send('Attachment storage is not available. Check ENQUIRY_ATTACHMENTS_ROOT and server permissions.');
+        return res.status(500).json({ message: 'Attachment storage is not available. Check ENQUIRY_ATTACHMENTS_ROOT and server permissions.' });
     }
     next();
 }, uploadEnquiryAttachments.array('files'), async (req, res) => {
@@ -2578,7 +2537,7 @@ app.post('/api/attachments/upload', (req, res, next) => {
         res.status(201).json({ message: 'Success', files: uploadedFiles });
     } catch (err) {
         console.error('Upload error:', err);
-        res.status(500).send(err.message || 'Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -2608,7 +2567,7 @@ app.get('/api/system/next-request-no', async (req, res) => {
         res.json({ nextId: nextId.toString() });
     } catch (err) {
         console.error('Error generating next ID:', err);
-        res.status(500).send('Error generating ID');
+        res.status(500).json({ message: 'Error generating ID' });
     }
 });
 
@@ -2630,7 +2589,7 @@ app.get('/api/attachments', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2660,7 +2619,7 @@ app.get('/api/attachments/:id', async (req, res) => {
         }
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2688,7 +2647,7 @@ app.delete('/api/attachments/:id', async (req, res) => {
         res.json({ message: 'Attachment deleted' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2712,7 +2671,7 @@ app.get('/api/notifications/:userId', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2723,7 +2682,7 @@ app.put('/api/notifications/:id/read', async (req, res) => {
         res.json({ message: 'Marked as read' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2735,7 +2694,7 @@ app.delete('/api/notifications/:userId', async (req, res) => {
         res.json({ message: 'All notifications cleared' });
     } catch (err) {
         console.error(err);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -2747,7 +2706,7 @@ app.get('/api/enquiries/:id/notes', async (req, res) => {
         res.json(result.recordset);
     } catch (err) {
         console.error('Error fetching notes:', err);
-        res.status(500).send(err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -2797,7 +2756,7 @@ app.post('/api/enquiries/:id/notes', async (req, res) => {
         res.sendStatus(201);
     } catch (err) {
         console.error('Error adding note:', err);
-        res.status(500).send(err.message);
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 

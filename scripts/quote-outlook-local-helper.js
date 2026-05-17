@@ -1,0 +1,245 @@
+/**
+ * Optional one-time helper for EMS Quote email (Windows).
+ * Run at login: node scripts/quote-outlook-local-helper.js
+ * Listens on http://127.0.0.1:39281 — opens Outlook draft with PDF via VBScript/COM.
+ */
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFile } = require('child_process');
+const { buildOutlookDraftVbs, buildOutlookHtmlDraftVbs } = require('../server/lib/outlookDraftVbs');
+const { resolveEnquiryOutlookEmailFields } = require('../server/lib/enquiryOutlookEmailFields');
+const { buildEnquiryNotifyEmailHtml, buildEnquiryOutlookSubject } = require('../server/lib/enquiryNotifyEmailHtml');
+const {
+    buildCustomerAcknowledgementEmailHtml,
+    buildCustomerAckSubject,
+} = require('../server/lib/enquiryCustomerAckEmailHtml');
+const {
+    loadCustomerAckTargets,
+    loadSeContact,
+    resolveCustomerAckCcEmails,
+} = require('../server/lib/enquiryCustomerAckData');
+const { runOutlookHtmlDraftVbs } = require('../server/lib/runOutlookHtmlDraftVbs');
+const { loadEnquiryEmailRow } = require('../server/lib/loadEnquiryEmailRow');
+const { sql, connectDB } = require('../server/dbConfig');
+
+const PORT = Number(process.env.EMS_OUTLOOK_HELPER_PORT) || 39281;
+const MAX_BODY = 55 * 1024 * 1024;
+
+function readJson(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > MAX_BODY) {
+                reject(new Error('Payload too large'));
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on('end', () => {
+            try {
+                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+            } catch (e) {
+                reject(e);
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+function openOutlookDraft(body) {
+    if (process.platform !== 'win32') {
+        return Promise.reject(new Error('Windows only'));
+    }
+    const { pdfBase64, attachmentName, to, cc, bcc, subject, body: mailBody, extraAttachments } = body;
+    if (!pdfBase64) {
+        return Promise.reject(new Error('pdfBase64 required'));
+    }
+
+    const dir = path.join(os.tmpdir(), 'ems-quote-outlook-helper', String(Date.now()));
+    fs.mkdirSync(dir, { recursive: true });
+
+    const pdfPath = path.join(dir, String(attachmentName || 'EMS_QuoteDraft.pdf').replace(/[/\\?%*:|"<>]/g, '_'));
+    fs.writeFileSync(pdfPath, Buffer.from(pdfBase64, 'base64'));
+
+    const extraPaths = [];
+    for (const att of extraAttachments || []) {
+        if (!att?.base64) continue;
+        const nm = String(att.filename || 'attachment').replace(/[/\\?%*:|"<>]/g, '_');
+        const p = path.join(dir, nm);
+        fs.writeFileSync(p, Buffer.from(att.base64, 'base64'));
+        extraPaths.push(p);
+    }
+
+    const vbsPath = path.join(dir, 'open-outlook.vbs');
+    const vbs = buildOutlookDraftVbs({
+        pdfPath,
+        extraAttachmentPaths: extraPaths,
+        to,
+        cc,
+        bcc,
+        subject,
+        body: mailBody,
+    });
+    fs.writeFileSync(vbsPath, vbs, 'utf8');
+
+    return new Promise((resolve, reject) => {
+        execFile('wscript.exe', ['//B', vbsPath], { windowsHide: true }, (err) => {
+            setTimeout(() => {
+                try {
+                    fs.rmSync(dir, { recursive: true, force: true });
+                } catch {
+                    /* ignore */
+                }
+            }, 120000);
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
+    const enquiryRoutes = new Set([
+        '/enquiry-outlook-draft',
+        '/enquiry-customer-ack-draft',
+    ]);
+    if (
+        req.method !== 'POST' ||
+        (req.url !== '/outlook-draft' && !enquiryRoutes.has(req.url))
+    ) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+        return;
+    }
+
+    try {
+        const body = await readJson(req);
+        if (req.url === '/enquiry-outlook-draft') {
+            await openEnquiryOutlookDraft(body);
+        } else if (req.url === '/enquiry-customer-ack-draft') {
+            await openEnquiryCustomerAckDraft(body);
+        } else {
+            await openOutlookDraft(body);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+    } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message || String(e) }));
+    }
+});
+
+async function openEnquiryOutlookDraft(body) {
+    const { requestNo, concernedSEs } = body || {};
+    const reqNo = String(requestNo || '').trim();
+    if (!reqNo) {
+        throw new Error('requestNo is required');
+    }
+    const seNamesFromBody = Array.isArray(concernedSEs)
+        ? concernedSEs
+        : typeof concernedSEs === 'string'
+          ? concernedSEs.split(',').map((s) => s.trim()).filter(Boolean)
+          : [];
+    await connectDB();
+    const row = await loadEnquiryEmailRow(reqNo);
+    if (!row) throw new Error('Enquiry not found');
+    const attRes = await sql.query`SELECT ID, FileName FROM Attachments WHERE RequestNo = ${reqNo} ORDER BY ID`;
+    const port = Number(process.env.PORT || 5002);
+    const apiBase = `http://127.0.0.1:${port}`;
+    const attachments = (attRes.recordset || []).map((att) => ({
+        ID: att.ID,
+        FileName: att.FileName,
+        downloadUrl: `${apiBase}/api/attachments/${att.ID}`,
+    }));
+    const { to, cc, seNames } = await resolveEnquiryOutlookEmailFields(reqNo, {
+        concernedSEs: seNamesFromBody,
+    });
+    if (!to) throw new Error(`No email for SE(s): ${(seNames || []).join(', ') || 'none'}`);
+    const html = buildEnquiryNotifyEmailHtml(row, attachments, apiBase);
+    const subject = buildEnquiryOutlookSubject(row);
+    const dir = path.join(os.tmpdir(), 'ems-enquiry-outlook-helper', String(Date.now()));
+    fs.mkdirSync(dir, { recursive: true });
+    const htmlPath = path.join(dir, 'enquiry-email.html');
+    fs.writeFileSync(htmlPath, '\uFEFF' + html, 'utf8');
+    const vbsPath = path.join(dir, 'open-outlook.vbs');
+    fs.writeFileSync(
+        vbsPath,
+        buildOutlookHtmlDraftVbs({ htmlPath, to, cc, subject, attachmentPaths: [], send: true }),
+        'utf8'
+    );
+    await new Promise((resolve, reject) => {
+        execFile('wscript.exe', ['//B', vbsPath], { windowsHide: true }, (err) => {
+            setTimeout(() => {
+                try {
+                    fs.rmSync(dir, { recursive: true, force: true });
+                } catch {
+                    /* ignore */
+                }
+            }, 120000);
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
+async function openEnquiryCustomerAckDraft(body) {
+    const {
+        requestNo,
+        acknowledgementSE,
+        concernedSEs,
+        customerAckTargets,
+    } = body || {};
+    const reqNo = String(requestNo || '').trim();
+    const seName = String(acknowledgementSE || '').trim();
+    if (!reqNo) throw new Error('requestNo is required');
+    if (!seName) throw new Error('acknowledgementSE is required');
+
+    await connectDB();
+    const row = await loadEnquiryEmailRow(reqNo);
+    if (!row) throw new Error('Enquiry not found');
+
+    const targets = await loadCustomerAckTargets(reqNo, customerAckTargets);
+    if (!targets.length) {
+        throw new Error(
+            'No customer email found. Each customer must have a Received From contact with an email in master data.'
+        );
+    }
+
+    const seContact = await loadSeContact(seName);
+    const { cc } = await resolveCustomerAckCcEmails(reqNo, { concernedSEs });
+    const subject = buildCustomerAckSubject(row);
+
+    for (const target of targets) {
+        const html = buildCustomerAcknowledgementEmailHtml(row, seContact);
+        await runOutlookHtmlDraftVbs({
+            html,
+            to: target.email,
+            cc,
+            subject,
+            send: false,
+            windowsHide: false,
+            useDefaultSignature: true,
+            tmpSubdir: 'ems-enquiry-customer-ack-helper',
+        });
+    }
+}
+
+server.listen(PORT, '127.0.0.1', () => {
+    console.log(
+        `[EMS] Outlook helper on http://127.0.0.1:${PORT} (quote: /outlook-draft, enquiry notify: /enquiry-outlook-draft, customer ack: /enquiry-customer-ack-draft)`
+    );
+});

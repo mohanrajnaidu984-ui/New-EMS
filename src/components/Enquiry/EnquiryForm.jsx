@@ -14,6 +14,52 @@ import DateInput from './DateInput';
 import ValidationTooltip from '../Common/ValidationTooltip';
 import CollaborativeNotes from './CollaborativeNotes';
 import { inferAssignedSEsForEnquiryForItem } from '../../utils/inferAssignedSEsForEnquiryForItem';
+import {
+    sendEnquiryInternalNotification,
+    openCustomerAcknowledgementDraft,
+} from '../../utils/enquiryOutlookDraft';
+
+const EMS_API_BASE = import.meta.env.VITE_API_BASE || '';
+
+const triggerBlobDownload = (blob, fileName) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One acknowledgement draft per customer — To = Received From email, paired by list index. */
+function buildCustomerAckTargets(customerList, receivedFromList, contacts = []) {
+    const pairedLen = Math.min((customerList || []).length, (receivedFromList || []).length);
+    const targets = [];
+    for (let i = 0; i < pairedLen; i++) {
+        const rf = String(receivedFromList[i] || '').trim();
+        if (!rf) continue;
+        const parts = rf.split('|').map((s) => s.trim());
+        const contactName = parts[0] || '';
+        const companyName = parts[1] || '';
+        const master = (contacts || []).find(
+            (c) =>
+                String(c.ContactName || '').trim() === contactName &&
+                String(c.CompanyName || '').trim() === companyName
+        );
+        const email = String(master?.EmailId || master?.email || '').trim();
+        if (!email) continue;
+        targets.push({
+            customerName: String(customerList[i] || '').trim(),
+            contactName,
+            companyName,
+            email,
+        });
+    }
+    return targets;
+}
 
 /** Alphanumeric fold for company / contractor name comparison (OCR & master data variants). */
 function normalizeCompanyKey(str) {
@@ -1007,6 +1053,28 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             newErrors.DueOn = 'Due Date cannot be before Enquiry Date';
         }
 
+        if (
+            !isModifyMode &&
+            formData.AutoAck &&
+            formData.EnquiryStatus === 'Active' &&
+            !ackSEList[0]
+        ) {
+            newErrors.AcknowledgementSE =
+                'Select an SE as the customer point of contact for the acknowledgement mail.';
+        }
+
+        if (!isModifyMode && formData.AutoAck && formData.EnquiryStatus === 'Active') {
+            const ackTargets = buildCustomerAckTargets(
+                customerList,
+                receivedFromList,
+                masters.contacts || []
+            );
+            if (ackTargets.length === 0) {
+                newErrors.ReceivedFrom =
+                    'Each customer needs a Received From contact with a valid email in master data for acknowledgement drafts.';
+            }
+        }
+
         if (Object.keys(newErrors).length > 0) {
             setErrors(newErrors);
             // Scroll to error message section after a brief delay to ensure it's rendered
@@ -1128,15 +1196,56 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                         await uploadPendingFiles(savedRequestNo);
                     }
 
+                    const concernedSEsForMail = [...selectedConcernedSEs];
+                    const ackSeName = ackSEList[0];
+                    const customerAckTargets = buildCustomerAckTargets(
+                        customerList,
+                        receivedFromList,
+                        masters.contacts || []
+                    );
+                    const shouldSendCustomerAck =
+                        formData.AutoAck &&
+                        formData.EnquiryStatus === 'Active' &&
+                        ackSeName &&
+                        customerAckTargets.length > 0;
+                    const createdByName = currentUser?.name || currentUser?.FullName || 'System';
+                    const createdByEmail = currentUser?.EmailId || currentUser?.email || '';
+
                     alert(`Enquiry Added: ${savedRequestNo}`);
                     resetForm();
 
-                    // Do not await: /api/enquiries/notify loads data and sends SMTP mail synchronously,
-                    // which routinely exceeds 30s and blocked the UI. Email runs in the background.
                     if (savedRequestNo) {
-                        void sendNotification(savedRequestNo).catch((err) =>
-                            console.error('[EnquiryForm] post-create notification failed:', err)
-                        );
+                        const internalResult = await sendEnquiryInternalNotification({
+                            apiBase: EMS_API_BASE,
+                            requestNo: savedRequestNo,
+                            concernedSEs: concernedSEsForMail,
+                        });
+                        if (!internalResult.ok) {
+                            alert(
+                                `Enquiry saved, but the internal notification email could not be sent.\n\n${internalResult.error || 'Unknown error'}\n\nEnsure EMS/server is running on this PC and classic Outlook is installed.`
+                            );
+                        }
+
+                        if (shouldSendCustomerAck) {
+                            const ackResult = await openCustomerAcknowledgementDraft({
+                                apiBase: EMS_API_BASE,
+                                requestNo: savedRequestNo,
+                                acknowledgementSE: ackSeName,
+                                createdBy: createdByName,
+                                createdByEmail,
+                                concernedSEs: concernedSEsForMail,
+                                customerAckTargets,
+                            });
+                            if (!ackResult.ok) {
+                                alert(
+                                    `Enquiry saved, but the customer acknowledgement draft(s) could not be opened.\n\n${ackResult.error || 'Unknown error'}`
+                                );
+                            } else if (ackResult.draftCount > 1) {
+                                alert(
+                                    `Opened ${ackResult.draftCount} customer acknowledgement draft(s) in Outlook (one per customer).`
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2720,24 +2829,45 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                                     <label className="form-check-label" htmlFor="autoAck">Send acknowledgement mail</label>
                                                 </div>
 
-                                                {/* Concerned SE Selection (Conditionally Rendered BELOW Send Ack) */}
-                                                {formData.AutoAck && seList.length > 0 && (
+                                                {formData.AutoAck && !isModifyMode && seList.length > 0 && (
                                                     <div className="ms-4 mb-2" style={{ fontSize: '13px' }}>
+                                                        <label className="form-label mb-1" style={{ fontSize: '12px' }}>
+                                                            Customer point of contact (SE)
+                                                        </label>
                                                         <select
-                                                            className="form-select form-select-sm"
+                                                            className={`form-select form-select-sm${errors.AcknowledgementSE ? ' is-invalid' : ''}`}
                                                             value={ackSEList[0] || ''}
                                                             onChange={(e) => {
                                                                 setAckSEList(e.target.value ? [e.target.value] : []);
+                                                                if (errors.AcknowledgementSE) {
+                                                                    setErrors((prev) => {
+                                                                        const next = { ...prev };
+                                                                        delete next.AcknowledgementSE;
+                                                                        return next;
+                                                                    });
+                                                                }
                                                             }}
-                                                            style={{ fontSize: '13px', width: '200px' }}
+                                                            style={{ fontSize: '13px', width: '280px' }}
                                                         >
                                                             <option value="">-- Select SE --</option>
                                                             {seList.map((se, idx) => (
                                                                 <option key={idx} value={se}>{se}</option>
                                                             ))}
                                                         </select>
+                                                        {errors.AcknowledgementSE ? (
+                                                            <div className="invalid-feedback d-block">{errors.AcknowledgementSE}</div>
+                                                        ) : null}
                                                     </div>
                                                 )}
+
+                                                {!isModifyMode ? (
+                                                    <div className="text-muted ms-1" style={{ fontSize: '11px' }}>
+                                                        On save: (1) Internal notification is sent to all concerned SEs (CC: division CCMailIds).
+                                                        {formData.AutoAck
+                                                            ? ' (2) One Outlook draft per customer — To: Received From email; CC: all concerned SEs and division CCMailIds.'
+                                                            : ''}
+                                                    </div>
+                                                ) : null}
 
                                                 {/* ED/CEO Signature Required */}
                                                 <div className="form-check" style={{ fontSize: '13px' }}>

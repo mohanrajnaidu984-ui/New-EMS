@@ -1267,8 +1267,6 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
         `);
         const allQuotes = quotesRes.recordset || [];
 
-        console.log(`[API] Found ${allJobs.length} jobs and ${allPrices.length} prices for ${enquiriesToMap.length} enquiries.`);
-
         // Map subjob prices for each enquiry
         const mappedEnquiries = enquiriesToMap.map(enq => {
             const enqRequestNo = enq.RequestNo?.toString().trim();
@@ -1655,14 +1653,6 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
                 })
                 .join(';;');
 
-            if (enq.RequestNo == '51') {
-                console.log(`[DEBUG 51] Root: ${internalCustomer}, External:`, externalCustomers);
-                console.log(`[DEBUG 51] JobSet:`, Array.from(jobNameSetNorm));
-                console.log(`[DEBUG 51] Final Customer Set:`, Array.from(finalCustomerSet));
-                console.log(`[DEBUG 51] Final Customers Array:`, finalCustomers);
-                console.log(`[DEBUG 51] Final Pricing Str:`, finalPricingStr);
-            }
-
             // Latest-quote own job: sum base prices for that EnquiryFor node + all descendants (same selfPrices rules as Subjob Prices column).
             // Prefer the pending-list tuple (PV) so ref/date/summary align with the row, not another branch on the enquiry.
             const pendingOwnFromTuple = pendingOwnFromTupleRaw;
@@ -1887,13 +1877,8 @@ async function mapQuoteListingRows(sql, enquiries, userEmail, accessCtx, session
                 return { ...enq, AccessRule: accessRule };
             });
         }
-    if (finalMapped.length > 0) {
-        console.log(`[API] mapQuoteListingRows sample:`, {
-        ReqNo: finalMapped[0].RequestNo,
-        SubJobPricesLen: finalMapped[0].SubJobPrices?.length,
-        });
-    }
-    return finalMapped;
+
+        return finalMapped;
 }
 
 module.exports = mapQuoteListingRows;

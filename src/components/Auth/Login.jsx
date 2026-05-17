@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import emsoLogo from '../../assets/ems_logo2.png';
-import almoayyedLogo from '../../assets/almoayyed-logo.png';
+import { getAcgBrandLogoSrc } from '../../utils/acgBrandLogo';
+import { readApiJson } from '../../utils/apiJson';
 import './Login.css';
 
 const Login = ({ onSwitchToSignup }) => {
@@ -49,7 +50,15 @@ const Login = ({ onSwitchToSignup }) => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: formData.email })
             });
-            const data = await res.json();
+            const { ok, data, invalidJson } = await readApiJson(res);
+            if (invalidJson || (!ok && !Object.keys(data).length)) {
+                setError('Server error. Please try again.');
+                return;
+            }
+            if (!ok) {
+                setError(data.message || `Server error (${res.status})`);
+                return;
+            }
 
             if (data.exists) {
                 if (data.isFirstLogin) {
@@ -87,9 +96,13 @@ const Login = ({ onSwitchToSignup }) => {
                 }),
             });
 
-            const data = await response.json();
+            const { ok, data, invalidJson } = await readApiJson(response);
+            if (invalidJson) {
+                setError('Server error. Please try again.');
+                return;
+            }
 
-            if (response.ok) {
+            if (ok) {
                 console.log('Login Success! User:', data.user);
                 /** Typed address on this screen — must drive `currentUserEmail` / pricing `userEmail` (DB EmailId can differ). */
                 const typedEmail = (formData.email || '').trim();
@@ -156,8 +169,9 @@ const Login = ({ onSwitchToSignup }) => {
                         password: formData.newPassword
                     }),
                 });
-                const loginData = await loginRes.json();
-                if (loginRes.ok) {
+                const loginParsed = await readApiJson(loginRes);
+                const loginData = loginParsed.data;
+                if (loginParsed.ok && !loginParsed.invalidJson) {
                     const typedEmail = (formData.email || '').trim();
                     const loginEmail =
                         typedEmail ||
@@ -197,8 +211,12 @@ const Login = ({ onSwitchToSignup }) => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: formData.email })
             });
-            const data = await res.json();
-            if (res.ok) {
+            const { ok, data, invalidJson } = await readApiJson(res);
+            if (invalidJson) {
+                setError('Server error. Please try again.');
+                return;
+            }
+            if (ok) {
                 setSuccessMsg(data.message || 'Reset link sent to your email.');
                 setTimeout(() => {
                     setStep('password');
@@ -372,13 +390,17 @@ const Login = ({ onSwitchToSignup }) => {
 
                     <div className="d-flex justify-content-center mt-4 pt-3 border-top">
                         <img
-                            src={almoayyedLogo}
+                            src={getAcgBrandLogoSrc()}
                             alt="Almoayyed Contracting Group"
-                            className="footer-logo-animated"
+                            className="footer-logo-animated acg-login-footer-logo"
+                            decoding="async"
+                            draggable={false}
                             style={{
-                                height: '40px',
+                                height: '44px',
                                 width: 'auto',
-                                opacity: 0.8
+                                maxWidth: 'min(280px, 85vw)',
+                                objectFit: 'contain',
+                                opacity: 0.9
                             }}
                         />
                     </div>

@@ -23,6 +23,10 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+# Windows reserved device names (accidental redirects)
+NUL
+NUL.*
+**/NUL.css
 
 # Logs
 *.log

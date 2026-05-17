@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import almoayyedLogo from '../../assets/almoayyed-logo.png';
 import emsMarkLogo from '../../assets/ems_logo2.png';
+import { getAcgBrandLogoSrc } from '../../utils/acgBrandLogo';
 import NotificationDropdown from './NotificationDropdown';
 import UserProfile from './UserProfile';
 
@@ -139,25 +139,54 @@ const Header = ({ activeTab, onNavigate, onOpenEnquiry }) => {
               </ul>
             </div>
 
-            {/* Right: Stacked ACG Logo + User Controls */}
-            <div className="d-flex flex-column align-items-end justify-content-end h-100 pb-1" style={{ marginLeft: 'auto' }}>
-              {/* Top: ACG Logo */}
-              <img
-                src={almoayyedLogo}
-                alt="ACG"
-                className="mb-1"
+            {/* Right: ACG logo + user controls — absolute slots so only the logo moves down */}
+            <div
+              className="acg-header-right"
+              style={{
+                position: 'relative',
+                marginLeft: 'auto',
+                alignSelf: 'stretch',
+                height: '100%',
+                width: 'min(240px, 40vw)',
+                flexShrink: 0,
+              }}
+            >
+              <div
+                className="acg-header-logo-slot"
                 style={{
-                  height: '26px',
-                  width: 'auto',
-                  objectFit: 'contain',
-                  opacity: 1,
-                  imageRendering: 'crisp-edges',
-                  transform: 'translateY(6px)'
+                  position: 'absolute',
+                  right: 0,
+                  bottom: '34px',
+                  lineHeight: 0,
+                  zIndex: 1,
                 }}
-              />
+              >
+                <img
+                  src={getAcgBrandLogoSrc()}
+                  alt="Almoayyed Contracting Group"
+                  className="acg-header-logo"
+                  decoding="async"
+                  draggable={false}
+                  style={{
+                    display: 'block',
+                    height: '34px',
+                    width: 'auto',
+                    maxWidth: 'min(220px, 38vw)',
+                    objectFit: 'contain',
+                    objectPosition: 'right center',
+                  }}
+                />
+              </div>
 
-              {/* Bottom: User Controls */}
-              <div className="d-flex align-items-center gap-2">
+              <div
+                className="acg-header-controls d-flex align-items-center gap-2"
+                style={{
+                  position: 'absolute',
+                  right: 0,
+                  bottom: '4px',
+                  zIndex: 2,
+                }}
+              >
                 <NotificationDropdown onOpenEnquiry={onOpenEnquiry} />
                 <div style={{ transform: 'scale(0.9)', transformOrigin: 'right bottom' }}>
                   <UserProfile activeTab={activeTab} />

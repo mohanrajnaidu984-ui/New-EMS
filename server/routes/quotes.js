@@ -4,6 +4,8 @@ const sql = require('mssql');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { execFile } = require('child_process');
 const multer = require('multer');
 const {
     resolvePricingAccessContext,
@@ -113,6 +115,8 @@ const runPendingQuoteListQuery = require('../lib/pendingQuoteListQuery');
 const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
 const { sendGeneralEmail } = require('../emailService');
+const { buildOutlookDraftVbs } = require('../lib/outlookDraftVbs');
+const { resolveQuoteOutlookEmailFields } = require('../lib/quoteOutlookEmailFields');
 const { resolveQuoteUploadDestination } = require('../lib/attachmentsRoot');
 
 /**
@@ -325,6 +329,99 @@ router.post('/send-email', express.json({ limit: '50mb' }), async (req, res) => 
     } catch (err) {
         console.error('Error in /send-email route:', err);
         res.status(500).json({ error: 'Internal server error', details: err.message });
+    }
+});
+
+// GET /api/quotes/outlook-email-fields — To (attention person) + CC (user division CCMailIds, filtered).
+router.get('/outlook-email-fields', async (req, res) => {
+    try {
+        const userEmail = (req.query.userEmail || '').toString().trim();
+        const toName = (req.query.toName || '').toString().trim();
+        const toAttention = (req.query.toAttention || '').toString().trim();
+        const requestNo = (req.query.requestNo || '').toString().trim();
+        const isInternal = String(req.query.isInternal || '').toLowerCase() === 'true' || req.query.isInternal === '1';
+
+        if (!userEmail) {
+            return res.status(400).json({ error: 'userEmail is required' });
+        }
+
+        const fields = await resolveQuoteOutlookEmailFields(sql, {
+            userEmail,
+            toName,
+            toAttention,
+            isInternal,
+            requestNo,
+        });
+
+        return res.json(fields);
+    } catch (err) {
+        console.error('Error in /outlook-email-fields:', err);
+        res.status(500).json({ error: 'Failed to resolve email fields', details: err.message });
+    }
+});
+
+// POST /api/quotes/outlook-draft — open classic Outlook draft with PDF (Windows COM via VBScript).
+// Works when EMS API runs on the same Windows PC/session as Outlook (e.g. localhost dev, some RDS setups).
+router.post('/outlook-draft', express.json({ limit: '50mb' }), async (req, res) => {
+    if (process.platform !== 'win32') {
+        return res.status(501).json({ error: 'Outlook draft is supported on Windows only' });
+    }
+
+    try {
+        const { to, cc, bcc, subject, body, attachmentName, pdfBase64, extraAttachments } = req.body || {};
+        if (!pdfBase64) {
+            return res.status(400).json({ error: 'PDF content is required' });
+        }
+
+        const dir = path.join(os.tmpdir(), 'ems-quote-outlook', String(Date.now()));
+        fs.mkdirSync(dir, { recursive: true });
+
+        const safePdfName = String(attachmentName || 'EMS_QuoteDraft.pdf').replace(/[/\\?%*:|"<>]/g, '_');
+        const pdfPath = path.join(dir, safePdfName);
+        fs.writeFileSync(pdfPath, Buffer.from(pdfBase64, 'base64'));
+
+        const extraPaths = [];
+        for (const att of extraAttachments || []) {
+            if (!att?.base64) continue;
+            const nm = String(att.filename || 'attachment').replace(/[/\\?%*:|"<>]/g, '_');
+            const attPath = path.join(dir, nm);
+            fs.writeFileSync(attPath, Buffer.from(att.base64, 'base64'));
+            extraPaths.push(attPath);
+        }
+
+        const vbsPath = path.join(dir, 'open-outlook.vbs');
+        const vbs = buildOutlookDraftVbs({
+            pdfPath,
+            extraAttachmentPaths: extraPaths,
+            to: to || '',
+            cc: cc || '',
+            bcc: bcc || '',
+            subject: subject || '',
+            body: body || '',
+        });
+        fs.writeFileSync(vbsPath, vbs, 'utf8');
+
+        await new Promise((resolve, reject) => {
+            execFile('wscript.exe', ['//B', vbsPath], { windowsHide: false }, (err) => {
+                setTimeout(() => {
+                    try {
+                        fs.rmSync(dir, { recursive: true, force: true });
+                    } catch {
+                        /* ignore */
+                    }
+                }, 120000);
+                if (err) reject(err);
+                else resolve();
+            });
+        });
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error in /outlook-draft route:', err);
+        res.status(500).json({
+            error: 'Could not open Outlook draft',
+            details: err.message || String(err),
+        });
     }
 });
 
