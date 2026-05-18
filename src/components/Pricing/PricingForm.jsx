@@ -4936,7 +4936,7 @@ const PricingForm = ({ openContext = null }) => {
                                         const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
                                         const specMeta = pricingListSpecStatusMeta(enq);
                                         const statusLines = pricingListSpecStatusTwoLines(specMeta);
-                                        const zebraBg = idx % 2 === 0 ? '#ffffff' : '#e2e8f0';
+                                        const zebraBg = idx % 2 === 0 ? '#ffffff' : '#f1f5f9';
                                         const tdPad = '10px 12px';
                                         const tdBg = { backgroundColor: 'transparent' };
                                         const hoverGrey = '#cbd5e1';
@@ -5175,7 +5175,7 @@ const PricingForm = ({ openContext = null }) => {
                                             const priceSplit = structured ? null : splitSubJobPricesForListColumns(enq.SubJobPrices);
                                             const specMeta = pricingListSpecStatusMeta(enq);
                                             const statusLines = pricingListSpecStatusTwoLines(specMeta);
-                                            const zebraBg = idx % 2 === 0 ? '#ffffff' : '#e2e8f0';
+                                            const zebraBg = idx % 2 === 0 ? '#ffffff' : '#f1f5f9';
                                             const tdPad = '10px 12px';
                                             const tdBg = { backgroundColor: 'transparent' };
                                             const hoverGrey = '#cbd5e1';

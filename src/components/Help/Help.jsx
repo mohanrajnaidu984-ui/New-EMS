@@ -7,7 +7,7 @@ const Help = () => {
     <div className="py-3 d-flex justify-content-center">
       <div className="card border-0 shadow-sm" style={{ width: '50%', minWidth: '320px', maxWidth: '100%' }}>
         <div className="card-body p-4">
-          <h4 className="mb-2" style={sectionTitleStyle}>Help - User Manual</h4>
+          <h4 className="mb-2" style={sectionTitleStyle}>EMS - User Manual</h4>
           <p className="text-secondary mb-4">
             This guide reflects the latest EMS application flow. It covers how to access the app, complete
             authentication steps, and use each module with practical process guidance.
@@ -111,9 +111,6 @@ const Help = () => {
             <p className="mb-0 mt-1">
               <strong>Process view:</strong> Dashboard &rarr; filter division/SE &rarr; review chips or bars &rarr; open list popup &rarr; complete action in Enquiry/Pricing/Quote.
             </p>
-            <p className="mb-0 mt-1">
-              <strong>Expected output:</strong> Consistent due/lapsed visibility aligned between calendar chips, monthly bars, and enquiry list popups.
-            </p>
           </div>
 
           <div className="text-secondary mb-3">
@@ -128,13 +125,10 @@ const Help = () => {
               <strong>How to use:</strong> Create or modify enquiry, validate mandatory fields, save. Use search and modify flows for updates. On Windows with classic Outlook installed, email actions run from the EMS server or optional local helper.
             </p>
             <p className="mb-1">
-              <strong>Internal notification (on Add Enquiry):</strong> After a successful add, EMS can send an internal notification email via Outlook to all concerned SEs (To), with division CC addresses from master data. This is sent automatically when Outlook integration is available.
+              <strong>Internal notification (on Add Enquiry):</strong> After a successful add, EMS can send an internal notification email via Outlook to all concerned SEs (To), with manager concerns in CC. This is sent automatically when Outlook integration is available.
             </p>
             <p className="mb-1">
-              <strong>Customer acknowledgement (optional):</strong> Before saving a new active enquiry, check <strong>Send acknowledgement mail</strong>, select the point-of-contact SE, and ensure customer/received-from email pairs are complete. EMS opens one Outlook draft per customer (not auto-sent). Each draft is addressed to the received-from contact, with concerned SEs and division CCs. The selected SE appears as contact in the body; your default Outlook signature is used.
-            </p>
-            <p className="mb-0">
-              <strong>Example:</strong> Register a new enquiry with two customers, enable acknowledgement, choose the lead SE, save—review and send each Outlook draft to the respective customer contact.
+              <strong>Customer acknowledgement (optional):</strong> Before saving a new active enquiry, check <strong>Send acknowledgement mail</strong>, select the point-of-contact Sales representative, and ensure customer/received-from email pairs are complete. EMS opens one Outlook draft per customer (not auto-sent). Each draft is addressed to the received-from contact, with concerned SEs and manager concerns in CC. The selected SE appears as contact in the body; your default Outlook signature is used.
             </p>
             <p className="mb-0 mt-1">
               <strong>Step process:</strong> New Enquiry &rarr; fill mandatory fields &rarr; set concerned SEs and emails &rarr; optionally enable acknowledgement &rarr; save &rarr; review Outlook mail &rarr; move to Pricing.
@@ -150,32 +144,43 @@ const Help = () => {
           <div className="text-secondary mb-3">
             <p className="mb-1"><strong>3. Pricing</strong></p>
             <p className="mb-1">
-              <strong>Purpose:</strong> Convert enquiry scope into commercial estimate values.
+              <strong>Purpose:</strong> Build the commercial estimate for an enquiry before quoting. Prices are entered per <strong>job</strong> (lead job and sub-jobs from Enquiry For) and per <strong>customer</strong> tab, using structured price lines called <strong>options</strong>.
             </p>
             <p className="mb-1">
-              <strong>Key activities:</strong> item-level pricing, totals, net value checks, margin assumptions, internal review.
+              <strong>Pending Updates list:</strong> Shows enquiries where at least one visible <strong>Base Price</strong> is still <strong>Not Updated</strong>. Open a row to enter pricing for that enquiry. Use Division and Category filters and the search bar to narrow the list.
             </p>
             <p className="mb-1">
-              <strong>How to use:</strong> Open the enquiry context, enter/update values, cross-check consistency, then finalize for quote stage.
+              <strong>Price option types:</strong>
+            </p>
+            <ul className="mb-2" style={{ paddingLeft: '1.1rem' }}>
+              <li>
+                <strong>Base Price</strong> — The main mandatory price for each job on each customer tab. Until Base Price is entered (greater than zero), the cell shows <strong>Not Updated</strong>. Pending Updates is driven by missing Base Price lines. Base Price is the primary value carried into Quote.
+              </li>
+              <li>
+                <strong>Optional</strong> — A separate add-on line for the same job. Use it for alternate scope, upgrades, or supplementary amounts that are not part of the core Base Price. Optional may be left at <strong>zero</strong> when not applicable; it does not block the Pending list the way Base Price does. In the grid it appears as its own option row; in list summaries it may show as <strong>Job name (Optional)</strong> next to the Base Price total.
+              </li>
+            </ul>
+            <p className="mb-1">
+              <strong>How to use:</strong> Open an enquiry from Pending Updates or Search &rarr; select the <strong>lead job</strong> and <strong>customer tab</strong> &rarr; enter <strong>Base Price</strong> for each relevant job row &rarr; enter <strong>Optional</strong> (or other options) where needed &rarr; click <strong>Save All</strong> &rarr; review customer totals and sub-job roll-ups &rarr; proceed to Quote when Base Price lines are complete.
             </p>
             <p className="mb-0">
-              <strong>Example:</strong> If material cost changed, revise pricing lines and confirm updated totals before issuing a revised quote.
+              <strong>Example:</strong> For lead job L1 on a customer tab, set Base Price on the lead and each sub-job. Add Optional on a sub-job only if that scope is priced separately (for example enhanced specification). If costs change later, update the affected Base Price or Optional cells and save again before creating a revised quote.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Step process:</strong> Load enquiry &rarr; update commercial lines &rarr; validate totals/net value &rarr; confirm for quote preparation.
+              <strong>Step process:</strong> Pending/Search &rarr; open enquiry &rarr; complete Base Price on all required jobs &rarr; add Optional as needed &rarr; Save All &rarr; verify totals &rarr; Quote.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Validation notes:</strong> Recheck arithmetic consistency between item totals, quoted value, and net value before forwarding.
+              <strong>Validation notes:</strong> Confirm prices on the correct customer tab and lead job. Optional zero is allowed; Base Price must be updated where that job is in scope. Check list columns <strong>Customer Name &amp; Total Price</strong> (Base Price roll-up) and <strong>Individual &amp; Subjob Base prices</strong> before leaving the enquiry.
             </p>
             <p className="mb-0 mt-1">
-              <strong>Expected output:</strong> Finalized commercial basis ready for quote release.
+              <strong>Expected output:</strong> All required Base Price lines updated, Optional and other options recorded where applicable, and a consistent commercial basis ready for quote preparation and revisions.
             </p>
           </div>
 
           <div className="text-secondary mb-3">
             <p className="mb-1"><strong>4. Quote</strong></p>
             <p className="mb-1">
-              <strong>Purpose:</strong> Manage customer-facing quotes and revisions.
+              <strong>Purpose:</strong> Manage customer quotations and revisions.
             </p>
             <p className="mb-1">
               <strong>Key activities:</strong> select enquiry, create quote reference and revisions, edit clauses, map lead job and customer, preview A4 layout, download PDF, send via Outlook.

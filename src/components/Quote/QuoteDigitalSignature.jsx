@@ -537,16 +537,210 @@ function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
 }
 
+/** Signature image width in px — anchor is the horizontal center of this image. */
+export const QUOTE_SIGNATURE_IMAGE_WIDTH_PX = 172;
+const SIG_IMG_HALF = QUOTE_SIGNATURE_IMAGE_WIDTH_PX / 2;
+
+/** Click/drop point aligns with center of signature image (not center of image + caption block). */
+const STAMP_ANCHOR_TRANSFORM = `translate(${-SIG_IMG_HALF}px, -50%)`;
+
+function QuoteSignatureStampContent({ imageDataUrl, displayName, designation, placedStr, verificationCode, preview }) {
+    return (
+        <div
+            style={{
+                display: 'flex',
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 0,
+                opacity: preview ? 0.92 : 1,
+                filter: preview ? 'drop-shadow(0 2px 6px rgba(15,23,42,0.15))' : undefined,
+            }}
+        >
+            <img
+                src={imageDataUrl}
+                alt=""
+                style={{
+                    flex: '0 0 auto',
+                    width: `${QUOTE_SIGNATURE_IMAGE_WIDTH_PX}px`,
+                    maxHeight: '94px',
+                    objectFit: 'contain',
+                    objectPosition: 'left center',
+                    display: 'block',
+                    pointerEvents: 'none',
+                    backgroundColor: 'transparent',
+                    mixBlendMode: 'multiply',
+                }}
+            />
+            <div style={{ flex: '1 1 auto', minWidth: 0, lineHeight: 1.25, marginLeft: 0, paddingLeft: 0 }}>
+                <div style={{ fontWeight: '700', color: '#0f172a', fontSize: '9px' }}>{displayName || '—'}</div>
+                {designation ? (
+                    <div style={{ fontSize: '8px', color: '#64748b', marginTop: '2px' }}>{designation}</div>
+                ) : null}
+                {placedStr ? (
+                    <div style={{ fontSize: '7px', color: '#94a3b8', marginTop: '3px' }}>{placedStr}</div>
+                ) : null}
+                {verificationCode ? (
+                    <div
+                        style={{
+                            fontSize: '7px',
+                            color: '#0369a1',
+                            fontWeight: '600',
+                            marginTop: '3px',
+                            wordBreak: 'break-all',
+                        }}
+                    >
+                        {verificationCode}
+                    </div>
+                ) : null}
+            </div>
+        </div>
+    );
+}
+
+/** True when the logged-in user's email is listed on any enquiry division CCMailIds. */
+export function isUserQuoteCcMailSigner(userEmail, divisionEmails) {
+    const e = String(userEmail || '')
+        .trim()
+        .toLowerCase()
+        .replace(/@almcg\.com/g, '@almoayyedcg.com');
+    if (!e) return false;
+    for (const div of divisionEmails || []) {
+        const cc = String(div.ccMailIds || div.CCMailIds || '')
+            .toLowerCase()
+            .replace(/@almcg\.com/g, '@almoayyedcg.com')
+            .split(/[,;]/)
+            .map((m) => m.trim())
+            .filter(Boolean);
+        if (cc.includes(e)) return true;
+    }
+    return false;
+}
+
 /**
- * Draggable stamp: signature image left; name, designation, date/time, code on the right (compact).
- * No card border on screen/print. Remove control only when allowRemove is true (draft: no saved quote
- * for this enquiry scope yet). After save, QuoteForm passes allowRemove=false so stamps stay fixed.
+ * Follow-cursor placement: click the signature toolbar, move over the quote preview, click once to fix.
+ * Escape cancels. Ignores clicks outside `.quote-a4-sheet` inside `#quote-preview`.
  */
-export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = true }) {
+export function QuoteSignaturePlacementOverlay({
+    active,
+    imageDataUrl,
+    displayName = '',
+    designation = '',
+    onCancel,
+    onPlaceAt,
+}) {
+    const [cursor, setCursor] = useState({ x: 0, y: 0 });
+
+    useEffect(() => {
+        if (!active) return undefined;
+
+        const onMove = (e) => setCursor({ x: e.clientX, y: e.clientY });
+
+        const onKey = (e) => {
+            if (e.key === 'Escape') onCancel();
+        };
+
+        const onClickCapture = (e) => {
+            if (e.target.closest('.no-print button, .no-print [role="button"], .signature-placement-ignore')) {
+                return;
+            }
+            const sheet = e.target.closest?.('.quote-a4-sheet');
+            const preview = document.getElementById('quote-preview');
+            if (!sheet || !preview || !preview.contains(sheet)) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            const rect = sheet.getBoundingClientRect();
+            if (!rect.width || !rect.height) return;
+
+            const xPct = clamp(((e.clientX - rect.left) / rect.width) * 100, 2, 96);
+            const yPct = clamp(((e.clientY - rect.top) / rect.height) * 100, 2, 92);
+            const sheets = [...preview.querySelectorAll('.quote-a4-sheet')];
+            const sheetIndex0 = Math.max(0, sheets.indexOf(sheet));
+            onPlaceAt({ sheetIndex: sheetIndex0 + 1, xPct, yPct });
+        };
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('keydown', onKey);
+        document.addEventListener('click', onClickCapture, true);
+        document.body.style.cursor = 'crosshair';
+
+        return () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('keydown', onKey);
+            document.removeEventListener('click', onClickCapture, true);
+            document.body.style.cursor = '';
+        };
+    }, [active, onCancel, onPlaceAt]);
+
+    if (!active || !imageDataUrl) return null;
+
+    const portalTarget = typeof document !== 'undefined' ? document.body : null;
+    if (!portalTarget) return null;
+
+    return createPortal(
+        <>
+            <div
+                className="no-print signature-placement-ignore"
+                aria-hidden
+                style={{
+                    position: 'fixed',
+                    inset: 0,
+                    zIndex: 100400,
+                    pointerEvents: 'none',
+                }}
+            />
+            <div
+                className="no-print signature-placement-ignore"
+                style={{
+                    position: 'fixed',
+                    left: cursor.x,
+                    top: cursor.y,
+                    transform: STAMP_ANCHOR_TRANSFORM,
+                    pointerEvents: 'none',
+                    zIndex: 100401,
+                    maxWidth: 'min(430px, 60vw)',
+                }}
+            >
+                <QuoteSignatureStampContent
+                    imageDataUrl={imageDataUrl}
+                    displayName={displayName}
+                    designation={designation}
+                    preview
+                />
+            </div>
+            <div
+                className="no-print signature-placement-ignore"
+                style={{
+                    position: 'fixed',
+                    left: 12,
+                    bottom: 12,
+                    zIndex: 100402,
+                    background: '#0f172a',
+                    color: '#f8fafc',
+                    padding: '8px 12px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                }}
+            >
+                Click on the quote to place your signature · Esc to cancel
+            </div>
+        </>,
+        portalTarget
+    );
+}
+
+/**
+ * Stamp overlay on the quote sheet. Locked stamps (removableBeforeNextCommit !== true) cannot move or be removed.
+ */
+export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = false, allowMove = false }) {
     const rootRef = useRef(null);
     const drag = useRef(null);
 
     const onPointerDown = (e) => {
+        if (!allowMove) return;
         if (e.target.closest('button')) return;
         e.preventDefault();
         e.stopPropagation();
@@ -565,6 +759,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = tru
     };
 
     useEffect(() => {
+        if (!allowMove) return undefined;
         const onPointerMove = (e) => {
             const d = drag.current;
             if (!d) return;
@@ -583,7 +778,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = tru
             document.removeEventListener('pointermove', onPointerMove);
             document.removeEventListener('pointerup', onPointerUp);
         };
-    }, [stamp.id, onMove]);
+    }, [stamp.id, onMove, allowMove]);
 
     const placed = stamp.placedAtIso ? new Date(stamp.placedAtIso) : null;
     const placedStr = placed && !Number.isNaN(placed.getTime()) ? placed.toLocaleString() : stamp.placedAtIso || '';
@@ -597,7 +792,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = tru
                 position: 'absolute',
                 left: `${stamp.xPct}%`,
                 top: `${stamp.yPct}%`,
-                transform: 'translate(-50%, -50%)',
+                transform: STAMP_ANCHOR_TRANSFORM,
                 zIndex: 25,
                 maxWidth: 'min(430px, 60vw)',
                 padding: 0,
@@ -606,102 +801,68 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = tru
                 boxShadow: 'none',
                 outline: 'none',
                 boxSizing: 'border-box',
-                cursor: 'grab',
+                cursor: allowMove ? 'grab' : 'default',
                 userSelect: 'none',
-                touchAction: 'none',
+                touchAction: allowMove ? 'none' : 'auto',
             }}
-            title="Drag to move on this page"
+            title={allowMove ? 'Drag to move on this page' : 'Signature placement is fixed'}
         >
-            <div
-                className="no-print"
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: allowRemove ? 'space-between' : 'flex-start',
-                    marginBottom: '4px',
-                    gap: '6px',
-                }}
-            >
-                <span style={{ fontSize: '8px', color: '#94a3b8', fontWeight: '500' }}>
-                    <GripHorizontal size={11} style={{ verticalAlign: 'middle', marginRight: '2px' }} />
-                    Drag
-                </span>
-                {allowRemove ? (
-                    <button
-                        type="button"
-                        className="no-print"
-                        aria-label="Remove signature from quote (only before this quote is saved for this customer and scope)"
-                        title="Remove signatures added after the last quote save. Saving the quote again locks every stamp."
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onRemove(stamp.id);
-                        }}
-                        style={{
-                            border: '1px solid #fecaca',
-                            background: '#fef2f2',
-                            color: '#b91c1c',
-                            borderRadius: '6px',
-                            padding: '2px 6px',
-                            minWidth: '28px',
-                            minHeight: '24px',
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            lineHeight: 1,
-                        }}
-                    >
-                        <X size={14} strokeWidth={2.5} aria-hidden />
-                    </button>
-                ) : null}
-            </div>
-            <div
-                style={{
-                    display: 'flex',
-                    flexDirection: 'row',
-                    alignItems: 'flex-start',
-                    gap: 0,
-                }}
-            >
-                <img
-                    src={stamp.imageDataUrl}
-                    alt=""
+            {allowMove || allowRemove ? (
+                <div
+                    className="no-print"
                     style={{
-                        flex: '0 0 auto',
-                        width: '172px',
-                        maxHeight: '94px',
-                        objectFit: 'contain',
-                        objectPosition: 'left center',
-                        display: 'block',
-                        pointerEvents: 'none',
-                        backgroundColor: 'transparent',
-                        /* Opaque white in older saved PNGs blends into white paper; true alpha PNGs stay correct. */
-                        mixBlendMode: 'multiply',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: allowRemove ? 'space-between' : 'flex-start',
+                        marginBottom: '4px',
+                        gap: '6px',
                     }}
-                />
-                <div style={{ flex: '1 1 auto', minWidth: 0, lineHeight: 1.25, marginLeft: 0, paddingLeft: 0 }}>
-                    <div style={{ fontWeight: '700', color: '#0f172a', fontSize: '9px' }}>{stamp.displayName || '—'}</div>
-                    {stamp.designation ? (
-                        <div style={{ fontSize: '8px', color: '#64748b', marginTop: '2px' }}>{stamp.designation}</div>
-                    ) : null}
-                    {placedStr ? (
-                        <div style={{ fontSize: '7px', color: '#94a3b8', marginTop: '3px' }}>{placedStr}</div>
-                    ) : null}
-                    {stamp.verificationCode ? (
-                        <div
+                >
+                    {allowMove ? (
+                        <span style={{ fontSize: '8px', color: '#94a3b8', fontWeight: '500' }}>
+                            <GripHorizontal size={11} style={{ verticalAlign: 'middle', marginRight: '2px' }} />
+                            Drag
+                        </span>
+                    ) : (
+                        <span />
+                    )}
+                    {allowRemove ? (
+                        <button
+                            type="button"
+                            className="no-print"
+                            aria-label="Remove signature from quote"
+                            title="Remove this signature before it is fixed on the page"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onRemove(stamp.id);
+                            }}
                             style={{
-                                fontSize: '7px',
-                                color: '#0369a1',
-                                fontWeight: '600',
-                                marginTop: '3px',
-                                wordBreak: 'break-all',
+                                border: '1px solid #fecaca',
+                                background: '#fef2f2',
+                                color: '#b91c1c',
+                                borderRadius: '6px',
+                                padding: '2px 6px',
+                                minWidth: '28px',
+                                minHeight: '24px',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                lineHeight: 1,
                             }}
                         >
-                            {stamp.verificationCode}
-                        </div>
+                            <X size={14} strokeWidth={2.5} aria-hidden />
+                        </button>
                     ) : null}
                 </div>
-            </div>
+            ) : null}
+            <QuoteSignatureStampContent
+                imageDataUrl={stamp.imageDataUrl}
+                displayName={stamp.displayName}
+                designation={stamp.designation}
+                placedStr={placedStr}
+                verificationCode={stamp.verificationCode}
+            />
         </div>
     );
 }

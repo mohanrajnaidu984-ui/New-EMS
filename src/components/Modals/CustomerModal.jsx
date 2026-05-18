@@ -53,13 +53,23 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                 const extracted = await res.json();
                 console.log('OCR Result:', extracted);
 
-                setFormData(prev => ({
+                const digits = (s) => String(s || '').replace(/\D/g, '');
+                const land = String(extracted.Phone || '').trim();
+                const mob = String(extracted.Mobile1 || '').trim();
+                const landD = digits(land);
+                const mobD = digits(mob);
+                const hasBoth = landD && mobD && landD !== mobD;
+
+                setFormData((prev) => ({
                     ...prev,
                     CompanyName: extracted.CompanyName || prev.CompanyName,
                     EmailId: extracted.EmailId || prev.EmailId,
-                    Phone1: (extracted.Mobile1 || extracted.Phone) || prev.Phone1,
+                    Website: extracted.Website || prev.Website,
                     Address1: extracted.Address1 || prev.Address1,
+                    Address2: extracted.Address2 || prev.Address2,
                     FaxNo: extracted.FaxNo || prev.FaxNo,
+                    Phone1: hasBoth ? land : land || mob || prev.Phone1,
+                    Phone2: hasBoth ? mob : prev.Phone2,
                 }));
                 alert('Scanned successfully! Please review the auto-filled details.');
             } else {

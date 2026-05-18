@@ -89,6 +89,8 @@ import {
 import {
     SignatureVaultModal,
     QuoteSignatureStamp,
+    QuoteSignaturePlacementOverlay,
+    isUserQuoteCcMailSigner,
     makeVerificationCode,
     loadStampsForEnquiry,
     saveStampsForEnquiry,
@@ -2378,6 +2380,7 @@ const QuoteForm = ({ openContext = null }) => {
 
     /** Per-enquiry draggable digital signatures on quote sheets (persisted in localStorage). */
     const [signatureVaultOpen, setSignatureVaultOpen] = useState(false);
+    const [signaturePlacementActive, setSignaturePlacementActive] = useState(false);
     /** dataTransfer cannot hold large data URLs — stash payload for the duration of the drag. */
     const dragSignaturePayloadRef = useRef(null);
     const sigDragActiveRef = useRef(false);
@@ -2406,6 +2409,12 @@ const QuoteForm = ({ openContext = null }) => {
         [currentUser?.Designation, currentUser?.designation]
     );
     const [quoteDigitalStamps, setQuoteDigitalStamps] = useState([]);
+
+    const isQuoteCcMailSigner = React.useMemo(() => {
+        const email = (currentUser?.EmailId || currentUser?.email || '').trim();
+        const divisionEmails = Array.isArray(enquiryData?.divisionEmails) ? enquiryData.divisionEmails : [];
+        return isUserQuoteCcMailSigner(email, divisionEmails);
+    }, [currentUser?.EmailId, currentUser?.email, enquiryData?.divisionEmails]);
 
     // Pending Files State
     const [pendingFiles, setPendingFiles] = useState([]);
@@ -11035,7 +11044,10 @@ const QuoteForm = ({ openContext = null }) => {
         };
     }, [enquiryData, selectedJobs, pricingSummary, currentUser, quoteListDivision, pricingData, validityDays, preparedBy, clauses, clauseContent, ownjobBasePriceForEnquiryQuoteTotal, customClauses, orderedClauses, quoteDate, customerReference, quoteTypeList, subject, signatory, signatoryDesignation, toName, toAddress, toPhone, toEmail, toFax, toAttention, activeQuoteTab, calculatedTabs, effectiveQuoteTabs, selectedLeadId, jobsPool, enquiryData?.divisionsHierarchy, enquiryData?.companyDetails, quoteDigitalStamps]);
 
-
+    const getQuotePayloadRef = useRef(getQuotePayload);
+    useLayoutEffect(() => {
+        getQuotePayloadRef.current = getQuotePayload;
+    }, [getQuotePayload]);
 
     const saveQuote = useCallback(async (isAutoSave = false, suppressCollisionAlert = false) => {
         if (!enquiryData) return null;
@@ -11227,6 +11239,61 @@ const QuoteForm = ({ openContext = null }) => {
         }
     }, [enquiryData, toName, quoteId, existingQuotes, getQuotePayload, calculatedTabs, pricingData, selectedJobs, fetchExistingQuotes, validateMandatoryFields, ownjobBasePriceForEnquiryQuoteTotal, scopedEnquiryQuotesParams, focusBrowseOnOwnjobWithQuote]);
 
+    /** Persist signatures on an already-saved/revised quote (PUT) without requiring manual Save or a new revision. */
+    const persistDigitalSignaturesToSavedQuote = useCallback(
+        async (stamps) => {
+            const qid = quoteId;
+            if (qid == null || String(qid).trim() === '' || !enquiryData) return;
+
+            try {
+                const payload = {
+                    ...getQuotePayloadRef.current(),
+                    digitalSignaturesJson: serializeDigitalStampsForApi(stamps),
+                };
+                const res = await fetch(`${API_BASE}/api/quotes/${qid}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const errorData = await res.json().catch(() => ({}));
+                    alert(
+                        `Failed to save signature on this quote: ${errorData.error || errorData.details || res.statusText}`
+                    );
+                    return;
+                }
+
+                const sigJson = payload.digitalSignaturesJson;
+                const idStr = String(qid);
+                setExistingQuotes((prev) =>
+                    prev.map((q) =>
+                        String(quoteRowId(q) ?? '') === idStr
+                            ? { ...q, DigitalSignaturesJson: sigJson, digitalSignaturesJson: sigJson }
+                            : q
+                    )
+                );
+                if (scopedEnquiryQuotesParams) {
+                    setQuoteScopedForPanel((prev) =>
+                        prev.map((q) =>
+                            String(quoteRowId(q) ?? '') === idStr
+                                ? { ...q, DigitalSignaturesJson: sigJson, digitalSignaturesJson: sigJson }
+                                : q
+                        )
+                    );
+                }
+            } catch (err) {
+                console.error('[persistDigitalSignaturesToSavedQuote]', err);
+                alert('Failed to save signature on this quote.');
+            }
+        },
+        [quoteId, enquiryData, scopedEnquiryQuotesParams]
+    );
+
+    const persistDigitalSignaturesToSavedQuoteRef = useRef(persistDigitalSignaturesToSavedQuote);
+    useLayoutEffect(() => {
+        persistDigitalSignaturesToSavedQuoteRef.current = persistDigitalSignaturesToSavedQuote;
+    }, [persistDigitalSignaturesToSavedQuote]);
+
     // Paste Handle
     useEffect(() => {
         const handleGlobalPaste = (e) => {
@@ -11327,23 +11394,58 @@ const QuoteForm = ({ openContext = null }) => {
             const email = currentUser?.EmailId || currentUser?.email || '';
             const xPct = typeof xIn === 'number' && Number.isFinite(xIn) ? Math.min(96, Math.max(2, xIn)) : 82;
             const yPct = typeof yIn === 'number' && Number.isFinite(yIn) ? Math.min(92, Math.max(2, yIn)) : 38;
-            commitQuoteDigitalStamps((prev) => [
-                ...prev,
-                {
-                    id: globalThis.crypto?.randomUUID?.() || `st-${Date.now()}`,
-                    sheetIndex: Math.max(0, Number(sheetIndex) || 0),
-                    xPct,
-                    yPct,
-                    imageDataUrl,
-                    displayName: (displayName || '').trim(),
-                    designation: (designation || '').trim(),
-                    placedAtIso: iso,
-                    verificationCode: makeVerificationCode(email, iso),
-                    removableBeforeNextCommit: true,
-                },
-            ]);
+            const sheetIdx = Math.max(1, Number(sheetIndex) || 1);
+            const newStamp = {
+                id: globalThis.crypto?.randomUUID?.() || `st-${Date.now()}`,
+                sheetIndex: sheetIdx,
+                xPct,
+                yPct,
+                imageDataUrl,
+                displayName: (displayName || '').trim(),
+                designation: (designation || '').trim(),
+                placedAtIso: iso,
+                verificationCode: makeVerificationCode(email, iso),
+                /** Fixed on placement — cannot move or remove afterward (including after save/revise). */
+                removableBeforeNextCommit: false,
+            };
+            commitQuoteDigitalStamps((prev) => {
+                const next = [...prev, newStamp];
+                const qid = quoteId;
+                if (qid != null && String(qid).trim() !== '') {
+                    void persistDigitalSignaturesToSavedQuoteRef.current?.(next);
+                }
+                return next;
+            });
         },
-        [currentUser, commitQuoteDigitalStamps]
+        [currentUser, commitQuoteDigitalStamps, quoteId]
+    );
+
+    const handleCancelSignaturePlacement = useCallback(() => {
+        setSignaturePlacementActive(false);
+    }, []);
+
+    const handleSignaturePlacementAt = useCallback(
+        ({ sheetIndex, xPct, yPct }) => {
+            if (!toolbarDragSignatureImageUrl) {
+                setSignaturePlacementActive(false);
+                return;
+            }
+            handlePlaceDigitalStamp({
+                imageDataUrl: toolbarDragSignatureImageUrl,
+                sheetIndex,
+                xPct,
+                yPct,
+                displayName: digitalStampUserDisplayName,
+                designation: digitalStampUserDesignation,
+            });
+            setSignaturePlacementActive(false);
+        },
+        [
+            toolbarDragSignatureImageUrl,
+            handlePlaceDigitalStamp,
+            digitalStampUserDisplayName,
+            digitalStampUserDesignation,
+        ]
     );
 
     const handleQuoteSheetSignatureDragOver = useCallback((e) => {
@@ -11458,37 +11560,27 @@ const QuoteForm = ({ openContext = null }) => {
         return bestArea > 0 ? best : 0;
     }, []);
 
+    const canUseQuoteDigitalSignature = Boolean(
+        hasUserPricing &&
+            enquiryData?.enquiry?.RequestNo &&
+            (isQuoteCcMailSigner || toolbarDragSignatureImageUrl)
+    );
+
     const handleSignaturesToolbarPrimaryClick = useCallback(
         (e) => {
-            if (!hasUserPricing || !enquiryData?.enquiry?.RequestNo) return;
+            if (!canUseQuoteDigitalSignature) return;
             if (e?.shiftKey) {
                 setSignatureVaultOpen(true);
                 return;
             }
-            /** Plain click: place default-or-first library image on the active sheet (no vault). */
             if (!toolbarDragSignatureImageUrl) {
                 setSignatureVaultOpen(true);
                 return;
             }
-            const sheet0 = getActiveQuoteSheetIndex0Based();
-            const sheetIndex = sheet0 + 1;
-            handlePlaceDigitalStamp({
-                imageDataUrl: toolbarDragSignatureImageUrl,
-                sheetIndex,
-                displayName: digitalStampUserDisplayName,
-                designation: digitalStampUserDesignation,
-            });
+            /** Click pen: signature follows cursor; click the quote preview once to fix position. */
+            setSignaturePlacementActive(true);
         },
-        [
-            hasUserPricing,
-            enquiryData?.enquiry?.RequestNo,
-            toolbarDragSignatureImageUrl,
-            getActiveQuoteSheetIndex0Based,
-            handlePlaceDigitalStamp,
-            digitalStampUserDisplayName,
-            digitalStampUserDesignation,
-            setSignatureVaultOpen,
-        ]
+        [canUseQuoteDigitalSignature, toolbarDragSignatureImageUrl, setSignatureVaultOpen]
     );
 
     const handleSignaturesToolbarControlClick = useCallback(
@@ -11502,7 +11594,11 @@ const QuoteForm = ({ openContext = null }) => {
     const handleMoveDigitalStamp = useCallback(
         (id, xPct, yPct) => {
             if (String(id).startsWith('inherited-')) return;
-            commitQuoteDigitalStamps((prev) => prev.map((s) => (s.id === id ? { ...s, xPct, yPct } : s)));
+            commitQuoteDigitalStamps((prev) => {
+                const t = prev.find((s) => s.id === id);
+                if (!t || t.removableBeforeNextCommit !== true) return prev;
+                return prev.map((s) => (s.id === id ? { ...s, xPct, yPct } : s));
+            });
         },
         [commitQuoteDigitalStamps]
     );
@@ -12156,12 +12252,7 @@ const QuoteForm = ({ openContext = null }) => {
             if (!toAddr) {
                 toAddr = (toEmail || '').trim();
             }
-            if (!toAddr) {
-                alert(
-                    'No email found for the selected Attention of person. Check Master_ConcernedSE (internal) or Master_ReceivedFrom (external).'
-                );
-                return;
-            }
+            // No To email: still open Outlook draft with blank To for manual entry.
 
             const salutation = quoteEmailSalutationFromAttention(toAttention);
             const initialBody = `${salutation}\n\nPlease find the attached quotation regarding Enquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'} for the ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}.\n\nWe have detailed the pricing, scope, and terms for your review. Should you have any questions or require further techno-commercial clarification regarding this proposal, please do not hesitate to contact us.\n\nWe look forward to the possibility of working with you on this project.`;
@@ -15391,11 +15482,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             type="button"
                                             onClick={startQuoteEmailFlow}
                                             disabled={!hasUserPricing || isUploading}
-                                            title={
-                                                !toEmail?.trim()
-                                                    ? 'Open Outlook draft with quote PDF attached. Enter customer Email on the quote to pre-fill To.'
-                                                    : 'Open Outlook draft with quote PDF attached (Windows desktop Outlook).'
-                                            }
+                                            title="Open Outlook draft with quote PDF attached (Windows desktop Outlook). To is pre-filled when an email is found; otherwise leave blank and enter in Outlook."
                                             aria-label="Email quote"
                                             style={{
                                                 width: '32px',
@@ -15449,16 +15536,10 @@ const QuoteForm = ({ openContext = null }) => {
                                         <div
                                             className="no-print"
                                             role="button"
-                                            tabIndex={!hasUserPricing || !enquiryData?.enquiry?.RequestNo ? -1 : 0}
-                                            aria-disabled={!hasUserPricing || !enquiryData?.enquiry?.RequestNo}
-                                            aria-label="Signatures: click to place or open library; drag anywhere on this control onto the quote to drop"
-                                            draggable={Boolean(
-                                                hasUserPricing &&
-                                                    enquiryData?.enquiry?.RequestNo &&
-                                                    toolbarDragSignatureImageUrl
-                                            )}
-                                            onDragStart={handleToolbarSignatureDragStart}
-                                            onDragEnd={handleToolbarSignatureDragEnd}
+                                            tabIndex={!canUseQuoteDigitalSignature ? -1 : 0}
+                                            aria-disabled={!canUseQuoteDigitalSignature}
+                                            aria-label="Signature: click to attach to cursor and place on the quote; Shift+click for library"
+                                            draggable={false}
                                             onClick={handleSignaturesToolbarControlClick}
                                             onKeyDown={(e) => {
                                                 if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -15466,10 +15547,12 @@ const QuoteForm = ({ openContext = null }) => {
                                                 handleSignaturesToolbarControlClick(e);
                                             }}
                                             title={
-                                                !hasUserPricing || !enquiryData?.enquiry?.RequestNo
-                                                    ? 'Save the quote context to use signatures.'
+                                                !canUseQuoteDigitalSignature
+                                                    ? isQuoteCcMailSigner
+                                                      ? 'Open an enquiry with pricing to place your signature.'
+                                                      : 'Save the quote context to use signatures.'
                                                     : toolbarDragSignatureImageUrl
-                                                      ? 'Click: place on the page in view. Drag from anywhere on this button onto the quote for an exact position. Shift+click: signature library.'
+                                                      ? 'Click: signature follows the mouse — click on the quote to fix it (cannot move or remove after). Shift+click: signature library.'
                                                       : 'Click: open library to add a signature. Shift+click: library.'
                                             }
                                             style={{
@@ -15484,23 +15567,18 @@ const QuoteForm = ({ openContext = null }) => {
                                                 borderRadius: '6px',
                                                 background: 'white',
                                                 color: '#475569',
-                                                opacity: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 0.5 : 1,
-                                                pointerEvents: !hasUserPricing || !enquiryData?.enquiry?.RequestNo ? 'none' : 'auto',
-                                                cursor: !hasUserPricing || !enquiryData?.enquiry?.RequestNo
+                                                opacity: !canUseQuoteDigitalSignature ? 0.5 : 1,
+                                                pointerEvents: !canUseQuoteDigitalSignature ? 'none' : 'auto',
+                                                cursor: !canUseQuoteDigitalSignature
                                                     ? 'not-allowed'
-                                                    : toolbarDragSignatureImageUrl
-                                                      ? 'grab'
+                                                    : signaturePlacementActive
+                                                      ? 'crosshair'
                                                       : 'pointer',
                                                 userSelect: 'none',
                                                 boxSizing: 'border-box',
                                             }}
                                         >
                                             <PenTool size={16} aria-hidden />
-                                            {toolbarDragSignatureImageUrl &&
-                                            hasUserPricing &&
-                                            enquiryData?.enquiry?.RequestNo ? (
-                                                <GripVertical size={12} color="#94a3b8" aria-hidden />
-                                            ) : null}
                                         </div>
                                     </div>
                                 </div>
@@ -17291,6 +17369,10 @@ const QuoteForm = ({ openContext = null }) => {
                                                             !stamp.inheritedFromSubJob &&
                                                             stamp.removableBeforeNextCommit === true
                                                         }
+                                                        allowMove={
+                                                            !stamp.inheritedFromSubJob &&
+                                                            stamp.removableBeforeNextCommit === true
+                                                        }
                                                     />
                                                 ))}
                                         </div>
@@ -17306,6 +17388,15 @@ const QuoteForm = ({ openContext = null }) => {
                 )}
             </div>
             </div>
+
+            <QuoteSignaturePlacementOverlay
+                active={signaturePlacementActive && Boolean(toolbarDragSignatureImageUrl)}
+                imageDataUrl={toolbarDragSignatureImageUrl}
+                displayName={digitalStampUserDisplayName}
+                designation={digitalStampUserDesignation}
+                onCancel={handleCancelSignaturePlacement}
+                onPlaceAt={handleSignaturePlacementAt}
+            />
 
             <SignatureVaultModal
                 open={signatureVaultOpen}
