@@ -1,9 +1,9 @@
 export const sourceOfInfos = [
-    "Email", "Phone", "Tender Board", "Customer Visit", "Cold visit by us", "Website", "Fax", "Thru top management", "News Paper"
+    "Email", "Phone", "Public Tender Board", "Private Tender", "Customer Visit", "Cold visit by us", "Website", "Fax", "Thru top management", "News Paper"
 ];
 
 export const enquiryType = [
-    "New Tender", "Re-Tender", "Job in hand", "Variation / Change order", "Supply only", "Maintenance", "Retrofit",
+    "New Tender", "Re-Tender", "Budgetary", "Job in hand", "Variation / Change order", "Supply only", "Maintenance", "Retrofit",
     "Upgradation", "Refurbishment", "Service", "Hiring", "Renting", "Facility Management", "Demo"
 ];
 

@@ -170,12 +170,17 @@ const SalesTarget = () => {
                 .then(res => res.json())
                 .then(data => {
                     const newMap = {};
+                    const isAll = selectedEngineer === 'ALL';
                     data.forEach(row => {
-                        if (!newMap[row.ItemName]) {
-                            newMap[row.ItemName] = { Q1: '', Q2: '', Q3: '', Q4: '', Q1_GP: '', Q2_GP: '', Q3_GP: '', Q4_GP: '' };
+                        const rowKey = isAll
+                            ? String(row.SalesEngineer || row.salesEngineer || '').trim()
+                            : String(row.ItemName || '').trim();
+                        if (!rowKey) return;
+                        if (!newMap[rowKey]) {
+                            newMap[rowKey] = { Q1: '', Q2: '', Q3: '', Q4: '', Q1_GP: '', Q2_GP: '', Q3_GP: '', Q4_GP: '' };
                         }
-                        newMap[row.ItemName][row.Quarter] = row.TargetValue;
-                        newMap[row.ItemName][`${row.Quarter}_GP`] = row.GrossProfitTarget ?? '';
+                        newMap[rowKey][row.Quarter] = row.TargetValue;
+                        newMap[rowKey][`${row.Quarter}_GP`] = row.GrossProfitTarget ?? '';
                     });
                     setTargetData(newMap);
                 })
@@ -263,28 +268,163 @@ const SalesTarget = () => {
 
     const isAllEngineersView = selectedEngineer === 'ALL';
 
+    /** Item rows for one SE; engineer rows when ALL is selected. */
+    const displayRowKeys = isAllEngineersView
+        ? engineers.map((e) => String(e.FullName || '').trim()).filter(Boolean)
+        : items;
+
+    const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
+
+    /** Split one engineer's quarterly totals across division items (sums match the grid). */
+    const buildTargetsPayloadForRow = (row) => {
+        const itemNames = items.length > 0 ? items : ['General'];
+        const n = itemNames.length;
+        return itemNames.map((itemName) => {
+            const out = { itemName };
+            quarters.forEach((q) => {
+                const rev = parseTargetNumber(row[q]);
+                out[q] = Number.isFinite(rev) ? rev / n : 0;
+                out[`${q}_GP`] = parseTargetNumber(row[`${q}_GP`]);
+            });
+            return out;
+        });
+    };
+
+    const buildItemTargetsPayload = (itemName) => {
+        const row = targetData[itemName] || {};
+        return {
+            itemName,
+            Q1: parseTargetNumber(row.Q1),
+            Q2: parseTargetNumber(row.Q2),
+            Q3: parseTargetNumber(row.Q3),
+            Q4: parseTargetNumber(row.Q4),
+            Q1_GP: parseTargetNumber(row.Q1_GP),
+            Q2_GP: parseTargetNumber(row.Q2_GP),
+            Q3_GP: parseTargetNumber(row.Q3_GP),
+            Q4_GP: parseTargetNumber(row.Q4_GP),
+        };
+    };
+
+    const rowHasAnyTarget = (row) =>
+        quarters.some((q) => {
+            const rev = parseTargetNumber(row[q]);
+            return Number.isFinite(rev) && rev > 0;
+        });
+
+    const validateRowTargets = (label, row) => {
+        const problems = [];
+        for (const q of quarters) {
+            const rev = parseTargetNumber(row[q]);
+            const gp = parseTargetNumber(row[`${q}_GP`]);
+            if (!Number.isFinite(rev) || rev <= 0) {
+                problems.push(`${label} · ${q}: Revenue must be greater than zero`);
+            }
+            if (!Number.isFinite(gp) || gp <= 0) {
+                problems.push(`${label} · ${q}: GP % must be greater than zero`);
+            }
+        }
+        return problems;
+    };
+
+    const reloadTargets = () => {
+        if (!selectedYear || !selectedDivision || !selectedEngineer) return;
+        fetch(
+            `/api/sales-targets/targets?year=${selectedYear}&division=${encodeURIComponent(selectedDivision)}&engineer=${encodeURIComponent(selectedEngineer)}`
+        )
+            .then((res) => res.json())
+            .then((data) => {
+                const newMap = {};
+                const isAll = selectedEngineer === 'ALL';
+                data.forEach((row) => {
+                    const rowKey = isAll
+                        ? String(row.SalesEngineer || row.salesEngineer || '').trim()
+                        : String(row.ItemName || '').trim();
+                    if (!rowKey) return;
+                    if (!newMap[rowKey]) {
+                        newMap[rowKey] = { Q1: '', Q2: '', Q3: '', Q4: '', Q1_GP: '', Q2_GP: '', Q3_GP: '', Q4_GP: '' };
+                    }
+                    newMap[rowKey][row.Quarter] = row.TargetValue;
+                    newMap[rowKey][`${row.Quarter}_GP`] = row.GrossProfitTarget ?? '';
+                });
+                setTargetData(newMap);
+            })
+            .catch((err) => console.error(err));
+
+        const qs = new URLSearchParams({
+            division: selectedDivision.trim(),
+            anchorYear: String(selectedYear).trim(),
+        });
+        fetch(`/api/sales-targets/year-history?${qs.toString()}`)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((data) => {
+                if (Array.isArray(data)) setYearHistory(data);
+            })
+            .catch(() => {});
+    };
+
     const handleSave = async () => {
-        if (!selectedEngineer) return alert("Please select a Sales Engineer");
+        if (!selectedEngineer) return alert('Please select a Sales Engineer');
+
+        const problems = [];
+        const userEmail = currentUser?.EmailId || currentUser?.email;
+
         if (isAllEngineersView) {
-            return alert('ALL shows combined targets for every engineer in this division. Pick a specific Sales Engineer to edit and save.');
+            const validationOnly = [];
+            for (const engineerName of displayRowKeys) {
+                const row = targetData[engineerName] || {};
+                if (!rowHasAnyTarget(row)) continue;
+                validationOnly.push(...validateRowTargets(engineerName, row));
+            }
+            if (validationOnly.length > 0) {
+                const maxLines = 14;
+                const head = validationOnly.slice(0, maxLines).join('\n');
+                const extra =
+                    validationOnly.length > maxLines ? `\n… and ${validationOnly.length - maxLines} more` : '';
+                alert(
+                    `Cannot save:\n\nFor each engineer with targets, every quarter needs Revenue (BD) > 0 and GP % > 0.\n\n${head}${extra}`
+                );
+                return;
+            }
+
+            const engineersToSaveFixed = displayRowKeys
+                .filter((engineerName) => rowHasAnyTarget(targetData[engineerName] || {}))
+                .map((engineerName) => ({
+                    engineer: engineerName,
+                    targets: buildTargetsPayloadForRow(targetData[engineerName] || {}),
+                }));
+
+            if (engineersToSaveFixed.length === 0) {
+                alert('Enter targets for at least one engineer (all four quarters: revenue > 0 and GP % > 0).');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/sales-targets/save-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        year: selectedYear,
+                        division: selectedDivision,
+                        userEmail,
+                        engineers: engineersToSaveFixed,
+                    }),
+                });
+                if (res.ok) {
+                    alert('Targets saved successfully for all updated engineers!');
+                    reloadTargets();
+                } else {
+                    const errBody = await res.json().catch(() => ({}));
+                    alert(errBody.error || 'Failed to save targets.');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error saving targets.');
+            }
+            return;
         }
 
-        const qs = ['Q1', 'Q2', 'Q3', 'Q4'];
-        const problems = [];
-
         for (const itemName of items) {
-            const row = targetData[itemName] || {};
-            for (const q of qs) {
-                const rev = parseTargetNumber(row[q]);
-                const gp = parseTargetNumber(row[`${q}_GP`]);
-
-                if (!Number.isFinite(rev) || rev <= 0) {
-                    problems.push(`${itemName} · ${q}: Revenue must be greater than zero`);
-                }
-                if (!Number.isFinite(gp) || gp <= 0) {
-                    problems.push(`${itemName} · ${q}: GP % must be greater than zero`);
-                }
-            }
+            problems.push(...validateRowTargets(itemName, targetData[itemName] || {}));
         }
 
         if (problems.length > 0) {
@@ -296,17 +436,7 @@ const SalesTarget = () => {
             return;
         }
 
-        const finalPayload = items.map((itemName) => ({
-            itemName,
-            Q1: parseTargetNumber(targetData[itemName]?.Q1),
-            Q2: parseTargetNumber(targetData[itemName]?.Q2),
-            Q3: parseTargetNumber(targetData[itemName]?.Q3),
-            Q4: parseTargetNumber(targetData[itemName]?.Q4),
-            Q1_GP: parseTargetNumber(targetData[itemName]?.Q1_GP),
-            Q2_GP: parseTargetNumber(targetData[itemName]?.Q2_GP),
-            Q3_GP: parseTargetNumber(targetData[itemName]?.Q3_GP),
-            Q4_GP: parseTargetNumber(targetData[itemName]?.Q4_GP),
-        }));
+        const finalPayload = items.map((itemName) => buildItemTargetsPayload(itemName));
 
         try {
             const res = await fetch('/api/sales-targets/save', {
@@ -316,18 +446,19 @@ const SalesTarget = () => {
                     year: selectedYear,
                     division: selectedDivision,
                     engineer: selectedEngineer,
-                    userEmail: currentUser?.EmailId || currentUser?.email,
-                    targets: finalPayload
-                })
+                    userEmail,
+                    targets: finalPayload,
+                }),
             });
             if (res.ok) {
-                alert("Targets saved successfully!");
+                alert('Targets saved successfully!');
+                reloadTargets();
             } else {
-                alert("Failed to save targets.");
+                alert('Failed to save targets.');
             }
         } catch (err) {
             console.error(err);
-            alert("Error saving targets.");
+            alert('Error saving targets.');
         }
     };
 
@@ -348,8 +479,6 @@ const SalesTarget = () => {
     // Calculate Grand Totals
     let grandTotalRevenue = 0;
     let grandTotalGPAmount = 0;
-
-    const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
 
     // Helper to format number with commas
     const fmt = (n) => n.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -393,8 +522,6 @@ const SalesTarget = () => {
                     type="button"
                     className="btn btn-primary"
                     onClick={handleSave}
-                    disabled={isAllEngineersView}
-                    title={isAllEngineersView ? 'Select a specific engineer to save' : undefined}
                 >
                     <i className="bi bi-save me-2"></i> Save Changes
                 </button>
@@ -432,7 +559,7 @@ const SalesTarget = () => {
                     {isAllEngineersView && (
                         <span className="text-secondary" style={{ fontSize: '11px' }}>
                             <i className="bi bi-info-circle me-1" aria-hidden />
-                            View-only: revenue is summed per quarter; GP % is the average across engineers. Choose one engineer to edit.
+                            Edit any engineer row, then Save Changes to update all at once. Engineers left blank are not changed. Revenue splits evenly across division items when saved.
                         </span>
                     )}
                     <span style={{ color: '#6c757d' }}>
@@ -453,7 +580,7 @@ const SalesTarget = () => {
                         <thead>
                             <tr style={{ background: EMS_TABLE_HEADER_GRADIENT }}>
                                 <th className="text-start ps-3 text-white" style={{ width: '28%', fontSize: '10px', letterSpacing: '0.55px', textTransform: 'uppercase', padding: '8px 10px', borderBottom: '1px solid rgba(255, 255, 255, 0.22)', lineHeight: 1.2 }}>
-                                    Item Name
+                                    {isAllEngineersView ? 'Sales Engineer' : 'Item Name'}
                                 </th>
                                 {quarters.map(q => (
                                     <th key={q} className="text-center text-white" style={{ fontSize: '10px', letterSpacing: '0.55px', textTransform: 'uppercase', padding: '8px 10px', borderBottom: '1px solid rgba(255, 255, 255, 0.22)', lineHeight: 1.2 }}>
@@ -466,8 +593,8 @@ const SalesTarget = () => {
                             </tr>
                         </thead>
                         <tbody>
-                            {items.length > 0 ? items.map(item => {
-                                const row = targetData[item] || {};
+                            {displayRowKeys.length > 0 ? displayRowKeys.map((rowKey) => {
+                                const row = targetData[rowKey] || {};
                                 const q1 = parseFloat(row.Q1) || 0;
                                 const q2 = parseFloat(row.Q2) || 0;
                                 const q3 = parseFloat(row.Q3) || 0;
@@ -495,8 +622,8 @@ const SalesTarget = () => {
                                 const qGPAmts = [gp1amt, gp2amt, gp3amt, gp4amt];
 
                                 return (
-                                    <React.Fragment key={item}>
-                                        {/* Row 1: Item name + Revenue inputs */}
+                                    <React.Fragment key={rowKey}>
+                                        {/* Row 1: label + Revenue inputs */}
                                         <tr style={revenueRowStyle}>
                                             <td
                                                 className="text-start ps-3 text-nowrap"
@@ -512,16 +639,15 @@ const SalesTarget = () => {
                                                     paddingBottom: '6px',
                                                 }}
                                             >
-                                                {item}
+                                                {rowKey}
                                             </td>
                                             {quarters.map((q, qi) => (
                                                 <td key={q} style={{ padding: '4px 6px', verticalAlign: 'top' }}>
                                                     <div style={labelCellStyle}>Revenue (BD)</div>
                                                     <RevenueInput
                                                         value={row[q] ?? ''}
-                                                        onChange={(val) => handleInputChange(item, q, val)}
+                                                        onChange={(val) => handleInputChange(rowKey, q, val)}
                                                         placeholder="0"
-                                                        disabled={isAllEngineersView}
                                                     />
                                                 </td>
                                             ))}
@@ -542,7 +668,6 @@ const SalesTarget = () => {
                                                             min="0"
                                                             max="100"
                                                             step="0.1"
-                                                            disabled={isAllEngineersView}
                                                             className="form-control form-control-sm text-center py-0"
                                                             style={{
                                                                 fontSize: '12px',
@@ -555,7 +680,7 @@ const SalesTarget = () => {
                                                                 paddingBottom: '0.15rem',
                                                             }}
                                                             value={row[`${q}_GP`] ?? ''}
-                                                            onChange={(e) => handleInputChange(item, `${q}_GP`, e.target.value)}
+                                                            onChange={(e) => handleInputChange(rowKey, `${q}_GP`, e.target.value)}
                                                             placeholder="%"
                                                         />
                                                         <span style={{ color: '#198754', fontWeight: '700', fontSize: '12px' }}>%</span>
@@ -585,14 +710,18 @@ const SalesTarget = () => {
                             }) : (
                                 <tr>
                                     <td colSpan="6" className="text-muted py-5 text-center">
-                                        No items found for this division.
+                                        {isAllEngineersView
+                                            ? 'No sales engineers found for this division.'
+                                            : 'No items found for this division.'}
                                     </td>
                                 </tr>
                             )}
                         </tbody>
                         <tfoot style={{ backgroundColor: '#f8f9fa', borderTop: '1px solid #ced4da' }}>
                             <tr>
-                                <th className="text-start ps-3" style={{ color: '#212529', padding: '8px 10px', fontSize: '12px' }}>Grand Total</th>
+                                <th className="text-start ps-3" style={{ color: '#212529', padding: '8px 10px', fontSize: '12px' }}>
+                                    {isAllEngineersView ? 'Total' : 'Grand Total'}
+                                </th>
                                 <th colSpan="4" style={{ padding: '8px 6px' }}></th>
                                 <th className="text-center sales-target-col-total" style={{ padding: '8px 10px' }}>
                                     <div style={{ color: '#0d6efd', fontSize: '11px', fontWeight: '700', lineHeight: 1.25 }}>

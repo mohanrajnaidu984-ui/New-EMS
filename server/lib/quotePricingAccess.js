@@ -279,6 +279,51 @@ function expandVisibleJobIdsWithAncestors(anchorJobs, enqJobs) {
     return out;
 }
 
+/** Assigned ConcernedSE on this enquiry (email join). */
+async function userIsConcernedSeOnEnquiry(ctx, requestNo) {
+    const rn = parseInt(String(requestNo), 10);
+    if (Number.isNaN(rn) || !ctx?.normalizedEmail) return false;
+    const concernedSeByEmailRes = await sql.query`
+        SELECT TOP 1 1 AS ok
+        FROM ConcernedSE cs
+        INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
+        WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
+          AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
+    `;
+    return (concernedSeByEmailRes.recordset?.length || 0) > 0;
+}
+
+/**
+ * Anchor jobs for pricing detail / quote (CC + ConcernedSE fallbacks when CCMailIds drift).
+ */
+function resolvePricingAnchorJobsWithFallbacks(enqJobs, ctx, userEmail, sessionDivision, allowedByConcernedSe = false) {
+    const sessionDivTrim = (sessionDivision || '').toString().trim();
+    if (ctx?.isAdmin && !sessionDivTrim) {
+        return [...enqJobs];
+    }
+    let anchors = sessionDivTrim
+        ? getPricingAnchorJobsForDivision(enqJobs, ctx, userEmail, sessionDivTrim)
+        : getPricingAnchorJobs(enqJobs, ctx, userEmail);
+
+    if (anchors.length === 0 && allowedByConcernedSe) {
+        anchors = sessionDivTrim
+            ? getDepartmentPricingAnchors(enqJobs, sessionDivTrim)
+            : getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+    }
+    if (anchors.length === 0 && ctx.isCcUser) {
+        if (sessionDivTrim) {
+            anchors = getDepartmentPricingAnchors(enqJobs, sessionDivTrim);
+        }
+        if (anchors.length === 0 && (ctx.userDepartment || '').trim()) {
+            anchors = getDepartmentPricingAnchors(enqJobs, (ctx.userDepartment || '').trim());
+        }
+        if (anchors.length === 0 && enqJobs.length > 0) {
+            anchors = [...enqJobs];
+        }
+    }
+    return anchors;
+}
+
 /**
  * Enquiry-level gate + job anchors (matches pricing list/detail).
  */
@@ -290,15 +335,7 @@ async function userHasQuotePricingEnquiryAccess(userEmail, requestNo, sessionDiv
     if (Number.isNaN(rn)) return false;
     const sessionDivTrim = (sessionDivision || '').toString().trim();
 
-    /** Assigned SE on this enquiry (email join) — same as pending-quote list; CC coordinators may also be ConcernedSE. */
-    const concernedSeByEmailRes = await sql.query`
-        SELECT TOP 1 1 AS ok
-        FROM ConcernedSE cs
-        INNER JOIN Master_ConcernedSE m ON UPPER(LTRIM(RTRIM(ISNULL(m.FullName, N'')))) = UPPER(LTRIM(RTRIM(ISNULL(cs.SEName, N''))))
-        WHERE LTRIM(RTRIM(ISNULL(cs.RequestNo, N''))) = LTRIM(RTRIM(CONVERT(NVARCHAR(50), ${rn})))
-          AND LOWER(LTRIM(RTRIM(REPLACE(REPLACE(ISNULL(m.EmailId, N''), N'@almcg.com', N'@almoayyedcg.com'), N'@ALMCG.COM', N'@almoayyedcg.com')))) = ${ctx.normalizedEmail}
-    `;
-    const allowedByConcernedSe = (concernedSeByEmailRes.recordset?.length || 0) > 0;
+    const allowedByConcernedSe = await userIsConcernedSeOnEnquiry(ctx, requestNo);
 
     if (!ctx.isCcUser) {
         if (!allowedByConcernedSe) return false;
@@ -446,5 +483,7 @@ module.exports = {
     jobBelongsToSessionDivision,
     expandVisibleJobIdsFromAnchors,
     expandVisibleJobIdsWithAncestors,
+    userIsConcernedSeOnEnquiry,
+    resolvePricingAnchorJobsWithFallbacks,
     userHasQuotePricingEnquiryAccess,
 };

@@ -12,6 +12,34 @@
     margin-bottom: 0;
 }
 
+/* Same funnel+X icon as Sales Report Jobs table toolbar (lucide FilterX) */
+.enquiry-results-table-root .ert-clear-column-filters-btn {
+    width: 1.75rem;
+    height: 1.35rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    flex-shrink: 0;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    background: linear-gradient(180deg, #2f5fae 0%, #203f75 100%);
+    color: #ffffff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.enquiry-results-table-root .ert-clear-column-filters-btn:hover:not(:disabled) {
+    border-color: #ffffff;
+    filter: brightness(1.06);
+}
+
+.enquiry-results-table-root .ert-clear-column-filters-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 /* Join count strip + scroll frame when count is shown (single card silhouette). */
 .enquiry-results-table-root:has(> .enquiry-results-table-project-total) .enquiry-search-table-wrap {
     border-radius: 0 0 18px 18px;
@@ -140,4 +168,131 @@
 
 .enquiry-results-table-root .enquiry-search-table-wrap tbody tr:nth-child(even) td {
     background: #f3f7fd !important;
+}
+
+/* Column header filters (Search Enquiry — same pattern as Sales Report Jobs table) */
+.enquiry-results-table-root .ert-filterable-th {
+    position: sticky;
+    z-index: 6;
+}
+
+.enquiry-results-table-root .ert-th-header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.2rem;
+    width: 100%;
+}
+
+.enquiry-results-table-root .ert-th-filter-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.25rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    padding: 0;
+    text-align: left;
+}
+
+.enquiry-results-table-root .ert-th-sort-btn {
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: #e6efff;
+    padding: 0 0.1rem;
+    line-height: 1;
+}
+
+.enquiry-results-table-root .ert-th-sort-btn:hover {
+    color: #ffffff;
+}
+
+.enquiry-results-table-root .ert-th-filter-caret {
+    font-size: 0.58rem;
+    opacity: 0.75;
+    flex-shrink: 0;
+}
+
+.enquiry-results-table-root .ert-th-filter-caret--active {
+    color: #c7d7ff;
+    opacity: 1;
+}
+
+.enquiry-results-table-root .ert-th-filter-popover {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    min-width: 220px;
+    max-width: 280px;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.22);
+    padding: 0.45rem;
+    z-index: 30;
+    color: #1e293b;
+    font-weight: 400;
+}
+
+.enquiry-results-table-root .ert-th-filter-search {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 0.18rem 0.35rem;
+    font-size: 0.65rem;
+}
+
+.enquiry-results-table-root .ert-th-filter-actions,
+.enquiry-results-table-root .ert-th-filter-footer {
+    display: flex;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+}
+
+.enquiry-results-table-root .ert-th-filter-actions button,
+.enquiry-results-table-root .ert-th-filter-footer button {
+    border: 1px solid #94a3b8;
+    background: #f8fafc;
+    border-radius: 4px;
+    padding: 0.08rem 0.38rem;
+    font-size: 0.64rem;
+    color: #334155;
+}
+
+.enquiry-results-table-root .ert-th-filter-footer {
+    justify-content: flex-end;
+}
+
+.enquiry-results-table-root .ert-th-filter-footer .ert-th-filter-apply {
+    background: #6366f1;
+    border-color: #6366f1;
+    color: #fff;
+}
+
+.enquiry-results-table-root .ert-th-filter-options {
+    max-height: 170px;
+    overflow: auto;
+    margin-top: 0.35rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 0.22rem 0.3rem;
+}
+
+.enquiry-results-table-root .ert-th-filter-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.33rem;
+    font-size: 0.67rem;
+    line-height: 1.2;
+    padding: 0.08rem 0;
+}
+
+.enquiry-results-table-root .ert-th-filter-option--month {
+    padding-left: 1rem;
 }

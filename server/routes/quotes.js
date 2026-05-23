@@ -15,6 +15,14 @@ const {
     normalizePricingJobName,
     jobBelongsToSessionDivision,
 } = require('../lib/quotePricingAccess');
+const {
+    normalizeUserEmail,
+    parseUserSignatureMaster,
+    serializeUserSignatureMaster,
+    parseQuoteDigitalStamps,
+    serializeQuoteDigitalStamps,
+    mergeQuoteStamp,
+} = require('../lib/digitalSignaturesJson');
 
 /** Shared SELECT for GET /by-enquiry — inputs must be bound on `sql.Request` before each call. */
 const BY_ENQUIRY_QUOTES_SQL = `
@@ -116,6 +124,8 @@ const runQuotedQuoteListQuery = require('../lib/quotedQuoteListQuery');
 const buildQuoteListSearchExtraWhere = require('../lib/buildQuoteListSearchExtraWhere');
 const { sendGeneralEmail } = require('../emailService');
 const { buildOutlookDraftVbs } = require('../lib/outlookDraftVbs');
+const { buildSmtpTransport, stripQuotes } = require('../lib/smtpTransport');
+const { buildQuoteEmlDraftBuffer } = require('../lib/quoteSmtpDraft');
 const { resolveQuoteOutlookEmailFields } = require('../lib/quoteOutlookEmailFields');
 const { resolveQuoteUploadDestination } = require('../lib/attachmentsRoot');
 
@@ -306,7 +316,15 @@ router.post('/send-email', express.json({ limit: '50mb' }), async (req, res) => 
             return res.status(400).json({ error: 'Recipients and PDF content are required' });
         }
 
+        const userFrom = stripQuotes(req.body.fromEmail || req.body.userEmail || '');
+        const fromDisplay = String(req.body.fromDisplayName || req.body.userDisplayName || '').trim();
+        const from =
+            userFrom && fromDisplay
+                ? `"${fromDisplay.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" <${userFrom}>`
+                : userFrom || undefined;
+
         const result = await sendGeneralEmail({
+            from,
             to,
             cc,
             bcc,
@@ -360,18 +378,132 @@ router.get('/outlook-email-fields', async (req, res) => {
     }
 });
 
-// POST /api/quotes/outlook-draft — open classic Outlook draft with PDF (Windows COM via VBScript).
-// Works when EMS API runs on the same Windows PC/session as Outlook (e.g. localhost dev, some RDS setups).
+// POST /api/quotes/smtp-draft — build .eml draft (From = logged-in user) using SMTP-configured server; opens in Outlook when saved file is opened.
+router.post('/smtp-draft', express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+        const {
+            userEmail,
+            userDisplayName,
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            attachmentName,
+            pdfBase64,
+            extraAttachments,
+        } = req.body || {};
+
+        const fromEmail = stripQuotes(userEmail);
+        if (!fromEmail) {
+            return res.status(400).json({ error: 'userEmail is required (logged-in user address for From)' });
+        }
+        if (!pdfBase64) {
+            return res.status(400).json({ error: 'PDF content is required' });
+        }
+
+        let smtpVerified = false;
+        try {
+            const transporter = buildSmtpTransport();
+            await transporter.verify();
+            smtpVerified = true;
+        } catch (verifyErr) {
+            console.warn('[quotes/smtp-draft] SMTP verify failed (still building .eml):', verifyErr.message);
+        }
+
+        const emlBuffer = await buildQuoteEmlDraftBuffer({
+            fromEmail,
+            fromDisplayName: userDisplayName,
+            to: to || '',
+            cc: cc || '',
+            bcc: bcc || '',
+            subject: subject || '',
+            body: body || '',
+            attachmentName,
+            pdfBase64,
+            extraAttachments,
+        });
+
+        const safeBase = String(attachmentName || 'EMS_QuoteDraft')
+            .replace(/\.pdf$/i, '')
+            .replace(/[/\\?%*:|"<>]/g, '_')
+            .slice(0, 80);
+
+        const emlFileName = 'EMS_QuoteDraft.eml';
+        const openInOutlook = req.body.openInOutlook === true || req.body.openInOutlook === '1';
+
+        if (openInOutlook && process.platform === 'win32') {
+            const emlDir = path.join(os.tmpdir(), 'ems-quote-eml', String(Date.now()));
+            fs.mkdirSync(emlDir, { recursive: true });
+            const emlPath = path.join(emlDir, emlFileName);
+            fs.writeFileSync(emlPath, emlBuffer);
+            try {
+                await new Promise((resolve, reject) => {
+                    execFile('cmd.exe', ['/c', 'start', '', emlPath], { windowsHide: true }, (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+                setTimeout(() => {
+                    try {
+                        fs.rmSync(emlDir, { recursive: true, force: true });
+                    } catch {
+                        /* ignore */
+                    }
+                }, 300000);
+                return res.json({
+                    success: true,
+                    smtpVerified,
+                    openedInOutlook: true,
+                    method: 'shell-eml',
+                    fileName: emlFileName,
+                });
+            } catch (openErr) {
+                console.warn('[quotes/smtp-draft] shell open .eml failed:', openErr.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            smtpVerified,
+            openedInOutlook: false,
+            fileName: emlFileName,
+            emlBase64: emlBuffer.toString('base64'),
+        });
+    } catch (err) {
+        console.error('Error in /smtp-draft route:', err);
+        res.status(500).json({
+            error: 'Could not build quote email draft',
+            details: err.message || String(err),
+        });
+    }
+});
+
+// POST /api/quotes/outlook-draft — legacy: classic Outlook draft (Windows COM via VBScript).
 router.post('/outlook-draft', express.json({ limit: '50mb' }), async (req, res) => {
     if (process.platform !== 'win32') {
         return res.status(501).json({ error: 'Outlook draft is supported on Windows only' });
     }
 
     try {
-        const { to, cc, bcc, subject, body, attachmentName, pdfBase64, extraAttachments } = req.body || {};
+        const {
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            attachmentName,
+            pdfBase64,
+            extraAttachments,
+            userEmail,
+            userDisplayName,
+        } = req.body || {};
         if (!pdfBase64) {
             return res.status(400).json({ error: 'PDF content is required' });
         }
+
+        const fromEmail = stripQuotes(userEmail);
+        const fromDisplayName = String(userDisplayName || '').trim();
 
         const dir = path.join(os.tmpdir(), 'ems-quote-outlook', String(Date.now()));
         fs.mkdirSync(dir, { recursive: true });
@@ -398,6 +530,8 @@ router.post('/outlook-draft', express.json({ limit: '50mb' }), async (req, res) 
             bcc: bcc || '',
             subject: subject || '',
             body: body || '',
+            fromEmail,
+            fromDisplayName,
         });
         fs.writeFileSync(vbsPath, vbs, 'utf8');
 
@@ -942,6 +1076,59 @@ router.get('/signatory-options-by-user', async (req, res) => {
     } catch (err) {
         console.error('[Quote API] Error in /signatory-options-by-user:', err);
         res.status(500).json({ ccMails: [] });
+    }
+});
+
+// GET /api/quotes/user-digital-signatures?userEmail= — Master_ConcernedSE.DigitalSignaturesJson
+router.get('/user-digital-signatures', async (req, res) => {
+    try {
+        const userEmail = normalizeUserEmail(req.query.userEmail);
+        if (!userEmail) return res.status(400).json({ error: 'userEmail is required' });
+
+        const row = await sql.query`
+            SELECT TOP 1 DigitalSignaturesJson
+            FROM Master_ConcernedSE
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, N'')))) = ${userEmail}
+        `;
+        const master = parseUserSignatureMaster(row.recordset?.[0]?.DigitalSignaturesJson);
+        return res.json({
+            defaultSignatureId: master.defaultSignatureId,
+            signatures: master.signatures,
+        });
+    } catch (err) {
+        console.error('[Quote API] GET /user-digital-signatures:', err);
+        res.status(500).json({ error: 'Failed to load signature library', details: err.message });
+    }
+});
+
+// PUT /api/quotes/user-digital-signatures — save library to Master_ConcernedSE
+router.put('/user-digital-signatures', express.json({ limit: '25mb' }), async (req, res) => {
+    try {
+        const userEmail = normalizeUserEmail(req.body.userEmail);
+        if (!userEmail) return res.status(400).json({ error: 'userEmail is required' });
+
+        const jsonStr = serializeUserSignatureMaster({
+            defaultSignatureId: req.body.defaultSignatureId,
+            signatures: req.body.signatures,
+        });
+
+        const upd = await sql.query`
+            UPDATE Master_ConcernedSE
+            SET DigitalSignaturesJson = ${jsonStr}
+            WHERE LOWER(LTRIM(RTRIM(ISNULL(EmailId, N'')))) = ${userEmail}
+        `;
+        if ((upd.rowsAffected?.[0] || 0) === 0) {
+            return res.status(404).json({ error: 'User not found in Master_ConcernedSE' });
+        }
+        const master = parseUserSignatureMaster(jsonStr);
+        return res.json({
+            ok: true,
+            defaultSignatureId: master.defaultSignatureId,
+            signatures: master.signatures,
+        });
+    } catch (err) {
+        console.error('[Quote API] PUT /user-digital-signatures:', err);
+        res.status(500).json({ error: 'Failed to save signature library', details: err.message });
     }
 });
 
@@ -2213,6 +2400,73 @@ router.delete('/form-drafts/:id', async (req, res) => {
 // IMPORTANT: This catch-all route MUST come AFTER all other GET routes with static prefixes
 //            (like /single/:id, /enquiry-data/:requestNo, /lists/metadata, /config/templates, /form-drafts)
 //            to prevent matching 'single', 'enquiry-data', etc. as requestNo values
+// GET /api/quotes/:id/digital-signatures — EnquiryQuotes.DigitalSignaturesJson (placed stamps)
+router.get('/:id/digital-signatures', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const row = await sql.query`
+            SELECT DigitalSignaturesJson FROM EnquiryQuotes WHERE ID = ${id}
+        `;
+        if (!row.recordset?.length) {
+            return res.status(404).json({ error: 'Quote not found' });
+        }
+        const stamps = parseQuoteDigitalStamps(row.recordset[0].DigitalSignaturesJson);
+        return res.json({ stamps });
+    } catch (err) {
+        console.error('[Quote API] GET /:id/digital-signatures:', err);
+        res.status(500).json({ error: 'Failed to load quote signatures', details: err.message });
+    }
+});
+
+// PUT /api/quotes/:id/digital-signatures — replace all placed stamps on this revision
+router.put('/:id/digital-signatures', express.json({ limit: '25mb' }), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const stamps = Array.isArray(req.body.stamps) ? req.body.stamps : [];
+        const jsonStr = serializeQuoteDigitalStamps(stamps);
+        const upd = await sql.query`
+            UPDATE EnquiryQuotes
+            SET DigitalSignaturesJson = ${jsonStr}, UpdatedAt = ${new Date()}
+            WHERE ID = ${id}
+        `;
+        if ((upd.rowsAffected?.[0] || 0) === 0) {
+            return res.status(404).json({ error: 'Quote not found' });
+        }
+        return res.json({ ok: true, stamps: parseQuoteDigitalStamps(jsonStr) });
+    } catch (err) {
+        console.error('[Quote API] PUT /:id/digital-signatures:', err);
+        res.status(500).json({ error: 'Failed to save quote signatures', details: err.message });
+    }
+});
+
+// POST /api/quotes/:id/digital-signatures/stamps — append/upsert one stamp (multi-user)
+router.post('/:id/digital-signatures/stamps', express.json({ limit: '8mb' }), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const stamp = req.body.stamp;
+        if (!stamp || !stamp.imageDataUrl) {
+            return res.status(400).json({ error: 'stamp with imageDataUrl is required' });
+        }
+        const existing = await sql.query`
+            SELECT DigitalSignaturesJson FROM EnquiryQuotes WHERE ID = ${id}
+        `;
+        if (!existing.recordset?.length) {
+            return res.status(404).json({ error: 'Quote not found' });
+        }
+        const merged = mergeQuoteStamp(existing.recordset[0].DigitalSignaturesJson, stamp);
+        const jsonStr = serializeQuoteDigitalStamps(merged);
+        await sql.query`
+            UPDATE EnquiryQuotes
+            SET DigitalSignaturesJson = ${jsonStr}, UpdatedAt = ${new Date()}
+            WHERE ID = ${id}
+        `;
+        return res.json({ ok: true, stamps: merged });
+    } catch (err) {
+        console.error('[Quote API] POST /:id/digital-signatures/stamps:', err);
+        res.status(500).json({ error: 'Failed to place signature', details: err.message });
+    }
+});
+
 router.get('/:requestNo', async (req, res) => {
     try {
         const { requestNo } = req.params;

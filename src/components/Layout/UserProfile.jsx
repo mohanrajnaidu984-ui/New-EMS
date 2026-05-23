@@ -9,7 +9,9 @@ import {
     loadDefaultSignatureId,
     saveDefaultSignatureId,
     EMS_QUOTE_PLACE_STAMP_EVENT,
+    migrateLocalSignatureLibraryToServer,
 } from '../Quote/QuoteDigitalSignature';
+import { fetchUserSignatureLibrary } from '../../utils/quoteSignatureApi';
 
 /** `activeTab` used so Place on page in the dropdown only works on Quote (same event QuoteForm listens for). */
 const UserProfile = ({ activeTab = '' }) => {
@@ -57,8 +59,27 @@ const UserProfile = ({ activeTab = '' }) => {
 
     useEffect(() => {
         if (!dropdownOpen || !displayEmail) return;
-        setSignatureQuickList(loadSignatureLibrary(displayEmail));
-        setDefaultSignatureId(loadDefaultSignatureId(displayEmail) || '');
+        let cancelled = false;
+        (async () => {
+            try {
+                let master = await migrateLocalSignatureLibraryToServer(displayEmail);
+                if (!master) master = await fetchUserSignatureLibrary(displayEmail);
+                if (cancelled) return;
+                const sigs = master?.signatures?.length ? master.signatures : loadSignatureLibrary(displayEmail);
+                setSignatureQuickList(sigs);
+                setDefaultSignatureId(
+                    master?.defaultSignatureId || loadDefaultSignatureId(displayEmail) || sigs[0]?.id || ''
+                );
+            } catch {
+                if (!cancelled) {
+                    setSignatureQuickList(loadSignatureLibrary(displayEmail));
+                    setDefaultSignatureId(loadDefaultSignatureId(displayEmail) || '');
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, [dropdownOpen, displayEmail]);
 
     useEffect(() => {
@@ -373,8 +394,18 @@ const UserProfile = ({ activeTab = '' }) => {
                 onClose={() => {
                     setShowSignatureVault(false);
                     if (displayEmail) {
-                        setSignatureQuickList(loadSignatureLibrary(displayEmail));
-                        setDefaultSignatureId(loadDefaultSignatureId(displayEmail) || '');
+                        void fetchUserSignatureLibrary(displayEmail).then((master) => {
+                            const sigs = master.signatures?.length
+                                ? master.signatures
+                                : loadSignatureLibrary(displayEmail);
+                            setSignatureQuickList(sigs);
+                            setDefaultSignatureId(
+                                master.defaultSignatureId ||
+                                    loadDefaultSignatureId(displayEmail) ||
+                                    sigs[0]?.id ||
+                                    ''
+                            );
+                        });
                     }
                 }}
                 userEmail={displayEmail}

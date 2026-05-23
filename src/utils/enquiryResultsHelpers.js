@@ -1,3 +1,5 @@
+const MONTHS_UPPER = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
 /** DD-MMM-YY for enquiry list tables */
 export function formatEnquiryResultDate(dateStr) {
     if (!dateStr) return '-';
@@ -5,11 +7,31 @@ export function formatEnquiryResultDate(dateStr) {
     if (Number.isNaN(date.getTime())) return String(dateStr);
 
     const day = String(date.getDate()).padStart(2, '0');
-    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-    const month = months[date.getMonth()];
+    const month = MONTHS_UPPER[date.getMonth()];
     const year = String(date.getFullYear()).slice(-2);
 
     return `${day}-${month}-${year}`;
+}
+
+/** DD-MMM-YY HH:MM:SS AM/PM for quote digital signature stamps */
+export function formatSignaturePlacedDateTime(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    if (Number.isNaN(date.getTime())) return String(dateStr);
+
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = MONTHS_UPPER[date.getMonth()];
+    const year = String(date.getFullYear()).slice(-2);
+
+    const h24 = date.getHours();
+    const ampm = h24 >= 12 ? 'PM' : 'AM';
+    let h12 = h24 % 12;
+    if (h12 === 0) h12 = 12;
+    const hours = String(h12).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+
+    return `${day}-${month}-${year} ${hours}:${minutes}:${seconds} ${ampm}`;
 }
 
 /** One line per customer when multiple are linked to an enquiry */

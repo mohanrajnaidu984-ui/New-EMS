@@ -1,6 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { format } from 'date-fns';
+import { FilterX } from 'lucide-react';
 import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
+import {
+    useTableColumnHeaderFilters,
+    TableColumnFilterHeader,
+} from '../shared/tableColumnHeaderFilters';
+import '../../styles/emsTableColumnFilters.css';
 
 /** Rollup key from API for colour + label (aligned with QuoteForm). */
 function normalizeListQuoteRollupKey(raw) {
@@ -11,7 +17,7 @@ function normalizeListQuoteRollupKey(raw) {
     return 'None Quoted';
 }
 
-function formatListQuoteRollupStatusTwoLines(raw) {
+export function formatListQuoteRollupStatusTwoLines(raw) {
     const key = normalizeListQuoteRollupKey(raw);
     const tail = 'for Ownjob';
     if (key === 'None Quoted') return { line1: 'None Quoted', line2: tail };
@@ -20,11 +26,61 @@ function formatListQuoteRollupStatusTwoLines(raw) {
     return { line1: 'None Quoted', line2: tail };
 }
 
-function listQuoteRollupStatusColor(raw) {
+export function listQuoteRollupStatusColor(raw) {
     const k = normalizeListQuoteRollupKey(raw);
     if (k === 'All Quoted') return '#047857';
     if (k === 'Partial Quoted') return '#b45309';
     return '#64748b';
+}
+
+const QUOTE_LIST_FILTER_KEYS = ['requestNo', 'projectName', 'listQuoteDetails', 'dueDate', 'consultantName'];
+
+function formatQuoteListDueDate(raw) {
+    if (!raw) return '—';
+    try {
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) return '—';
+        return format(d, 'dd-MMM-yyyy');
+    } catch {
+        return '—';
+    }
+}
+
+function getQuoteListFilterValue(row, key) {
+    if (!row) return '—';
+    switch (key) {
+        case 'requestNo': {
+            const st = formatListQuoteRollupStatusTwoLines(row.ListQuoteRollupStatus);
+            const rn = String(row.RequestNo ?? '').trim() || '—';
+            return `${rn} — ${st.line1}`;
+        }
+        case 'projectName':
+            return String(row.ProjectName || '—').trim() || '—';
+        case 'listQuoteDetails': {
+            if (Array.isArray(row.ListQuoteDetailLines) && row.ListQuoteDetailLines.length > 0) {
+                return row.ListQuoteDetailLines
+                    .map((ln) => String(ln.textLine || '').trim())
+                    .filter(Boolean)
+                    .join(' | ') || '—';
+            }
+            if (Array.isArray(row.ListMultiLeadQuoteRefs) && row.ListMultiLeadQuoteRefs.length > 0) {
+                return row.ListMultiLeadQuoteRefs
+                    .map((line) => String(line.quoteNumber || '').trim())
+                    .filter(Boolean)
+                    .join(' | ') || '—';
+            }
+            const ref = String(row.ListQuoteRef || '').trim();
+            const to = String(row.ListQuoteDetailToName || '').trim();
+            if (ref || to) return [to, ref].filter(Boolean).join(' — ') || '—';
+            return '—';
+        }
+        case 'dueDate':
+            return formatQuoteListDueDate(row.DueDate);
+        case 'consultantName':
+            return String(row.ConsultantName || row.consultantName || '—').trim() || '—';
+        default:
+            return '—';
+    }
 }
 
 /** Count quote lines shown in the “To Customer and Quote details” column for one row. */
@@ -49,7 +105,6 @@ function localYmdFromRawDate(raw) {
     return `${y}-${m}-${d}`;
 }
 
-/** Matches server `fmtRowDetailDate` tail on `textLine` when `quoteDate` is absent (older payloads). */
 function parseQuoteYmdFromDetailTextLine(textLine) {
     const tl = String(textLine || '');
     if (/\(Not Quoted\)/i.test(tl)) return null;
@@ -93,7 +148,6 @@ function quoteYmdInScope(ymd, scope) {
     return false;
 }
 
-/** When `scope` is null, same as `countQuoteLinesInRow`; otherwise only lines whose quote date lies in scope. */
 function countQuoteLinesInRowForScope(enq, scope) {
     if (!enq) return 0;
     if (!scope) return countQuoteLinesInRow(enq);
@@ -114,15 +168,16 @@ function countQuoteLinesInRowForScope(enq, scope) {
 }
 
 /**
- * Quote module summary grid (same columns / cell layout as QuoteForm pending/search list).
+ * Quote module summary grid (Quote list + Dashboard quote-date popup).
  */
 export default function DashboardQuoteSummaryTable({
     rows,
     onOpenEnquiry,
     emptyLabel = 'No results.',
     quoteDateScope = null,
-    /** When set, Total quotes matches dashboard calendar (COUNT EnquiryQuotes in scope). */
     calendarAlignedQuoteTotal = null,
+    onRegisterClearColumnFilters,
+    onFilterStateChange,
 }) {
     const [sortConfig, setSortConfig] = useState({ field: 'DueDate', direction: 'asc' });
 
@@ -146,8 +201,21 @@ export default function DashboardQuoteSummaryTable({
         return list;
     }, [rows, sortConfig]);
 
+    const colFilters = useTableColumnHeaderFilters(sortedRows, getQuoteListFilterValue, QUOTE_LIST_FILTER_KEYS);
+    const displayRows = colFilters.filteredRows;
+
+    useEffect(() => {
+        if (typeof onRegisterClearColumnFilters === 'function') {
+            onRegisterClearColumnFilters(colFilters.clearAllColumnFilters);
+        }
+    }, [colFilters.clearAllColumnFilters, onRegisterClearColumnFilters]);
+
+    useEffect(() => {
+        onFilterStateChange?.({ hasColumnFilters: colFilters.hasColumnFilters });
+    }, [colFilters.hasColumnFilters, onFilterStateChange]);
+
     const headerStats = useMemo(() => {
-        const list = Array.isArray(sortedRows) ? sortedRows : [];
+        const list = Array.isArray(displayRows) ? displayRows : [];
         const reqSet = new Set();
         let quotes = 0;
         list.forEach((enq) => {
@@ -162,46 +230,32 @@ export default function DashboardQuoteSummaryTable({
             }
         });
         return { projects: reqSet.size, quotes };
-    }, [sortedRows, quoteDateScope]);
+    }, [displayRows, quoteDateScope]);
 
     const displayQuoteTotal =
         typeof calendarAlignedQuoteTotal === 'number' && !Number.isNaN(calendarAlignedQuoteTotal)
             ? calendarAlignedQuoteTotal
             : headerStats.quotes;
 
-    const sortField = sortConfig.field;
-    const sortDir = sortConfig.direction;
-
-    const renderQSH = (field, label, style = {}) => {
-        const isActive = sortField === field;
-        const isAsc = sortDir === 'asc';
-        return (
-            <th
-                key={field}
-                onClick={() =>
-                    setSortConfig((prev) =>
-                        prev.field === field
-                            ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
-                            : { field, direction: 'asc' },
-                    )
-                }
-                style={{
-                    padding: '6px 10px',
-                    fontSize: '11.7px',
-                    fontWeight: '400',
-                    color: '#ffffff',
-                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
-                    cursor: 'pointer',
-                    userSelect: 'none',
-                    whiteSpace: 'nowrap',
-                    ...style,
-                    textAlign: 'left',
-                }}
-            >
-                {label}
-                {isActive ? (isAsc ? ' ▲' : ' ▼') : <span style={{ color: '#cbd5e1' }}> ⇅</span>}
-            </th>
+    const handleSort = (field, initialDirection = 'asc') => {
+        setSortConfig((prev) =>
+            prev.field === field
+                ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                : { field, direction: initialDirection },
         );
+    };
+
+    const pricingListThBase = {
+        padding: '6px 10px',
+        textAlign: 'left',
+        fontSize: '11.7px',
+        fontWeight: '400',
+        color: '#ffffff',
+        borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
+        whiteSpace: 'nowrap',
+        background: EMS_TABLE_HEADER_GRADIENT,
+        top: 0,
+        zIndex: 2,
     };
 
     const quoteListColgroup = (
@@ -225,9 +279,12 @@ export default function DashboardQuoteSummaryTable({
     const quoteListRowHoverGrey = '#cbd5e1';
     const tdPad = '10px 12px';
 
+    const showSummaryBar =
+        headerStats.projects > 0 || colFilters.hasColumnFilters || (Array.isArray(rows) && rows.length > 0);
+
     return (
         <div
-            className="w-100 d-flex flex-column flex-grow-1"
+            className="ems-cf-scope w-100 d-flex flex-column flex-grow-1"
             style={{
                 background: 'white',
                 borderRadius: '8px',
@@ -236,16 +293,30 @@ export default function DashboardQuoteSummaryTable({
                 overflow: 'hidden',
             }}
         >
-            {headerStats.projects > 0 ? (
+            {showSummaryBar ? (
                 <div
                     className="flex-shrink-0 px-2 py-1 d-flex align-items-center justify-content-between gap-2 flex-wrap"
                     role="status"
                     aria-live="polite"
                     style={{ borderBottom: '1px solid #e2e8f0' }}
                 >
-                    <div className="d-flex align-items-center gap-3 flex-wrap">
-                        <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
-                            Total projects: <span className="text-primary">{headerStats.projects}</span>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        <span className="small fw-semibold text-dark d-inline-flex align-items-center gap-1" style={{ letterSpacing: '0.02em' }}>
+                            <span>
+                                Total projects: <span className="text-primary">{headerStats.projects}</span>
+                            </span>
+                            {headerStats.projects > 0 ? (
+                                <button
+                                    type="button"
+                                    className="ems-cf-clear-filters-btn"
+                                    onClick={colFilters.clearAllColumnFilters}
+                                    disabled={!colFilters.hasColumnFilters}
+                                    title="Clear all column filters"
+                                    aria-label="Clear all column filters"
+                                >
+                                    <FilterX size={13} strokeWidth={2} aria-hidden="true" />
+                                </button>
+                            ) : null}
                         </span>
                         <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
                             Total quotes: <span className="text-success">{displayQuoteTotal}</span>
@@ -286,26 +357,67 @@ export default function DashboardQuoteSummaryTable({
                         }}
                     >
                         <tr>
-                            {renderQSH('RequestNo', 'Enquiry No.', { width: '96px', borderTopLeftRadius: '8px' })}
-                            {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
-                            {renderQSH('ListQuoteRef', 'To Customer and Quote details', {
-                                minWidth: 'max-content',
-                                maxWidth: '72vw',
-                                whiteSpace: 'normal',
-                            })}
-                            {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                            {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '260px', borderTopRightRadius: '8px' })}
+                            <TableColumnFilterHeader
+                                colKey="requestNo"
+                                label="Enquiry No."
+                                sortField="RequestNo"
+                                sortConfig={sortConfig}
+                                onSort={handleSort}
+                                filterCtx={colFilters}
+                                thStyle={{ ...pricingListThBase, width: '96px', borderTopLeftRadius: '8px' }}
+                            />
+                            <TableColumnFilterHeader
+                                colKey="projectName"
+                                label="Project Name"
+                                sortField="ProjectName"
+                                sortConfig={sortConfig}
+                                onSort={handleSort}
+                                filterCtx={colFilters}
+                                thStyle={{ ...pricingListThBase, minWidth: '200px' }}
+                            />
+                            <TableColumnFilterHeader
+                                colKey="listQuoteDetails"
+                                label="To Customer and Quote details"
+                                sortField="ListQuoteRef"
+                                sortConfig={sortConfig}
+                                onSort={handleSort}
+                                filterCtx={colFilters}
+                                thStyle={{
+                                    ...pricingListThBase,
+                                    minWidth: 'max-content',
+                                    maxWidth: '72vw',
+                                    whiteSpace: 'normal',
+                                }}
+                            />
+                            <TableColumnFilterHeader
+                                colKey="dueDate"
+                                label="Due Date"
+                                sortField="DueDate"
+                                sortConfig={sortConfig}
+                                onSort={handleSort}
+                                filterCtx={colFilters}
+                                thStyle={{ ...pricingListThBase, minWidth: '110px' }}
+                            />
+                            <TableColumnFilterHeader
+                                colKey="consultantName"
+                                label="Consultant Name"
+                                sortField="ConsultantName"
+                                sortConfig={sortConfig}
+                                onSort={handleSort}
+                                filterCtx={colFilters}
+                                thStyle={{ ...pricingListThBase, minWidth: '260px', borderTopRightRadius: '8px' }}
+                            />
                         </tr>
                     </thead>
                     <tbody>
-                        {sortedRows.length === 0 ? (
+                        {displayRows.length === 0 ? (
                             <tr>
                                 <td colSpan={5} className="text-muted text-center py-3 small">
                                     {emptyLabel}
                                 </td>
                             </tr>
                         ) : (
-                            sortedRows.map((enq, idx) => {
+                            displayRows.map((enq, idx) => {
                                 const zebraBg = idx % 2 === 0 ? '#ffffff' : '#f1f5f9';
                                 const statusLines = formatListQuoteRollupStatusTwoLines(enq.ListQuoteRollupStatus);
                                 const statusColor = listQuoteRollupStatusColor(enq.ListQuoteRollupStatus);
@@ -335,7 +447,7 @@ export default function DashboardQuoteSummaryTable({
                                             e.currentTarget.style.backgroundColor = zebraBg;
                                         }}
                                         onClick={() => {
-                                            if (reqNo && onOpenEnquiry) onOpenEnquiry(reqNo);
+                                            if (reqNo && onOpenEnquiry) onOpenEnquiry(enq);
                                         }}
                                     >
                                         <td
@@ -396,14 +508,7 @@ export default function DashboardQuoteSummaryTable({
                                         >
                                             {(() => {
                                                 const rowPreparedBy = String(enq.ListPreparedBy ?? enq.listpreparedby ?? '').trim();
-                                                const fmtQuoteDate = (raw) => {
-                                                    try {
-                                                        const d = raw ? new Date(raw) : null;
-                                                        return d && !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '—';
-                                                    } catch {
-                                                        return '—';
-                                                    }
-                                                };
+                                                const fmtQuoteDate = (raw) => formatQuoteListDueDate(raw);
                                                 const compactLineStyle = {
                                                     display: 'flex',
                                                     flexWrap: 'wrap',

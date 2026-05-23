@@ -882,6 +882,7 @@ const Dashboard = ({ onNavigate, onOpenEnquiry }) => { // Assuming these props p
                                             onRowOpen={handleModalRowOpen}
                                             emptyLabel="No enquiries for this selection."
                                             headerQuotedTotal={dashboardModalHeaderQuotedTotal}
+                                            enableHeaderFilters
                                         />
                                     )}
                                 </div>

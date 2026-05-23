@@ -82,10 +82,10 @@ const sendAcknowledgementEmail = async (enquiryData, customerEmail, seEmail, ceo
     }
 };
 
-const sendGeneralEmail = async ({ to, cc, bcc, subject, html, attachments }) => {
+const sendGeneralEmail = async ({ to, cc, bcc, subject, html, attachments, from }) => {
     try {
         const mailOptions = {
-            from: defaultFrom(),
+            from: from || defaultFrom(),
             to,
             cc,
             bcc,

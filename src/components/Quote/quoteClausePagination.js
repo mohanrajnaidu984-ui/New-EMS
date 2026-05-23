@@ -83,9 +83,14 @@ export function splitClauseHtmlToSegments(html) {
      * @param {Element} el
      */
     const splitList = (el) => {
+        const tag = el.tagName.toLowerCase();
+        /* Never split <ol> — one-item lists each restart at 1 in preview/PDF. */
+        if (tag === 'ol') {
+            push(el.outerHTML);
+            return;
+        }
         const items = [...el.children].filter((c) => c.tagName === 'LI');
         if (items.length > 4) {
-            const tag = el.tagName.toLowerCase();
             const attrs = [...el.attributes]
                 .map((a) => ` ${a.name}="${String(a.value).replace(/"/g, '&quot;')}"`)
                 .join('');

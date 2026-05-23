@@ -160,6 +160,9 @@ const {
     getDepartmentPricingAnchors,
     getPricingAnchorJobsForDivision,
     expandVisibleJobIdsWithAncestors,
+    userHasQuotePricingEnquiryAccess,
+    userIsConcernedSeOnEnquiry,
+    resolvePricingAnchorJobsWithFallbacks,
 } = require('../lib/quotePricingAccess');
 const { filterJobsByDepartment } = require('../services/hierarchyService');
 const {
@@ -2419,7 +2422,7 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 let hasCustomerBaseGap = false;
                 // Single-ownjob division scope: pending should clear once that ownjob is priced.
                 // Customer-gap enforcement is kept only when multiple anchors are in scope.
-                if (divAnchors.length > 1 && enquiryCustomerKeys.length > 0) {
+                if (unpriced > 0 && divAnchors.length > 1 && enquiryCustomerKeys.length > 0) {
                     for (const customerKey of enquiryCustomerKeys) {
                         let customerCoveredInDivision = false;
                         for (const jobRec of divAnchors) {
@@ -2443,8 +2446,11 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
                 // Fallback for unexpected data (no anchors): use the older display-line scoped status.
                 hasPendingItems = divisionScopedPricingStatus !== 'All Priced';
             } else {
-                // Last resort: keep legacy behaviour if we cannot scope at all.
-                hasPendingItems = legacyPending;
+                // With a division filter, do not use legacyPending (parent lead / other divisions).
+                hasPendingItems = false;
+            }
+            if (divisionScopedPricingStatus === 'All Priced') {
+                hasPendingItems = false;
             }
         } else if (pendingOnly && userSpecPricingSummary && userSpecPricingSummary.enabled) {
             if (userSpecPricingSummary.pricingSummaryStatus === 'All Priced') {
@@ -2515,30 +2521,26 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
             const pid = j.ParentID ?? j.parentID;
             return pid == null || String(pid) === '0' || pid === 0 || pid === '0';
         };
-        const basePositiveForJobId = (jid) =>
-            enqPrices.some((pr) => {
-                if (!reqNoEq(pr.RequestNo, enq.RequestNo)) return false;
-                const eid = pr.EnquiryForID ?? pr.enquiryForId;
-                if (eid == null || String(eid) === '' || String(eid) === '0') return false;
-                if (String(eid) !== String(jid)) return false;
-                if (!valueRowIsBasePrice(pr)) return false;
-                return parsePriceNum(pr.Price) > 0.01;
-            });
         const ownJobCandidates = (() => {
             if (divisionTrim) {
-                // Division dropdown: treat anchors of that division as "own jobs" for the badge.
-                return getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
+                const divNorm = normalizePricingJobName(String(divisionTrim).trim());
+                const divAnchorsRaw = getDepartmentPricingAnchors(enqJobs, String(divisionTrim).trim());
+                let divAnchors = (divAnchorsRaw || []).filter((jobRec) => {
+                    const nm = normalizePricingJobName(jobRec?.ItemName || '');
+                    return !!divNorm && nm === divNorm;
+                });
+                if (divAnchors.length === 0) divAnchors = divAnchorsRaw || [];
+                return divAnchors;
             }
             // No division filter: "own jobs" = lead roots on this enquiry.
             return enqJobs.filter(isRootJobRec);
         })();
-        const ownJobIds = [...new Set(ownJobCandidates.map((j) => jobIdOf(j)).filter((x) => x != null))];
         let displaySpecStatus = null;
-        if (ownJobIds.length > 0) {
+        if (ownJobCandidates.length > 0) {
             let priced = 0;
             let unpriced = 0;
-            for (const jid of ownJobIds) {
-                if (basePositiveForJobId(jid)) priced += 1;
+            for (const jobRec of ownJobCandidates) {
+                if (strictHasPositiveBaseForJob(jobRec)) priced += 1;
                 else unpriced += 1;
             }
             if (unpriced > 0 && priced === 0) displaySpecStatus = 'None Priced';
@@ -3084,7 +3086,27 @@ router.get('/:requestNo', async (req, res) => {
                 const useDivision = Boolean(sessionDivision);
                 const shouldScopeJobs = !pricingDetailAccessCtx.isAdmin || useDivision;
                 if (shouldScopeJobs) {
-                    const anchors = getPricingAnchorJobsForDivision(jobs, pricingDetailAccessCtx, userEmail, sessionDivision);
+                    if (!pricingDetailAccessCtx.isAdmin) {
+                        const allowed = await userHasQuotePricingEnquiryAccess(
+                            userEmail,
+                            requestNo,
+                            sessionDivision
+                        );
+                        if (!allowed) {
+                            return res.status(403).json({ error: 'Forbidden' });
+                        }
+                    }
+                    const allowedByConcernedSe = await userIsConcernedSeOnEnquiry(
+                        pricingDetailAccessCtx,
+                        requestNo
+                    );
+                    const anchors = resolvePricingAnchorJobsWithFallbacks(
+                        jobs,
+                        pricingDetailAccessCtx,
+                        userEmail,
+                        sessionDivision,
+                        allowedByConcernedSe
+                    );
                     if (anchors.length === 0) {
                         return res.status(403).json({ error: 'Forbidden' });
                     }

@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
-import { getLeadJobDisplayLines } from '../../utils/leadJobDisplayLines';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
+import { FilterX } from 'lucide-react';
+import { getLeadJobDisplayLines, formatLeadJobLinesPlain } from '../../utils/leadJobDisplayLines';
 import {
     formatEnquiryResultDate,
     getCustomerDisplayLines,
@@ -9,6 +10,7 @@ import {
 } from '../../utils/enquiryResultsHelpers';
 import { EMS_TABLE_HEADER_GRADIENT } from '../../constants/emsTheme';
 import './EnquiryResultsTable.css';
+import '../../styles/emsTableColumnFilters.css';
 
 /** Resolve enquiry id from list rows (API/client variants). */
 export function getEnquiryRowRequestNo(row) {
@@ -16,6 +18,58 @@ export function getEnquiryRowRequestNo(row) {
     if (v === undefined || v === null) return null;
     const s = String(v).trim();
     return s === '' ? null : s;
+}
+
+const FILTERABLE_COLUMNS = [
+    { key: 'requestNo', label: 'Enquiry No.', sortKey: 'RequestNo' },
+    { key: 'enquiryDate', label: 'Enquiry Date', sortKey: 'EnquiryDate' },
+    { key: 'projectName', label: 'Project', sortKey: 'ProjectName' },
+    { key: 'se', label: 'Divisions / SE', sortKey: 'SE', labelLines: ['Divisions', 'SE/EE/TE/QS Involved'] },
+    { key: 'enquiryDetails', label: 'Enquiry Details', sortKey: 'EnquiryDetails' },
+    { key: 'customer', label: 'Customer Name / Contractor Name', sortKey: 'Customer' },
+    { key: 'dueOn', label: 'Due', sortKey: 'DueOn' },
+    { key: 'siteVisitDate', label: 'Site visit date', sortKey: 'SiteVisitDate' },
+    { key: 'clientName', label: 'Client', sortKey: 'ClientName' },
+    { key: 'enquiryType', label: 'Enquiry Type', sortKey: 'EnquiryType' },
+    { key: 'sourceOfInfo', label: 'Source', sortKey: 'SourceOfInfo' },
+    { key: 'status', label: 'Status', sortKey: 'Status' },
+    { key: 'createdBy', label: 'Created By', sortKey: 'CreatedBy' },
+];
+
+const DATE_FILTER_KEYS = new Set(['enquiryDate', 'dueOn', 'siteVisitDate']);
+
+function getEnquiryFilterValue(row, key, masters) {
+    if (!row) return '—';
+    switch (key) {
+        case 'requestNo':
+            return String(getEnquiryRowRequestNo(row) || '—');
+        case 'enquiryDate':
+            return formatEnquiryResultDate(row.EnquiryDate);
+        case 'projectName':
+            return String(row.ProjectName || '—').trim() || '—';
+        case 'se':
+            return formatLeadJobLinesPlain(getLeadJobDisplayLines(row, { users: masters?.users })) || '—';
+        case 'enquiryDetails':
+            return getEnquiryDetailsDisplay(row);
+        case 'customer':
+            return getCustomerDisplayLines(row).join(', ') || '—';
+        case 'dueOn':
+            return formatEnquiryResultDate(row.DueOn ?? row.DueDate);
+        case 'siteVisitDate':
+            return formatEnquiryResultDate(row.SiteVisitDate);
+        case 'clientName':
+            return String(row.ClientName || '—').trim() || '—';
+        case 'enquiryType':
+            return getEnquiryTypeDisplay(row);
+        case 'sourceOfInfo':
+            return getSourceOfInfoDisplay(row);
+        case 'status':
+            return String(row.Status || 'Enquiry').trim() || 'Enquiry';
+        case 'createdBy':
+            return String(row.CreatedBy || '—').trim() || '—';
+        default:
+            return '—';
+    }
 }
 
 /**
@@ -30,7 +84,17 @@ const EnquiryResultsTable = ({
     emptyLabel = 'No results.',
     /** When set (e.g. dashboard Quote Date modal), show total quote lines next to project count. */
     headerQuotedTotal = null,
+    /** Search Enquiry: Excel-style column filters on headers (like Sales Report Jobs table). */
+    enableHeaderFilters = false,
+    /** Called when displayed rows change (after column filters). Used for export. */
+    onDisplayRowsChange,
 }) => {
+    const [columnFilters, setColumnFilters] = useState({});
+    const [activeHeaderFilter, setActiveHeaderFilter] = useState(null);
+    const [headerFilterSearch, setHeaderFilterSearch] = useState('');
+    const [headerFilterDraft, setHeaderFilterDraft] = useState([]);
+    const headerFilterRef = useRef(null);
+
     const SortIcon = ({ column }) => {
         if (sortConfig?.key !== column) return <i className="bi bi-arrow-down-up ms-1 text-muted" style={{ fontSize: '10px' }}></i>;
         return sortConfig.direction === 'asc'
@@ -38,10 +102,57 @@ const EnquiryResultsTable = ({
             : <i className="bi bi-arrow-down ms-1 text-primary"></i>;
     };
 
-    /** Unique enquiries in the list (one row per enquiry counts once). */
+    const filterOptions = useMemo(() => {
+        if (!enableHeaderFilters) return {};
+        const out = {};
+        FILTERABLE_COLUMNS.forEach((col) => {
+            out[col.key] = Array.from(
+                new Set((sortedRows || []).map((r) => getEnquiryFilterValue(r, col.key, masters)))
+            ).sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
+        });
+        return out;
+    }, [sortedRows, masters, enableHeaderFilters]);
+
+    const rowsToDisplay = useMemo(() => {
+        if (!enableHeaderFilters) return sortedRows || [];
+        return (sortedRows || []).filter((row) =>
+            FILTERABLE_COLUMNS.every((col) => {
+                const selected = columnFilters[col.key];
+                if (!Array.isArray(selected)) return true;
+                const value = getEnquiryFilterValue(row, col.key, masters);
+                return selected.includes(value);
+            })
+        );
+    }, [sortedRows, columnFilters, masters, enableHeaderFilters]);
+
+    useEffect(() => {
+        if (typeof onDisplayRowsChange === 'function') {
+            onDisplayRowsChange(rowsToDisplay);
+        }
+    }, [rowsToDisplay, onDisplayRowsChange]);
+
+    useEffect(() => {
+        if (!enableHeaderFilters) return undefined;
+        const onDocDown = (e) => {
+            if (!headerFilterRef.current?.contains(e.target)) {
+                setActiveHeaderFilter(null);
+            }
+        };
+        document.addEventListener('mousedown', onDocDown);
+        return () => document.removeEventListener('mousedown', onDocDown);
+    }, [enableHeaderFilters]);
+
+    const openHeaderFilter = (key) => {
+        const options = filterOptions[key] || [];
+        const applied = columnFilters[key];
+        setHeaderFilterDraft(Array.isArray(applied) ? [...applied] : [...options]);
+        setHeaderFilterSearch('');
+        setActiveHeaderFilter((prev) => (prev === key ? null : key));
+    };
+
     const distinctProjectCount = useMemo(() => {
         const keys = new Set();
-        (sortedRows || []).forEach((row, idx) => {
+        (rowsToDisplay || []).forEach((row, idx) => {
             const no = getEnquiryRowRequestNo(row);
             if (no) keys.add(`e:${no}`);
             else {
@@ -50,7 +161,21 @@ const EnquiryResultsTable = ({
             }
         });
         return keys.size;
-    }, [sortedRows]);
+    }, [rowsToDisplay]);
+
+    const hasColumnFilters = Object.keys(columnFilters).length > 0;
+
+    const clearAllColumnFilters = () => {
+        setColumnFilters({});
+        setActiveHeaderFilter(null);
+        setHeaderFilterSearch('');
+        setHeaderFilterDraft([]);
+    };
+
+    const showProjectSummaryBar =
+        distinctProjectCount > 0 ||
+        (enableHeaderFilters && hasColumnFilters) ||
+        (headerQuotedTotal != null && Number.isFinite(Number(headerQuotedTotal)));
 
     const headerThStyle = {
         position: 'sticky',
@@ -68,18 +193,256 @@ const EnquiryResultsTable = ({
         verticalAlign: 'middle',
     };
 
+    const renderDateFilterOptions = (visible, headerFilterDraft, setHeaderFilterDraft) => {
+        const monthOrder = [
+            'January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December',
+        ];
+        const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const parseShortDate = (s) => {
+            const m = String(s || '').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
+            if (!m) return null;
+            const mIdx = monthShort.findIndex((x) => x.toLowerCase() === m[2].toLowerCase());
+            if (mIdx < 0) return null;
+            const yy = Number(m[3]);
+            const year = yy >= 70 ? 1900 + yy : 2000 + yy;
+            return { year, monthName: monthOrder[mIdx], raw: String(s) };
+        };
+        const dateGroups = visible
+            .map(parseShortDate)
+            .filter(Boolean)
+            .reduce((acc, d) => {
+                if (!acc[d.year]) acc[d.year] = {};
+                if (!acc[d.year][d.monthName]) acc[d.year][d.monthName] = [];
+                acc[d.year][d.monthName].push(d.raw);
+                return acc;
+            }, {});
+
+        return (
+            <>
+                {Object.keys(dateGroups)
+                    .sort((a, b) => Number(b) - Number(a))
+                    .map((y) => {
+                        const yearValues = Object.values(dateGroups[y]).flat();
+                        const yearChecked = yearValues.length > 0 && yearValues.every((v) => headerFilterDraft.includes(v));
+                        return (
+                            <div key={y}>
+                                <label className="ert-th-filter-option">
+                                    <input
+                                        type="checkbox"
+                                        checked={yearChecked}
+                                        onChange={(e) =>
+                                            setHeaderFilterDraft((prev) => {
+                                                const set = new Set(prev);
+                                                if (e.target.checked) yearValues.forEach((v) => set.add(v));
+                                                else yearValues.forEach((v) => set.delete(v));
+                                                return [...set];
+                                            })
+                                        }
+                                    />
+                                    <span>{y}</span>
+                                </label>
+                                {Object.keys(dateGroups[y])
+                                    .sort((a, b) => monthOrder.indexOf(a) - monthOrder.indexOf(b))
+                                    .map((mn) => {
+                                        const monthValues = dateGroups[y][mn];
+                                        const monthChecked =
+                                            monthValues.length > 0 && monthValues.every((v) => headerFilterDraft.includes(v));
+                                        return (
+                                            <label key={`${y}-${mn}`} className="ert-th-filter-option ert-th-filter-option--month">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={monthChecked}
+                                                    onChange={(e) =>
+                                                        setHeaderFilterDraft((prev) => {
+                                                            const set = new Set(prev);
+                                                            if (e.target.checked) monthValues.forEach((v) => set.add(v));
+                                                            else monthValues.forEach((v) => set.delete(v));
+                                                            return [...set];
+                                                        })
+                                                    }
+                                                />
+                                                <span>{mn}</span>
+                                            </label>
+                                        );
+                                    })}
+                            </div>
+                        );
+                    })}
+                {visible
+                    .filter((v) => !parseShortDate(v))
+                    .map((opt) => (
+                        <label key={opt} className="ert-th-filter-option">
+                            <input
+                                type="checkbox"
+                                checked={headerFilterDraft.includes(opt)}
+                                onChange={(e) =>
+                                    setHeaderFilterDraft((prev) =>
+                                        e.target.checked ? [...new Set([...prev, opt])] : prev.filter((v) => v !== opt)
+                                    )
+                                }
+                            />
+                            <span>{opt || '—'}</span>
+                        </label>
+                    ))}
+            </>
+        );
+    };
+
+    const renderFilterableHeader = (col, extraStyle = {}) => {
+        const { key, label, sortKey, labelLines } = col;
+        const options = filterOptions[key] || [];
+        const applied = columnFilters[key];
+        const isFiltered = Array.isArray(applied);
+        const searchQ = String(headerFilterSearch || '').trim().toLowerCase();
+        const visible = options.filter((o) => String(o).toLowerCase().includes(searchQ));
+        const isDateColumn = DATE_FILTER_KEYS.has(key);
+
+        return (
+            <th key={key} className="ert-filterable-th" style={{ ...headerThStyle, ...extraStyle }}>
+                <div className="ert-th-header-inner">
+                    <button type="button" className="ert-th-filter-btn" onClick={() => openHeaderFilter(key)}>
+                        {labelLines ? (
+                            <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15, textAlign: 'left' }}>
+                                <span>{labelLines[0]}</span>
+                                <span style={{ fontSize: '10px', opacity: 0.88 }}>{labelLines[1]}</span>
+                            </span>
+                        ) : (
+                            <span>{label}</span>
+                        )}
+                        <span className={`ert-th-filter-caret${isFiltered ? ' ert-th-filter-caret--active' : ''}`}>▼</span>
+                    </button>
+                    <button
+                        type="button"
+                        className="ert-th-sort-btn"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onSort(sortKey);
+                        }}
+                        title={`Sort by ${label}`}
+                    >
+                        <SortIcon column={sortKey} />
+                    </button>
+                </div>
+                {activeHeaderFilter === key && (
+                    <div className="ert-th-filter-popover" ref={headerFilterRef}>
+                        <input
+                            className="ert-th-filter-search"
+                            value={headerFilterSearch}
+                            onChange={(e) => {
+                                const q = String(e.target.value || '');
+                                setHeaderFilterSearch(q);
+                                const nq = q.trim().toLowerCase();
+                                const matched = options.filter((o) => String(o).toLowerCase().includes(nq));
+                                setHeaderFilterDraft(matched);
+                            }}
+                            placeholder="Search..."
+                        />
+                        <div className="ert-th-filter-actions">
+                            <button type="button" onClick={() => setHeaderFilterDraft(visible)}>
+                                Select All
+                            </button>
+                            <button type="button" onClick={() => setHeaderFilterDraft([])}>
+                                Unselect All
+                            </button>
+                        </div>
+                        <div className="ert-th-filter-options">
+                            {isDateColumn
+                                ? renderDateFilterOptions(visible, headerFilterDraft, setHeaderFilterDraft)
+                                : visible.map((opt) => (
+                                      <label key={opt} className="ert-th-filter-option">
+                                          <input
+                                              type="checkbox"
+                                              checked={headerFilterDraft.includes(opt)}
+                                              onChange={(e) =>
+                                                  setHeaderFilterDraft((prev) =>
+                                                      e.target.checked ? [...prev, opt] : prev.filter((v) => v !== opt)
+                                                  )
+                                              }
+                                          />
+                                          <span>{opt || '—'}</span>
+                                      </label>
+                                  ))}
+                        </div>
+                        <div className="ert-th-filter-footer">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setColumnFilters((prev) => {
+                                        const next = { ...prev };
+                                        delete next[key];
+                                        return next;
+                                    });
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Clear
+                            </button>
+                            <button
+                                type="button"
+                                className="ert-th-filter-apply"
+                                onClick={() => {
+                                    setColumnFilters((prev) => {
+                                        const next = { ...prev };
+                                        if (headerFilterDraft.length === options.length) {
+                                            delete next[key];
+                                        } else {
+                                            next[key] = [...headerFilterDraft];
+                                        }
+                                        return next;
+                                    });
+                                    setActiveHeaderFilter(null);
+                                }}
+                            >
+                                Apply
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </th>
+        );
+    };
+
+    const renderSortableHeader = (sortKey, label, extraStyle = {}, labelContent = null) => (
+        <th
+            key={sortKey}
+            className="sortable-header"
+            style={{ ...headerThStyle, ...extraStyle }}
+            onClick={() => onSort(sortKey)}
+        >
+            <div className="header-content">
+                {labelContent || label}
+                <SortIcon column={sortKey} />
+            </div>
+        </th>
+    );
+
     return (
-        <div className="enquiry-results-table-root w-100 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
-            {distinctProjectCount > 0 ? (
+        <div className="enquiry-results-table-root ems-cf-scope w-100 d-flex flex-column flex-grow-1" style={{ minHeight: 0 }}>
+            {showProjectSummaryBar ? (
                 <div
                     className="enquiry-results-table-project-total flex-shrink-0 px-2 py-1 d-flex align-items-center justify-content-between gap-2 flex-wrap"
                     role="status"
                     aria-live="polite"
                 >
-                    <div className="d-flex align-items-center gap-3 flex-wrap">
-                        <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
-                            Total projects:{' '}
-                            <span className="text-primary">{distinctProjectCount}</span>
+                    <div className="d-flex align-items-center gap-2 flex-wrap">
+                        <span className="small fw-semibold text-dark d-inline-flex align-items-center gap-1" style={{ letterSpacing: '0.02em' }}>
+                            <span>
+                                Total projects:{' '}
+                                <span className="text-primary">{distinctProjectCount}</span>
+                            </span>
+                            {enableHeaderFilters && distinctProjectCount > 0 ? (
+                                <button
+                                    type="button"
+                                    className="ems-cf-clear-filters-btn"
+                                    onClick={clearAllColumnFilters}
+                                    title="Clear all column filters"
+                                    aria-label="Clear all column filters"
+                                    disabled={!hasColumnFilters}
+                                >
+                                    <FilterX size={13} strokeWidth={2} aria-hidden="true" />
+                                </button>
+                            ) : null}
                         </span>
                         {headerQuotedTotal != null && Number.isFinite(Number(headerQuotedTotal)) ? (
                             <span className="small fw-semibold text-dark" style={{ letterSpacing: '0.02em' }}>
@@ -101,58 +464,49 @@ const EnquiryResultsTable = ({
                     <thead>
                         <tr>
                             <th style={headerThStyle}>Action</th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('RequestNo')}>
-                                <div className="header-content">Enquiry No. <SortIcon column="RequestNo" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('EnquiryDate')}>
-                                <div className="header-content">Enquiry Date <SortIcon column="EnquiryDate" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('ProjectName')}>
-                                <div className="header-content">Project <SortIcon column="ProjectName" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('SE')}>
-                                <div className="header-content" style={{ alignItems: 'flex-start', whiteSpace: 'normal' }}>
-                                    <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15 }}>
-                                        <span style={{ fontWeight: 400 }}>Divisions</span>
-                                        <span style={{ fontSize: '10px', opacity: 0.88 }}>SE/EE/TE/QS Involved</span>
-                                    </div>
-                                    <SortIcon column="SE" />
-                                </div>
-                            </th>
-                            <th className="sortable-header" style={{ ...headerThStyle, maxWidth: '260px' }} onClick={() => onSort('EnquiryDetails')}>
-                                <div className="header-content">Enquiry Details <SortIcon column="EnquiryDetails" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('Customer')}>
-                                <div className="header-content">Customer Name / Contractor Name <SortIcon column="Customer" /></div>
-                            </th>
-                            <th className="sortable-header" onClick={() => onSort('DueOn')} style={headerThStyle}>
-                                <div className="header-content">Due <SortIcon column="DueOn" /></div>
-                            </th>
-                            <th className="sortable-header text-nowrap" onClick={() => onSort('SiteVisitDate')} style={headerThStyle}>
-                                <div className="header-content">Site visit date <SortIcon column="SiteVisitDate" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('ClientName')}>
-                                <div className="header-content">Client <SortIcon column="ClientName" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('EnquiryType')}>
-                                <div className="header-content">Enquiry Type <SortIcon column="EnquiryType" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('SourceOfInfo')}>
-                                <div className="header-content">Source <SortIcon column="SourceOfInfo" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('Status')}>
-                                <div className="header-content">Status <SortIcon column="Status" /></div>
-                            </th>
-                            <th className="sortable-header" style={headerThStyle} onClick={() => onSort('CreatedBy')}>
-                                <div className="header-content">Created By <SortIcon column="CreatedBy" /></div>
-                            </th>
+                            {enableHeaderFilters
+                                ? FILTERABLE_COLUMNS.map((col) =>
+                                      renderFilterableHeader(
+                                          col,
+                                          col.key === 'enquiryDetails' ? { maxWidth: '260px' } : col.key === 'se' ? { minWidth: '200px' } : {}
+                                      )
+                                  )
+                                : (
+                                    <>
+                                        {renderSortableHeader('RequestNo', 'Enquiry No.')}
+                                        {renderSortableHeader('EnquiryDate', 'Enquiry Date')}
+                                        {renderSortableHeader('ProjectName', 'Project')}
+                                        {renderSortableHeader(
+                                            'SE',
+                                            null,
+                                            { minWidth: '200px' },
+                                            <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15 }}>
+                                                <span>Divisions</span>
+                                                <span style={{ fontSize: '10px', opacity: 0.88 }}>SE/EE/TE/QS Involved</span>
+                                            </span>
+                                        )}
+                                        {renderSortableHeader('EnquiryDetails', 'Enquiry Details', { maxWidth: '260px' })}
+                                        {renderSortableHeader('Customer', 'Customer Name / Contractor Name')}
+                                        {renderSortableHeader('DueOn', 'Due')}
+                                        {renderSortableHeader('SiteVisitDate', 'Site visit date', {}, null)}
+                                        {renderSortableHeader('ClientName', 'Client')}
+                                        {renderSortableHeader('EnquiryType', 'Enquiry Type')}
+                                        {renderSortableHeader('SourceOfInfo', 'Source')}
+                                        {renderSortableHeader('Status', 'Status')}
+                                        {renderSortableHeader('CreatedBy', 'Created By')}
+                                    </>
+                                )}
                         </tr>
                     </thead>
                     <tbody>
-                        {sortedRows.length === 0 ? (
-                            <tr><td colSpan="14" className="text-muted text-center">{emptyLabel}</td></tr>
+                        {rowsToDisplay.length === 0 ? (
+                            <tr>
+                                <td colSpan="14" className="text-muted text-center">
+                                    {emptyLabel}
+                                </td>
+                            </tr>
                         ) : (
-                            sortedRows.map((r, idx) => {
+                            rowsToDisplay.map((r, idx) => {
                                 const jobLines = getLeadJobDisplayLines(r, { users: masters?.users });
                                 const reqNo = getEnquiryRowRequestNo(r);
                                 const canActivate = Boolean(reqNo && typeof onRowOpen === 'function');

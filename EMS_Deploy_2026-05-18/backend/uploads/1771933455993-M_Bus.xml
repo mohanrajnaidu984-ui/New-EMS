@@ -1,0 +1,53 @@
+<M-Bus_Network>
+
+<Nodo Node_Enable="1" ID_Primary="28" ID_Secondary="10102783" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="100" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="102" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="104" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="106" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="29" ID_Secondary="10102777" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="108" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="110" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="112" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="114" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="30" ID_Secondary="10102780" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="116" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="118" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="120" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="122" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="31" ID_Secondary="10102782" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="124" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="126" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="128" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="130" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="32" ID_Secondary="10102790" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="132" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="134" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="136" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="138" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="33" ID_Secondary="10102776" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="140" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="142" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="144" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="146" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+<Nodo Node_Enable="1" ID_Primary="34" ID_Secondary="10102753" Descrizione="IMT" Send_SND_NKE="0" Reset_App="0" Node_State="0" Ident_Num="0" BCDtoINT_IN="0" Swap_IN="0" Node_ID_Type="0" Var_List_Type="0" Cut_After="3" Manufacturer_Specific_Data="0" MSD_Length="0" MSD_Offset="0" Access_Number="0">
+<Variabile Enable="1" Desc="m3-1" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="148" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="1" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m3-2" Type="2" Fun_Field="0" Dim="2" Unit="0" ModReg="150" ModScale="0" StoNumber="0" Tariff="1" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="2" Post_Operation="0"/>
+<Variabile Enable="1" Desc="m2h" Type="8" Fun_Field="0" Dim="2" Unit="0" ModReg="152" ModScale="0" StoNumber="0" Tariff="0" VIFE="0" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="3" Post_Operation="0"/>
+<Variabile Enable="1" Desc="Rem_days" Type="19" Fun_Field="0" Dim="1" Unit="0" ModReg="154" ModScale="0" StoNumber="0" Tariff="0" VIFE="135" BCDtoINT="0" VIF_ASCII="" Length="0" Conv_Float="1" Force_Int32="0" TP_Mod_Regs="0" TP_Mod_Year="0" Position="4" Post_Operation="0"/>
+</Nodo>
+
+</M-Bus_Network>
+<!--SW_VERSION = 2.306-->

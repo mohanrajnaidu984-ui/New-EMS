@@ -1,0 +1,1315 @@
+﻿// BACnet Version 1.0 22.02.2016 MH
+
+//  0 => HD67671 BACnet / Modbus Master
+//  1 => HD67056 M-Bus / BACnet
+//  2 => HD67672 BACnet / Modbus Slave
+//  3 => HD67673 BACnet / Modbus TCP Master
+//  4 => HD67674 BACnet / Modbus TCP Slave
+//  6 => HD67676 BACnet / PROFIBUS Slave
+//  7 => HD67677 BACnet / CAN
+//  8 => HD67678 BACnet / CANopen
+//  9 => HD67679 BACnet / PROFINET
+// 10 => HD67680 BACnet / DeviceNet Master
+// 11 => HD67681 BACnet / DeviceNet Slave
+// 12 => HD67682 BACnet / EtherNet/IP
+// 13 => HD67683 BACnet / J1939
+// 14 => HD67684 BACnet / NMEA 2000
+// 15 => HD67685 BACnet / Ethernet
+// 16 => HD67802 BACnet / KNX
+// 17 => HD67693 BACnet / SNMP
+// 18 => HD67670 BACnet / DMX
+// 19 => HD67170 BACnet / SNMP Manager
+
+  //Main Form
+STR00000 = Projekt
+STR00001 = Schritt 1
+STR00002 = Schritt 2
+STR00003 = Schritt 3
+STR00004 = Schritt 4
+STR00005 = Schritt 5
+STR00006 = Schritt 6
+STR00007 = Schritt 7
+STR00008 = Schritt 8
+STR00009 = Keine Konfiguration geöffnet ¶
+STR00010 = Nutze Schritt 1 um eine Konfiguration zu erstellen
+STR00011 = Geöffnete Konfiguration des Compositor: ¶
+STR00012 = Information
+STR00013 = Optionen
+STR00014 = Compositor schliessen
+STR00015 = Neue Konfiguration
+STR00016 = Konfiguration öffnen
+STR00017 = Update Gerät
+STR00018 = Projekt nicht gültig.
+STR00019 = Neue Version verfügbar. Hier klicken für weitere Details.
+STR00020 = Komm. einstellen
+STR00021 = Die Datei existiert bereits! Wollen Sie die Datei überschreiben?
+STR00022 = Schritt 9
+STR00023 = ¶ ¶
+STR00024 = ¶ ¶
+
+
+  //New Configuration
+STR00025 = Neue Konfiguration erstellen
+STR00026 = Neue Konfiguration erstellen
+STR00027 = Name der neuen Konfiguration:
+STR00028 = OK
+STR00029 = Abbruch
+STR00030 = FEHLER! Proj.-Name ist nicht gültig
+STR00031 = FEHLER! Proj.-Name ist nicht gültig weil Verzeichnis besteht bereits
+STR00032 = FEHLER! Proj.-Name ist nicht gültig
+
+
+  //Open Configuration
+STR00033 = Konfiguration öffnen
+STR00034 = Bestehende Konfiguration öffnen
+STR00035 = Liste bestehender Konfigurationen:
+STR00036 = OK
+STR00037 = Abbruch
+
+  //Soft Options
+STR00038 = Software Optionen
+STR00039 = Software Optionen
+STR00040 = Sprache
+STR00041 = Verbindungs-Optionen
+STR00042 = Sprache wählen: ¶
+STR00043 = Seite ¶
+STR00044 = ¶ / ¶
+STR00045 = Vorher
+STR00046 = Nächste
+STR00047 = Internet-Verbindung einschalten
+STR00048 = Bei Programmstart auf Software-Update prüfen 
+STR00049 = Auf Update prüfen
+STR00050 = OK
+STR00051 = Abbruch
+STR00052 = Neue Version verfügbar. Hier Klicken für weitere Details.
+STR00053 = Kein Update verfügbar.
+STR00054 = Möchten Sie die Sprache wechseln von ¶
+STR00055 = ¶ auf ¶
+STR00056 = ?
+
+  //BootTCP
+STR00057 = Update Firmware über Ethernet (UDP)
+STR00058 = IP-Addresse eingeben für ¶
+STR00059 = Verbindung zum Gerät prüfen.
+STR00060 = Ping
+STR00061 = Abbruch
+STR00062 = Weiter
+STR00063 = Update Gerät Optionen
+STR00064 = Firmware
+STR00065 = Firmware lesen wenn fertig
+STR00066 = Projekt
+STR00067 = Projekt lesen wenn fertig
+STR00068 = Firmware Update ausführen
+STR00069 = Gerät gefunden!
+STR00070 = Gerät nicht gefunden!
+STR00071 = FEHLER!!! IP-Addresse prüfen.
+STR00072 = Gerät nicht gefunden im Netzwerk.
+
+  //Boot Ser
+STR00073 = Update Firmware über Seriell
+STR00074 = Update über serielle Schnittstelle
+STR00075 = Gehen Sie wie folgt vor, um von RS232 zu aktualisieren:
+STR00076 = 1 - Schalten Sie das Gerät aus
+STR00077 = 2 - Stellen Sie den DIP-Schalter auf Boot-Modus
+STR00078 = 3 - Wählen Sie den COM-Port für die Aktualisierung
+STR00079 = 4 - Schalten Sie das Gerät ein
+STR00080 = Update COM-Port Liste
+STR00081 = Update Gerät Optionen
+STR00082 = Firmware
+STR00083 = Firmware lesen wenn fertig
+STR00084 = Projekt
+STR00085 = Projekt lesen wenn fertig
+STR00086 = Abbruch
+STR00087 = Weiter
+STR00088 = Firmware Update ausführen
+STR00089 = Fehler! Select the COM port to use for the Update
+
+
+  //Main Form - Other BUTTON
+STR00090 = Modbus Einstellungen
+STR00091 = BACnet Einstellungen
+STR00092 = BACnet Einstellungen
+STR00093 = Modbus Einstellungen
+STR00094 = BACnet Einstellungen
+STR00095 = BACnet Einstellungen
+STR00096 = BACnet Einstellungen
+STR00097 = BACnet Einstellungen
+STR00098 = Frames empfangen
+STR00099 = Info empfangen
+STR00100 = Frames senden
+STR00101 = Info senden
+STR00102 = BACnet-Zugriff
+STR00103 = SDO Server setzen
+STR00104 = SDO Client setzen
+STR00105 = PDO-Zugriff
+STR00106 = M-Bus
+STR00107 = BACnet-Zugriff
+STR00108 = BACnet-Zugriff
+STR00109 = BACnet-Zugriff
+STR00110 = DeviceNet Netzwerk
+STR00111 = Offset definieren
+STR00112 = BACnet-Zugriff
+STR00113 = BACnet-Zugirff
+STR00114 = BACnet-Zugriff
+STR00115 = Frames empfangen
+STR00116 = Frames senden
+STR00117 = BACnet-Zugriff
+STR00118 = NMEA 2000 empfangen
+STR00119 = NMEA 2000 senden
+STR00120 = Objekt-Liste
+STR00121 = PROFIBUS GSD
+STR00122 = PROFINET XML
+
+  //SET COMMUNICATION
+STR00123 = Kommunikationseinstellungen
+STR00124 = Kommunikation einstellen
+STR00125 = OK
+STR00126 = Abbruch
+STR00127 = ¶ Ethernet aktualisieren ¶
+STR00128 = ¶ BACnet ¶
+STR00129 = IP-Adresse
+STR00130 = Netzwerk-Maske
+STR00131 = GATEWAY
+STR00132 = Port
+STR00133 = BACnet Gerätename
+STR00134 = Geräte ID
+STR00135 = ¶ BACnet ¶
+STR00136 = Baudrate
+STR00137 = Parität
+STR00138 = MAC-Adresse
+STR00139 = BACnet Gerätename
+STR00140 = ¶ BACnet Typ ¶
+STR00141 = Typ
+STR00142 = ¶ Modbus Master ¶
+STR00143 = Seriell
+STR00144 = Baudrate
+STR00145 = Parität
+STR00146 = Stoppbit
+STR00147 = Timeout (ms)
+STR00148 = Zykl. Verzögerg. (ms)
+STR00149 = ¶ Modbus Slave ¶
+STR00150 = Seriell
+STR00151 = Baudrate
+STR00152 = Parität
+STR00153 = Geräte-ID
+STR00154 = ¶ Modbus TCP Master ¶
+STR00155 = Timeout (ms)
+STR00156 = Zykl. Verzögerg. (ms)
+STR00157 = ¶ Modbus TCP Slave ¶
+STR00158 = Port
+STR00159 = ¶ DeviceNet Master ¶
+STR00160 = Geräte-ID
+STR00161 = Baudrate
+STR00162 = ¶ PROFIBUS Slave ¶
+STR00163 = Geräte-ID
+STR00164 = Baudrate
+STR00165 = Anzahl Byte IN
+STR00166 = Anzahl Byte OUT
+STR00167 = ¶ CAN ¶
+STR00168 = Baudrate
+STR00169 = ¶ CANopen ¶
+STR00170 = Geräte-ID
+STR00171 = Baudrate
+STR00172 = Bus in "Operational" setzen beim Aufstarten
+STR00173 = Netzwerk starten beim Aufstarten Verz. (s)
+STR00174 = SDO Client TimeOut (1/10 ms)
+STR00175 = ¶ PROFINET ¶
+STR00176 = Port
+STR00177 = Anzahl Byte IN
+STR00178 = Anzahl Byte OUT
+STR00179 = ¶ DeviceNet Slave ¶
+STR00180 = ID Device
+STR00181 = Baudrate
+STR00182 = Anz. Byte IN
+STR00183 = Anz. Byte Out
+STR00184 = ¶ EtherNet/IP ¶
+STR00185 = Port
+STR00186 = Anz. Byte Input
+STR00187 = Anz. Byte Output
+STR00188 = ¶ J1939 ¶
+STR00189 = Baudrate
+STR00190 = Timeout Daten (s)
+STR00191 = Punkt-zu-Punkt aktivieren
+STR00192 = ¶ NMEA 2000 ¶
+STR00193 = Baudrate
+STR00194 = Timeout Daten (s)
+STR00195 = Punkt-zu-Punkt aktivieren
+STR00196 = ¶ Ethernet ¶
+STR00197 = Port
+STR00198 = ¶ M-Bus ¶
+STR00199 = Baudrate
+STR00200 = Parität
+STR00201 = Zykl. Verzögerung (s)
+STR00202 = Wert "Geräte-Status" wenn Slave-Gerät nicht ¶
+STR00203 = vorhanden: 
+STR00204 = Zusammenbruch
+STR00205 = expandieren
+
+STR00206 = Fehler BACnet!! IP-Addresse 1 muss zwischen 0 und 255 sein.
+STR00207 = Fehler BACnet!! IP-Addresse 2 muss zwischen 0 und 255 sein.
+STR00208 = Fehler BACnet!! IP-Addresse 3 muss zwischen 0 und 255 sein.
+STR00209 = Fehler BACnet!! IP-Addresse 4 muss zwischen 0 und 255 sein.
+
+STR00210 = Fehler BACnet!! Netzwerk-Maske 1 muss zwischen 0 und 255 sein.
+STR00211 = Fehler BACnet!! Netzwerk-Maske 2 muss zwischen 0 und 255 sein.
+STR00212 = Fehler BACnet!! Netzwerk-Maske 3 muss zwischen 0 und 255 sein.
+STR00213 = Fehler BACnet!! Netzwerk-Maske 4 muss zwischen 0 und 255 sein.
+
+STR00214 = Fehler BACnet!! Gateway-IP 1 muss zwischen 0 und 255 sein.
+STR00215 = Fehler BACnet!! Gateway-IP 2 muss zwischen 0 und 255 sein.
+STR00216 = Fehler BACnet!! Gateway-IP 3 muss zwischen 0 und 255 sein.
+STR00217 = Fehler BACnet!! Gateway-IP 4 muss zwischen 0 und 255 sein.
+
+STR00218 = Fehler BACnet!! Port muss zwischen 0 und 65535, und unterscheidet sich von 10000 und 10001 sein.
+STR00219 = Fehler BACnet!! BACnet Geräte-Name ist nicht korrekt (zulässige Zeichen sind "a" .. "z" und "0" .. "9").
+STR00220 = Fehler BACnet!! Geräte-ID muss zwischen 0 und 4194303 sein.
+STR00221 = Fehler BACnet!! Baudrate muss zwischen 9600 und 115200 sein.
+STR00222 = Fehler BACnet!! Geräte-ID muss zwischen 0 und 254 sein.
+STR00223 = Fehler BACnet!! IP-Addresse 1 muss zwischen 0 und 255 sein.
+STR00224 = Fehler BACnet!! IP-Addresse 2 muss zwischen 0 und 255 sein.
+STR00225 = Fehler BACnet!! IP-Addresse 3 muss zwischen 0 und 255 sein.
+STR00226 = Fehler BACnet!! IP-Addresse 4 muss zwischen 0 und 255 sein.
+STR00227 = Fehler BACnet!! Netzwerk-Maske 1 muss zwischen 0 und 255 sein.
+STR00228 = Fehler BACnet!! Netzwerk-Maske 2 muss zwischen 0 und 255 sein.
+STR00229 = Fehler BACnet!! Netzwerk-Maske 3 muss zwischen 0 und 255 sein.
+STR00230 = Fehler BACnet!! Netzwerk-Maske 4 muss zwischen 0 und 255 sein.
+STR00231 = Fehler BACnet!! Gateway-IP 1 muss zwischen 0 und 255 sein.
+STR00232 = Fehler BACnet!! Gateway-IP 2 muss zwischen 0 und 255 sein.
+STR00233 = Fehler BACnet!! Gateway-IP 3 muss zwischen 0 und 255 sein.
+STR00234 = Fehler BACnet!! Gateway-IP 4 muss zwischen 0 und 255 sein.
+STR00235 = Fehler BACnet!! PORT muss zwischen 0 und 65535 sein, und nicht 10000.
+STR00236 = Fehler BACnet!! BACnet Geräte-Name ist nicht korrekt (zulässige Zeichen sind "a" .. "z" und "0" .. "9").
+STR00237 = Fehler BACnet!! Geräte-ID muss zwischen 0 und 65536 sein.
+STR00238 = Fehler Modbus Master!! Zwei Stop-Bits können nur ohne Parität ausgewählt werden. 
+STR00239 = Fehler Modbus Master!! TimeOut muss zwischen 0 und 100000ms sein.
+STR00240 = Fehler Modbus Master!! Zykl. Verzögerg. muss zwischen 0 und 10000ms sein.
+STR00241 = Fehler M-Bus!! Zykl. Verzögerg. muss zwischen 0 und 65535 Sekunden sein.
+STR00242 = Fehler M-Bus!! Geräte-Status muss zwischen 0 und 255 sein, wenn Slave-Gerät nicht vorhanden ist.
+STR00243 = Fehler Modbus Slave!! Geräte-ID muss zwischen 1 und 247 sein.
+STR00244 = Fehler Modbus TCP Master!! Port muss zwischen 0 und 65535 sein, und nicht 10000 oder ¶
+STR00245 = Fehler Modbus TCP Master!! TimeOut muss zwischen 0 und 100000ms sein.
+STR00246 = Fehler Modbus TCP Master!! Zykl. Verzögerg. muss zwischen 0 und 10000ms sein.
+STR00247 = Fehler Modbus TCP Slave!! Port muss zwischen 0 und 65535 sein, und nicht 10000 oder ¶
+STR00248 = Fehler PROFIBUS Slave!! Geräte-ID muss zwischen 1 und 125 sein.
+STR00249 = Fehler PROFIBUS Slave!! Anz. Byte IN muss zwischen 0 und 244 sein.
+STR00250 = Fehler PROFIBUS Slave!! Anz. Byte OUT muss zwischen 0 und 244 sein.
+STR00251 = Fehler CANopen!! Geräte-ID muss zwischen 1 und 127 sein.
+STR00252 = Fehler CANopen!! Verz. muss zwischen 0 und 255 Sekunden sein.
+STR00253 = Fehler CANopen!! TimeOut SDO muss zwischen 0 und 100000 sein.
+STR00254 = Fehler PROFINET!! PORT muss gleich 34964 sein.
+STR00255 = Fehler PROFINET!! Anz. Byte Input muss zwischen 1 und 1440 sein.
+STR00256 = Fehler PROFINET!! Anz. Byte Output muss zwischen 1 und 1440 sein.
+STR00257 = Fehler DeviceNet Master!! Geräte-ID muss zwischen 0 und 63 sein.
+STR00258 = Fehler DeviceNet Slave!! Geräte-ID muss zwischen 0 und 63 sein.
+STR00259 = Fehler DeviceNet Slave!! Anz. Byte IN muss zwischen 0 und 455 sein.
+STR00260 = Fehler DeviceNet Slave!! Anz. Byte OUT muss zwischen 0 und 455 sein.
+STR00261 = Fehler EtherNet/IP!! PORT muss gleich 44818 sein.
+STR00262 = Fehler EtherNet/IP!! Anz. Byte Input muss zwischen 0 und 496 sein.
+STR00263 = Fehler EtherNet/IP!! Anz. Byte Output muss zwischen 0 und 500 sein.
+STR00264 = Fehler J1939!! TimeOut muss zwischen 0 und 100000s sein.
+STR00265 = Fehler NMEA 2000!! TimeOut muss zwischen 0 und 100000s sein.
+STR00266 = Fehler Ethernet!! Port muss zwischen 0 und 65535 sein, und nicht 10000 oder ¶
+STR00267 = Möchten Sie schliessen ohne die Änderungen zu speichern?
+
+
+  //M-BUS
+  //FBACnet_Eng_Unit
+STR00268 = BACnet Einheit
+STR00269 = Wählen Sie die BACnet-Einheit.
+STR00270 = OK
+STR00271 = Abbruch
+STR00272 = Ausgewählte BACnet-Einheit: 
+STR00273 = Wählen Sie eine neue BACnet-Einheit: 
+STR00274 = Typ: 
+STR00275 = Einheit: 
+STR00276 = Einheit übernehmen
+
+  //FNewIDNode
+STR00277 = Neue Node-ID
+STR00278 = Neue Node-ID
+STR00279 = OK
+STR00280 = Abbruch
+STR00281 = ID des neuen Knoten auswählen.
+STR00282 = Primäre Knoten-ID
+STR00283 = Sekundäre Knoten-ID
+
+STR00284 = Fehler!! Primäre Knoten-ID M-Bus muss zwischen 0 und 255 sein.¶
+STR00285 = Fehler!! Sekundäre Knoten-ID M-Bus muss zwischen 0 und 99999999 sein.¶
+
+  //FMeter_Bus
+STR00286 = M-Bus Netzwerk
+STR00287 = M-Bus Netzwerk
+
+STR00288 = OK
+STR00289 = Abbruch
+STR00290 = Netzwerk import.
+
+STR00291 = Knoten     ¶
+STR00292 = Variablen     ¶
+
+STR00293 = Knoten einschalten
+STR00294 = Beschreib.:
+STR00295 = Prim. Knoten-ID:
+STR00296 = Sek. Knoten-ID:
+STR00297 = Knoten-Status
+STR00298 = Ident.-Nr.
+STR00299 = Ident.-Nr. tauschen
+STR00300 = Konvert. Ident.-Nr. von BCD in Integer ¶
+STR00301 = SND_NKE senden
+STR00302 = Reset App. senden
+STR00303 = Variablenliste:
+STR00304 = Nach ¶
+STR00305 = Frame(s) abschneiden
+STR00306 = Knoten ändern
+STR00307 = Knoten hinzuf.
+
+STR00308 = Var. einschalten
+STR00309 = Beschreib.:
+STR00310 = Datentyp:
+STR00311 = VIF Zeichenkette:
+STR00312 = Funktionsfeld:
+STR00313 = Dimension (Bit):
+STR00314 = Länge (Var. Length)
+STR00315 = Modul:
+STR00316 = Speicher Nummer:
+STR00317 = Tarif:
+STR00318 = VIFE
+STR00319 = Von BCD zu Integer
+STR00320 = Position
+STR00321 = BACnet Einheit
+STR00322 = BACnet Datentyp
+STR00323 = Anschl. Operation
+STR00324 = Variable ändern
+STR00325 = Variable hinzuf.
+
+STR00326 = Möchten Sie wirklich das bestehende M-Bus Netzwerk überschreiben?
+STR00327 = Fehler!! Speicher Nummer muss zwischen 0x00000000 und 0xFFFFFFFF sein. ¶
+STR00328 = Fehler!! Tarif muss zwischen 0x00000 und 0xFFFFF sein. ¶
+STR00329 = Fehler!! Länge (Var. Length) muss zwischen 0 und 191 sein. ¶
+STR00330 = Fehler!! Variable Position muss zwischen 1 und 100 sein. ¶
+STR00331 = Fehler!! Variable BACnet Einheit musss zwischen 0 und 65535 sein.¶
+STR00332 = Fehler!! Die Dimension muss "Variable Länge" sein, wenn "String" im BACnet Datentyp ausgewählt ist.¶
+STR00333 = Fehler!! Anschl. Operation muss "None" für diesen "BACnet Datentyp" sein.
+STR00334 = Fehler!! Anschl. Operation muss "None" für diesen "Datentyp" sein.
+STR00335 = Fehler!! Anschl. Operation muss "None" für diese "VIFE" sein
+STR00336 = Fehler!! Primäre Knoten-ID M-Bus muss zwischen 0 und 255 sein.¶
+STR00337 = Fehler!! Sekundäre Knoten-ID M-Bus muss zwischen 0 und 99999999 sein.¶
+STR00338 = Fehler!! Node-ID ist bereits benutzt. ¶
+STR00339 = Fehler!! Node-ID ist bereits benutzt. ¶
+STR00340 = Fehler!! Node-ID ist bereits benutzt. ¶
+STR00341 = Wollen Sie wirklich alle Knoten abbrechen?
+STR00342 = Wollen Sie wirklich diesen Knoten abbrechen?
+STR00343 = Wollen Sie wirklich diese Variable abbrechen?
+STR00344 = Fehler! Variable auswählen.
+STR00345 = Fehler! Wählen Sie eine Variable von einem Knoten.
+STR00346 = Fehler! Ein Knoten auswählen.
+STR00347 = Fehler! Ein Knoten auswählen.
+STR00348 = Fehler! Kopieren Sie eine Variable vorher.
+STR00349 = Fehler! Wählen Sie einen Knoten, in den Sie die Variable kopieren.
+STR00350 = Möchten Sie schliessen ohne die Änderungen zu speichern?
+
+
+  //FBACnetSetAccess
+STR00351 = BACnet Zugriff setzen
+STR00352 = BACnet Zugriff setzen
+STR00353 = OK
+STR00354 = Abbruch
+STR00355 = Zeile löschen
+STR00356 = Zeile einfügen
+STR00357 = BACnet liest
+STR00358 = BACnet schreibt
+STR00359 = N
+STR00360 = Datentyp
+STR00361 = Tech. Einheit
+STR00362 = Position
+STR00363 = Start-Bit
+STR00364 = Länge
+STR00365 = Kommentar
+STR00366 = N
+STR00367 = Datentyp
+STR00368 = Tech. Einheit
+STR00369 = Position
+STR00370 = Start-Bit
+STR00371 = Länge
+STR00372 = Kommentar
+
+STR00373 = Fehler Spalte ¶
+STR00374 = !! [BACnet liest] Tech. Einheit muss zwischen 0 und 65535 sein.
+STR00375 = !! [BACnet liest] Position muss zwischen 0 und ¶
+STR00376 = !! [BACnet liest] Bit muss zwischen 0 und 7 sein.
+STR00377 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00378 = !! [BACnet schreibt] Tech. Einheit muss zwischen 0 und 65535 sein.
+STR00379 = !! [BACnet schreibt] Position muss sein, zwischen 0 und ¶
+STR00380 = !! [BACnet schreibt] Bit muss zwischen 0 und 7 sein.
+STR00381 = !! [BACnet schreibt] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00382 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+
+  //FSetAccess
+STR00383 = Zugriff einstellen
+STR00384 = Modbus Master Einstellungen
+STR00385 = OK
+STR00386 = Abbruch
+STR00387 = Zeile löschen
+STR00388 = Zeile einfügen
+STR00389 = Modbus lesen
+STR00390 = Modbus schreiben
+STR00391 = N
+STR00392 = Slave-ID
+STR00393 = Typ
+STR00394 = Adresse
+STR00395 = Anz.
+STR00396 = Zeitinterv. [ms]
+STR00397 = Max. Fehler
+STR00398 = Position
+STR00399 = Start-Bit
+STR00400 = Float-Konv.
+STR00401 = Endian
+STR00402 = Operation
+STR00403 = Kommentar
+STR00404 = N
+STR00405 = Slave ID
+STR00406 = Typ
+STR00407 = Adresse
+STR00408 = Anz.
+STR00409 = Zeitinterv. [ms]
+STR00410 = Bei Wechsel
+STR00411 = Max. Fehler
+STR00412 = Position
+STR00413 = Start-Bit
+STR00414 = Float-Konv.
+STR00415 = Endian
+STR00416 = Operation
+STR00417 = Kommentar
+
+STR00418 = Fehler row ¶
+STR00419 = !! [Modbus lesen] Slave-ID muss zwischen 1 und 247 sein.
+STR00420 = !! [Modbus lesen] Typ muss Coil-Status oder Input-Status oder Holding-Register oder Input-Register sein.
+STR00421 = !! [Modbus lesen] Adresse muss zwischen 0 und 65535 sein.
+STR00422 = !! [Modbus lesen] Anz. muss sein, zwischen 1 und ¶
+STR00423 = !! [Modbus lesen] Zeitintervall muss zwischen 1 und 100000000 sein.
+STR00424 = !! [Modbus lesen] Max. Fehler muss zwischen 0 und 100000000 sein.
+STR00425 = !! [Modbus lesen] Position muss sein, zwischen 0 und ¶
+STR00426 = !! [Modbus lesen] Bit muss zwischen 0 und 7 sein.
+STR00427 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00428 = !! [Modbus lesen] Endian muss Little oder Big sein.
+STR00429 = !! [Modbus lesen] Operation muss selektiert sein.
+STR00430 = !! [Modbus schreiben] Slave-ID muss zwischen 1 und 247 sein.
+STR00431 = !! [Modbus schreiben] Type muss Coil-Status oder Holding-Register sein.
+STR00432 = !! [Modbus schreiben] Adresse muss zwischen 0 und 65535 sein.
+STR00433 = !! [Modbus schreiben] Anz. muss sein, zwischen 1 und ¶
+STR00434 = !! [Modbus schreiben] Zeitintervall muss zwischen 0 und 100000000 sein.
+STR00435 = !! [Modbus schreiben] Max Fehler muss zwischen 0 und 100000000 sein.
+STR00436 = !! [Modbus schreiben] Position muss sein, zwischen 0 und ¶
+STR00437 = !! [Modbus schreiben] Bit muss zwischen 0 und 7 sein.
+STR00438 = !! [BACnet schreiben] Zu viele Bytes um, beginnend von der angegebenen Position, zu schreiben.
+STR00439 = !! [Modbus schreiben] Endian muss Little oder Big sein.
+STR00440 = !! [Modbus schreiben] Operation muss selektiert sein.
+STR00441 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //FBACnetSetAccess_ModSlave
+STR00442 = BACnet Einstellungen
+STR00443 = BACnet Einstellungen
+STR00444 = OK
+STR00445 = Abbruch
+STR00446 = Zeile löschen
+STR00447 = Zeile einfügen
+STR00448 = BACnet liest
+STR00449 = BACnet schreibt
+STR00450 = N
+STR00451 = Datentyp
+STR00452 = Tech. Einheit
+STR00453 = Position
+STR00454 = Start-Bit
+STR00455 = Länge
+STR00456 = Kommentar
+STR00457 = N
+STR00458 = Datentyp
+STR00459 = Tech. Einheit
+STR00460 = Position
+STR00461 = Start-Bit
+STR00462 = Länge
+STR00463 = Kommentar
+
+STR00464 = Fehler Zeile ¶
+STR00465 = !! [BACnet liest] Tech. Einheit muss zwischen 0 und 65535 sein.
+STR00466 = !! [BACnet liest] Position muss sein, zwischen 0 und ¶
+STR00467 = !! [BACnet liest] Länge mit der Variable "Analog Input" muss zwischen 1 und 4 sein.
+STR00468 = !! [BACnet liest] Länge mit der Variable "Positive Integer Value" muss zwischen 1 und 4 sein.
+STR00469 = !! [BACnet liest] Länge mit der Variable "Large Analog Value" muss zwischen 1 und 8 sein.
+STR00470 = !! [BACnet liest] Bit muss zwischen 0 und 7 sein.
+STR00471 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00472 = !! [BACnet schreibt] Tech. Einheit muss zwischen 0 und 65535 sein.
+STR00473 = !! [BACnet schreibt] Position muss sein, zwischen 0 und ¶
+STR00474 = !! [BACnet schreibt] Bit muss zwischen 0 und 7 sein.
+STR00475 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00476 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //FSetAccessTCP
+STR00477 = Einstellungen
+STR00478 = Modbus TCP Master Einstellungen
+STR00479 = OK
+STR00480 = Abbruch
+STR00481 = Zeile löschen
+STR00482 = Zeile einfügen
+STR00483 = Modbus lesen
+STR00484 = Modbus schreiben
+STR00485 = N
+STR00486 = Slave IP-Addresse
+STR00487 = Port
+STR00488 = Slave-ID
+STR00489 = Typ
+STR00490 = Adresse
+STR00491 = Anz.
+STR00492 = Zeitinterv. [ms]
+STR00493 = Max. Fehler
+STR00494 = Position
+STR00495 = Start-Bit
+STR00496 = Kommentar
+STR00497 = N
+STR00498 = Slave IP-Addresse
+STR00499 = Port
+STR00500 = Slave-ID
+STR00501 = Typ
+STR00502 = Adresse
+STR00503 = Anz.
+STR00504 = Zeitinterv. [ms]
+STR00505 = Bei Wechsel
+STR00506 = Max. Fehler
+STR00507 = Position
+STR00508 = Start-Bit
+STR00509 = Kommentar
+
+STR00510 = Fehler Zeile ¶
+STR00511 = !! [Modbus lesen] Slave IP-Adresse muss eine gültige TCP IP-Addresse sein (z. Bsp. 192.168.1.125)
+STR00512 = !! [Modbus lesen] Port muss zwischen 0 und 65535 sein.
+STR00513 = !! [Modbus lesen] Slave-ID muss zwischen 0 und 255 sein.
+STR00514 = !! [Modbus lesen] Type muss ein Coil-Status oder Input-Status oder Holding-Register oder Input-Register sein.
+STR00515 = !! [Modbus lesen] Adresse muss zwischen 0 und 65535 sein.
+STR00516 = !! [Modbus lesen] Anz. muss sein, zwischen 1 und ¶
+STR00517 = !! [Modbus lesen] Zeitintervall muss zwischen 1 und 100000000 sein.
+STR00518 = !! [Modbus lesen] Max. Fehler muss zwischen 0 und 100000000 sein.
+STR00519 = !! [Modbus lesen] Position muss sein, zwischen 0 und ¶
+STR00520 = !! [Modbus lesen] Bit muss zwischen 0 und 7 sein.
+STR00521 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu speichern.
+STR00522 = !! [Modbus schreiben] Slave IP-Adresse muss eine gültige TCP IP-Adresse sein. (z. Bsp. 192.168.1.125)
+STR00523 = !! [Modbus schreiben] Port muss zwischen 0 und 65535 sein.
+STR00524 = !! [Modbus schreiben] Slave-ID muss zwischen 0 und 255 sein.
+STR00525 = !! [Modbus schreiben] Typ muss Coil-Status oder Holding-Register sein.
+STR00526 = !! [Modbus schreiben] Adresse muss zwischen 0 und 65535 sein.
+STR00527 = !! [Modbus schreiben] Anz. muss sein, zwischen 1 und ¶
+STR00528 = !! [Modbus schreiben] Zeitintervall muss zwischen 0 und 100000000 sein.
+STR00529 = !! [Modbus schreiben] Max. Fehler muss zwischen 0 und 100000000 sein.
+STR00530 = !! [Modbus schreiben] Position muss sein, zwischen 0 und ¶
+STR00531 = !! [Modbus schreiben] Bit muss zwischen 0 und 7 sein.
+STR00532 = !! [BACnet liest] Zu viele Bytes um, beginnend von der angegebenen Position, zu lesen.
+STR00533 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //UProfibus_GSD
+STR00534 = Datei existiert bereits! Möchten Sie die Datei überschreiben?
+STR00535 = Fehler! Bitte setzen Sie die Kommunikationsparameter bevor Sie die GSD-Datei erzeugen.
+
+
+
+  //CAN
+  //FCAN_Rec_Frames
+STR00536 = CAN-Frames empfangen
+STR00537 = CAN-Frames empfangen
+STR00538 = OK
+STR00539 = Abbruch
+STR00540 = Zeile löschen
+STR00541 = Zeile einfügen
+STR00542 = N
+STR00543 = Cob-ID
+STR00544 = Typ
+STR00545 = Dimension
+STR00546 = Timeout
+STR00547 = Kommentar
+
+STR00548 = Fehler Zeile ¶
+STR00549 = !! COB-ID Typ muss 2.0A (11 Bits) oder 2.0B (29 Bits) sein.
+STR00550 = !! CAN COB-ID muss zwischen 0x000 und 0x7FF sein.
+STR00551 = !! CAN COB-ID muss zwischen 0x000 und 0x1FFFFFFF sein.
+STR00552 = !! CAN Dimension muss zwischen 1 und 8 sein.
+STR00553 = !! Timeout muss zwischen 0 und 10000000 ms sein.
+STR00554 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //FCAN_Send_Frame
+STR00555 = CAN-Frames senden
+STR00556 = CAN-Frames senden
+STR00557 = OK
+STR00558 = Abbruch
+STR00559 = Zeile löschen
+STR00560 = Zeile einfügen
+STR00561 = N
+STR00562 = COB-ID
+STR00563 = Typ
+STR00564 = Dimension
+STR00565 = Send Frame Typ
+STR00566 = Timer Send
+STR00567 = Kommentar
+
+STR00568 = Fehler Zeile ¶
+STR00569 = !! COB-ID Typ muss 2.0A (11 Bits) oder 2.0B (29 Bits) sein.
+STR00570 = !! CAN COB-ID muss zwischen 0x000 und 0x7FF sein.
+STR00571 = !! CAN COB-ID muss zwischen 0x000 und 0x1FFFFFFF sein.
+STR00572 = !! CAN Dimension muss zwischen 1 und 8 sein.
+STR00573 = !! Timeout muss zwischen 0 und 10000000 ms sein.
+STR00574 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //F_Rec_Info
+STR00575 = CAN-Frames Info empfangen
+STR00576 = CAN-Frames Info empfangen
+STR00577 = OK
+STR00578 = Abbruch
+STR00579 = COB-ID
+STR00580 = Bytes
+STR00581 = Byte 1 des CAN-Frame geht zu Byte
+STR00582 = Byte 2 des CAN-Frame geht zu Byte
+STR00583 = Byte 3 des CAN-Frame geht zu Byte
+STR00584 = Byte 4 des CAN-Frame geht zu Byte
+STR00585 = Byte 5 des CAN-Frame geht zu Byte
+STR00586 = Byte 6 des CAN-Frame geht zu Byte
+STR00587 = Byte 7 des CAN-Frame geht zu Byte
+STR00588 = Byte 8 des CAN-Frame geht zu Byte
+STR00589 = von BACnet
+STR00590 = nicht benutzt
+
+STR00591 = ¶ oder nichts
+STR00592 = Fehler Byte 1!! Wert muss sein, zwischen 0 bis ¶
+STR00593 = Fehler Byte 2!! Wert muss sein, zwischen 0 bis ¶
+STR00594 = Fehler Byte 3!! Wert muss sein, zwischen 0 bis ¶
+STR00595 = Fehler Byte 4!! Wert muss sein, zwischen 0 bis ¶
+STR00596 = Fehler Byte 5!! Wert muss sein, zwischen 0 bis ¶
+STR00597 = Fehler Byte 6!! Wert muss sein, zwischen 0 bis ¶
+STR00598 = Fehler Byte 7!! Wert muss sein, zwischen 0 bis ¶
+STR00599 = Fehler Byte 8!! Wert muss sein, zwischen 0 bis ¶
+STR00600 = Fehler!! Das Byte ¶
+STR00601 = ¶ wird in COB-ID benutzt ¶
+STR00602 = ¶ in Byte ¶
+STR00603 = ¶ und in COB-ID ¶
+STR00604 = ¶ in Byte ¶
+
+  //F_Sen_Info
+STR00605 = Send CAN Frames Info
+STR00606 = Send CAN Frames Info
+STR00607 = OK
+STR00608 = Abbruch
+STR00609 = COB ID
+STR00610 = Bytes
+STR00611 = Byte 1 des CAN-Frame ist das Byte 
+STR00612 = Byte 2 des CAN-Frame ist das Byte 
+STR00613 = Byte 3 des CAN-Frame ist das Byte 
+STR00614 = Byte 4 des CAN-Frame ist das Byte 
+STR00615 = Byte 5 des CAN-Frame ist das Byte 
+STR00616 = Byte 6 des CAN-Frame ist das Byte 
+STR00617 = Byte 7 des CAN-Frame ist das Byte 
+STR00618 = Byte 8 des CAN-Frame ist das Byte 
+STR00619 = von BACnet
+STR00620 = Nicht in Benutzung.
+
+STR00621 = ¶ oder nichts
+STR00622 = Fehler Byte 1!! Wert muss sein, zwischen 0 bis ¶
+STR00623 = Fehler Byte 2!! Wert muss sein, zwischen 0 bis ¶
+STR00624 = Fehler Byte 3!! Wert muss sein, zwischen 0 bis ¶
+STR00625 = Fehler Byte 4!! Wert muss sein, zwischen 0 bis ¶
+STR00626 = Fehler Byte 5!! Wert muss sein, zwischen 0 bis ¶
+STR00627 = Fehler Byte 6!! Wert muss sein, zwischen 0 bis ¶
+STR00628 = Fehler Byte 7!! Wert muss sein, zwischen 0 bis ¶
+STR00629 = Fehler Byte 8!! Wert muss sein, zwischen 0 bis ¶
+
+  //CANopen
+  //FSet_PDO_Access
+STR00630 = PDO Einstellungen
+STR00631 = PDO Einstellungen
+STR00632 = OK
+STR00633 = Abbruch
+STR00634 = Zeile löschen
+STR00635 = Zeile einfügen
+STR00636 = Empfangs-PDO
+STR00637 = Sende-PDO
+STR00638 = N
+STR00639 = COB-ID
+STR00640 = Dimension
+STR00641 = Einf. B1
+STR00642 = Einf. B2
+STR00643 = Einf. B3
+STR00644 = Einf. B4
+STR00645 = Einf. B5
+STR00646 = Einf. B6
+STR00647 = Einf. B7
+STR00648 = Einf. B8
+STR00649 = Timeout
+STR00650 = Kommentar
+STR00651 = N
+STR00652 = COB-ID
+STR00653 = Dimension
+STR00654 = Einf. B1
+STR00655 = Einf. B2
+STR00656 = Einf. B3
+STR00657 = Einf. B4
+STR00658 = Einf. B5
+STR00659 = Einf. B6
+STR00660 = Einf. B7
+STR00661 = Einf. B8
+STR00662 = Zeitintervall [ms]
+STR00663 = Bei Wechsel
+STR00664 = Kommentar
+
+STR00665 = Fehler Zeile ¶
+STR00666 = !! [Receive PDO] COB-ID muss zwischen 0x000 und 0x7FF sein.
+STR00667 = !! [Receive PDO] Dimension muss zwischen 1 und 8 sein.
+STR00668 = !! [Receive PDO] Address Byte1 muss sein, zwischen 0 und ¶
+STR00669 = !! [Receive PDO] Address Byte2 muss sein, zwischen 0 und ¶
+STR00670 = !! [Receive PDO] Address Byte3 muss sein, zwischen 0 und ¶
+STR00671 = !! [Receive PDO] Address Byte4 muss sein, zwischen 0 und ¶
+STR00672 = !! [Receive PDO] Address Byte5 muss sein, zwischen 0 und ¶
+STR00673 = !! [Receive PDO] Address Byte6 muss sein, zwischen 0 und ¶
+STR00674 = !! [Receive PDO] Address Byte7 muss sein, zwischen 0 und ¶
+STR00675 = !! [Receive PDO] Address Byte8 muss sein, zwischen 0 und ¶
+STR00676 = !! [Receive PDO] Timeout muss zwischen 0 und 65535 sein.
+STR00677 = !! [Transmit PDO] COB-ID muss zwischen 0x000 und 0x7FF sein.
+STR00678 = !! [Transmit PDO] Dimension muss zwischen 1 und 8 sein.
+STR00679 = !! [Transmit PDO] Address Byte1 muss sein, zwischen 0 und ¶
+STR00680 = !! [Transmit PDO] Address Byte2 muss sein, zwischen 0 und ¶
+STR00681 = !! [Transmit PDO] Address Byte3 muss sein, zwischen 0 und ¶
+STR00682 = !! [Transmit PDO] Address Byte4 muss sein, zwischen 0 und ¶
+STR00683 = !! [Transmit PDO] Address Byte5 muss sein, zwischen 0 und ¶
+STR00684 = !! [Transmit PDO] Address Byte6 muss sein, zwischen 0 und ¶
+STR00685 = !! [Transmit PDO] Address Byte7 muss sein, zwischen 0 und ¶
+STR00686 = !! [Transmit PDO] Address Byte8 muss sein, zwischen 0 und ¶
+STR00687 = !! [Transmit PDO] Zeitintervall muss zwischen 1 und 100000000 sein.
+STR00688 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+
+  //FSet_SDO_Client_Access
+STR00689 = SDO-Client Einstellungen
+STR00690 = SDO-Client Einstellungen
+STR00691 = OK
+STR00692 = Abbruch
+STR00693 = Zeile löschen
+STR00694 = Zeile einfügen
+STR00695 = SDO lesen
+STR00696 = SDO schreiben
+STR00697 = N
+STR00698 = Geräte-ID
+STR00699 = Index
+STR00700 = SubIndex
+STR00701 = Anz. Byte
+STR00702 = Zeitinterv. [ms]
+STR00703 = Einf. Byte1
+STR00704 = Einf. Byte2
+STR00705 = Einf. Byte3
+STR00706 = Einf. Byte4
+STR00707 = Kommentar
+STR00708 = N
+STR00709 = Geräte-ID
+STR00710 = Index
+STR00711 = SubIndex
+STR00712 = N Byte
+STR00713 = Zeitintervall [ms]
+STR00714 = Bei Wechsel
+STR00715 = Einf. Byte1
+STR00716 = Einf. Byte2
+STR00717 = Einf. Byte3
+STR00718 = Einf. Byte4
+STR00719 = Kommentar
+
+STR00720 = Fehler Zeile ¶
+STR00721 = !! [SDO lesen] Geräte-ID muss zwischen 1 und 127 sein.
+STR00722 = !! [SDO lesen] Index muss zwischen 0x1000 und 0xFFFF sein.
+STR00723 = !! [SDO lesen] SubIndex muss zwischen 0x00 und 0xFF sein.
+STR00724 = !! [SDO lesen] N Byte muss 1, 2 oder 4 sein.
+STR00725 = !! [SDO lesen] Zeitintervall muss zwischen 1 und 100000000 sein.
+STR00726 = !! [SDO lesen] Address Byte1 muss sein, zwischen 0 und ¶
+STR00727 = !! [SDO lesen] Address Byte2 muss sein, zwischen 0 und ¶
+STR00728 = !! [SDO lesen] Address Byte3 muss sein, zwischen 0 und ¶
+STR00729 = !! [SDO lesen] Address Byte4 muss sein, zwischen 0 und ¶
+STR00730 = !! [SDO schreiben] Device ID muss zwischen 1 und 127 sein.
+STR00731 = !! [SDO schreiben] Index muss zwischen 0x1000 und 0xFFFF sein.
+STR00732 = !! [SDO schreiben] SubIndex muss zwischen 0x00 und 0xFF sein.
+STR00733 = !! [SDO schreiben] N Byte mus2 1, 2 oder 4 sein.
+STR00734 = !! [SDO schreiben] Zeitintervall muss zwischen 1 und 100000000 sein.
+STR00735 = !! [SDO schreiben] Address Byte1 muss SEIN; zwischen 0 und ¶
+STR00736 = !! [SDO schreiben] Address Byte2 muss SEIN; zwischen 0 und ¶
+STR00737 = !! [SDO schreiben] Address Byte3 muss SEIN; zwischen 0 und ¶
+STR00738 = !! [SDO schreiben] Address Byte4 muss SEIN; zwischen 0 und ¶
+STR00739 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //FSet_SDO_Server_Access
+STR00740 = SDO-Server Einstellungen
+STR00741 = SDO-Server Einstellungen
+STR00742 = OK
+STR00743 = Abbruch
+STR00744 = Zeile löschen
+STR00745 = Zeile einfügen
+STR00746 = SDO liest
+STR00747 = SDO schreibt
+STR00748 = N
+STR00749 = Index
+STR00750 = SubIndex
+STR00751 = N Byte
+STR00752 = Einf. Byte1
+STR00753 = Einf. Byte2
+STR00754 = Einf. Byte3
+STR00755 = Einf. Byte4
+STR00756 = Kommentar
+STR00757 = N
+STR00758 = Index
+STR00759 = SubIndex
+STR00760 = N Byte
+STR00761 = Einf. Byte1
+STR00762 = Einf. Byte2
+STR00763 = Einf. Byte3
+STR00764 = Einf. Byte4
+STR00765 = Kommentar
+
+STR00766 = Fehler row ¶
+STR00767 = !! [SDO liest] Index muss zwischen 0x2000 und 0x5FFF sein.
+STR00768 = !! [SDO liest] SubIndex muss zwischen 0x00 und 0xFF sein.
+STR00769 = !! [SDO liest] N Byte muss 1, 2 oder 4 sein.
+STR00770 = !! [SDO liest] Address Byte1 muss sein, zwischen 0 und ¶
+STR00771 = !! [SDO liest] Address Byte2 muss sein, zwischen 0 und ¶
+STR00772 = !! [SDO liest] Address Byte3 muss sein, zwischen 0 und ¶
+STR00773 = !! [SDO liest] Address Byte4 muss sein, zwischen 0 und ¶
+STR00774 = !! [SDO schreibt] Index muss zwischen 0x2000 und 0x5FFF sein.
+STR00775 = !! [SDO schreibt] SubIndex muss zwischen 0x00 und 0xFF sein.
+STR00776 = !! [SDO schreibt] N Byte muss 1, 2 oder 4 sein.
+STR00777 = !! [SDO schreibt] Address Byte1 muss sein, zwischen 0 und ¶
+STR00778 = !! [SDO schreibt] Address Byte2 muss sein, zwischen 0 und ¶
+STR00779 = !! [SDO schreibt] Address Byte3 muss sein, zwischen 0 und ¶
+STR00780 = !! [SDO schreibt] Address Byte4 muss sein, zwischen 0 und ¶
+STR00781 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+
+  //FProfinetFileName
+STR00782 = PROFINET XML Datei-Name
+STR00783 = PROFINET XML GSD-Datei genrieren.
+STR00784 = OK
+STR00785 = Abbruch
+STR00786 = PROFINET XML Datei-Name auswählen.
+STR00787 = Fester Teil
+STR00788 = Benutzer Teil
+STR00789 = Fester Teil
+
+STR00790 = Datei existiert bereits! Möchten Sie die Datei überschreiben?
+
+  //DeviceNet Master
+  //FDefOffset
+STR00791 = Offset definieren
+STR00792 = DeviceNet Offset definieren
+STR00793 = OK
+STR00794 = Abbruch
+STR00795 = Byte IN
+STR00796 = Byte OUT
+STR00797 = DeviceNet-Slave auswählen.
+STR00798 = Position im BACnet-Array des DeviceNet-Bytes auswählen. ¶
+STR00799 = "None" einstellen, damit das Byte nicht von DeviceNet in das BACnet-Array gelangt.
+STR00800 = ID
+STR00801 = Anz. Byte IN
+STR00802 = Anz. Byte OUT
+STR00803 = Kommentar
+STR00804 = Byte
+STR00805 = Offset
+STR00806 = Kommentar
+STR00807 = Byte
+STR00808 = Offset
+STR00809 = Kommentar
+
+STR00810 = Fehler in Byte OUT! Das gleiche Byte im BACnet wird in zwei Bytes DeviceNet benutzt.
+STR00811 = Erste ID = ¶
+STR00812 = ¶ Byte = ¶
+STR00813 = , Zweite ID = ¶
+STR00814 = ¶ Byte = ¶
+
+
+  //FDNet
+STR00815 = DeviceNet Netzwerk
+STR00816 = DeviceNet Netzwerk
+STR00817 = OK
+STR00818 = Abbruch
+STR00819 = Zeile löschen
+STR00820 = Zeile einfügen
+STR00821 = N
+STR00822 = ID
+STR00823 = Anz. BYTE IN
+STR00824 = Anz. BYTE OUT
+STR00825 = Kommentar
+
+STR00826 = Fehler in Zeile ¶
+STR00827 = !! ID muss 0 oder 63 sein.
+STR00828 = !! Anzahl Byte IN muss 0 oder 65535 sein.
+STR00829 = !! Anzahl Byte OUT muss 0 oder 65535 sein.
+STR00830 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //J1939
+  //FReceiveJ1939
+STR00831 = J1939 Frames empfangen
+STR00832 = J1939 Frames empfangen
+STR00833 = OK
+STR00834 = Abbruch
+STR00835 = Zeile löschen
+STR00836 = Zeile einfügen
+STR00837 = N
+STR00838 = Data Page
+STR00839 = PGN
+STR00840 = Quell-Adresse
+STR00841 = Transport Protocol
+STR00842 = Start Byte
+STR00843 = N° Byte
+STR00844 = Abbruch Data
+STR00845 = Kommentar
+
+STR00846 = Fehler in Zeile ¶
+STR00847 = !! Data Page muss 0 oder 1 sein.
+STR00848 = !! PGN muss zwischen 0x0000 und 0xFFFF sein.
+STR00849 = !! Quell-Adresse muss zwischen 0 und 239 sein.
+STR00850 = !! Start Byte muss zwischen 0 und 1785 sein.
+STR00851 = !! Start Byte plus N° Byte muss zwischen 0 und 1785sein.
+STR00852 = Fehler!! Zu viele Bytes Daten, die max. Anzahl ist ¶
+STR00853 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+
+  //FTransmitJ1939
+STR00854 = J1939 Frames senden
+STR00855 = J1939 Frames senden
+STR00856 = OK
+STR00857 = Abbruch
+STR00858 = Zeile löschen
+STR00859 = Zeile einfügen
+STR00860 = N
+STR00861 = Priorität
+STR00862 = Data Page
+STR00863 = PGN
+STR00864 = Quell-Addresse
+STR00865 = Transport Protocol
+STR00866 = N° Byte
+STR00867 = Übertragungs-Typ
+STR00868 = Send Timer
+STR00869 = Kommentar
+
+STR00870 = Fehler in Zeile ¶
+STR00871 = !! Priorität muss zwischen 0 und 7 sein.
+STR00872 = !! Data Page muse 0 oder 1 sein.
+STR00873 = !! PGN muss zwischen 0x00000 und 0x1FFFF sein.
+STR00874 = !! Quell-Adresse muss zwischen 0 und 239 sein.
+STR00875 = !! N° Byte muss sein, zwischen 0 und ¶
+STR00876 = Fehler!! Zu viele Daten-Bytes, die max. Anzahl ist ¶
+STR00877 = !! Übertragungs-Typ muss "On Data Change" oder "On Timer" sein.
+STR00878 = !! Send Timer muss zwischen 1 und 65535 ms sein.
+STR00879 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //NMEA 2000
+  //FReceiveNMEA
+STR00880 = NMEA 2000 Frames empfangen
+STR00881 = NMEA 2000 Frames empfangen
+STR00882 = OK
+STR00883 = Abbruch
+STR00884 = Zeile löschen
+STR00885 = Zeile einfügen
+STR00886 = N
+STR00887 = PGN
+STR00888 = Quell-Adresse
+STR00889 = Transport Protocol
+STR00890 = Fast Packet
+STR00891 = Start Byte
+STR00892 = N° Byte
+STR00893 = Abbruch Data
+STR00894 = Kommentar
+
+STR00895 = Fehler in Zeile ¶
+STR00896 = !! PGN muss zwischen 0x00000 und 0x1FFFF sein.
+STR00897 = !! Quell-Adresse muss zwischen 0 und 239 sein.
+STR00898 = !! Start Byte muss zwischen 0 und 1785 sein.
+STR00899 = !! Start Byte plus Number Bytes muss zwischen 0 und 1785 sein.
+STR00900 = !! Start Byte muss zwischen 0 und 223 sein.
+STR00901 = !! Start Byte plus N° Byte muss zwischen 0 und 223 sein.
+STR00902 = Fehler!! Zu viele Daten-Bytes, die max Anzahl ist ¶
+STR00903 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+  //FTransmitNMEA
+STR00904 = NMEA 2000 Frames senden
+STR00905 = NMEA 2000 Frames senden
+STR00906 = OK
+STR00907 = Abbruch
+STR00908 = Zeile löschen
+STR00909 = Zeile einfügen
+STR00910 = N
+STR00911 = Priorität
+STR00912 = PGN
+STR00913 = Quell-Adress
+STR00914 = Transport Protocol
+STR00915 = Fast Packet
+STR00916 = Num Byte
+STR00917 = Transmition Typ
+STR00918 = Send Timer
+STR00919 = Kommentar
+
+STR00920 = Fehler in Zeile ¶
+STR00921 = !! Priorität muss zwischen 0 und 7 sein.
+STR00922 = !! PGN muss zwischen 0x00000 und 0x1FFFF sein.
+STR00923 = !! Quell-Adresse muss zwischen 0 und 239 sein.
+STR00924 = !! N° Byte muss sein, zwischen 0 und ¶
+STR00925 = !! N° Byte muss zwischen 0 und 223 sein.
+STR00926 = Fehler!! Zu viele Daten-Bytes, die max. Anmzahl ist ¶
+STR00927 = !! Transmition Typ muss "On Data Change" oder "On Timer" sein.
+STR00928 = !! Send Timer muss zwischen 1 und 65535 ms  sein.
+STR00929 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+STR00930 = Fehler!! BACnet PTP wird noch nicht unterstützt!
+
+STR00931 = !! [BACnet liest] Länge mit Variable "Analog Value" muss zwischen 1 und 4 sein.
+STR00932 = !! [BACnet liest] Länge mit Variable "Multi State Input" muss zwischen 1 und 4 sein.
+STR00933 = !! [BACnet liest] Länge mit Variable "Multi State Value" muss zwischen 1 und 4 sein.
+STR00934 = !! [BACnet liest] Länge mit Variable "Life Safety Point" muss 1 oder 2 sein.
+STR00935 = !! [BACnet liest] Länge mit Variable "Life Safety Zone" muss 1 oder 2 sein.
+STR00936 = !! [BACnet liest] Länge mit Variable "Access Door" muss gleich 1 sein.
+STR00937 = !! [BACnet liest] Länge mit Variable "Accumulator" muss zwischen 1 und 4 sein.
+
+STR00938 = ¶ KNX ¶
+STR00939 = Geräte-ID
+
+STR00940 = BACnet Einstellungen
+STR00941 = KNX Einstellungen
+
+  //KNX
+STR00942 = KNX Einstellungen
+STR00943 = KNX Einstellungen
+STR00944 = OK
+STR00945 = Abbruch
+STR00946 = Zeile löschen
+STR00947 = Zeile einfügen
+STR00948 = KNX Sniffer Sektion
+STR00949 = KNX Aktive Kommands
+STR00950 = N
+STR00951 = Quell-Adr.
+STR00952 = Ziel/Gruppe
+STR00953 = APCI
+STR00954 = Control
+STR00955 = Format
+STR00956 = Erweitert
+STR00957 = Gruppe
+STR00958 = ReTest
+STR00959 = Zeitintervall [ms]
+STR00960 = Timeout
+STR00961 = Position
+STR00962 = Bit-Mode
+STR00963 = Länge
+STR00964 = Kommentar
+STR00965 = N
+STR00966 = Quell-Adr.
+STR00967 = Ziel/Gruppe
+STR00968 = APCI
+STR00969 = Priorität
+STR00970 = Format
+STR00971 = Erweitert
+STR00972 = Gruppe
+STR00973 = ReTest
+STR00974 = Zeitintervall [ms]
+STR00975 = Bei Wechsel
+STR00976 = Position
+STR00977 = Bit-Mode
+STR00978 = Länge
+STR00979 = Kommentar
+
+STR00980 = Fehler in Zeile ¶
+STR00981 = !! [KNX liest] Quell-Adresse muss eine gültige KNX Individual Adresse sein (z. Bsp. 15.15.255).
+STR00982 = !! [KNX liest] Ziel-Adresse muss eine gültige KNX Individual Addresse sein (z. Bsp. 15.15.255).
+STR00983 = !! [KNX liest] APCI muss zwischen 0 und 1023 sein, oder den Wert Lesen oder Schreiben benutzen.
+STR00984 = !! [KNX liest] Priorität muss System, Urgent, Normal oder Low sein.
+STR00985 = !! [KNX liest] Zeitintervall muss zwischen 1 und 100.000.000 sein.
+STR00986 = !! [KNX liest] Timeout muss zwischen 1 und 100.000.000 sein.
+STR00987 = !! [KNX liest] Position muss sein, zwischen 0 und ¶
+STR00988 = !! [KNX liest] Bit-Mode muss "Nein", oder zwischen 0 und 7 sein.
+STR00989 = !! [KNX liest] Länge muss sein, zwischen 1 und ¶
+STR00990 = !! [KNX liest] Position plus Länge muss kleiner oder gleich sein als ¶
+
+STR00991 = !! [KNX schreibt] Quell-Adresse muss eine gültige KNX Individual Addresse sein (z. Bsp. 15.15.255).
+STR00992 = !! [KNX schreibt] Ziel-Adresse muss eine gültige KNX Individual Addresse sein (z. Bsp. 15.15.255).
+STR00993 = !! [KNX schreibt] APCI muss zwischen 0 und 1023 sein, oder Wert Lesen oder Schreiben benutzen.
+STR00994 = !! [KNX schreibt] Priorität muss System, Urgent, Normal oder Low sein.
+STR00995 = !! [KNX schreibt] Zeitinteravall muss zwischen 1 und 100000000 sein.
+STR00996 = !! [KNX schreibt] Position muss sein, zwischen 0 und ¶
+STR00997 = !! [KNX schreibt] Bit-Mode muss "Nein", oder zwischen 0 und 7 sein.
+STR00998 = !! [KNX schreibt] Länge muss sein, zwischen 1 und ¶
+STR00999 = !! [KNX schreibt] Position plus Länge muss kleiner oder gleich sein als ¶
+
+STR01000 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+STR01001 = !! [KNX liest] Ziel-Adresse muss eine gültige KNX Gruppen-Addresse sein (z. Bsp. 31/2047 oder 31/7/255).
+STR01002 = !! [KNX schreibt] Ziel-Adresse muss eine gültige KNX Gruppen-Addresse sein (z. Bsp. 31/2047 oder 31/7/255).
+
+STR01003 = ¶ ¶
+STR01004 = ¶ ¶
+STR01005 = ¶ ¶
+STR01006 = ¶ ¶
+STR01007 = ¶ ¶
+STR01008 = ¶ ¶
+STR01009 = ¶ ¶
+STR01010 = ¶ ¶
+STR01011 = ¶ ¶
+STR01012 = ¶ ¶
+STR01013 = ¶ ¶
+STR01014 = ¶ ¶
+STR01015 = ¶ ¶
+STR01016 = ¶ ¶
+STR01017 = Fehler KNX!! Geräte-ID muss eine gültige KNX Individual Addresse sein (z. Bsp. 15.15.255).
+
+STR01018 = Realzahl-Konv.
+STR01019 = Endian
+STR01020 = Operation
+STR01021 = Realzahl-Konv.
+STR01022 = Endian
+STR01023 = Operation
+STR01024 = !! [Modbus lesen] Endian muss Little oder Big sein.
+STR01025 = !! [Modbus lesen] Operation muss angewählt sein.
+STR01026 = !! [Modbus schreiben] Endian muss Little oder Big sein.
+STR01027 = !! [Modbus schreiben] Operation muss angewählt sein.
+
+STR01028 = !! [BACnet liest] Länge mit Variable "Analog Input" muss zwischen 1 und 4 sein.
+STR01029 = !! [BACnet liest] Länge mit Variable "Positive Integer Value" muss zwischen 1 und 4 sein.
+STR01030 = !! [BACnet liest] Länge mit Variable "Large Analog Value" muss zwischen 1 und 8 sein.
+STR01031 = !! [BACnet liest] Länge mit Variable "Analog Value" muss zwischen 1 und 4 sein.
+STR01032 = !! [BACnet liest] Länge mit Variable "Multi State Input" muss zwischen 1 und 4 sein.
+STR01033 = !! [BACnet liest] Länge mit Variable "Multi State Value" muss zwischen 1 und 4 sein.
+STR01034 = !! [BACnet liest] Länge mit Variable "Life Safety Point" muss 1 oder 2 sein.
+STR01035 = !! [BACnet liest] Länge mit Variable "Life Safety Zone" muss 1 oder 2 sein.
+STR01036 = !! [BACnet liest] Länge mit Variable "Access Door" muss gleich 1 sein.
+STR01037 = !! [BACnet liest] Länge mit Variable "Accumulator" muss zwischen 1 und 4 sein.
+
+STR01038 = OnTimer
+
+STR01039 = Aktivieren
+STR01040 = Aktivieren
+
+STR01041 = Zeile wird bereits benutzt. Möchten Sie die Werte überschreiben?
+STR01042 = Fehler im Kopier-Wert!!! Kopieren Sie eine gültige Zeile vor dem Einfügen.
+STR01043 = Fehler!!! Kopieren Sie eine gültige Zeile vor dem Einfügen.
+
+STR01044 = ¶ SNMP ¶
+STR01045 = Zufällige Ganzzahl-Dimension
+
+STR01046 = !! [KNX liest] Format is nicht korrekt.
+STR01047 = !! [KNX schreibt] Format is nicht korrekt.
+
+STR01048 = OnCMD
+
+STR01049 = Geräte-Instanz
+STR01050 = Fehler BACnet!! Geräte-Instanz muss zwischen 0 und 4194303 sein.
+STR01051 = Max. Master
+STR01052 = Max. Info Frames
+STR01053 = Fehler BACnet!! Max. Master muss zwischen 1 und 127 sein.
+STR01054 = Fehler BACnet!! Max. Info Frames muss zwischen 1 und 100 sein.
+
+STR01055 = Netzwerk
+STR01056 = Fehler BACnet!! Netzwerk muss zwischen 1 und 65534 sein.
+
+  //DMX
+STR01057 = BACnet Einstellungen
+STR01058 = DMX Grundeinstellung
+  //set communication
+STR01059 = ¶ DMX ¶
+STR01060 = Kanal-Nummer
+STR01061 = Fehler DMX!! Kanal-Nummer muss zwischen 24 und 512 sein.
+
+  //DMX Default Value
+STR01062 = DMX Grundeinstellung
+STR01063 = DMX Grundeinstellung
+STR01064 = OK
+STR01065 = Abbruch
+STR01066 = Kanal
+STR01067 = Voreingestellter Wert
+STR01068 = Kommentar
+STR01069 = Fehler in Zeile ¶
+STR01070 = !! Voreingestellter Wert muss zwischen 0 und 255 sein.
+
+STR01071 = DMX
+
+STR01072 = Variable kopieren
+STR01073 = Variable einfügen
+STR01074 = Knoten kopieren
+STR01075 = Knoten einfügen
+STR01076 = Einheit löschen
+
+  //ParGen - SNMP
+STR01077 = ¶ SNMP-Manager ¶
+STR01078 = IP-Adresse
+STR01079 = Netzwerk-Maske
+STR01080 = GATEWAY
+STR01081 = Fehler SNMP-Manager!! IP-Addresse 1 muss zwischen 0 und 255 sein.
+STR01082 = Fehler SNMP-Manager!! IP-Addresse 2 muss zwischen 0 und 255 sein.
+STR01083 = Fehler SNMP-Manager!! IP-Addresse 3 muss zwischen 0 und 255 sein.
+STR01084 = Fehler SNMP-Manager!! IP-Addresse 4 muss zwischen 0 und 255 sein.
+STR01085 = Fehler SNMP-Manager!! Netzwerk-Maske 1 muss zwischen 0 und 255 sein.
+STR01086 = Fehler SNMP-Manager!! Netzwerk-Maske 2 muss zwischen 0 und 255 sein.
+STR01087 = Fehler SNMP-Manager!! Netzwerk-Maske 3 muss zwischen 0 und 255 sein.
+STR01088 = Fehler SNMP-Manager!! Netzwerk-Maske 4 muss zwischen 0 und 255 sein.
+STR01089 = Fehler SNMP-Manager!! Gateway-IP 1 muss zwischen 0 und 255 sein.
+STR01090 = Fehler SNMP-Manager!! Gateway-IP 2 muss zwischen 0 und 255 sein.
+STR01091 = Fehler SNMP-Manager!! Gateway-IP 3 muss zwischen 0 und 255 sein.
+STR01092 = Fehler SNMP-Manager!! Gateway-IP 4 muss zwischen 0 und 255 sein.
+
+STR01093 = BACnet Einstellungen
+STR01094 = SNMP-Manager ¶
+
+
+///////////////////////////////////////////////////////////////////////////////////
+  //SNMP
+STR01095 = SNMP-Manager Zugriff setzen
+STR01096 = SNMP-Manager Zugriff setzen
+STR01097 = OK
+STR01098 = Abbruch
+STR01099 = Zeile löschen
+STR01100 = Zeile einfügen
+STR01101 = Zeile kopieren
+STR01102 = Zeile paste
+
+STR01103 = N
+STR01104 = Aktivieren
+STR01105 = IP-Adresse
+STR01106 = Version
+STR01107 = Community-Name
+STR01108 = OID
+STR01109 = Typ
+STR01110 = Modus
+STR01111 = Bei Wechsel
+STR01112 = auf CMD
+STR01113 = zyklisch
+STR01114 = Zeitinterv. [ms]
+STR01115 = Position
+STR01116 = Länge
+STR01117 = Kommentar
+
+STR01118 = Aktivieren oder Deaktivieren Sie die Regel für den SNMP-Manager
+STR01119 = IP-Adresse des SNMP-Gerät, auf dem die Anfrage zu senden
+STR01120 = Wählen Sie die Version von SNMP im Einsatz
+STR01121 = Community-Name
+STR01122 = Object Identifier
+STR01123 = Art der Daten zu lesen / schreiben
+STR01124 = Art der Anfrage gesendet werden
+STR01125 = Aktivieren Sie die Anfrage Wenn ein Byte Wert ändern
+STR01126 = Aktivieren Sie die Anfrage Wenn Schreiben Sie die Modbus-Register verknüpft
+STR01127 = Aktivieren Sie die Anfrage auf Timer
+STR01128 = Zeit in Millisekunden warten zwischen zwei Anfragen
+STR01129 = Position, in der Lesen / Schreiben der Daten
+STR01130 = Anzahl der Bytes in der Anfrage SNMP
+STR01131 = Beschreibung der SNMP-Anfrage
+
+STR01132 = Fehler in Zeile ¶
+STR01133 = !! IP-Adresse muss eine gültige TCP IP-Addresse sein (z. Bsp. 192.168.1.125)
+STR01134 = !! OID ist zu viel lange
+STR01135 = !! OID ist nicht korrekt (zulässige Zeichen sind Zahlen und ".")
+STR01136 = !! OID kann nicht mit einem Start "."
+STR01137 = !! OID kann nicht mit einem Finish "."
+STR01138 = !! OID kann nicht zwei oder mehr aufeinanderfolgende "."
+STR01139 = !! OID String kann nicht enthält Nummer größer als 65535 zwischen zwei "."
+STR01140 = !! Zeitintervall muss zwischen 0 und 100000000 sein.
+STR01141 = !! N Byte muss zwischen 0 und 1024 sein.
+STR01142 = Wollen Sie wirklich folgende Zeile löschen: ¶
+
+STR01143 = Bestätigen und Speichern der aktuellen Konfiguration von SNMP-Manager anfordern
+STR01144 = Beenden und Verwerfen Sie die aktuelle Konfiguration
+STR01145 = Abbrechen, um die ausgewählte Zeile
+STR01146 = Legen Sie eine neue Zeile
+STR01147 = Kopieren Sie alle Felder der ausgewählten Zeile
+STR01148 = Fügen Sie die Felder in der ausgewählten Zeile

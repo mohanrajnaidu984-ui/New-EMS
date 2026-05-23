@@ -25,7 +25,7 @@ async function seedAllMasterData() {
 
         // 1. Seed Source of Enquiry
         console.log('=== Seeding Master_SourceOfEnquiry ===');
-        const sources = ["Email", "Phone", "Tender Board", "Customer Visit", "Cold visit by us", "Website", "Fax", "Thru top management", "News Paper"];
+        const sources = ["Email", "Phone", "Public Tender Board", "Private Tender", "Customer Visit", "Cold visit by us", "Website", "Fax", "Thru top management", "News Paper"];
         for (const source of sources) {
             const existing = await pool.request().query`SELECT * FROM Master_SourceOfEnquiry WHERE SourceName = ${source}`;
             if (existing.recordset.length === 0) {
@@ -36,7 +36,7 @@ async function seedAllMasterData() {
 
         // 2. Seed Enquiry Types
         console.log('\n=== Seeding Master_EnquiryType ===');
-        const types = ["New Tender", "Re-Tender", "Job in hand", "Variation / Change order", "Supply only", "Maintenance", "Retrofit", "Upgradation", "Refurbishment", "Service", "Hiring", "Renting", "Facility Management", "Demo"];
+        const types = ["New Tender", "Re-Tender", "Budgetary", "Job in hand", "Variation / Change order", "Supply only", "Maintenance", "Retrofit", "Upgradation", "Refurbishment", "Service", "Hiring", "Renting", "Facility Management", "Demo"];
         for (const type of types) {
             const existing = await pool.request().query`SELECT * FROM Master_EnquiryType WHERE TypeName = ${type}`;
             if (existing.recordset.length === 0) {

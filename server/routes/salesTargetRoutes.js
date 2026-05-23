@@ -194,16 +194,27 @@ router.get('/targets', async (req, res) => {
 
         let result;
         if (isAllEngineers) {
-            /** Sum revenue per item/quarter; arithmetic mean of GP % across SE rows (same item/quarter). */
+            /** Per SE: sum revenue across items; GP % = revenue-weighted average for that quarter. */
             result = await request.query(`
                 SELECT
-                    ItemName,
+                    SalesEngineer,
                     Quarter,
                     SUM(ISNULL(TargetValue, 0)) AS TargetValue,
-                    CAST(AVG(CAST(ISNULL(GrossProfitTarget, 0) AS FLOAT)) AS DECIMAL(18, 4)) AS GrossProfitTarget
+                    CASE
+                        WHEN SUM(ISNULL(TargetValue, 0)) > 0 THEN CAST(
+                            SUM(
+                                CAST(ISNULL(TargetValue, 0) AS DECIMAL(18, 4))
+                                * CAST(ISNULL(GrossProfitTarget, 0) AS DECIMAL(18, 4)) / 100.0
+                            )
+                            / NULLIF(SUM(CAST(ISNULL(TargetValue, 0) AS DECIMAL(18, 4))), 0)
+                            * 100.0 AS DECIMAL(18, 4)
+                        )
+                        ELSE CAST(AVG(CAST(ISNULL(GrossProfitTarget, 0) AS FLOAT)) AS DECIMAL(18, 4))
+                    END AS GrossProfitTarget
                 FROM SalesTargets
                 WHERE FinancialYear = @year AND Division = @division
-                GROUP BY ItemName, Quarter
+                GROUP BY SalesEngineer, Quarter
+                ORDER BY SalesEngineer ASC, Quarter ASC
             `);
         } else {
             result = await request.query(`
@@ -314,75 +325,80 @@ router.get('/year-history', async (req, res) => {
     }
 });
 
-// 5. Save Targets
+const QUARTERS_SAVE = ['Q1', 'Q2', 'Q3', 'Q4'];
+
+/** Replace all targets for one engineer in a division/year (used by save + save-all). */
+async function persistEngineerTargets(transaction, { year, division, engineer, targets, userEmail }) {
+    const engineerTrim = String(engineer || '').trim();
+    if (!engineerTrim) return;
+
+    const delReq = new sql.Request(transaction);
+    delReq.input('year', sql.Int, year);
+    delReq.input('division', sql.NVarChar, division);
+    delReq.input('engineer', sql.NVarChar, engineerTrim);
+    await delReq.query(`
+        DELETE FROM SalesTargets
+        WHERE FinancialYear = @year
+          AND Division = @division
+          AND SalesEngineer = @engineer
+    `);
+
+    const list = Array.isArray(targets) ? targets : [];
+    for (const t of list) {
+        const itemName = String(t.itemName || t.ItemName || '').trim();
+        if (!itemName) continue;
+        for (const q of QUARTERS_SAVE) {
+            const val = t[q] != null && t[q] !== '' ? parseFloat(t[q]) : 0;
+            if (!Number.isFinite(val) || val < 0) continue;
+            const gpVal = t[`${q}_GP`] != null && t[`${q}_GP`] !== '' ? parseFloat(t[`${q}_GP`]) : 0;
+            const insRequest = new sql.Request(transaction);
+            insRequest.input('year', sql.Int, year);
+            insRequest.input('div', sql.NVarChar, division);
+            insRequest.input('se', sql.NVarChar, engineerTrim);
+            insRequest.input('item', sql.NVarChar, itemName);
+            insRequest.input('q', sql.NVarChar, q);
+            insRequest.input('val', sql.Decimal(18, 2), val);
+            insRequest.input('gpVal', sql.Decimal(18, 2), Number.isFinite(gpVal) ? gpVal : 0);
+            insRequest.input('by', sql.NVarChar, userEmail || '');
+            await insRequest.query(`
+                INSERT INTO SalesTargets (FinancialYear, Quarter, Division, ItemName, SalesEngineer, TargetValue, GrossProfitTarget, CreatedBy)
+                VALUES (@year, @q, @div, @item, @se, @val, @gpVal, @by)
+            `);
+        }
+    }
+}
+
+async function commitTargetsAndSync(year, division) {
+    const yNum = parseInt(String(year), 10);
+    const divTrim = String(division || '').trim();
+    if (Number.isFinite(yNum) && divTrim) {
+        await syncCommitTargetForDivisionYear(divTrim, yNum);
+    }
+}
+
+// 5. Save Targets (single engineer)
 router.post('/save', async (req, res) => {
     try {
         const { targets, year, division, engineer, userEmail } = req.body;
-        // targets is array of { itemName, q1, q2, q3, q4 }
 
         if (!engineer || String(engineer).trim().toLowerCase() === 'all') {
-            return res.status(400).json({ error: 'Select a specific Sales Engineer to save targets (ALL is view-only).' });
+            return res.status(400).json({ error: 'Use save-all when updating every engineer at once.' });
         }
 
         const transaction = new sql.Transaction();
         await transaction.begin();
 
         try {
-            const request = new sql.Request(transaction);
-
-            // Delete existing for this combination (easiest way to handle updates)
-            // Or better: Upsert. But deleting all for this year/div/se/item is safe if we re-insert.
-            // Let's delete for specific SE/Year/Division first to clear old data then insert new.
-            // CAUTION: This deletes all items for that SE in that year. Make sure we are saving ALL items or just specific ones?
-            // User UI will likely show all items.
-            // Efficient approach: MERGE or Delete/Insert. 
-
-            request.input('year', sql.Int, year);
-            request.input('division', sql.NVarChar, division);
-            request.input('engineer', sql.NVarChar, engineer);
-            request.input('createdBy', sql.NVarChar, userEmail);
-
-            // Deleting existing targets for this specific SE and Year in this Division
-            // Only strictly if we are saving the 'whole sheet' for them.
-            await request.query(`
-                DELETE FROM SalesTargets 
-                WHERE FinancialYear = @year 
-                  AND Division = @division 
-                  AND SalesEngineer = @engineer
-            `);
-
-            for (const t of targets) {
-                // t = { itemName, Q1: 100, Q2: 200... }
-                const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
-                for (const q of quarters) {
-                    const val = t[q] ? parseFloat(t[q]) : 0;
-                    if (val >= 0) { // allow 0
-                        const gpVal = t[`${q}_GP`] ? parseFloat(t[`${q}_GP`]) : 0;
-                        const insRequest = new sql.Request(transaction);
-                        insRequest.input('year', sql.Int, year);
-                        insRequest.input('div', sql.NVarChar, division);
-                        insRequest.input('se', sql.NVarChar, engineer);
-                        insRequest.input('item', sql.NVarChar, t.itemName);
-                        insRequest.input('q', sql.NVarChar, q);
-                        insRequest.input('val', sql.Decimal(18, 2), val);
-                        insRequest.input('gpVal', sql.Decimal(18, 2), gpVal);
-                        insRequest.input('by', sql.NVarChar, userEmail);
-
-                        await insRequest.query(`
-                            INSERT INTO SalesTargets (FinancialYear, Quarter, Division, ItemName, SalesEngineer, TargetValue, GrossProfitTarget, CreatedBy)
-                            VALUES (@year, @q, @div, @item, @se, @val, @gpVal, @by)
-                         `);
-                    }
-                }
-            }
-
+            await persistEngineerTargets(transaction, {
+                year,
+                division,
+                engineer,
+                targets,
+                userEmail,
+            });
             await transaction.commit();
             try {
-                const yNum = parseInt(String(year), 10);
-                const divTrim = String(division || '').trim();
-                if (Number.isFinite(yNum) && divTrim) {
-                    await syncCommitTargetForDivisionYear(divTrim, yNum);
-                }
+                await commitTargetsAndSync(year, division);
             } catch (syncErr) {
                 console.warn('[SalesTargets] commit_Target sync after save:', syncErr.message);
             }
@@ -391,7 +407,47 @@ router.post('/save', async (req, res) => {
             await transaction.rollback();
             throw err;
         }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server Error' });
+    }
+});
 
+// 5b. Save targets for every engineer in one request (ALL view)
+router.post('/save-all', async (req, res) => {
+    try {
+        const { year, division, userEmail, engineers } = req.body;
+        if (!Array.isArray(engineers) || engineers.length === 0) {
+            return res.status(400).json({ error: 'No engineer targets to save.' });
+        }
+
+        const transaction = new sql.Transaction();
+        await transaction.begin();
+
+        try {
+            for (const block of engineers) {
+                const eng = block?.engineer ?? block?.Engineer;
+                const targets = block?.targets ?? block?.Targets;
+                if (!eng || !Array.isArray(targets) || targets.length === 0) continue;
+                await persistEngineerTargets(transaction, {
+                    year,
+                    division,
+                    engineer: eng,
+                    targets,
+                    userEmail,
+                });
+            }
+            await transaction.commit();
+            try {
+                await commitTargetsAndSync(year, division);
+            } catch (syncErr) {
+                console.warn('[SalesTargets] commit_Target sync after save-all:', syncErr.message);
+            }
+            res.json({ message: 'Targets saved successfully' });
+        } catch (err) {
+            await transaction.rollback();
+            throw err;
+        }
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server Error' });

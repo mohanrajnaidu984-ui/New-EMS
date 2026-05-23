@@ -1,5 +1,18 @@
 import React, { useRef, useMemo, useState, useEffect, useCallback } from 'react';
 import JoditEditor from 'jodit-react';
+import {
+    registerClauseEditorListCommands,
+    normalizeClauseListHtml,
+    normalizeClauseListHtmlInString,
+    EMS_UL_TOOLBAR_CONTROL,
+    EMS_OL_TOOLBAR_CONTROL,
+    CLAUSE_LIST_STYLES_CSS,
+} from './clauseEditorListPresets';
+import {
+    harmonizeInsertedTableCells,
+    isTableStructureResizeActive,
+    registerClauseEditorTableHooks,
+} from './clauseEditorTable';
 
 /**
  * Excel / Word pastes inflate table row heights because they ship:
@@ -72,12 +85,19 @@ const cleanCellSpacingNodes = (cell) => {
 
 const normalizePastedTables = (root) => {
     if (!root || typeof root.querySelectorAll !== 'function') return;
+    if (isTableStructureResizeActive(root)) return;
     const tables = root.querySelectorAll('table');
     tables.forEach((table) => {
+        table.style.tableLayout = 'fixed';
+        if (table.style.width === '100%') table.style.removeProperty('width');
+        const keepRowHeights = table.hasAttribute('data-ems-row-heights');
+        const stripProps = keepRowHeights
+            ? CELL_KILL_STYLE_PROPS.filter((p) => p !== 'height' && p !== 'min-height')
+            : CELL_KILL_STYLE_PROPS;
         table.querySelectorAll('tr, td, th').forEach((cell) => {
-            cell.removeAttribute('height');
+            if (!keepRowHeights) cell.removeAttribute('height');
             if (cell.style) {
-                CELL_KILL_STYLE_PROPS.forEach((p) => cell.style.removeProperty(p));
+                stripProps.forEach((p) => cell.style.removeProperty(p));
             }
         });
         table.querySelectorAll('td, th').forEach(cleanCellSpacingNodes);
@@ -92,11 +112,60 @@ const normalizePastedTables = (root) => {
             el.removeAttribute('height');
         });
     });
+    harmonizeInsertedTableCells(root);
 };
 
-/** Same cleanup as normalizePastedTables, but operating on an HTML string before Jodit inserts it. */
+/** Word/Excel block styles that pull pasted lines to the extreme left of the editor. */
+const PASTE_BLOCK_ALIGN_KILL_PROPS = [
+    'margin-left',
+    'margin-right',
+    'padding-left',
+    'padding-right',
+    'text-indent',
+    'left',
+    'right',
+    'position',
+    'top',
+    'transform',
+    'mso-margin-left-alt',
+    'mso-padding-alt',
+];
+
+const isInsideTable = (el) => Boolean(el?.closest?.('table'));
+
+/** Remove Office hanging-indent / zero-margin inline styles on paragraphs and lists. */
+const normalizePastedBlockAlignment = (root) => {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+
+    root.querySelectorAll('div[class*="WordSection"], div[class*="OutlineElement"], div[class*="Mso"]').forEach((wrapper) => {
+        if (isInsideTable(wrapper)) return;
+        if (wrapper.style) {
+            PASTE_BLOCK_ALIGN_KILL_PROPS.forEach((p) => wrapper.style.removeProperty(p));
+        }
+        const parent = wrapper.parentElement;
+        if (!parent) return;
+        const unwrap =
+            parent.id === '__ems_paste_root' ||
+            parent.classList?.contains('jodit-wysiwyg') ||
+            parent.classList?.contains('clause-editor-wrapper');
+        if (!unwrap) return;
+        while (wrapper.firstChild) {
+            parent.insertBefore(wrapper.firstChild, wrapper);
+        }
+        wrapper.remove();
+    });
+
+    root.querySelectorAll('p, div, ul, ol, li, blockquote').forEach((el) => {
+        if (isInsideTable(el)) return;
+        if (el.style) {
+            PASTE_BLOCK_ALIGN_KILL_PROPS.forEach((p) => el.style.removeProperty(p));
+        }
+    });
+};
+
+/** Same cleanup on clipboard HTML before Jodit inserts it (tables + block alignment). */
 const sanitizePastedHtmlString = (html) => {
-    if (!html || typeof html !== 'string' || !/<table[\s>]/i.test(html)) return html;
+    if (!html || typeof html !== 'string' || !/<[a-z][\s>]/i.test(html)) return html;
     let doc;
     try {
         doc = new DOMParser().parseFromString(`<div id="__ems_paste_root">${html}</div>`, 'text/html');
@@ -106,6 +175,7 @@ const sanitizePastedHtmlString = (html) => {
     const root = doc.getElementById('__ems_paste_root');
     if (!root) return html;
     normalizePastedTables(root);
+    normalizePastedBlockAlignment(root);
     return root.innerHTML;
 };
 
@@ -157,9 +227,26 @@ const ClauseEditor = ({ html, onChange, style }) => {
         const root = getEditorBody();
         if (!root) return;
         normalizePastedTables(root);
-        requestAnimationFrame(() => normalizePastedTables(root));
-        setTimeout(() => normalizePastedTables(root), 300);
-        setTimeout(() => normalizePastedTables(root), 1200);
+        normalizePastedBlockAlignment(root);
+        normalizeClauseListHtml(root);
+        requestAnimationFrame(() => {
+            const r = getEditorBody();
+            normalizePastedTables(r);
+            normalizePastedBlockAlignment(r);
+            normalizeClauseListHtml(r);
+        });
+        setTimeout(() => {
+            const r = getEditorBody();
+            normalizePastedTables(r);
+            normalizePastedBlockAlignment(r);
+            normalizeClauseListHtml(r);
+        }, 300);
+        setTimeout(() => {
+            const r = getEditorBody();
+            normalizePastedTables(r);
+            normalizePastedBlockAlignment(r);
+            normalizeClauseListHtml(r);
+        }, 1200);
     }, [getEditorBody]);
 
     /** Intercept clipboard HTML BEFORE Jodit inserts it so the editor never sees the dirty Excel/Word
@@ -167,8 +254,8 @@ const ClauseEditor = ({ html, onChange, style }) => {
      *  return a replacement string. */
     const processPasteHandler = useCallback((_e, text /* , _types */) => {
         if (typeof text !== 'string') return undefined;
-        const cleaned = sanitizePastedHtmlString(text);
-        return cleaned !== text ? cleaned : undefined;
+        if (!/<[a-z][\s>]/i.test(text)) return undefined;
+        return sanitizePastedHtmlString(text);
     }, []);
 
     /** Keep tables clean even if Jodit / a Word-paste plugin re-injects inline styles later. */
@@ -189,6 +276,7 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 );
             });
             if (!touchesTable || scheduled) return;
+            if (isTableStructureResizeActive(root)) return;
             scheduled = true;
             requestAnimationFrame(run);
         });
@@ -198,11 +286,29 @@ const ClauseEditor = ({ html, onChange, style }) => {
         // proxy for "editor mounted" in jodit-react.
     }, [value, getEditorBody]);
 
+    /** Fix split <ol> blocks and duplicate typed "1." prefixes in loaded clause HTML. */
+    useEffect(() => {
+        const root = getEditorBody();
+        if (!root) return;
+        normalizePastedBlockAlignment(root);
+        normalizeClauseListHtml(root);
+        requestAnimationFrame(() => {
+            const r = getEditorBody();
+            normalizePastedBlockAlignment(r);
+            normalizeClauseListHtml(r);
+        });
+    }, [value, getEditorBody]);
+
     const config = useMemo(() => ({
         readonly: false,
         placeholder: 'Start typing...',
         height: style?.height || 400,
         minHeight: 200,
+        /** Built-in orderedList plugin uses commitStyle and only wraps part of the selection — conflicts with EMS list presets. */
+        disablePlugins: ['orderedList', 'resizeCells', 'resizer', 'addNewLine'],
+        /** Enter-icon “add line” handle (before/after tables) uses position:fixed and blocks the horizontal scrollbar when scrolling. */
+        addNewLine: false,
+        addNewLineOnDBLClick: false,
         enableDragAndDropFileToEditor: true,
         /** Skip Word/Excel paste plugin so Jodit does not run applyStyles() (it strips border* from inline CSS). */
         askBeforePasteFromWord: false,
@@ -213,27 +319,34 @@ const ClauseEditor = ({ html, onChange, style }) => {
         },
         colorPickerDefaultTab: 'color',
         toolbarAdaptive: false,
+        toolbarButtonSize: 'xsmall',
+        globalFullSize: true,
         buttons: [
             'undo', 'redo', '|',
             'bold', 'italic', 'underline', 'strikethrough', '|',
             'brush', 'font', 'fontsize', 'paragraph', '|',
-            'ul', 'ol', '|',
+            'ul', 'ol', 'indent', 'outdent', '|',
             'image', 'table', 'link', '|',
             'left', 'center', 'right', 'justify', '|',
             'hr', 'eraser', 'fullsize'
         ],
+        controls: {
+            ul: EMS_UL_TOOLBAR_CONTROL,
+            ol: EMS_OL_TOOLBAR_CONTROL,
+        },
         showCharsCounter: false,
         showWordsCounter: false,
         showXPathInStatusbar: false,
+        /** Image corner handles only; table columns use EMS col resize (not Jodit % resize). */
+        allowResizeTags: new Set(['img']),
+        tableAllowCellResize: false,
         table: {
             splitBlockOnInsertTable: true,
             useExtraClassesOptions: true,
-            // Highly visible blue overlay on multi-selected cells — drag across cells (or shift-click) to select
-            // multiple rows / columns, then use the table popup's "Delete row"/"Delete column" buttons.
+            /** Blue highlight only when 2+ cells selected (see clauseEditorTable sync). */
             selectionCellStyle:
-                'background-color: rgba(37, 99, 235, 0.18) !important; outline: 2px solid #2563eb !important; outline-offset: -2px !important;',
+                'background-color: rgba(30, 136, 229, 0.18) !important; outline: 1px solid #1e88e5 !important;',
             allowCellSelection: true,
-            allowCellResize: true,
         },
         /** Strip Excel/Word height + empty trailing <p><br></p> noise:
          *   - processPaste: clean the clipboard HTML BEFORE Jodit inserts it (primary defense).
@@ -242,20 +355,58 @@ const ClauseEditor = ({ html, onChange, style }) => {
             processPaste: processPasteHandler,
             afterPaste: cleanupAfterPaste,
             paste: cleanupAfterPaste,
+            afterInit: (jodit) => {
+                const getBody = () =>
+                    jodit.editor ||
+                    wrapperRef.current?.querySelector('.jodit-wysiwyg') ||
+                    null;
+                jodit.__emsClauseEditorBody = getBody;
+                registerClauseEditorListCommands(jodit);
+                registerClauseEditorTableHooks(jodit, getBody);
+                jodit.e.on('toggleFullSize.emsClause', (enable) => {
+                    const wrap = wrapperRef.current;
+                    const container = jodit.container;
+                    if (wrap) wrap.classList.toggle('clause-editor-fullsize', !!enable);
+                    if (container) {
+                        if (enable) {
+                            container.style.setProperty('width', '100vw', 'important');
+                            container.style.setProperty('height', '100vh', 'important');
+                            container.style.setProperty('max-width', 'none', 'important');
+                        } else {
+                            container.style.removeProperty('width');
+                            container.style.removeProperty('height');
+                            container.style.removeProperty('max-width');
+                        }
+                    }
+                    document.body.style.overflow = enable ? 'hidden' : '';
+                });
+            },
         },
     }), [style?.height, cleanupAfterPaste, processPasteHandler]);
 
     const handleChange = (newContent) => {
-        const fromParent = onChange(newContent);
+        const root = getEditorBody();
+        const domHtml = root?.innerHTML ?? '';
+        let content = newContent ?? '';
+        /* Jodit value can omit <table> after list toolbar sync even when the DOM still has it. */
+        if (domHtml.includes('<table') && !String(content).includes('<table')) {
+            content = domHtml;
+        }
+        const normalized = normalizeClauseListHtmlInString(content);
+        const fromParent = onChange(normalized);
         // Parent may post-process the HTML (e.g. re-sync clause 4.1 with the table total). In that case
         // the next render will arrive with `html = synced` — keep `lastEmittedRef` aligned so the editor
         // does not see it as an external change and reset the caret.
-        lastEmittedRef.current = typeof fromParent === 'string' ? fromParent : newContent;
+        lastEmittedRef.current = typeof fromParent === 'string' ? fromParent : normalized;
         /** Intentionally no setValue — keeps `value` prop stable so jodit-react does not overwrite Jodit's DOM. */
     };
 
     return (
-        <div ref={wrapperRef} style={{ ...style, display: 'flex', flexDirection: 'column' }} className="clause-editor-wrapper">
+        <div
+            ref={wrapperRef}
+            style={{ width: '100%', minHeight: 0, ...style, display: 'flex', flexDirection: 'column' }}
+            className="clause-editor-wrapper"
+        >
             <JoditEditor
                 ref={editor}
                 value={value}
@@ -265,25 +416,181 @@ const ClauseEditor = ({ html, onChange, style }) => {
             />
             <style>
                 {`
-                .jodit-container {
+                .clause-editor-wrapper .jodit-container {
                      border: 1px solid #e2e8f0 !important;
                      border-radius: 4px;
+                     display: flex !important;
+                     flex-direction: column !important;
+                     width: 100% !important;
+                     min-height: 0 !important;
                 }
-                .jodit-toolbar__box {
+                /* Fullscreen — escape narrow left panel (100% !important was blocking Jodit resize). */
+                .clause-editor-wrapper .jodit-container.jodit_fullsize,
+                .clause-editor-wrapper.clause-editor-fullsize .jodit-container {
+                    position: fixed !important;
+                    top: 0 !important;
+                    left: 0 !important;
+                    right: 0 !important;
+                    bottom: 0 !important;
+                    width: 100vw !important;
+                    height: 100vh !important;
+                    max-width: none !important;
+                    min-width: 0 !important;
+                    margin: 0 !important;
+                    border-radius: 0 !important;
+                    z-index: 100001 !important;
+                }
+                .clause-editor-wrapper .jodit-container.jodit_fullsize .jodit-workplace,
+                .clause-editor-wrapper.clause-editor-fullsize .jodit-workplace {
+                    flex: 1 1 auto !important;
+                    min-height: 0 !important;
+                    height: auto !important;
+                    overflow: auto !important;
+                }
+                .clause-editor-wrapper.clause-editor-fullsize {
+                    position: static !important;
+                    z-index: 100001 !important;
+                    overflow: visible !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar__box {
                     background-color: #f8fafc;
                     border-bottom: 1px solid #e2e8f0;
+                    flex-shrink: 0;
+                    padding: 1px 2px !important;
                 }
-                .jodit-workplace {
-                    overflow-y: auto !important;
+                .clause-editor-wrapper .jodit-toolbar-editor-collection {
+                    gap: 0 !important;
+                }
+                .clause-editor-wrapper .jodit-ui-group {
+                    gap: 0 !important;
+                    margin: 0 !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button {
+                    width: 22px !important;
+                    height: 22px !important;
+                    min-width: 22px !important;
+                    margin: 0 1px !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button__button {
+                    width: 22px !important;
+                    height: 22px !important;
+                    min-height: 22px !important;
+                    padding: 0 !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button__icon,
+                .clause-editor-wrapper .jodit-toolbar-button__icon svg {
+                    width: 13px !important;
+                    height: 13px !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button__text {
+                    font-size: 10px !important;
+                    line-height: 1 !important;
+                }
+                .clause-editor-wrapper .jodit-workplace {
+                    overflow: auto !important;
+                    flex: 1 1 auto !important;
+                    min-height: 0 !important;
+                }
+                /* Image/add-line floaters must not cover the horizontal scrollbar. */
+                .clause-editor-wrapper .jodit-resizer,
+                .clause-editor-wrapper .jodit-workplace > .jodit-resizer,
+                .clause-editor-wrapper .jodit-add-new-line {
+                    display: none !important;
+                    pointer-events: none !important;
+                    visibility: hidden !important;
+                }
+                .clause-editor-wrapper .jodit-table-resizer {
+                    display: none !important;
+                    pointer-events: none !important;
+                }
+                /* Column resize — vertical grab at cell border. */
+                .clause-editor-wrapper .jodit-wysiwyg td.ems-col-resize-hover,
+                .clause-editor-wrapper .jodit-wysiwyg th.ems-col-resize-hover {
+                    cursor: col-resize !important;
+                }
+                .clause-editor-wrapper .ems-table-col-resizer {
+                    position: fixed;
+                    z-index: 10000;
+                    width: 10px;
+                    margin-left: -5px;
+                    cursor: col-resize !important;
+                    pointer-events: auto !important;
+                    display: block !important;
+                    background: rgba(30, 136, 229, 0.12);
+                }
+                .clause-editor-wrapper .ems-table-col-resizer:hover,
+                .clause-editor-wrapper .ems-table-col-resizer_moved {
+                    background-color: rgba(30, 136, 229, 0.35);
+                }
+                .clause-editor-wrapper .jodit-wysiwyg td.ems-row-resize-hover,
+                .clause-editor-wrapper .jodit-wysiwyg th.ems-row-resize-hover {
+                    cursor: row-resize !important;
+                }
+                /* Row resize (EMS) — horizontal grab at bottom of row. */
+                .clause-editor-wrapper .ems-table-row-resizer {
+                    position: fixed;
+                    z-index: 10000;
+                    height: 8px;
+                    margin-top: -4px;
+                    cursor: row-resize !important;
+                    pointer-events: auto !important;
+                    display: block !important;
+                    background: rgba(30, 136, 229, 0.12);
+                }
+                .clause-editor-wrapper .ems-table-row-resizer:hover,
+                .clause-editor-wrapper .ems-table-row-resizer_moved {
+                    background-color: rgba(30, 136, 229, 0.35);
+                }
+                .clause-editor-wrapper .jodit-workplace {
+                    position: relative;
+                }
+                .clause-editor-wrapper .jodit-workplace::-webkit-scrollbar {
+                    height: 14px;
+                }
+                .clause-editor-wrapper .jodit-workplace::-webkit-scrollbar-thumb {
+                    background: #94a3b8;
+                    border-radius: 4px;
+                }
+                /* Single-cell caret: no stray outline; multi-cell blue comes from Jodit selectionCellStyle. */
+                .clause-editor-wrapper .jodit-wysiwyg td,
+                .clause-editor-wrapper .jodit-wysiwyg th {
+                    outline: none;
                 }
                 /* Left editor only: tight rhythm (~half cursor between paragraphs). */
                 .clause-editor-wrapper .jodit-wysiwyg {
                     line-height: 1.25 !important;
+                    padding: 6px 8px !important;
+                    box-sizing: border-box !important;
+                    overflow-x: auto !important;
+                    overflow-y: visible !important;
+                    min-height: 100%;
+                    user-select: text !important;
+                    -webkit-user-select: text !important;
+                    cursor: text;
+                }
+                /* Top-level blocks share the same left edge as typed text (not flush to the box border). */
+                .clause-editor-wrapper .jodit-wysiwyg > p,
+                .clause-editor-wrapper .jodit-wysiwyg > div,
+                .clause-editor-wrapper .jodit-wysiwyg > ul,
+                .clause-editor-wrapper .jodit-wysiwyg > ol,
+                .clause-editor-wrapper .jodit-wysiwyg > blockquote {
+                    margin-left: 0 !important;
+                    margin-right: 0 !important;
+                    text-indent: 0 !important;
                 }
                 .clause-editor-wrapper .jodit-wysiwyg p,
                 .clause-editor-wrapper .jodit-wysiwyg li {
-                    margin: 0 !important;
+                    margin-top: 0 !important;
+                    margin-bottom: 0 !important;
                     line-height: 1.25 !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg > ul,
+                .clause-editor-wrapper .jodit-wysiwyg > ol {
+                    padding-left: 1.5em !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg ol > li,
+                .clause-editor-wrapper .jodit-wysiwyg ul > li {
+                    display: list-item !important;
                 }
                 .clause-editor-wrapper .jodit-wysiwyg p + p {
                     margin-top: 5px !important;
@@ -297,6 +604,12 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg table {
                     border-collapse: collapse !important;
                     border-spacing: 0 !important;
+                    table-layout: fixed !important;
+                    width: auto !important;
+                    max-width: none !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-col-widths] {
+                    width: auto !important;
                 }
                 /* Pasted tables from Excel/Word should keep their source rhythm.
                    The cleanup runs in JS, but these rules act as a safety net so
@@ -308,9 +621,9 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg table tr,
                 .clause-editor-wrapper .jodit-wysiwyg table td,
                 .clause-editor-wrapper .jodit-wysiwyg table th {
-                    height: auto !important;
                     line-height: 1.25 !important;
                     vertical-align: middle !important;
+                    box-sizing: border-box !important;
                 }
                 /* Jodit's default is padding: 0.4em (~6px each side) which inflates rows when source
                    inline padding is absent. Use a compact Word-typical default — written WITHOUT
@@ -338,6 +651,7 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg th > p:empty {
                     display: none;
                 }
+                ${CLAUSE_LIST_STYLES_CSS}
             `}
             </style>
         </div>

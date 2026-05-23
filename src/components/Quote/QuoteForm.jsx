@@ -23,7 +23,10 @@ import {
     Smartphone,
     Tag,
     Clock,
+    FilterX,
 } from 'lucide-react';
+import DashboardQuoteSummaryTable from '../Dashboard/DashboardQuoteSummaryTable';
+import '../../styles/emsTableColumnFilters.css';
 import CreatableSelect from 'react-select/creatable';
 import { format, parseISO, addDays } from 'date-fns';
 import DateInput from '../Enquiry/DateInput';
@@ -69,6 +72,7 @@ import {
 } from '../../constants/emsTheme';
 import { useAuth } from '../../context/AuthContext';
 import ClauseEditor from './ClauseEditor';
+import { CLAUSE_LIST_STYLES_CSS, normalizeClauseListHtmlInString } from './clauseEditorListPresets';
 import { resolveQuoteSummaryPriceFromRows, leadJobRowMatches } from './quoteEnquiryPricingLookup';
 import ListBoxControl from '../Enquiry/ListBoxControl';
 import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
@@ -94,19 +98,30 @@ import {
     makeVerificationCode,
     loadStampsForEnquiry,
     saveStampsForEnquiry,
-    loadSignatureLibrary,
     resolveDefaultSignatureImage,
     EMS_QUOTE_PLACE_STAMP_EVENT,
     parseDigitalSignaturesFromQuoteRow,
     serializeDigitalStampsForApi,
+    migrateLocalSignatureLibraryToServer,
 } from './QuoteDigitalSignature';
-import { openQuoteOutlookDraft, fetchQuoteOutlookEmailFields } from '../../utils/quoteOutlookDraft';
+import {
+    fetchUserSignatureLibrary,
+    fetchQuoteDigitalStamps,
+    appendQuoteDigitalStamp,
+    saveQuoteDigitalStamps,
+    normalizeSignatureEmail,
+} from '../../utils/quoteSignatureApi';
+import { openQuoteSmtpDraft, fetchQuoteOutlookEmailFields } from '../../utils/quoteSmtpDraft';
+import { isQuotePdfBrowserDownload } from '../../utils/quotePdfDownloadMode';
 
 /** Confirms this file is the bundle executed by Vite (Main.jsx → ./Quote/QuoteForm). Hard-refresh if missing. */
 console.log("QUOTE FILE LOADED");
 
 /** Match Pricing/Probability: when set, all `/api/*` calls (including PDF) hit the Express host. */
 const API_BASE = String(import.meta.env?.VITE_API_BASE ?? '').replace(/\/+$/, '');
+
+/** Production IIS: Download PDF → browser Print / Save as PDF. Email still uses server Puppeteer. */
+const QUOTE_PDF_BROWSER_DOWNLOAD = isQuotePdfBrowserDownload();
 
 /** Must match `PORT` in server/.env and `VITE_API_PORT` in vite.config.js / .env.development (default 5002). */
 function getEmsDevApiPort() {
@@ -237,6 +252,12 @@ async function assertQuotePdfApiReachable() {
         if (data && data.puppeteer === false) {
             throw new Error(
                 'Puppeteer is not installed on the API server. In EMS/server run: npm install, then npx puppeteer browsers install chrome'
+            );
+        }
+        if (data && data.chromeReady === false) {
+            throw new Error(
+                data.chromeHint ||
+                    'Chrome is not configured on the API server. On that machine run: cd server && npx puppeteer browsers install chrome — or set PUPPETEER_EXECUTABLE_PATH in server/.env.'
             );
         }
     } catch (e) {
@@ -504,18 +525,6 @@ function formatQuoteValidityLineForDetails(validityDisplay, dayCount) {
     return `${disp} (${n} day${n === 1 ? '' : 's'})`;
 }
 
-/**
- * Rollup key from API for colour + label. Accepts optional trailing "(…)" and ignores it for display.
- * Canonical key text is: None Quoted | Partial Quoted | All Quoted.
- */
-function normalizeListQuoteRollupKey(raw) {
-    let s = String(raw || '').trim();
-    if (s === 'All Quoted' || s === 'Partial Quoted' || s === 'None Quoted') return s;
-    const base = s.replace(/\s*\([^)]*\)\s*$/g, '').trim();
-    if (base === 'All Quoted' || base === 'Partial Quoted' || base === 'None Quoted') return base;
-    return 'None Quoted';
-}
-
 /** Pick enquiry row when user presses Enter in the left-panel search box. */
 function pickEnquiryForSearchEnter(term, suggestions) {
     const t = String(term || '').trim();
@@ -532,23 +541,6 @@ function pickEnquiryForSearchEnter(term, suggestions) {
         if (list.length === 1) return list[0];
     }
     return { RequestNo: t, ProjectName: '' };
-}
-
-/** Two-line label under enquiry no.: "{None|Partial|All} Quoted" / "for Ownjob" */
-function formatListQuoteRollupStatusTwoLines(raw) {
-    const key = normalizeListQuoteRollupKey(raw);
-    const tail = 'for Ownjob';
-    if (key === 'None Quoted') return { line1: 'None Quoted', line2: tail };
-    if (key === 'Partial Quoted') return { line1: 'Partial Quoted', line2: tail };
-    if (key === 'All Quoted') return { line1: 'All Quoted', line2: tail };
-    return { line1: 'None Quoted', line2: tail };
-}
-
-function listQuoteRollupStatusColor(raw) {
-    const k = normalizeListQuoteRollupKey(raw);
-    if (k === 'All Quoted') return '#047857';
-    if (k === 'Partial Quoted') return '#b45309';
-    return '#64748b';
 }
 
 /** Stable reference when there are zero quote tabs (avoids new [] every memo pass). */
@@ -659,7 +651,7 @@ function getClauseDisplayBodyHtml(html, listKey, displayMajor) {
     const canon = CLAUSE_MAJOR_BY_LIST_KEY[listKey];
     let out = renumberClauseMajorInHtml(html, canon, displayMajor);
     out = separateClauseSubNumberLines(out);
-    return out;
+    return normalizeClauseListHtmlInString(out);
 }
 
 /** Stable id on the auto-built pricing summary table so `calculateSummary` can replace it without wiping user HTML. */
@@ -2035,23 +2027,33 @@ const tableStyles = `
     .clause-content ul, .clause-content ol {
         margin-top: 1.6px !important;
         margin-bottom: 1.6px !important;
+        margin-left: 0 !important;
         padding-left: 24px !important;
         white-space: normal !important;
         line-height: 1.6 !important;
+        text-indent: 0 !important;
+        font-size: inherit !important;
+    }
+    .clause-content p,
+    .clause-content div:not(table div):not(td div):not(th div) {
+        margin-left: 0 !important;
+        text-indent: 0 !important;
     }
     .clause-content li {
         margin-bottom: 1.6px !important;
         line-height: 1.6 !important;
         display: list-item !important;
         list-style-position: outside !important;
+        font-size: inherit !important;
     }
     .clause-content li:last-child {
         margin-bottom: 0 !important;
     }
-    .clause-content ul {
+    /* Legacy clauses saved without EMS list classes */
+    .clause-content ul:not([class]) {
         list-style-type: disc !important;
     }
-    .clause-content ol {
+    .clause-content ol:not([class]) {
         list-style-type: decimal !important;
     }
     /* Footer: screen + print + PDF — column stack (default flex is row in some print UAs). */
@@ -2103,7 +2105,7 @@ const tableStyles = `
         text-align: right !important;
         box-sizing: border-box !important;
     }
-`;
+` + CLAUSE_LIST_STYLES_CSS;
 
 /** mm → px at 96dpi (CSS px). */
 const quoteMmToPx = (mm) => (mm * 96) / 25.4;
@@ -2387,18 +2389,53 @@ const QuoteForm = ({ openContext = null }) => {
     /** After a toolbar signature drag, browsers may emit a click — skip running place/open in that case. */
     const sigToolbarSuppressClickRef = useRef(false);
     const signatureLibraryEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
-    /** Stored default only — used for click-to-place on page 1 (same as vault “Place on page” with default image). */
-    const defaultSignatureImageUrl = React.useMemo(() => {
-        if (!signatureLibraryEmail) return null;
-        return resolveDefaultSignatureImage(signatureLibraryEmail);
+    /** Master_ConcernedSE.DigitalSignaturesJson — loaded from server (per user). */
+    const [userSignatureLibrary, setUserSignatureLibrary] = useState([]);
+    const [userDefaultSignatureId, setUserDefaultSignatureId] = useState(null);
+
+    useEffect(() => {
+        const email = signatureLibraryEmail;
+        if (!email) {
+            setUserSignatureLibrary([]);
+            setUserDefaultSignatureId(null);
+            return undefined;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                let master = await migrateLocalSignatureLibraryToServer(email);
+                if (!master) master = await fetchUserSignatureLibrary(email);
+                if (cancelled) return;
+                setUserSignatureLibrary(master?.signatures || []);
+                setUserDefaultSignatureId(master?.defaultSignatureId || null);
+            } catch (e) {
+                if (!cancelled) {
+                    console.warn('[QuoteForm] user signature library load failed', e);
+                    setUserSignatureLibrary([]);
+                    setUserDefaultSignatureId(null);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, [signatureLibraryEmail, signatureVaultOpen]);
+
     /** Default if set, else first library image — for dragging from the toolbar without opening the vault. */
     const toolbarDragSignatureImageUrl = React.useMemo(() => {
         if (!signatureLibraryEmail) return null;
-        if (defaultSignatureImageUrl) return defaultSignatureImageUrl;
-        const lib = loadSignatureLibrary(signatureLibraryEmail);
-        return lib[0]?.imageDataUrl || null;
-    }, [signatureLibraryEmail, signatureVaultOpen, defaultSignatureImageUrl]);
+        const defHit = userDefaultSignatureId
+            ? userSignatureLibrary.find((s) => s.id === userDefaultSignatureId)
+            : null;
+        if (defHit?.imageDataUrl) return defHit.imageDataUrl;
+        if (userSignatureLibrary[0]?.imageDataUrl) return userSignatureLibrary[0].imageDataUrl;
+        return resolveDefaultSignatureImage(signatureLibraryEmail);
+    }, [
+        signatureLibraryEmail,
+        signatureVaultOpen,
+        userSignatureLibrary,
+        userDefaultSignatureId,
+    ]);
     /** Digital stamp caption = logged-in user (merged profile), not quote Signatory / Prepared By. */
     const digitalStampUserDisplayName = React.useMemo(
         () => (currentUser?.FullName || currentUser?.name || '').trim(),
@@ -2488,6 +2525,8 @@ const QuoteForm = ({ openContext = null }) => {
     const [toPhone, setToPhone] = useState('');
     const [toEmail, setToEmail] = useState('');
     const [toFax, setToFax] = useState('');
+    /** User edited Recipient Info override — do not auto-hydrate or preview-fallback from master/customer. */
+    const recipientOverrideTouchedRef = useRef(false);
     const [toAttention, setToAttention] = useState(''); // ReceivedFrom contact for selected customer
     /** When enquiry-data map misses a label (e.g. pricing-only customer), filled from /attention-by-department. */
     const [deptAttentionNames, setDeptAttentionNames] = useState([]);
@@ -2607,7 +2646,8 @@ const QuoteForm = ({ openContext = null }) => {
     const [quoteSearchLoading, setQuoteSearchLoading] = useState(false);
     /** When true with an enquiry open, right panel shows pending/search list instead of quote preview (after Search click). */
     const [showQuoteListSummaryOverQuote, setShowQuoteListSummaryOverQuote] = useState(false);
-    const [pendingQuotesSortConfig, setPendingQuotesSortConfig] = useState({ field: 'DueDate', direction: 'asc' }); // Default: soonest due date on top
+    const quoteSummaryClearColFiltersRef = useRef(() => {});
+    const [quoteSummaryHasColFilters, setQuoteSummaryHasColFilters] = useState(false);
 
     const quoteListDisplayRows = React.useMemo(
         () => (quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH ? quoteSearchResults : pendingQuotes),
@@ -2673,6 +2713,8 @@ const QuoteForm = ({ openContext = null }) => {
     const handleQuoteListClear = useCallback(() => {
         // Same full reset as the left panel Search row "Clear" (enquiry no, lead job, customer, etc.)
         clearLeftPanelForToolbarSearchRef.current?.();
+        quoteSummaryClearColFiltersRef.current?.();
+        setQuoteSummaryHasColFilters(false);
         setQuoteListSearchCriteria('');
         setQuoteListDateFrom('');
         setQuoteListDateTo('');
@@ -6173,11 +6215,16 @@ const QuoteForm = ({ openContext = null }) => {
         }
     }, [enquiryData, toName, quoteListDivision]);
 
+    useEffect(() => {
+        recipientOverrideTouchedRef.current = false;
+    }, [toName]);
+
     // Safety net for pending-list/context opens:
     // if customer name is present but recipient contact block is blank, hydrate from master/enquiry data.
     useEffect(() => {
         const tn = String(toName || '').trim();
         if (!tn) return;
+        if (recipientOverrideTouchedRef.current) return;
 
         const hasAnyContact =
             String(toAddress || '').trim() ||
@@ -6418,9 +6465,9 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     const updateCustomClause = (id, field, value) => {
-        setCustomClauses(customClauses.map(c =>
-            c.id === id ? { ...c, [field]: value } : c
-        ));
+        const nextVal =
+            field === 'content' ? normalizeClauseListHtmlInString(value) : value;
+        setCustomClauses(customClauses.map((c) => (c.id === id ? { ...c, [field]: nextVal } : c)));
     };
 
     const canEdit = () => {
@@ -10341,339 +10388,23 @@ const QuoteForm = ({ openContext = null }) => {
                 </div>
             );
         }
-        const sortedPendingQuotes = [...quoteListDisplayRows].sort((a, b) => {
-            const { field, direction } = pendingQuotesSortConfig;
-            let aVal = a[field];
-            let bVal = b[field];
-            if (field === 'DueDate' || field === 'EnquiryDate' || field === 'ListQuoteDate') {
-                aVal = aVal ? new Date(aVal).getTime() : Infinity;
-                bVal = bVal ? new Date(bVal).getTime() : Infinity;
-            } else {
-                aVal = (aVal || '').toString().toLowerCase();
-                bVal = (bVal || '').toString().toLowerCase();
-            }
-            if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-            if (aVal > bVal) return direction === 'asc' ? 1 : -1;
-            return 0;
-        });
-        const quoteSortField = pendingQuotesSortConfig.field;
-        const quoteSortDir = pendingQuotesSortConfig.direction;
-        const renderQSH = (field, label, style = {}) => {
-            const isActive = quoteSortField === field;
-            const isAsc = quoteSortDir === 'asc';
-            return (
-                <th
-                    key={field}
-                    onClick={() =>
-                        setPendingQuotesSortConfig((prev) =>
-                            prev.field === field
-                                ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
-                                : { field, direction: 'asc' },
-                        )
-                    }
-                    style={{
-                        padding: '6px 10px',
-                        fontSize: '11.7px',
-                        fontWeight: '400',
-                        color: '#ffffff',
-                        borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
-                        cursor: 'pointer',
-                        userSelect: 'none',
-                        whiteSpace: 'nowrap',
-                        ...style,
-                        textAlign: 'left',
-                    }}
-                >
-                    {label}
-                    {isActive ? (isAsc ? ' ▲' : ' ▼') : <span style={{ color: '#cbd5e1' }}> ⇅</span>}
-                </th>
-            );
-        };
-        const quoteListColgroup = (
-            <colgroup>
-                <col style={{ width: '96px' }} />
-                <col style={{ width: '220px' }} />
-                <col />
-                <col style={{ width: '110px' }} />
-                <col style={{ minWidth: '260px', width: '260px' }} />
-            </colgroup>
-        );
-        const quoteListTableFixed = {
-            width: 'max-content',
-            minWidth: '960px',
-            borderCollapse: 'collapse',
-            tableLayout: 'fixed',
-        };
-        const quoteListTdTransparent = { backgroundColor: 'transparent' };
-        const quoteListRowHoverGrey = '#cbd5e1';
+        const emptyLabel = quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+            ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
+            : 'No pending updates found. Start by entering an enquiry number above.';
         return (
-            <div
-                style={{
-                    background: 'white',
-                    borderRadius: '8px',
-                    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-                    flex: 1,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    overflow: 'hidden',
-                    width: '100%',
-                    margin: '0 auto',
-                    minHeight: 0,
+            <DashboardQuoteSummaryTable
+                rows={quoteListDisplayRows}
+                onOpenEnquiry={handleSelectEnquiry}
+                emptyLabel={emptyLabel}
+                onRegisterClearColumnFilters={(fn) => {
+                    quoteSummaryClearColFiltersRef.current = fn;
                 }}
-            >
-                {/* Single table + one scroll container: header/body columns always align; both scrollbars visible */}
-                <div
-                    style={{
-                        flex: 1,
-                        minHeight: 0,
-                        overflow: 'auto',
-                        WebkitOverflowScrolling: 'touch',
-                    }}
-                >
-                    <table style={quoteListTableFixed}>
-                        {quoteListColgroup}
-                        <thead
-                            style={{
-                                position: 'sticky',
-                                top: 0,
-                                zIndex: 2,
-                                background: EMS_TABLE_HEADER_GRADIENT,
-                                boxShadow: '0 1px 0 rgba(15, 23, 42, 0.12)',
-                            }}
-                        >
-                            <tr>
-                                {renderQSH('RequestNo', 'Enquiry No.', { width: '96px', borderTopLeftRadius: '8px' })}
-                                {renderQSH('ProjectName', 'Project Name', { minWidth: '200px' })}
-                                {renderQSH('ListQuoteRef', 'To Customer and Quote details', { minWidth: 'max-content', maxWidth: '72vw', whiteSpace: 'normal' })}
-                                {renderQSH('DueDate', 'Due Date', { minWidth: '110px' })}
-                                {renderQSH('ConsultantName', 'Consultant Name', { minWidth: '260px', borderTopRightRadius: '8px' })}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sortedPendingQuotes.map((enq, idx) => {
-                                const zebraBg = idx % 2 === 0 ? '#ffffff' : '#f1f5f9';
-                                const statusLines = formatListQuoteRollupStatusTwoLines(enq.ListQuoteRollupStatus);
-                                const statusColor = listQuoteRollupStatusColor(enq.ListQuoteRollupStatus);
-                                const tdPad = '10px 12px';
-                                return (
-                                <tr
-                                    key={
-                                        enq.QuoteListKind
-                                            ? `${enq.RequestNo}-${enq.QuoteListKind}`
-                                            : `${String(enq.RequestNo ?? 'r')}-${
-                                                  Array.isArray(enq.ListMergedPendingPvIds)
-                                                      ? enq.ListMergedPendingPvIds.join('-')
-                                                      : String(enq.ListPendingPvId ?? enq.listpendingpvid ?? '').trim() || `row-${idx}`
-                                              }`
-                                    }
-                                    style={{
-                                        borderBottom: '1px solid #e2e8f0',
-                                        cursor: 'pointer',
-                                        transition: 'background-color 0.12s ease',
-                                        backgroundColor: zebraBg,
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        e.currentTarget.style.backgroundColor = quoteListRowHoverGrey;
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.currentTarget.style.backgroundColor = zebraBg;
-                                    }}
-                                    onClick={() => handleSelectEnquiry(enq)}
-                                >
-                                    <td style={{ ...quoteListTdTransparent, padding: tdPad, fontSize: '11.7px', color: '#1e293b', fontWeight: '500', verticalAlign: 'top', whiteSpace: 'nowrap', textAlign: 'left' }}>
-                                        <div>{enq.RequestNo}</div>
-                                        <div
-                                            style={{
-                                                marginTop: '6px',
-                                                fontSize: '8.8px',
-                                                fontWeight: 700,
-                                                letterSpacing: '0.02em',
-                                                color: statusColor,
-                                                whiteSpace: 'normal',
-                                                lineHeight: 1.25,
-                                            }}
-                                        >
-                                            <div>{statusLines.line1}</div>
-                                            <div>{statusLines.line2}</div>
-                                        </div>
-                                    </td>
-                                    <td style={{ ...quoteListTdTransparent, padding: tdPad, fontSize: '11.2px', color: '#64748b', verticalAlign: 'top', minWidth: '234px', whiteSpace: 'nowrap', textAlign: 'left' }}>
-                                        {enq.ProjectName || '-'}
-                                    </td>
-                                    <td
-                                        style={{
-                                            ...quoteListTdTransparent,
-                                            padding: tdPad,
-                                            fontSize: '11px',
-                                            color: '#64748b',
-                                            verticalAlign: 'top',
-                                            minWidth: 'max-content',
-                                            maxWidth: '72vw',
-                                            whiteSpace: 'normal',
-                                            wordBreak: 'break-word',
-                                            textAlign: 'left',
-                                        }}
-                                    >
-                                        {(() => {
-                                            const rowPreparedBy = String(enq.ListPreparedBy ?? enq.listpreparedby ?? '').trim();
-                                            const fmtQuoteDate = (raw) => {
-                                                try {
-                                                    const d = raw ? new Date(raw) : null;
-                                                    return d && !Number.isNaN(d.getTime()) ? format(d, 'dd-MMM-yyyy') : '—';
-                                                } catch {
-                                                    return '—';
-                                                }
-                                            };
-                                            const compactLineStyle = {
-                                                display: 'flex',
-                                                flexWrap: 'wrap',
-                                                alignItems: 'baseline',
-                                                justifyContent: 'flex-start',
-                                                gap: '6px',
-                                                fontSize: '11px',
-                                                lineHeight: 1.2,
-                                                color: '#334155',
-                                                textAlign: 'left',
-                                                width: '100%',
-                                            };
-                                            const refDateStyle = { fontSize: '11px', color: '#475569', wordBreak: 'break-word' };
-                                            const bdStyle = {
-                                                fontSize: '11px',
-                                                fontWeight: 600,
-                                                color: '#166534',
-                                                whiteSpace: 'nowrap',
-                                                background: '#dcfce7',
-                                                padding: '2px 8px',
-                                                borderRadius: '4px',
-                                            };
-                                            const preparedByStyle = {
-                                                fontSize: '11px',
-                                                color: '#800000',
-                                                fontWeight: 500,
-                                                whiteSpace: 'normal',
-                                                wordBreak: 'break-word',
-                                            };
-
-                                            if (Array.isArray(enq.ListQuoteDetailLines) && enq.ListQuoteDetailLines.length > 0) {
-                                                return enq.ListQuoteDetailLines.map((ln, li) => {
-                                                    const linePrep = String(
-                                                        ln.preparedBy ?? ln.PreparedBy ?? ''
-                                                    ).trim();
-                                                    return (
-                                                    <div key={`dl-${li}`} style={{ ...compactLineStyle, marginTop: li ? 4 : 0 }}>
-                                                        <span style={refDateStyle}>{ln.textLine}</span>
-                                                        {ln.bdTotal != null && ln.bdTotal > 0 ? (
-                                                            <span style={{ ...bdStyle, fontSize: '10px' }}>
-                                                                BD{' '}
-                                                                {Number(ln.bdTotal).toLocaleString(undefined, {
-                                                                    minimumFractionDigits: 2,
-                                                                    maximumFractionDigits: 2,
-                                                                })}
-                                                            </span>
-                                                        ) : null}
-                                                        {linePrep ? <span style={preparedByStyle}>{linePrep}</span> : null}
-                                                    </div>
-                                                    );
-                                                });
-                                            }
-
-                                            const toNameCell = String(enq.ListQuoteDetailToName ?? '').trim() || '—';
-                                            if (Array.isArray(enq.ListMultiLeadQuoteRefs) && enq.ListMultiLeadQuoteRefs.length > 0) {
-                                                const joined = enq.ListMultiLeadQuoteRefs
-                                                    .map((line) => `${toNameCell} (${line.quoteNumber} - ${fmtQuoteDate(line.quoteDate)})`)
-                                                    .join(' · ');
-                                                const multiPrep = [
-                                                    ...new Set(
-                                                        enq.ListMultiLeadQuoteRefs.map((line) =>
-                                                            String(line.preparedBy ?? line.PreparedBy ?? '').trim()
-                                                        ).filter(Boolean)
-                                                    ),
-                                                ].join(' · ');
-                                                return (
-                                                    <div style={compactLineStyle}>
-                                                        <span style={refDateStyle}>{joined}</span>
-                                                        {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
-                                                            <span style={bdStyle}>
-                                                                BD{' '}
-                                                                {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, {
-                                                                    minimumFractionDigits: 2,
-                                                                    maximumFractionDigits: 2,
-                                                                })}
-                                                            </span>
-                                                        ) : null}
-                                                        {multiPrep ? (
-                                                            <span style={preparedByStyle}>{multiPrep}</span>
-                                                        ) : rowPreparedBy ? (
-                                                            <span style={preparedByStyle}>{rowPreparedBy}</span>
-                                                        ) : null}
-                                                    </div>
-                                                );
-                                            }
-                                            if (enq.ListQuoteRef) {
-                                                return (
-                                                    <div style={compactLineStyle}>
-                                                        <span style={refDateStyle}>
-                                                            {toNameCell} ({enq.ListQuoteRef} - {fmtQuoteDate(enq.ListQuoteDate)})
-                                                        </span>
-                                                        {enq.ListQuoteUnderRefTotal != null && enq.ListQuoteUnderRefTotal > 0 ? (
-                                                            <span style={bdStyle}>
-                                                                BD{' '}
-                                                                {Number(enq.ListQuoteUnderRefTotal).toLocaleString(undefined, {
-                                                                    minimumFractionDigits: 2,
-                                                                    maximumFractionDigits: 2,
-                                                                })}
-                                                            </span>
-                                                        ) : null}
-                                                        {rowPreparedBy ? (
-                                                            <span style={preparedByStyle}>{rowPreparedBy}</span>
-                                                        ) : null}
-                                                    </div>
-                                                );
-                                            }
-                                            return <div style={{ color: '#94a3b8', fontSize: '12px' }}>—</div>;
-                                        })()}
-                                    </td>
-                                    <td
-                                        style={{
-                                            ...quoteListTdTransparent,
-                                            padding: tdPad,
-                                            fontSize: '11.2px',
-                                            color: '#dc2626',
-                                            fontWeight: '500',
-                                            verticalAlign: 'top',
-                                            minWidth: '110px',
-                                            whiteSpace: 'nowrap',
-                                            textAlign: 'left',
-                                        }}
-                                    >
-                                        {enq.DueDate ? format(new Date(enq.DueDate), 'dd-MMM-yyyy') : '-'}
-                                    </td>
-                                    <td
-                                        style={{
-                                            ...quoteListTdTransparent,
-                                            padding: tdPad,
-                                            fontSize: '11.2px',
-                                            color: '#64748b',
-                                            verticalAlign: 'top',
-                                            minWidth: '260px',
-                                            maxWidth: '42vw',
-                                            whiteSpace: 'normal',
-                                            wordBreak: 'break-word',
-                                            overflowWrap: 'anywhere',
-                                            textAlign: 'left',
-                                        }}
-                                    >
-                                        {enq.ConsultantName || enq.consultantName || '-'}
-                                    </td>
-                                </tr>
-                            );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+                onFilterStateChange={({ hasColumnFilters }) => {
+                    setQuoteSummaryHasColFilters(hasColumnFilters);
+                }}
+            />
         );
-    }, [quoteListDisplayRows, pendingQuotesSortConfig, quoteListCategory, handleSelectEnquiry]);
+    }, [quoteListDisplayRows, quoteListCategory, handleSelectEnquiry]);
 
     // --- Attachment Functions ---
     const fetchQuoteAttachments = useCallback(async (qId) => {
@@ -10839,7 +10570,7 @@ const QuoteForm = ({ openContext = null }) => {
 
     // Update clause content
     const updateClauseContent = (key, value) => {
-        setClauseContent(prev => ({ ...prev, [key]: value }));
+        setClauseContent((prev) => ({ ...prev, [key]: normalizeClauseListHtmlInString(value) }));
     };
 
 
@@ -11246,24 +10977,8 @@ const QuoteForm = ({ openContext = null }) => {
             if (qid == null || String(qid).trim() === '' || !enquiryData) return;
 
             try {
-                const payload = {
-                    ...getQuotePayloadRef.current(),
-                    digitalSignaturesJson: serializeDigitalStampsForApi(stamps),
-                };
-                const res = await fetch(`${API_BASE}/api/quotes/${qid}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                if (!res.ok) {
-                    const errorData = await res.json().catch(() => ({}));
-                    alert(
-                        `Failed to save signature on this quote: ${errorData.error || errorData.details || res.statusText}`
-                    );
-                    return;
-                }
-
-                const sigJson = payload.digitalSignaturesJson;
+                const saved = await saveQuoteDigitalStamps(qid, stamps);
+                const sigJson = serializeDigitalStampsForApi(saved.length ? saved : stamps);
                 const idStr = String(qid);
                 setExistingQuotes((prev) =>
                     prev.map((q) =>
@@ -11357,6 +11072,30 @@ const QuoteForm = ({ openContext = null }) => {
         stampScopeRef.current = digitalStampScope;
     }, [digitalStampScope]);
 
+    /** Refresh placed stamps from EnquiryQuotes when a saved quote is open (multi-user). */
+    useEffect(() => {
+        const qid = quoteId;
+        if (qid == null || String(qid).trim() === '') return undefined;
+        let cancelled = false;
+        (async () => {
+            try {
+                const stamps = await fetchQuoteDigitalStamps(qid);
+                if (cancelled || !stamps.length) return;
+                setQuoteDigitalStamps(
+                    stamps.map((s) => ({
+                        ...s,
+                        removableBeforeNextCommit: false,
+                    }))
+                );
+            } catch (e) {
+                console.warn('[QuoteForm] fetchQuoteDigitalStamps failed', e);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [quoteId]);
+
     useEffect(() => {
         if (!digitalStampScope) {
             setQuoteDigitalStamps([]);
@@ -11389,35 +11128,68 @@ const QuoteForm = ({ openContext = null }) => {
     }, [commitQuoteDigitalStamps]);
 
     const handlePlaceDigitalStamp = useCallback(
-        ({ imageDataUrl, sheetIndex, displayName, designation, xPct: xIn, yPct: yIn }) => {
+        async ({ imageDataUrl, sheetIndex, displayName, designation, xPct: xIn, yPct: yIn }) => {
             const iso = new Date().toISOString();
-            const email = currentUser?.EmailId || currentUser?.email || '';
+            const email = normalizeSignatureEmail(currentUser?.EmailId || currentUser?.email || '');
             const xPct = typeof xIn === 'number' && Number.isFinite(xIn) ? Math.min(96, Math.max(2, xIn)) : 82;
             const yPct = typeof yIn === 'number' && Number.isFinite(yIn) ? Math.min(92, Math.max(2, yIn)) : 38;
             const sheetIdx = Math.max(1, Number(sheetIndex) || 1);
             const newStamp = {
                 id: globalThis.crypto?.randomUUID?.() || `st-${Date.now()}`,
+                placedByEmail: email,
                 sheetIndex: sheetIdx,
                 xPct,
                 yPct,
                 imageDataUrl,
-                displayName: (displayName || '').trim(),
-                designation: (designation || '').trim(),
+                displayName: (displayName || digitalStampUserDisplayName || '').trim(),
+                designation: (designation || digitalStampUserDesignation || '').trim(),
                 placedAtIso: iso,
                 verificationCode: makeVerificationCode(email, iso),
-                /** Fixed on placement — cannot move or remove afterward (including after save/revise). */
                 removableBeforeNextCommit: false,
             };
-            commitQuoteDigitalStamps((prev) => {
-                const next = [...prev, newStamp];
-                const qid = quoteId;
-                if (qid != null && String(qid).trim() !== '') {
-                    void persistDigitalSignaturesToSavedQuoteRef.current?.(next);
+            const qid = quoteId;
+            if (qid != null && String(qid).trim() !== '') {
+                try {
+                    const fromServer = await appendQuoteDigitalStamp(qid, newStamp);
+                    const locked = fromServer.map((s) => ({
+                        ...s,
+                        removableBeforeNextCommit: false,
+                    }));
+                    setQuoteDigitalStamps(locked);
+                    const sigJson = serializeDigitalStampsForApi(locked);
+                    const idStr = String(qid);
+                    setExistingQuotes((prev) =>
+                        prev.map((q) =>
+                            String(quoteRowId(q) ?? '') === idStr
+                                ? { ...q, DigitalSignaturesJson: sigJson, digitalSignaturesJson: sigJson }
+                                : q
+                        )
+                    );
+                    if (scopedEnquiryQuotesParams) {
+                        setQuoteScopedForPanel((prev) =>
+                            prev.map((q) =>
+                                String(quoteRowId(q) ?? '') === idStr
+                                    ? { ...q, DigitalSignaturesJson: sigJson, digitalSignaturesJson: sigJson }
+                                    : q
+                            )
+                        );
+                    }
+                } catch (err) {
+                    console.error('[handlePlaceDigitalStamp]', err);
+                    alert(`Failed to save signature on this quote: ${err.message || err}`);
                 }
-                return next;
-            });
+                return;
+            }
+            commitQuoteDigitalStamps((prev) => [...prev, newStamp]);
         },
-        [currentUser, commitQuoteDigitalStamps, quoteId]
+        [
+            currentUser,
+            commitQuoteDigitalStamps,
+            quoteId,
+            digitalStampUserDisplayName,
+            digitalStampUserDesignation,
+            scopedEnquiryQuotesParams,
+        ]
     );
 
     const handleCancelSignaturePlacement = useCallback(() => {
@@ -11563,7 +11335,9 @@ const QuoteForm = ({ openContext = null }) => {
     const canUseQuoteDigitalSignature = Boolean(
         hasUserPricing &&
             enquiryData?.enquiry?.RequestNo &&
-            (isQuoteCcMailSigner || toolbarDragSignatureImageUrl)
+            (isQuoteCcMailSigner ||
+                userSignatureLibrary.length > 0 ||
+                Boolean(toolbarDragSignatureImageUrl))
     );
 
     const handleSignaturesToolbarPrimaryClick = useCallback(
@@ -11733,38 +11507,53 @@ const QuoteForm = ({ openContext = null }) => {
         return () => window.removeEventListener(EMS_QUOTE_PLACE_STAMP_EVENT, onPlaceFromProfile);
     }, [handlePlaceDigitalStamp, digitalStampUserDisplayName, digitalStampUserDesignation]);
 
-    // Print quote — same HTML shell as vector PDF preview (`buildQuotePrintDocumentHtml` preview mode).
-    const printQuote = useCallback(() => {
-        const printRoot = document.getElementById('quote-print-root');
-        const printContent = document.getElementById('quote-preview');
-        const fragmentHtml = printRoot
-            ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
-            : printContent
-              ? printContent.innerHTML
-              : '';
-        if (fragmentHtml) {
+    /** Browser print window — shared by Print button and Download PDF (IIS production). */
+    const openQuotePrintWindow = useCallback(
+        (options = {}) => {
+            const { browserSavePdf = false } = options;
+            const printRoot = document.getElementById('quote-print-root');
+            const printContent = document.getElementById('quote-preview');
+            const fragmentHtml = printRoot
+                ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
+                : printContent
+                  ? printContent.innerHTML
+                  : '';
+            if (!fragmentHtml) {
+                window.alert('No quote document to print.');
+                return false;
+            }
             const serverOrigin = getQuotePdfServerOrigin();
+            const safeRef = String(quoteNumber || quoteId || 'Draft').replace(/\//g, '_');
+            const docTitle = `Quote_${safeRef}`;
             const printWindow = window.open('', '_blank');
             if (!printWindow) {
-                window.alert('Pop-up blocked — allow pop-ups for this site to print, or use the Print button in the quote panel.');
-                return;
+                window.alert(
+                    'Pop-up blocked — allow pop-ups for this site to print or save as PDF.'
+                );
+                return false;
             }
-            /* Same HTML path as PDF download (preview mode) so Print and Download stay aligned */
             printWindow.document.write(
                 buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, tableStyles, serverOrigin, 'preview', {
                     pdfAssetOriginRewriteFrom: typeof window !== 'undefined' ? window.location.origin : '',
+                    browserSavePdfHint: browserSavePdf,
+                    documentTitle: docTitle,
                 })
             );
             printWindow.document.close();
+            printWindow.document.title = docTitle;
             printWindow.focus();
-
-            // Increased delay to ensure rendering matches styles
             setTimeout(() => {
                 printWindow.print();
                 printWindow.close();
             }, 900);
-        }
-    }, [printWithHeader]);
+            return true;
+        },
+        [printWithHeader, quoteNumber, quoteId, tableStyles]
+    );
+
+    const printQuote = useCallback(() => {
+        openQuotePrintWindow({ browserSavePdf: false });
+    }, [openQuotePrintWindow]);
 
     /** Browser Ctrl+P prints the whole flex layout (narrow quote column). Route to the same window as the Print button. */
     useEffect(() => {
@@ -11836,7 +11625,7 @@ const QuoteForm = ({ openContext = null }) => {
         }, 60_000);
     };
 
-    /** Same PDF bytes as Download PDF — used by download + Outlook email flow */
+    /** Server vector PDF — email Outlook draft, attachment downloads (not user Download PDF on IIS). */
     const fetchQuotePdfBlob = async () => {
         await assertQuotePdfApiReachable();
         syncCoverLetterGapBeforePdfCapture(quoteCoverLetterRef.current);
@@ -11903,8 +11692,16 @@ const QuoteForm = ({ openContext = null }) => {
         return { blob, fileName: fname };
     };
 
-    /** Vector PDF via server Puppeteer (selectable text — not canvas screenshots). */
+    /**
+     * Download PDF: production IIS uses browser Print → Save as PDF (no Puppeteer).
+     * Dev / VITE_QUOTE_PDF_SERVER_DOWNLOAD=1 uses server vector PDF.
+     */
     const downloadPDF = async () => {
+        if (QUOTE_PDF_BROWSER_DOWNLOAD) {
+            syncCoverLetterGapBeforePdfCapture(quoteCoverLetterRef.current);
+            openQuotePrintWindow({ browserSavePdf: true });
+            return;
+        }
         setIsUploading(true);
         try {
             const { blob, fileName } = await fetchQuotePdfBlob();
@@ -11939,7 +11736,7 @@ const QuoteForm = ({ openContext = null }) => {
         } catch (err) {
             console.error('PDF generation error:', err);
             const msg = String(err?.message || err || 'Unknown error');
-            const needsServerHint = /not running|not reachable|puppeteer/i.test(msg);
+            const needsServerHint = /not running|not reachable|puppeteer|chrome|EFTYPE|spawn/i.test(msg);
             alert(
                 `PDF download failed: ${msg}` +
                     (needsServerHint
@@ -12220,7 +12017,7 @@ const QuoteForm = ({ openContext = null }) => {
         return '';
     };
 
-    /** Email button — opens Outlook draft with quote PDF attached (VBScript/COM on Windows). */
+    /** Email button — builds SMTP-based .eml draft (From = login email) with quote PDF attached. */
     const startQuoteEmailFlow = async () => {
         if (!hasUserPricing) return;
         if (!toAttention?.trim()) {
@@ -12277,10 +12074,14 @@ const QuoteForm = ({ openContext = null }) => {
                 }
             }
 
-            const result = await openQuoteOutlookDraft({
+            const displayName = String(currentUser?.FullName || currentUser?.name || '').trim();
+
+            const result = await openQuoteSmtpDraft({
                 apiBase: API_BASE,
                 pdfBlob: blob,
                 displayFileName: fileName,
+                userEmail,
+                userDisplayName: displayName,
                 emailFields: {
                     to: toAddr,
                     cc: (outlookFields.cc || '').trim(),
@@ -12289,41 +12090,24 @@ const QuoteForm = ({ openContext = null }) => {
                     body: initialBody,
                     extraAttachments: extraAttachmentsBase64,
                 },
-                extraAttachmentFileNames,
                 triggerBlobDownload,
-                sleep,
                 blobToBase64,
             });
 
-            if (result.method === 'server' || result.method === 'local-helper') {
-                return;
+            if (!result.ok) {
+                throw new Error(result.error || 'Could not create email draft');
             }
 
-            for (let i = 0; i < extraAttachmentsBase64.length; i++) {
-                const item = extraAttachmentsBase64[i];
-                const bin = Uint8Array.from(atob(item.base64), (c) => c.charCodeAt(0));
-                triggerBlobDownload(new Blob([bin]), extraAttachmentFileNames[i]);
-                await sleep(350);
-            }
-
-            if (result.method === 'vbs-prompt') {
+            if (!result.openedInOutlook) {
                 alert(
-                    'If Outlook did not open, choose Open on EMS_OpenQuoteDraft.vbs in your browser download bar.\n\nThe quote PDF is in Downloads as EMS_QuoteDraft.pdf.'
+                    'Outlook did not open automatically.\n\n' +
+                        `Open ${result.fileName || 'EMS_QuoteDraft.eml'} from your Downloads folder (double-click) to open the draft in Outlook.\n\n` +
+                        'Tip: run `node scripts/quote-outlook-local-helper.js` at login for one-click Outlook drafts.'
                 );
-                return;
             }
-
-            alert(
-                'Outlook could not be started automatically from the EMS server.\n\n' +
-                    'In your Downloads folder:\n' +
-                    '1. Wait for EMS_QuoteDraft.pdf to finish downloading\n' +
-                    '2. Double-click EMS_OpenQuoteDraft.vbs\n\n' +
-                    'This opens an Outlook draft with the quote attached (classic Outlook desktop required).' +
-                    (result.serverError ? `\n\n(${result.serverError})` : '')
-            );
         } catch (err) {
             console.error('Email preparation failed:', err);
-            alert(`Failed to prepare quote for Outlook: ${err.message || err}`);
+            alert(`Failed to open quote email draft: ${err.message || err}`);
         } finally {
             setIsUploading(false);
         }
@@ -12339,10 +12123,13 @@ const QuoteForm = ({ openContext = null }) => {
         try {
             const pdfBase64 = await blobToBase64(emailDetails.pdfBlob);
             
+            const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
             const res = await fetch(`${API_BASE}/api/quotes/send-email`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    fromEmail: userEmail,
+                    fromDisplayName: String(currentUser?.FullName || currentUser?.name || '').trim(),
                     to: emailDetails.to,
                     cc: emailDetails.cc,
                     bcc: emailDetails.bcc,
@@ -12391,10 +12178,12 @@ const QuoteForm = ({ openContext = null }) => {
                 .replace(/\n*Best Regards,?\s*\n[\s\S]*$/i, '')
                 .trimEnd();
 
-            const result = await openQuoteOutlookDraft({
+            const result = await openQuoteSmtpDraft({
                 apiBase: API_BASE,
                 pdfBlob: emailDetails.pdfBlob,
                 displayFileName: emailDetails.pdfName,
+                userEmail,
+                userDisplayName: String(currentUser?.FullName || currentUser?.name || '').trim(),
                 emailFields: {
                     to: toAddr,
                     cc: (emailDetails.cc || outlookFields.cc || '').trim(),
@@ -12402,21 +12191,20 @@ const QuoteForm = ({ openContext = null }) => {
                     subject: emailDetails.subject || '',
                     body: bodyNoSig,
                 },
-                extraAttachmentFileNames: [],
                 triggerBlobDownload,
-                sleep,
                 blobToBase64,
             });
-            if (result.method === 'vbs-manual' || result.method === 'vbs-prompt') {
+            if (!result.ok) {
+                throw new Error(result.error || 'Could not create email draft');
+            }
+            if (!result.openedInOutlook) {
                 alert(
-                    result.method === 'vbs-prompt'
-                        ? 'Choose Open on EMS_OpenQuoteDraft.vbs if prompted. PDF: EMS_QuoteDraft.pdf in Downloads.'
-                        : 'Double-click EMS_OpenQuoteDraft.vbs in Downloads after the PDF finishes downloading.'
+                    `Open ${result.fileName || 'EMS_QuoteDraft.eml'} from Downloads to open the draft in Outlook (From: ${userEmail}).`
                 );
             }
             setShowEmailModal(false);
         } catch (e) {
-            alert(`Could not open Outlook: ${e.message || e}`);
+            alert(`Could not create email draft: ${e.message || e}`);
         } finally {
             setEmailSending(false);
         }
@@ -12802,22 +12590,10 @@ const QuoteForm = ({ openContext = null }) => {
 
         /**
          * Draft preview (Previous Quotes / Revisions OFF): mirror the left-panel recipient
-         * fields verbatim so the user sees their edits live on the right side. The left panel
-         * is already hydrated from Master_EnquiryFor for internal recipients (see
-         * handleCustomerChange + internalToAddressSyncedRef), so no extra override is needed
-         * here. Only fall back to the internal profile for fields the user has cleared, so
-         * those don't show as empty in the preview while an internal recipient is selected.
+         * fields verbatim — cleared override fields must hide the matching preview rows/icons.
          */
         if (!browsePreviousQuotesRevisions) {
-            const intOverride = overrideFromInternalProfile(baseForm.toName);
-            if (!intOverride) return baseForm;
-            return {
-                ...baseForm,
-                toAddress: baseForm.toAddress || intOverride.toAddress,
-                toPhone: baseForm.toPhone || intOverride.toPhone,
-                toFax: baseForm.toFax || intOverride.toFax,
-                toEmail: baseForm.toEmail || intOverride.toEmail,
-            };
+            return baseForm;
         }
 
         const sj = subjobQuoteA4HeaderDisplay;
@@ -14392,7 +14168,10 @@ const QuoteForm = ({ openContext = null }) => {
                                             <label style={{ display: 'block', fontSize: '12px', color: '#64748b', marginBottom: '2px' }}>To Address</label>
                                             <textarea
                                                 value={toAddress}
-                                                onChange={(e) => setToAddress(e.target.value)}
+                                                onChange={(e) => {
+                                                    recipientOverrideTouchedRef.current = true;
+                                                    setToAddress(e.target.value);
+                                                }}
                                                 rows={2}
                                                 placeholder="Client Address..."
                                                 style={{ width: '100%', padding: '4px 8px', border: '1px solid #cbd5e1', borderRadius: '4px', resize: 'vertical', fontSize: '12px', boxSizing: 'border-box' }}
@@ -14404,7 +14183,10 @@ const QuoteForm = ({ openContext = null }) => {
                                                 <input
                                                     type="text"
                                                     value={toPhone}
-                                                    onChange={(e) => setToPhone(e.target.value)}
+                                                    onChange={(e) => {
+                                                        recipientOverrideTouchedRef.current = true;
+                                                        setToPhone(e.target.value);
+                                                    }}
                                                     style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
                                                 />
                                             </div>
@@ -14413,7 +14195,10 @@ const QuoteForm = ({ openContext = null }) => {
                                                 <input
                                                     type="text"
                                                     value={toFax}
-                                                    onChange={(e) => setToFax(e.target.value)}
+                                                    onChange={(e) => {
+                                                        recipientOverrideTouchedRef.current = true;
+                                                        setToFax(e.target.value);
+                                                    }}
                                                     style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
                                                 />
                                             </div>
@@ -14422,7 +14207,10 @@ const QuoteForm = ({ openContext = null }) => {
                                                 <input
                                                     type="email"
                                                     value={toEmail}
-                                                    onChange={(e) => setToEmail(e.target.value)}
+                                                    onChange={(e) => {
+                                                        recipientOverrideTouchedRef.current = true;
+                                                        setToEmail(e.target.value);
+                                                    }}
                                                     style={{ width: '100%', ...QUOTE_LEFT_COMPACT_CONTROL, fontSize: '12px' }}
                                                 />
                                             </div>
@@ -14683,7 +14471,7 @@ const QuoteForm = ({ openContext = null }) => {
                                                 )}
 
                                                 {expandedClause === contentKey && (
-                                                    <div style={{ marginLeft: '28px' }}>
+                                                    <div style={{ marginLeft: '8px', width: 'calc(100% - 8px)', maxWidth: '100%' }}>
                                                         {(() => {
                                                             // For Pricing & Payment Terms, do NOT re-merge the auto-table on every render —
                                                             // the parent useEffect already does that whenever the summary structure changes.
@@ -14764,16 +14552,9 @@ const QuoteForm = ({ openContext = null }) => {
                                                             }}
                                                             style={{
                                                                 width: '100%',
-                                                                marginTop: '8px',
-                                                                padding: '12px',
-                                                                border: '1px solid #e2e8f0',
-                                                                borderRadius: '4px',
-                                                                fontSize: '12px',
-                                                                minHeight: '150px',
-                                                                maxHeight: '400px',
-                                                                overflowY: 'auto',
-                                                                backgroundColor: 'white',
-                                                                outline: 'none'
+                                                                marginTop: '4px',
+                                                                minHeight: '200px',
+                                                                height: '280px',
                                                             }}
                                                         />
                                                             );
@@ -15146,6 +14927,18 @@ const QuoteForm = ({ openContext = null }) => {
                                         >
                                             Clear
                                         </button>
+                                        {quoteListDisplayRows.length > 0 ? (
+                                            <button
+                                                type="button"
+                                                className="ems-cf-clear-filters-btn no-print"
+                                                onClick={() => quoteSummaryClearColFiltersRef.current?.()}
+                                                disabled={!quoteSummaryHasColFilters}
+                                                title="Clear all column filters"
+                                                aria-label="Clear all column filters"
+                                            >
+                                                <FilterX size={13} strokeWidth={2} aria-hidden="true" />
+                                            </button>
+                                        ) : null}
                                     </div>
                                 </div>
                             </div>
@@ -15443,6 +15236,18 @@ const QuoteForm = ({ openContext = null }) => {
                                         >
                                             Clear
                                         </button>
+                                        {quoteListDisplayRows.length > 0 ? (
+                                            <button
+                                                type="button"
+                                                className="ems-cf-clear-filters-btn no-print"
+                                                onClick={() => quoteSummaryClearColFiltersRef.current?.()}
+                                                disabled={!quoteSummaryHasColFilters}
+                                                title="Clear all column filters"
+                                                aria-label="Clear all column filters"
+                                            >
+                                                <FilterX size={13} strokeWidth={2} aria-hidden="true" />
+                                            </button>
+                                        ) : null}
                                     </div>
                                     <div
                                         className="no-print"
@@ -15460,8 +15265,16 @@ const QuoteForm = ({ openContext = null }) => {
                                             type="button"
                                             onClick={downloadPDF}
                                             disabled={!hasUserPricing}
-                                            title="Download quote PDF"
-                                            aria-label="Download quote PDF"
+                                            title={
+                                                QUOTE_PDF_BROWSER_DOWNLOAD
+                                                    ? 'Save as PDF (opens print dialog — choose Save as PDF or Microsoft Print to PDF)'
+                                                    : 'Download quote PDF'
+                                            }
+                                            aria-label={
+                                                QUOTE_PDF_BROWSER_DOWNLOAD
+                                                    ? 'Save quote as PDF using the browser print dialog'
+                                                    : 'Download quote PDF'
+                                            }
                                             style={{
                                                 width: '32px',
                                                 height: '32px',
@@ -15482,7 +15295,7 @@ const QuoteForm = ({ openContext = null }) => {
                                             type="button"
                                             onClick={startQuoteEmailFlow}
                                             disabled={!hasUserPricing || isUploading}
-                                            title="Open Outlook draft with quote PDF attached (Windows desktop Outlook). To is pre-filled when an email is found; otherwise leave blank and enter in Outlook."
+                                            title="Open Outlook draft with quote PDF (From = your login email). Uses SMTP + Outlook on this PC."
                                             aria-label="Email quote"
                                             style={{
                                                 width: '32px',
@@ -15548,9 +15361,9 @@ const QuoteForm = ({ openContext = null }) => {
                                             }}
                                             title={
                                                 !canUseQuoteDigitalSignature
-                                                    ? isQuoteCcMailSigner
+                                                    ? isQuoteCcMailSigner || userSignatureLibrary.length > 0
                                                       ? 'Open an enquiry with pricing to place your signature.'
-                                                      : 'Save the quote context to use signatures.'
+                                                      : 'Add your signature under profile → Manage signatures, then open a priced enquiry.'
                                                     : toolbarDragSignatureImageUrl
                                                       ? 'Click: signature follows the mouse — click on the quote to fix it (cannot move or remove after). Shift+click: signature library.'
                                                       : 'Click: open library to add a signature. Shift+click: library.'
@@ -16642,14 +16455,23 @@ const QuoteForm = ({ openContext = null }) => {
                                         margin-bottom: 1.6px !important;
                                         padding-left: 24px !important;
                                         line-height: 1.45 !important;
+                                        font-size: inherit !important;
                                     }
                                     #quote-preview .clause-content li {
                                         margin-bottom: 1.6px !important;
                                         line-height: 1.45 !important;
+                                        font-size: inherit !important;
                                     }
                                     #quote-preview .clause-content li:last-child {
                                         margin-bottom: 0 !important;
                                     }
+                                    #quote-preview .clause-content ul:not([class]) {
+                                        list-style-type: disc !important;
+                                    }
+                                    #quote-preview .clause-content ol:not([class]) {
+                                        list-style-type: decimal !important;
+                                    }
+                                    ${CLAUSE_LIST_STYLES_CSS}
                                     #quote-preview .clause-content table {
                                         margin-top: 4px !important;
                                         margin-bottom: 4px !important;
@@ -17393,14 +17215,22 @@ const QuoteForm = ({ openContext = null }) => {
                 active={signaturePlacementActive && Boolean(toolbarDragSignatureImageUrl)}
                 imageDataUrl={toolbarDragSignatureImageUrl}
                 displayName={digitalStampUserDisplayName}
-                designation={digitalStampUserDesignation}
                 onCancel={handleCancelSignaturePlacement}
                 onPlaceAt={handleSignaturePlacementAt}
             />
 
             <SignatureVaultModal
                 open={signatureVaultOpen}
-                onClose={() => setSignatureVaultOpen(false)}
+                onClose={() => {
+                    setSignatureVaultOpen(false);
+                    const email = signatureLibraryEmail;
+                    if (email) {
+                        void fetchUserSignatureLibrary(email).then((master) => {
+                            setUserSignatureLibrary(master.signatures || []);
+                            setUserDefaultSignatureId(master.defaultSignatureId || null);
+                        });
+                    }
+                }}
                 userEmail={(currentUser?.EmailId || currentUser?.email || '').trim()}
                 placementEnabled
                 totalSheets={quotePreviewTotalPages}
@@ -17491,10 +17321,10 @@ const QuoteForm = ({ openContext = null }) => {
                                     className="btn btn-outline-secondary me-auto"
                                     onClick={handleOpenInOutlook}
                                     disabled={emailSending}
-                                    title="Open Outlook draft with the quote PDF attached (VBScript / classic Outlook on Windows)."
+                                    title="Download .eml draft (From = your login email) and open in Outlook — PDF attached."
                                 >
                                     <i className="bi bi-microsoft me-2"></i>
-                                    Open in Outlook
+                                    Open draft in Outlook
                                 </button>
                                 
                                 <button

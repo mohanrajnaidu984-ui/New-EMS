@@ -64,6 +64,8 @@ End If`;
  * @param {string} [opts.bcc]
  * @param {string} [opts.subject]
  * @param {string} [opts.body]
+ * @param {string} [opts.fromEmail] - Logged-in user (SendUsingAccount when found)
+ * @param {string} [opts.fromDisplayName]
  */
 function buildOutlookDraftVbs(opts) {
     const pdfPath = String(opts.pdfPath || '').replace(/"/g, '""');
@@ -75,6 +77,21 @@ function buildOutlookDraftVbs(opts) {
     const bcc = escapeVbsString(opts.bcc);
     const subject = escapeVbsString(opts.subject);
     const msgHtmlEscaped = escapeVbsString(plainTextToOutlookHtml(opts.body));
+    const fromEmail = escapeVbsString(String(opts.fromEmail || '').trim().toLowerCase());
+    const fromDisplayName = escapeVbsString(String(opts.fromDisplayName || '').trim());
+    const fromAccountVbs =
+        fromEmail
+            ? `
+fromAddr = LCase("${fromEmail}")
+fromName = "${fromDisplayName}"
+For Each acc In olApp.Session.Accounts
+  If LCase(acc.SmtpAddress) = fromAddr Then
+    Set olMail.SendUsingAccount = acc
+    Exit For
+  End If
+Next
+If fromName <> "" Then olMail.SentOnBehalfOfName = fromName`
+            : '';
 
     const extraAttachLines = extraPaths
         .map(
@@ -87,7 +104,7 @@ End If`
 
     return `Option Explicit
 On Error Resume Next
-Dim fso, olApp, olMail, pdfPath, waited, insp
+Dim fso, olApp, olMail, pdfPath, waited, insp, acc, fromAddr, fromName
 Set fso = CreateObject("Scripting.FileSystemObject")
 pdfPath = "${pdfPath}"
 waited = 0
@@ -106,6 +123,7 @@ If Err.Number <> 0 Then
 End If
 Err.Clear
 Set olMail = olApp.CreateItem(0)
+${fromAccountVbs}
 ${opts.to ? `olMail.To = "${to}"` : ''}
 ${opts.cc ? `olMail.CC = "${cc}"` : ''}
 ${opts.bcc ? `olMail.BCC = "${bcc}"` : ''}
@@ -138,6 +156,8 @@ WScript.Quit 0
  * @param {string} [opts.cc]
  * @param {string} [opts.bcc]
  * @param {string} [opts.subject]
+ * @param {string} [opts.replyTo] - Reply-To address (customer replies route here)
+ * @param {string} [opts.replyToName]
  * @param {boolean} [opts.send] - If true, send immediately (no draft window). Default false (Display).
  */
 function buildOutlookHtmlDraftVbs(opts) {
@@ -147,6 +167,8 @@ function buildOutlookHtmlDraftVbs(opts) {
     const cc = escapeVbsString(opts.cc);
     const bcc = escapeVbsString(opts.bcc);
     const subject = escapeVbsString(opts.subject);
+    const replyTo = escapeVbsString(opts.replyTo);
+    const replyToName = escapeVbsString(opts.replyToName || opts.replyTo);
 
     const extraAttachLines = extraPaths
         .map(
@@ -177,6 +199,13 @@ ${opts.to ? `olMail.To = "${to}"` : ''}
 ${opts.cc ? `olMail.CC = "${cc}"` : ''}
 ${opts.bcc ? `olMail.BCC = "${bcc}"` : ''}
 ${opts.subject ? `olMail.Subject = "${subject}"` : ''}
+${
+    opts.replyTo
+        ? `Dim replyRec
+Set replyRec = olMail.ReplyRecipients.Add("${replyTo}")
+If Len("${replyToName}") > 0 Then replyRec.Name = "${replyToName}"`
+        : ''
+}
 olMail.BodyFormat = 2
 Dim htmlStream
 Set htmlStream = CreateObject("ADODB.Stream")
@@ -213,6 +242,8 @@ function buildOutlookCustomerAckDraftVbs(opts) {
     const cc = escapeVbsString(opts.cc);
     const bcc = escapeVbsString(opts.bcc);
     const subject = escapeVbsString(opts.subject);
+    const replyTo = escapeVbsString(opts.replyTo);
+    const replyToName = escapeVbsString(opts.replyToName || opts.replyTo);
 
     const extraPaths = (opts.attachmentPaths || []).map((p) => String(p || '').replace(/"/g, '""'));
     const extraAttachLines = extraPaths
@@ -244,6 +275,13 @@ ${opts.to ? `olMail.To = "${to}"` : ''}
 ${opts.cc ? `olMail.CC = "${cc}"` : ''}
 ${opts.bcc ? `olMail.BCC = "${bcc}"` : ''}
 ${opts.subject ? `olMail.Subject = "${subject}"` : ''}
+${
+    opts.replyTo
+        ? `Dim replyRec
+Set replyRec = olMail.ReplyRecipients.Add("${replyTo}")
+If Len("${replyToName}") > 0 Then replyRec.Name = "${replyToName}"`
+        : ''
+}
 olMail.BodyFormat = 2
 ${extraAttachLines}
 olMail.Display

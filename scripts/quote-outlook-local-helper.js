@@ -51,6 +51,33 @@ function readJson(req) {
     });
 }
 
+function openEmlDraftOnWindows(body) {
+    if (process.platform !== 'win32') {
+        return Promise.reject(new Error('Windows only'));
+    }
+    const { emlBase64, fileName } = body || {};
+    if (!emlBase64) {
+        return Promise.reject(new Error('emlBase64 required'));
+    }
+    const dir = path.join(os.tmpdir(), 'ems-quote-eml-helper', String(Date.now()));
+    fs.mkdirSync(dir, { recursive: true });
+    const emlPath = path.join(dir, String(fileName || 'EMS_QuoteDraft.eml').replace(/[/\\?%*:|"<>]/g, '_'));
+    fs.writeFileSync(emlPath, Buffer.from(emlBase64, 'base64'));
+    return new Promise((resolve, reject) => {
+        execFile('cmd.exe', ['/c', 'start', '', emlPath], { windowsHide: true }, (err) => {
+            setTimeout(() => {
+                try {
+                    fs.rmSync(dir, { recursive: true, force: true });
+                } catch {
+                    /* ignore */
+                }
+            }, 300000);
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
 function openOutlookDraft(body) {
     if (process.platform !== 'win32') {
         return Promise.reject(new Error('Windows only'));
@@ -84,6 +111,8 @@ function openOutlookDraft(body) {
         bcc,
         subject,
         body: mailBody,
+        fromEmail: body.fromEmail || body.userEmail || '',
+        fromDisplayName: body.fromDisplayName || body.userDisplayName || '',
     });
     fs.writeFileSync(vbsPath, vbs, 'utf8');
 
@@ -104,7 +133,7 @@ function openOutlookDraft(body) {
 
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
@@ -117,6 +146,25 @@ const server = http.createServer(async (req, res) => {
         '/enquiry-outlook-draft',
         '/enquiry-customer-ack-draft',
     ]);
+    if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, service: 'ems-outlook-local-helper' }));
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/open-eml-draft') {
+        try {
+            const body = await readJson(req);
+            await openEmlDraftOnWindows(body);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+        }
+        return;
+    }
+
     if (
         req.method !== 'POST' ||
         (req.url !== '/outlook-draft' && !enquiryRoutes.has(req.url))
@@ -128,15 +176,16 @@ const server = http.createServer(async (req, res) => {
 
     try {
         const body = await readJson(req);
+        let result = { success: true };
         if (req.url === '/enquiry-outlook-draft') {
             await openEnquiryOutlookDraft(body);
         } else if (req.url === '/enquiry-customer-ack-draft') {
-            await openEnquiryCustomerAckDraft(body);
+            result = { success: true, ...(await openEnquiryCustomerAckDraft(body)) };
         } else {
             await openOutlookDraft(body);
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true }));
+        res.end(JSON.stringify(result));
     } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message || String(e) }));
@@ -200,6 +249,7 @@ async function openEnquiryCustomerAckDraft(body) {
     const {
         requestNo,
         acknowledgementSE,
+        createdByEmail,
         concernedSEs,
         customerAckTargets,
     } = body || {};
@@ -220,22 +270,38 @@ async function openEnquiryCustomerAckDraft(body) {
     }
 
     const seContact = await loadSeContact(seName);
+    const replyTo = seContact.email || String(createdByEmail || '').trim().toLowerCase();
+    const replyToName = seContact.fullName || seName;
     const { cc } = await resolveCustomerAckCcEmails(reqNo, { concernedSEs });
     const subject = buildCustomerAckSubject(row);
+    const opened = [];
 
     for (const target of targets) {
+        const toNorm = String(target.email || '')
+            .trim()
+            .toLowerCase();
+        const ccForDraft = String(cc || '')
+            .split(';')
+            .map((e) => e.trim())
+            .filter((e) => e && e.toLowerCase() !== toNorm)
+            .join('; ');
         const html = buildCustomerAcknowledgementEmailHtml(row, seContact);
         await runOutlookHtmlDraftVbs({
             html,
             to: target.email,
-            cc,
+            cc: ccForDraft,
             subject,
+            replyTo: replyTo || undefined,
+            replyToName: replyTo ? replyToName : undefined,
             send: false,
             windowsHide: false,
             useDefaultSignature: true,
             tmpSubdir: 'ems-enquiry-customer-ack-helper',
         });
+        opened.push({ customerName: target.customerName, to: target.email });
     }
+
+    return { draftCount: opened.length, drafts: opened, replyTo: replyTo || null };
 }
 
 server.listen(PORT, '127.0.0.1', () => {

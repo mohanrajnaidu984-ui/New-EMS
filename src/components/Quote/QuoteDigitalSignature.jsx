@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { PenLine, Upload, Trash2, X, GripHorizontal } from 'lucide-react';
+import {
+    fetchUserSignatureLibrary,
+    saveUserSignatureLibrary,
+    normalizeSignatureEmail,
+} from '../../utils/quoteSignatureApi';
+import { formatSignaturePlacedDateTime } from '../../utils/enquiryResultsHelpers';
 
 /** Dispatched when placing from profile modal on Quote tab (QuoteForm listens). */
 export const EMS_QUOTE_PLACE_STAMP_EVENT = 'ems-quote-place-digital-stamp';
@@ -12,7 +18,7 @@ const DEFAULT_SIG_ID_KEY = 'ems_quote_default_sig_id_v1:';
 export function loadDefaultSignatureId(email) {
     if (!email) return null;
     try {
-        return localStorage.getItem(DEFAULT_SIG_ID_KEY + String(email).toLowerCase()) || null;
+        return localStorage.getItem(DEFAULT_SIG_ID_KEY + normalizeSignatureEmail(email)) || null;
     } catch {
         return null;
     }
@@ -21,7 +27,7 @@ export function loadDefaultSignatureId(email) {
 export function saveDefaultSignatureId(email, signatureId) {
     if (!email) return;
     try {
-        const k = DEFAULT_SIG_ID_KEY + String(email).toLowerCase();
+        const k = DEFAULT_SIG_ID_KEY + normalizeSignatureEmail(email);
         if (!signatureId) localStorage.removeItem(k);
         else localStorage.setItem(k, String(signatureId));
     } catch (e) {
@@ -40,7 +46,7 @@ export function resolveDefaultSignatureImage(email) {
 export function loadSignatureLibrary(email) {
     if (!email) return [];
     try {
-        const raw = localStorage.getItem(SIG_LIB_STORAGE_PREFIX + String(email).toLowerCase());
+        const raw = localStorage.getItem(SIG_LIB_STORAGE_PREFIX + normalizeSignatureEmail(email));
         if (!raw) return [];
         const arr = JSON.parse(raw);
         return Array.isArray(arr) ? arr : [];
@@ -52,10 +58,29 @@ export function loadSignatureLibrary(email) {
 export function saveSignatureLibrary(email, items) {
     if (!email) return;
     try {
-        localStorage.setItem(SIG_LIB_STORAGE_PREFIX + String(email).toLowerCase(), JSON.stringify(items.slice(0, 12)));
+        localStorage.setItem(
+            SIG_LIB_STORAGE_PREFIX + normalizeSignatureEmail(email),
+            JSON.stringify(items.slice(0, 12))
+        );
     } catch (e) {
         console.warn('[SignatureVault] save library failed', e);
     }
+}
+
+/** One-time upload of browser library to Master_ConcernedSE when server row is empty. */
+export async function migrateLocalSignatureLibraryToServer(email) {
+    const normalized = normalizeSignatureEmail(email);
+    if (!normalized) return null;
+    const local = loadSignatureLibrary(normalized);
+    if (!local.length) return null;
+    const server = await fetchUserSignatureLibrary(normalized);
+    if (server.signatures?.length) return server;
+    const defaultId = loadDefaultSignatureId(normalized);
+    await saveUserSignatureLibrary(normalized, {
+        defaultSignatureId: defaultId,
+        signatures: local,
+    });
+    return fetchUserSignatureLibrary(normalized);
 }
 
 /** Safe segment for localStorage key (enquiry no + lead context + customer). */
@@ -108,6 +133,7 @@ export function parseDigitalSignaturesFromQuoteRow(quote) {
         return arr
             .map((s, i) => ({
                 id: s.id || `db-stamp-${i}`,
+                placedByEmail: normalizeSignatureEmail(s.placedByEmail || s.placedBy || ''),
                 sheetIndex: (() => {
                     const si = Number(s.sheetIndex);
                     return Number.isFinite(si) && si >= 1 ? si : 1;
@@ -136,6 +162,7 @@ export function serializeDigitalStampsForApi(stamps) {
             .filter((s) => s && !s.inheritedFromSubJob)
             .map((s) => ({
                 id: s.id,
+                placedByEmail: normalizeSignatureEmail(s.placedByEmail || ''),
                 sheetIndex: s.sheetIndex,
                 xPct: s.xPct,
                 yPct: s.yPct,
@@ -185,14 +212,40 @@ export function SignatureVaultModal({
     const [newLabel, setNewLabel] = useState('');
     const [pageIndex, setPageIndex] = useState(0);
     const [defaultSigId, setDefaultSigId] = useState(null);
+    const [libraryLoading, setLibraryLoading] = useState(false);
+    const [librarySaveError, setLibrarySaveError] = useState('');
     const fileRef = useRef(null);
 
     useEffect(() => {
         if (!open || !userEmail) return;
-        setLibrary(loadSignatureLibrary(userEmail));
-        setDefaultSigId(loadDefaultSignatureId(userEmail));
+        let cancelled = false;
+        setLibraryLoading(true);
+        setLibrarySaveError('');
         setPageIndex(0);
         setNewLabel('');
+        (async () => {
+            try {
+                let master = await migrateLocalSignatureLibraryToServer(userEmail);
+                if (!master) master = await fetchUserSignatureLibrary(userEmail);
+                if (cancelled) return;
+                const sigs = master?.signatures?.length ? master.signatures : loadSignatureLibrary(userEmail);
+                const def =
+                    master?.defaultSignatureId ||
+                    loadDefaultSignatureId(userEmail) ||
+                    sigs[0]?.id ||
+                    null;
+                setLibrary(sigs);
+                setDefaultSigId(def);
+            } catch (e) {
+                if (!cancelled) {
+                    console.warn('[SignatureVault] load from server failed', e);
+                    setLibrary(loadSignatureLibrary(userEmail));
+                    setDefaultSigId(loadDefaultSignatureId(userEmail));
+                }
+            } finally {
+                if (!cancelled) setLibraryLoading(false);
+            }
+        })();
         const c = canvasRef.current;
         if (c) {
             const ctx = c.getContext('2d', { alpha: true });
@@ -202,14 +255,28 @@ export function SignatureVaultModal({
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
         }
+        return () => {
+            cancelled = true;
+        };
     }, [open, userEmail]);
 
     const persistLibrary = useCallback(
-        (next) => {
+        async (next, nextDefaultId = defaultSigId) => {
             setLibrary(next);
             saveSignatureLibrary(userEmail, next);
+            try {
+                await saveUserSignatureLibrary(userEmail, {
+                    defaultSignatureId: nextDefaultId,
+                    signatures: next,
+                });
+                if (nextDefaultId) saveDefaultSignatureId(userEmail, nextDefaultId);
+                setLibrarySaveError('');
+            } catch (e) {
+                console.error('[SignatureVault] server save failed', e);
+                setLibrarySaveError(e.message || 'Failed to save to server');
+            }
         },
-        [userEmail]
+        [userEmail, defaultSigId]
     );
 
     const getCtx = () => {
@@ -248,7 +315,7 @@ export function SignatureVaultModal({
         if (!dataUrl || dataUrl.length < 200) return;
         const id = globalThis.crypto?.randomUUID?.() || `sig-${Date.now()}`;
         const label = (newLabel || `Signature ${library.length + 1}`).trim();
-        persistLibrary([...library, { id, label, imageDataUrl: dataUrl, createdAt: new Date().toISOString() }]);
+        void persistLibrary([...library, { id, label, imageDataUrl: dataUrl, createdAt: new Date().toISOString() }]);
         setNewLabel('');
         clearCanvas();
     };
@@ -274,7 +341,7 @@ export function SignatureVaultModal({
                 const dataUrl = c.toDataURL('image/png');
                 const id = globalThis.crypto?.randomUUID?.() || `sig-${Date.now()}`;
                 const label = (newLabel || f.name.replace(/\.[^.]+$/, '') || 'Uploaded').trim();
-                persistLibrary([...library, { id, label, imageDataUrl: dataUrl, createdAt: new Date().toISOString() }]);
+                void persistLibrary([...library, { id, label, imageDataUrl: dataUrl, createdAt: new Date().toISOString() }]);
                 setNewLabel('');
             };
             img.src = reader.result;
@@ -284,12 +351,12 @@ export function SignatureVaultModal({
     };
 
     const removeFromLibrary = (id) => {
-        persistLibrary(library.filter((x) => x.id !== id));
-        const cur = loadDefaultSignatureId(userEmail);
-        if (cur === id) {
-            saveDefaultSignatureId(userEmail, null);
-            setDefaultSigId(null);
-        }
+        const next = library.filter((x) => x.id !== id);
+        const cur = defaultSigId || loadDefaultSignatureId(userEmail);
+        const nextDef = cur === id ? next[0]?.id || null : cur;
+        setDefaultSigId(nextDef);
+        if (cur === id) saveDefaultSignatureId(userEmail, nextDef);
+        void persistLibrary(next, nextDef);
     };
 
     if (!open) return null;
@@ -340,6 +407,12 @@ export function SignatureVaultModal({
                 </div>
 
                 <div style={{ padding: '16px', fontSize: '13px', color: '#64748b', lineHeight: 1.5 }}>
+                    {libraryLoading ? (
+                        <div style={{ marginBottom: '8px', color: '#0369a1' }}>Loading your signatures from server…</div>
+                    ) : null}
+                    {librarySaveError ? (
+                        <div style={{ marginBottom: '8px', color: '#b91c1c', fontWeight: 600 }}>{librarySaveError}</div>
+                    ) : null}
                     {placementEnabled ? (
                         <>
                             Draw or upload, then <strong>Save to library</strong>. In <strong>Your library</strong> below: pick the <strong>Page</strong>, then{' '}
@@ -487,8 +560,9 @@ export function SignatureVaultModal({
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        saveDefaultSignatureId(userEmail, item.id);
                                                         setDefaultSigId(item.id);
+                                                        saveDefaultSignatureId(userEmail, item.id);
+                                                        void persistLibrary(library, item.id);
                                                     }}
                                                     style={{
                                                         padding: '6px 10px',
@@ -508,8 +582,9 @@ export function SignatureVaultModal({
                                                     <button
                                                         type="button"
                                                         onClick={() => {
-                                                            saveDefaultSignatureId(userEmail, null);
                                                             setDefaultSigId(null);
+                                                            saveDefaultSignatureId(userEmail, null);
+                                                            void persistLibrary(library, null);
                                                         }}
                                                         style={{ padding: '4px 8px', fontSize: '11px', border: '1px solid #e2e8f0', borderRadius: '6px', background: '#f8fafc', cursor: 'pointer' }}
                                                     >
@@ -539,60 +614,83 @@ function clamp(n, lo, hi) {
 
 /** Signature image width in px — anchor is the horizontal center of this image. */
 export const QUOTE_SIGNATURE_IMAGE_WIDTH_PX = 172;
+export const QUOTE_SIGNATURE_IMAGE_MAX_HEIGHT_PX = 94;
 const SIG_IMG_HALF = QUOTE_SIGNATURE_IMAGE_WIDTH_PX / 2;
+const SIG_IMG_HALF_H = QUOTE_SIGNATURE_IMAGE_MAX_HEIGHT_PX / 2;
 
-/** Click/drop point aligns with center of signature image (not center of image + caption block). */
-const STAMP_ANCHOR_TRANSFORM = `translate(${-SIG_IMG_HALF}px, -50%)`;
+/**
+ * Click/drop point = center of signature image (not caption).
+ * Same offsets for placed stamps (calc) and placement cursor (transform) — preview must match PDF.
+ */
+export const QUOTE_SIGNATURE_ANCHOR_OFFSET_X_PX = SIG_IMG_HALF;
+export const QUOTE_SIGNATURE_ANCHOR_OFFSET_Y_PX = SIG_IMG_HALF_H;
 
-function QuoteSignatureStampContent({ imageDataUrl, displayName, designation, placedStr, verificationCode, preview }) {
+function stampAnchorStyle(xPct, yPct) {
+    return {
+        left: `calc(${xPct}% - ${QUOTE_SIGNATURE_ANCHOR_OFFSET_X_PX}px)`,
+        top: `calc(${yPct}% - ${QUOTE_SIGNATURE_ANCHOR_OFFSET_Y_PX}px)`,
+    };
+}
+
+/** Follow-cursor placement preview only (not captured in PDF). Must match stampAnchorStyle offsets. */
+const STAMP_PLACEMENT_CURSOR_TRANSFORM = `translate(${-QUOTE_SIGNATURE_ANCHOR_OFFSET_X_PX}px, -${QUOTE_SIGNATURE_ANCHOR_OFFSET_Y_PX}px)`;
+
+function QuoteSignatureStampContent({ imageDataUrl, displayName, placedStr, preview }) {
+    const hasCaption = Boolean(displayName || placedStr);
     return (
         <div
+            className="quote-signature-stamp-body"
             style={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'flex-start',
-                gap: 0,
+                position: 'relative',
+                display: 'inline-block',
                 opacity: preview ? 0.92 : 1,
                 filter: preview ? 'drop-shadow(0 2px 6px rgba(15,23,42,0.15))' : undefined,
             }}
         >
+            {hasCaption ? (
+                <div
+                    className="quote-signature-stamp-caption"
+                    style={{
+                        position: 'absolute',
+                        bottom: '100%',
+                        left: 0,
+                        width: `${QUOTE_SIGNATURE_IMAGE_WIDTH_PX}px`,
+                        marginBottom: '3px',
+                        lineHeight: 1.25,
+                        textAlign: 'center',
+                        boxSizing: 'border-box',
+                    }}
+                >
+                    {displayName ? (
+                        <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '9px' }}>{displayName}</div>
+                    ) : null}
+                    {placedStr ? (
+                        <div
+                            style={{
+                                fontSize: '8px',
+                                color: '#64748b',
+                                marginTop: displayName ? '2px' : 0,
+                            }}
+                        >
+                            {placedStr}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
             <img
                 src={imageDataUrl}
                 alt=""
                 style={{
-                    flex: '0 0 auto',
                     width: `${QUOTE_SIGNATURE_IMAGE_WIDTH_PX}px`,
                     maxHeight: '94px',
                     objectFit: 'contain',
-                    objectPosition: 'left center',
+                    objectPosition: 'center center',
                     display: 'block',
                     pointerEvents: 'none',
                     backgroundColor: 'transparent',
                     mixBlendMode: 'multiply',
                 }}
             />
-            <div style={{ flex: '1 1 auto', minWidth: 0, lineHeight: 1.25, marginLeft: 0, paddingLeft: 0 }}>
-                <div style={{ fontWeight: '700', color: '#0f172a', fontSize: '9px' }}>{displayName || '—'}</div>
-                {designation ? (
-                    <div style={{ fontSize: '8px', color: '#64748b', marginTop: '2px' }}>{designation}</div>
-                ) : null}
-                {placedStr ? (
-                    <div style={{ fontSize: '7px', color: '#94a3b8', marginTop: '3px' }}>{placedStr}</div>
-                ) : null}
-                {verificationCode ? (
-                    <div
-                        style={{
-                            fontSize: '7px',
-                            color: '#0369a1',
-                            fontWeight: '600',
-                            marginTop: '3px',
-                            wordBreak: 'break-all',
-                        }}
-                    >
-                        {verificationCode}
-                    </div>
-                ) : null}
-            </div>
         </div>
     );
 }
@@ -624,7 +722,6 @@ export function QuoteSignaturePlacementOverlay({
     active,
     imageDataUrl,
     displayName = '',
-    designation = '',
     onCancel,
     onPlaceAt,
 }) {
@@ -696,7 +793,7 @@ export function QuoteSignaturePlacementOverlay({
                     position: 'fixed',
                     left: cursor.x,
                     top: cursor.y,
-                    transform: STAMP_ANCHOR_TRANSFORM,
+                    transform: STAMP_PLACEMENT_CURSOR_TRANSFORM,
                     pointerEvents: 'none',
                     zIndex: 100401,
                     maxWidth: 'min(430px, 60vw)',
@@ -705,7 +802,7 @@ export function QuoteSignaturePlacementOverlay({
                 <QuoteSignatureStampContent
                     imageDataUrl={imageDataUrl}
                     displayName={displayName}
-                    designation={designation}
+                    placedStr={formatSignaturePlacedDateTime(new Date().toISOString())}
                     preview
                 />
             </div>
@@ -780,8 +877,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = fal
         };
     }, [stamp.id, onMove, allowMove]);
 
-    const placed = stamp.placedAtIso ? new Date(stamp.placedAtIso) : null;
-    const placedStr = placed && !Number.isNaN(placed.getTime()) ? placed.toLocaleString() : stamp.placedAtIso || '';
+    const placedStr = stamp.placedAtIso ? formatSignaturePlacedDateTime(stamp.placedAtIso) : '';
 
     return (
         <div
@@ -790,9 +886,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = fal
             onPointerDown={onPointerDown}
             style={{
                 position: 'absolute',
-                left: `${stamp.xPct}%`,
-                top: `${stamp.yPct}%`,
-                transform: STAMP_ANCHOR_TRANSFORM,
+                ...stampAnchorStyle(stamp.xPct, stamp.yPct),
                 zIndex: 25,
                 maxWidth: 'min(430px, 60vw)',
                 padding: 0,
@@ -859,9 +953,7 @@ export function QuoteSignatureStamp({ stamp, onRemove, onMove, allowRemove = fal
             <QuoteSignatureStampContent
                 imageDataUrl={stamp.imageDataUrl}
                 displayName={stamp.displayName}
-                designation={stamp.designation}
                 placedStr={placedStr}
-                verificationCode={stamp.verificationCode}
             />
         </div>
     );

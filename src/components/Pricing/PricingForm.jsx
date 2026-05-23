@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, ChevronLeft, FileSpreadsheet, X } from 'lucide-react';
+import { Search, Plus, Trash2, Save, FileText, ChevronDown, ChevronUp, ChevronLeft, FileSpreadsheet, X, FilterX } from 'lucide-react';
+import {
+    useTableColumnHeaderFilters,
+    TableColumnFilterHeader,
+} from '../shared/tableColumnHeaderFilters';
+import '../../styles/emsTableColumnFilters.css';
 import { format } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
 import DateInput from '../Enquiry/DateInput';
@@ -644,6 +649,72 @@ function getLatestIndividualSubjobBasePriceUpdatedMs(enq) {
     return max;
 }
 
+const PRICING_LIST_FILTER_KEYS_SEARCH = [
+    'requestNo',
+    'projectName',
+    'customerName',
+    'latestPriceUpdated',
+    'clientName',
+    'consultantName',
+    'enquiryDateCol',
+];
+
+const PRICING_LIST_FILTER_KEYS_PENDING = [
+    'requestNo',
+    'projectName',
+    'customerName',
+    'latestPriceUpdated',
+    'clientName',
+    'consultantName',
+    'dueDateCol',
+];
+
+function formatPricingListFilterDate(v) {
+    if (!v) return '—';
+    try {
+        const d = new Date(v);
+        if (Number.isNaN(d.getTime())) return '—';
+        return format(d, 'dd-MMM-yyyy');
+    } catch {
+        return '—';
+    }
+}
+
+function getPricingListFilterValue(row, key) {
+    if (!row) return '—';
+    switch (key) {
+        case 'requestNo':
+            return String(row.RequestNo || '—').trim() || '—';
+        case 'projectName':
+            return String(row.ProjectName || '—').trim() || '—';
+        case 'customerName': {
+            const structured = tryParsePricingListDisplay(row);
+            if (structured?.customerTotals?.length) {
+                const names = structured.customerTotals
+                    .map((c) => String(c.name || c.customerName || c.label || '').trim())
+                    .filter(Boolean);
+                if (names.length) return names.join(', ');
+            }
+            return String(row.CustomerName || '—').trim() || '—';
+        }
+        case 'latestPriceUpdated': {
+            const ms = getLatestIndividualSubjobBasePriceUpdatedMs(row);
+            if (!Number.isFinite(ms)) return '—';
+            return formatPricingListFilterDate(new Date(ms));
+        }
+        case 'clientName':
+            return String(row.ClientName || '—').trim() || '—';
+        case 'consultantName':
+            return String(row.ConsultantName || '—').trim() || '—';
+        case 'enquiryDateCol':
+            return formatPricingListFilterDate(row.EnquiryDate);
+        case 'dueDateCol':
+            return formatPricingListFilterDate(row.DueDate);
+        default:
+            return '—';
+    }
+}
+
 function sortPricingEnquiryListRows(rows, { field, direction }) {
     return [...(rows || [])].sort((a, b) => {
         if (field === 'LatestPriceUpdated') {
@@ -1033,6 +1104,8 @@ const PricingForm = ({ openContext = null }) => {
     const searchRef = useRef(null);
     const pricingListDivisionRef = useRef(pricingListDivision);
     const pricingListSearchCriteriaRef = useRef(pricingListSearchCriteria);
+    const pricingSearchColFiltersClearRef = useRef(() => {});
+    const pricingPendingColFiltersClearRef = useRef(() => {});
     useEffect(() => {
         pricingListDivisionRef.current = pricingListDivision;
     }, [pricingListDivision]);
@@ -1379,6 +1452,8 @@ const PricingForm = ({ openContext = null }) => {
         setSelectedCustomer('');
         setAddingCustomer(false);
         setNewCustomerName('');
+        pricingSearchColFiltersClearRef.current?.();
+        pricingPendingColFiltersClearRef.current?.();
         refreshPendingRequests();
     };
 
@@ -4039,48 +4114,56 @@ const PricingForm = ({ openContext = null }) => {
         ((pricingListCategory === PRICING_LIST_CATEGORY.SEARCH && searchResults.length > 0) ||
             (pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0));
 
-    const sortedSearchResultsForTable = React.useMemo(
+    const pricingListSortedSearch = React.useMemo(
         () => sortPricingEnquiryListRows(searchResults, pendingSortConfig),
         [searchResults, pendingSortConfig]
     );
 
-    const PricingListSortableHeader = ({ field, label, initialDirection = 'asc', style = {} }) => {
-        const isActive = pendingSortConfig.field === field;
-        const isAsc = pendingSortConfig.direction === 'asc';
-        return (
-            <th
-                onClick={() =>
-                    setPendingSortConfig((prev) =>
-                        prev.field === field
-                            ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
-                            : { field, direction: initialDirection }
-                    )
-                }
-                style={{
-                    padding: '8px 12px',
-                    textAlign: 'left',
-                    fontSize: '11.7px',
-                    fontWeight: '400',
-                    color: '#ffffff',
-                    borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
-                    cursor: 'pointer',
-                    userSelect: 'none',
-                    whiteSpace: 'nowrap',
-                    ...style,
-                }}
-            >
-                {label}
-                {isActive ? (
-                    isAsc ? (
-                        ' ▲'
-                    ) : (
-                        ' ▼'
-                    )
-                ) : (
-                    <span style={{ color: '#e6efff' }}> ⇅</span>
-                )}
-            </th>
+    const pricingListSortedPending = React.useMemo(
+        () => sortPricingEnquiryListRows(pendingRequests, pendingSortConfig),
+        [pendingRequests, pendingSortConfig]
+    );
+
+    const pricingSearchColFilters = useTableColumnHeaderFilters(
+        pricingListSortedSearch,
+        getPricingListFilterValue,
+        PRICING_LIST_FILTER_KEYS_SEARCH
+    );
+    const pricingPendingColFilters = useTableColumnHeaderFilters(
+        pricingListSortedPending,
+        getPricingListFilterValue,
+        PRICING_LIST_FILTER_KEYS_PENDING
+    );
+    pricingSearchColFiltersClearRef.current = pricingSearchColFilters.clearAllColumnFilters;
+    pricingPendingColFiltersClearRef.current = pricingPendingColFilters.clearAllColumnFilters;
+
+    const activePricingColFilters =
+        pricingListCategory === PRICING_LIST_CATEGORY.SEARCH
+            ? pricingSearchColFilters
+            : pricingPendingColFilters;
+
+    const sortedSearchResultsForTable = pricingSearchColFilters.filteredRows;
+    const sortedPendingForTable = pricingPendingColFilters.filteredRows;
+
+    const handlePricingListSort = (field, initialDirection = 'asc') => {
+        setPendingSortConfig((prev) =>
+            prev.field === field
+                ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                : { field, direction: initialDirection }
         );
+    };
+
+    const pricingListThBase = {
+        padding: '6px 10px',
+        textAlign: 'left',
+        fontSize: '11.7px',
+        fontWeight: '400',
+        color: '#ffffff',
+        borderBottom: '1px solid rgba(210, 222, 255, 0.25)',
+        whiteSpace: 'nowrap',
+        background: EMS_TABLE_HEADER_GRADIENT,
+        top: 0,
+        zIndex: 2,
     };
 
     return (
@@ -4476,6 +4559,16 @@ const PricingForm = ({ openContext = null }) => {
                                 >
                                     Clear
                                 </button>
+                                <button
+                                    type="button"
+                                    className="ems-cf-clear-filters-btn"
+                                    onClick={() => activePricingColFilters.clearAllColumnFilters()}
+                                    disabled={!activePricingColFilters.hasColumnFilters}
+                                    title="Clear all column filters"
+                                    aria-label="Clear all column filters"
+                                >
+                                    <FilterX size={13} strokeWidth={2} aria-hidden="true" />
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -4868,6 +4961,7 @@ const PricingForm = ({ openContext = null }) => {
                         }}
                     >
                         <div
+                            className="ems-cf-scope"
                             style={{
                                 flex: listFillsViewport ? 1 : undefined,
                                 minHeight: listFillsViewport ? 0 : undefined,
@@ -4886,47 +4980,75 @@ const PricingForm = ({ openContext = null }) => {
                                     tableLayout: 'auto',
                                 }}
                             >
-                                <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
+                                <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                                     <tr>
-                                        <PricingListSortableHeader
-                                            field="RequestNo"
+                                        <TableColumnFilterHeader
+                                            colKey="requestNo"
                                             label="Enquiry No."
-                                            style={{ padding: '6px 10px', borderTopLeftRadius: '8px' }}
+                                            sortField="RequestNo"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={{ ...pricingListThBase, borderTopLeftRadius: '8px' }}
                                         />
-                                        <PricingListSortableHeader
-                                            field="ProjectName"
+                                        <TableColumnFilterHeader
+                                            colKey="projectName"
                                             label="Project Name"
-                                            style={{ padding: '6px 10px' }}
+                                            sortField="ProjectName"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={pricingListThBase}
                                         />
-                                        <PricingListSortableHeader
-                                            field="CustomerName"
+                                        <TableColumnFilterHeader
+                                            colKey="customerName"
                                             label="Customer Name & Total Price"
-                                            style={{
-                                                padding: '6px 10px',
+                                            sortField="CustomerName"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={{
+                                                ...pricingListThBase,
                                                 minWidth: 'min(560px, 92vw)',
                                                 width: 'auto',
                                             }}
                                         />
-                                        <PricingListSortableHeader
-                                            field="LatestPriceUpdated"
+                                        <TableColumnFilterHeader
+                                            colKey="latestPriceUpdated"
                                             label="Individual & Subjob Base prices"
+                                            sortField="LatestPriceUpdated"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
                                             initialDirection="desc"
-                                            style={{ padding: '6px 10px' }}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={pricingListThBase}
                                         />
-                                        <PricingListSortableHeader
-                                            field="ClientName"
+                                        <TableColumnFilterHeader
+                                            colKey="clientName"
                                             label="Client Name"
-                                            style={{ padding: '6px 10px' }}
+                                            sortField="ClientName"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={pricingListThBase}
                                         />
-                                        <PricingListSortableHeader
-                                            field="ConsultantName"
+                                        <TableColumnFilterHeader
+                                            colKey="consultantName"
                                             label="Consultant Name"
-                                            style={{ padding: '6px 10px' }}
+                                            sortField="ConsultantName"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={pricingListThBase}
                                         />
-                                        <PricingListSortableHeader
-                                            field="EnquiryDate"
+                                        <TableColumnFilterHeader
+                                            colKey="enquiryDateCol"
                                             label="Enquiry Date"
-                                            style={{ padding: '6px 10px', borderTopRightRadius: '8px' }}
+                                            sortField="EnquiryDate"
+                                            sortConfig={pendingSortConfig}
+                                            onSort={handlePricingListSort}
+                                            filterCtx={pricingSearchColFilters}
+                                            thStyle={{ ...pricingListThBase, borderTopRightRadius: '8px' }}
                                         />
                                     </tr>
                                 </thead>
@@ -5071,7 +5193,7 @@ const PricingForm = ({ openContext = null }) => {
             {/* Pending Requests List */}
             {
                 pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0 && (() => {
-                    const sortedPending = sortPricingEnquiryListRows(pendingRequests, pendingSortConfig);
+                    const sortedPending = sortedPendingForTable;
                     const sortFieldLabel =
                         pendingSortConfig.field === 'DueDate'
                             ? 'Due Date'
@@ -5133,6 +5255,7 @@ const PricingForm = ({ openContext = null }) => {
                             </div>
                             {/* Make the pending list fill the viewport height (instead of a fixed 400px). */}
                             <div
+                                className="ems-cf-scope"
                                 style={{
                                     flex: listFillsViewport ? 1 : undefined,
                                     minHeight: listFillsViewport ? 0 : undefined,
@@ -5150,23 +5273,72 @@ const PricingForm = ({ openContext = null }) => {
                                         tableLayout: 'auto',
                                     }}
                                 >
-                                    <thead style={{ background: EMS_TABLE_HEADER_GRADIENT, position: 'sticky', top: 0, zIndex: 1 }}>
+                                    <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                                         <tr>
-                                            <PricingListSortableHeader field="RequestNo" label="Enquiry No." />
-                                            <PricingListSortableHeader field="ProjectName" label="Project Name" />
-                                            <PricingListSortableHeader
-                                                field="CustomerName"
+                                            <TableColumnFilterHeader
+                                                colKey="requestNo"
+                                                label="Enquiry No."
+                                                sortField="RequestNo"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
+                                            />
+                                            <TableColumnFilterHeader
+                                                colKey="projectName"
+                                                label="Project Name"
+                                                sortField="ProjectName"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
+                                            />
+                                            <TableColumnFilterHeader
+                                                colKey="customerName"
                                                 label="Customer Name & Total Price"
-                                                style={{ minWidth: 'min(560px, 92vw)', width: 'auto' }}
+                                                sortField="CustomerName"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={{ ...pricingListThBase, minWidth: 'min(560px, 92vw)', width: 'auto' }}
                                             />
-                                            <PricingListSortableHeader
-                                                field="LatestPriceUpdated"
+                                            <TableColumnFilterHeader
+                                                colKey="latestPriceUpdated"
                                                 label="Individual & Subjob Base prices"
+                                                sortField="LatestPriceUpdated"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
                                                 initialDirection="desc"
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
                                             />
-                                            <PricingListSortableHeader field="ClientName" label="Client Name" />
-                                            <PricingListSortableHeader field="ConsultantName" label="Consultant Name" />
-                                            <PricingListSortableHeader field="DueDate" label="Due Date" />
+                                            <TableColumnFilterHeader
+                                                colKey="clientName"
+                                                label="Client Name"
+                                                sortField="ClientName"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
+                                            />
+                                            <TableColumnFilterHeader
+                                                colKey="consultantName"
+                                                label="Consultant Name"
+                                                sortField="ConsultantName"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
+                                            />
+                                            <TableColumnFilterHeader
+                                                colKey="dueDateCol"
+                                                label="Due Date"
+                                                sortField="DueDate"
+                                                sortConfig={pendingSortConfig}
+                                                onSort={handlePricingListSort}
+                                                filterCtx={pricingPendingColFilters}
+                                                thStyle={pricingListThBase}
+                                            />
                                         </tr>
                                     </thead>
                                     <tbody>

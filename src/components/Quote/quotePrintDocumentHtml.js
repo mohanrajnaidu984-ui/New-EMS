@@ -35,7 +35,6 @@ import {
     EMS_QUOTE_PRICING_TABLE_TOTAL_BG,
     EMS_QUOTE_PRICING_TABLE_BORDER_COLOR,
 } from '../../constants/emsTheme';
-
 const QUOTE_APP_FONT_STACK = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
 /** Same stack as #quote-preview in QuoteForm.jsx — do not substitute Inter in PDF. */
@@ -1080,6 +1079,10 @@ html[data-preview-pdf="1"] .footer-section .quote-print-footer-company > div {
         margin: 0 !important;
         line-height: 1.1 !important;
     }
+    html[data-preview-pdf="1"] .no-print,
+    html[data-preview-pdf="1"] .ems-browser-pdf-hint {
+        display: none !important;
+    }
 }
 `;
 
@@ -1100,11 +1103,17 @@ html[data-preview-pdf="1"] #quote-preview {
     -moz-osx-font-smoothing: grayscale !important;
     text-rendering: auto !important;
 }
-html[data-preview-pdf="1"] #quote-preview,
-html[data-preview-pdf="1"] #quote-preview * {
+html[data-preview-pdf="1"] #quote-preview *:not(.quote-digital-signature-stamp):not(.quote-signature-stamp-caption):not(.quote-signature-stamp-body) {
     transform: none !important;
     filter: none !important;
     backdrop-filter: none !important;
+}
+html[data-preview-pdf="1"] .quote-a4-sheet {
+    position: relative !important;
+}
+html[data-preview-pdf="1"] .quote-digital-signature-stamp {
+    position: absolute !important;
+    /* left/top: inline calc(xPct/yPct) from placement — never override for PDF parity */
 }
 html[data-preview-pdf="1"] #quote-preview .quote-a4-sheet,
 html[data-preview-pdf="1"] #quote-preview .quote-document-root {
@@ -1212,7 +1221,12 @@ export function buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, table
         ? '-webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: auto;'
         : '-webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;';
 
-    return `<!DOCTYPE html><html lang="en"${htmlDataAttrs}><head><title>EMS</title>${baseTag}${
+    const browserSavePdfHint = options?.browserSavePdfHint
+        ? `<div class="no-print ems-browser-pdf-hint" style="position:fixed;top:0;left:0;right:0;z-index:99999;padding:10px 14px;background:#eff6ff;border-bottom:1px solid #3b82f6;font:14px 'Segoe UI',system-ui,sans-serif;color:#1e3a8a;text-align:center;box-sizing:border-box;">In the print dialog, choose <strong>Save as PDF</strong> or <strong>Microsoft Print to PDF</strong>, then click Save.</div>`
+        : '';
+    const docTitle = String(options?.documentTitle || 'EMS Quote').replace(/</g, '');
+
+    return `<!DOCTYPE html><html lang="en"${htmlDataAttrs}><head><title>${docTitle}</title>${baseTag}${
         usePreviewMatchedPdf ? '' : googleFontLinks
     }<style>
         @page { size: A4 portrait; margin: 0; }
@@ -1234,5 +1248,5 @@ export function buildQuotePrintDocumentHtml(printWithHeader, fragmentHtml, table
         ${getServerPdfHeaderModeCss(printWithHeader)}
         ${String(tableStyles || '').trim()}
         ${usePreviewMatchedPdf ? PDF_FINAL_OVERRIDES : ''}
-    </style></head><body><div id="quote-print-root" class="print-wrapper" data-print-with-header="${printWithHeader ? '1' : '0'}">${fragmentForBody}</div></body></html>`.trim().replace(/>\s*>/g, '>');
+    </style></head><body>${browserSavePdfHint}<div id="quote-print-root" class="print-wrapper" data-print-with-header="${printWithHeader ? '1' : '0'}">${fragmentForBody}</div></body></html>`.trim().replace(/>\s*>/g, '>');
 }

@@ -1,0 +1,306 @@
+﻿// Version 1.0 17.05.2016 AGI
+
+// 0 => HD67507 Modbus TCP Slave / Modbus Master - Converter
+// 1 => HD67508 Modbus TCP Slave / Modbus Master - Converter
+// 2 => HD67510 Modbus Slave / Modbus TCP Master - Converter
+// 4 => HD67516 Modbus Slave / Modbus TCP Master - Converter 
+
+STR00000 = Projekt
+STR00001 = Schritt 1
+STR00002 = Schritt 2
+STR00003 = Schritt 3
+STR00004 = Schritt 4
+STR00005 = Schritt 5
+STR00006 = Schritt 6
+STR00007 = Schritt 7
+STR00008 = Schritt 8
+STR00009 = Keine Konfiguration geöffnet ¶
+STR00010 = Nutze Schritt 1 um eine Konfiguration zu erstellen
+STR00011 = Aktuelle Konfiguration: ¶
+STR00012 = Information
+STR00013 = Optionen
+STR00014 = Compositor schliessen
+STR00015 = Neue Konfiguration
+STR00016 = Konfiguration öffnen
+STR00017 = Update via Ethernet
+STR00018 = Projekt nicht gültig.
+STR00019 = Neue Version verfügbar. Mehr Details hier
+STR00020 = Komm. einstellen
+STR00021 = Update via Seriell
+STR00022 = Übersetzungstabelle
+STR00023 = Update via USB
+STR00024 = ¶ ¶
+
+
+  //neu Konfiguration
+STR00025 = Neue Konfiguration erstellen
+STR00026 = Neue Konfiguration erstellen
+STR00027 = Name der neuen Konfiguration
+STR00028 = OK
+STR00029 = Abbruch
+STR00030 = Fehler! Projektname ist nicht gültig
+STR00031 = Fehler! Projektname ist nicht gültig weil Verzeichnis bereits existiert
+STR00032 = Fehler! Projektname ist nicht gültig
+
+
+  //Open Konfiguration
+STR00033 = Konfiguration öffnen
+STR00034 = Konfiguration öffnen
+STR00035 = Liste der Konfigurationen
+STR00036 = OK
+STR00037 = Abbruch
+
+  //Soft Options
+STR00038 = Software Optionen
+STR00039 = Software Optionen
+STR00040 = Sprache
+STR00041 = Verbindungs-Optionen
+STR00042 = Ausgewählte Sprache : ¶
+STR00043 = Seite ¶
+STR00044 = ¶ / ¶
+STR00045 = Vorherige
+STR00046 = Nächste
+STR00047 = Internet-Verbindung einschalten
+STR00048 = Bei Programmstart auf Software-Update prüfen
+STR00049 = Auf Update prüfen
+STR00050 = OK
+STR00051 = Abbruch
+STR00052 = Neue Version verfügbar. Mehr Details hier
+STR00053 = Kein Update verfügbar
+STR00054 = Möchten Sie die Sprache wechseln von ¶
+STR00055 = ¶ auf ¶
+STR00056 = ?
+
+  //BootTCP
+STR00057 = Update Firmware über Etherner (UDP)
+STR00058 = IP Adresse eingeben für ¶
+STR00059 = Verbindung zum Gerät prüfen.
+STR00060 = Ping
+STR00061 = Abbruch
+STR00062 = Weiter
+STR00063 = Update Geräte Optionen
+STR00064 = Firmware
+STR00065 = Lesen der Firmware nach Übertragung
+STR00066 = Projekt
+STR00067 = Lesen des Projekts nach Übertragung
+STR00068 = Firmware Update ausführen
+STR00069 = Gerät gefunden!
+STR00070 = Gerät nicht gefunden!
+STR00071 = FEHLER!!! IP-Adresse prüfen.
+STR00072 = Gerät nicht im Netzwerk gefunden.
+
+
+  //Boot Ser
+STR00073 = Update Firmware über serielle Schnittstelle
+STR00074 = Update über serielle Schnittstelle
+STR00075 = Folgen Sie diesen Schritten zum Updaten über RS232:
+STR00076 = 1 - Gerät ausschalten
+STR00077 = 2 - Dip-Switch auf Boot Modus setzen
+STR00078 = 3 - Wählen Sie den COM Port für das Update
+STR00079 = 4 - Gerät einschalten
+STR00080 = Update COM-Port Liste
+STR00081 = Update Gerät Optionen
+STR00082 = Firmware
+STR00083 = Lesen der Firmware nach Übertragung
+STR00084 = Projekt
+STR00085 = Lesen des Projekts nach Übertragung
+STR00086 = Abbruch
+STR00087 = Weiter
+STR00088 = Firmware Update ausführen
+
+
+  //SET COMMUNICATION
+STR00089 = Kommunikationseinstellungen
+STR00090 = Kommunikationseinstellungen
+STR00091 = Operationsmodus
+STR00092 = Routing Mode
+STR00093 = NAT Mode
+STR00094 = Operationsmodus
+STR00095 = Normaler Modus (mit Übersetzungstabelle)
+STR00096 = Mit fester IP Adresse
+STR00097 = Routing Slave Adresse
+STR00098 = Modbus TCP Slave
+STR00099 = IP Adresse
+STR00100 = SUBNET Maske
+STR00101 = GATEWAY
+STR00102 = Port
+STR00103 = Aktiviere UDP Port
+STR00104 = Aktiviere Spezialbefehl
+STR00105 = Deaktivierung der ersten zwei Bytes
+STR00106 = Kein TCP Frame bei RTU TimeOut
+STR00107 = Fast StartUp (nur mit 100Mbit/s)
+STR00108 = Modbus Master
+STR00109 = Schnittstelle
+STR00110 = Baudrate
+STR00111 = Parität
+STR00112 = TimeOut (ms)
+STR00113 = RS485 Stoppbits
+STR00114 = Komm. Leerlaufzeit (ms)
+STR00115 = Modbus TCP Master
+STR00116 = IP Adresse
+STR00117 = SUBNET Maske
+STR00118 = GATEWAY
+STR00119 = Port
+STR00120 = TimeOut (ms)
+STR00121 = Den socket nicht schliessen
+STR00122 = Fixe IP Adresse
+STR00123 = Modbus Slave
+STR00124 = Seriell
+STR00125 = Baudrate
+STR00126 = Parität
+STR00127 = Slave ID
+STR00128 = Fehler Modbus TCP Slave!! IP Adresse 1 muss zwischen 0 und 255 sein
+STR00129 = Fehler Modbus TCP Slave!! IP Adresse 2 muss zwischen 0 und 255 sein
+STR00130 = Fehler Modbus TCP Slave!! IP Adresse 3 muss zwischen 0 und 255 sein
+STR00131 = Fehler Modbus TCP Slave!! IP Adresse 4 muss zwischen 0 und 255 sein
+STR00132 = Fehler Modbus TCP Slave!! SUBNET Maske 1 muss zwischen 0 und 255 sein
+STR00133 = Fehler Modbus TCP Slave!! SUBNET Maske 2 muss zwischen 0 und 255 sein
+STR00134 = Fehler Modbus TCP Slave!! SUBNET Maske 3 muss zwischen 0 und 255 sein
+STR00135 = Fehler Modbus TCP Slave!! SUBNET Maske 4 muss zwischen 0 und 255 sein
+STR00136 = Fehler Modbus TCP Slave!! GATEWAY IP 1 muss zwischen 0 und 255 sein
+STR00137 = Fehler Modbus TCP Slave!! GATEWAY IP 2 muss zwischen 0 und 255 sein
+STR00138 = Fehler Modbus TCP Slave!! GATEWAY IP 3 muss zwischen 0 und 255 sein
+STR00139 = Fehler Modbus TCP Slave!! GATEWAY IP 4 muss zwischen 0 und 255 sein
+STR00140 = Fehler Modbus TCP Slave!! PORT muss zwischen 0 und 65535 sein
+STR00141 = Fehler Modbus Master!! TimeOut muss zwischen 0 und 100000000 ms sein
+STR00142 = Fehler Modbus Master!! TimeOut muss zwischen 0 und 60000 ms sein
+STR00143 = Fehler Modbus TCP Master!! IP Adresse 1 muss zwischen 0 und 255 sein
+STR00144 = Fehler Modbus TCP Master!! IP Adresse 2 muss zwischen 0 und 255 sein
+STR00145 = Fehler Modbus TCP Master!! IP Adresse 3 muss zwischen 0 und 255 sein
+STR00146 = Fehler Modbus TCP Master!! IP Adresse 4 muss zwischen 0 und 255 sein
+STR00147 = Fehler Modbus TCP Master!! SUBNET Maske 1 muss zwischen 0 und 255 sein
+STR00148 = Fehler Modbus TCP Master!! SUBNET Maske 2 muss zwischen 0 und 255 sein
+STR00149 = Fehler Modbus TCP Master!! SUBNET Maske 3 muss zwischen 0 und 255 sein
+STR00150 = Fehler Modbus TCP Master!! SUBNET Maske 4 muss zwischen 0 und 255 sein
+STR00151 = Fehler Modbus TCP Master!! GATEWAY IP 1 muss zwischen 0 und 255 sein
+STR00152 = Fehler Modbus TCP Master!! GATEWAY IP 2 muss zwischen 0 und 255 sein
+STR00153 = Fehler Modbus TCP Master!! GATEWAY IP 3 muss zwischen 0 und 255 sein
+STR00154 = Fehler Modbus TCP Master!! GATEWAY IP 4 muss zwischen 0 und 255 sein
+STR00155 = Fehler Modbus TCP Master!! PORT muss zwischen 0 und 65535 sein
+STR00156 = Fehler Modbus TCP Master!! TimeOut muss zwischen 0 und 100000000 ms sein
+STR00157 = Fehler Modbus TCP Master!! FIX IP Adresse 1 muss zwischen 0 und 255 sein
+STR00158 = Fehler Modbus TCP Master!! FIX IP Adresse 2 muss zwischen 0 und 255 sein
+STR00159 = Fehler Modbus TCP Master!! FIX IP Adresse 3 muss zwischen 0 und 255 sein
+STR00160 = Fehler Modbus TCP Master!! FIX IP Adresse 4 muss zwischen 0 und 255 sein
+STR00161 = Fehler Modbus Slave!! ID Geraete muss zwischen 1 und 247 sein
+
+
+  //Translte Table 507
+STR00162 = Übersetzungstabelle
+STR00163 = Übersetzungstabelle
+STR00164 = OK
+STR00165 = Abbruch
+STR00166 = Zeile löschen
+STR00167 = Zeile hinzufuegen
+STR00168 = Nr
+STR00169 = Datentyp
+STR00170 = Slave ID TCP
+STR00171 = Adresse TCP
+STR00172 = Slave ID
+STR00173 = Adresse
+STR00174 = Anzahl
+STR00175 = Beschreibung
+STR00176 = Fehler in Zeile ¶
+STR00177 = !! Datentyp muss gewählt werden
+STR00178 = !! Slave ID TCP muss zwischen 1 und 247 sein
+STR00179 = !! Adresse TCP muss zwischen 0 und 65535 sein
+STR00180 = !! Slave ID muss zwischen 1 und 247 sein
+STR00181 = !! Adresse muss zwischen 0 und 65535 sein
+STR00182 = !! Anzahl muss zwischen 1 und 127 sein
+STR00183 = !! Anzahl muss zwischen 1 und 255 sein
+STR00184 = Wollen Sie wirklich die Zeile löschen? ¶
+
+  //Translte Table 510
+STR00185 = Übersetzungstabelle
+STR00186 = Übersetzungstabelle
+STR00187 = OK
+STR00188 = Abbruch
+STR00189 = Zeile löschen
+STR00190 = Zeile hinzufügen
+STR00191 = Nr
+STR00192 = Datentyp
+STR00193 = Adresse
+STR00194 = IP Adresse TCP
+STR00195 = Adresse TCP
+STR00196 = Anzahl
+STR00197 = Beschreibung
+STR00198 = Fehler in Zeile ¶
+STR00199 = !! Datentyp muss gewählt werden
+STR00200 = !! Adresse muss zwischen 0 und 65535 sein
+STR00201 = !! IP Adresse TCP muss eine gültige sein (z.B. 192.168.1.125)
+STR00202 = !! Adresse TCP muss zwischen 0 und 65535 sein
+STR00203 = !! Anzahl muss zwischen 1 und 127 sein
+STR00204 = !! Anzahl muss zwischen 1 und 255 sein
+STR00205 = Wollen Sie wirklich die Zeile löschen? ¶
+
+  //ROUTING SLAVE Adresse 510
+STR00206 = Übersetzungstabelle
+STR00207 = Übersetzungstabelle
+STR00208 = OK
+STR00209 = Abbruch
+STR00210 = Zeile löschen
+STR00211 = Zeile hinzufuegen
+STR00212 = Nr
+STR00213 = Slave ID
+STR00214 = IP Adresse TCP
+STR00215 = Slave ID TCP
+STR00216 = Beschreibung
+
+STR00217 = Fehler in Zeile ¶
+STR00218 = !! Slave ID muss zwischen 1 und 247 sein
+STR00219 = !! Slave ID ¶
+STR00220 = ¶ schon benutzt in Zeile ¶
+STR00221 = !! IP Adresse TCP muss eine gültige sein (z.B. 192.168.1.125)
+STR00222 = !! Slave ID TCP muss zwischen 0 und 255 sein
+STR00223 = Wollen Sie wirklich die Zeile löschen? ¶
+
+STR00224 = Fehler! Wählen Sie einen COM Port für das Update
+
+STR00225 = OK
+STR00226 = Abbruch
+
+  //Boot Ser
+STR00227 = Update Gerät über USB
+STR00228 = Update Gerät über USB Schnittstelle
+STR00229 = Folgen Sie diesen Schritten zum Updaten über USB:
+STR00230 = 1 - Gerät ausschalten
+STR00231 = 2 - Dip-Switch auf Boot Modus setzen
+STR00232 = 3 - Wählen Sie den COM Port für das Update
+STR00233 = 4 - Gerät einschalten
+STR00234 = Update COM Ports Liste
+STR00235 = Update Gerät Optionen
+STR00236 = Firmware
+STR00237 = Lesen der Firmware nach Übertragung
+STR00238 = Konfiguration
+STR00239 = Lesen der Konfiguration nach Übertragung
+STR00240 = Abbruch
+STR00241 = Weiter
+STR00242 = Firmware Update ausführen
+
+STR00243 = Fehler! Wählen Sie einen COM Port für das Update
+
+
+  //Set Communication - Wi-Fi
+STR00244 = ¶ Modbus TCP Slave (Wi-Fi) ¶
+STR00245 = SSID
+STR00246 = Passwort
+STR00247 = Typ
+STR00248 = Ungesichert
+STR00249 = WEP
+STR00250 = WPA
+STR00251 = WPA2
+
+STR00252 = Gerät auswählen
+
+  //New options 510 on Routing Slave Address
+STR00253 = Reservierten Sock
+STR00254 = Fehler Sock
+STR00255 = !! Fehler Sock muss zwischen 0 und 10000 sein
+STR00256 = Fehler!! Zu viele Sockets vorbehalten ausgewählt (Maximum ¶
+STR00257 = ¶ sockets)
+
+STR00258 = !! Die Slave-ID 0 nicht verwendet werden mit einem Reservierten Socket
+STR00259 = !! ID Geraete muss zwischen 0 und 247 sein
+
+STR00260 = Broadcast-Meldung mit ID Null aktivieren
+

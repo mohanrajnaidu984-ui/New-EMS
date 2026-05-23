@@ -248,6 +248,14 @@ function getTopJobProbValueExpr(topJobStatus) {
     return `(${SQL_PROB_JOB_VALUE})`;
 }
 
+/** Selected / logged-in SE for report widgets (ConcernedSE on enquiry — not quote/probability PreparedBy). */
+function getSalesReportAssignedSe(req, safeRole) {
+    return (
+        (req.salesReportForceSeName && String(req.salesReportForceSeName).trim()) ||
+        (safeRole && safeRole !== 'All' ? safeRole : null)
+    );
+}
+
 /**
  * EnquiryMaster scope: non–CC → company + latest Probability.OwnJobName = division + ConcernedSE↔Master email;
  * CC / others → EnquiryFor division/company + optional ConcernedSE by name.
@@ -729,18 +737,13 @@ router.get('/summary', async (req, res) => {
 
         const probDateExpr =
             'COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, E.EnquiryDate)';
-        const effectiveQuotedSe =
-            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
-            || (safeRole && safeRole !== 'All' ? safeRole : null);
+        const effectiveQuotedSe = getSalesReportAssignedSe(req, safeRole);
         if (safeCompany && safeCompany !== 'All') {
             bindInputIfMissing(request, 'company', sql.NVarChar, safeCompany);
         }
         if (safeDivision && safeDivision !== 'All') {
             bindInputIfMissing(request, 'division', sql.NVarChar, safeDivision);
         }
-        const quotePreparedByClause = effectiveQuotedSe
-            ? ` WHERE LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
-            : '';
         if (effectiveQuotedSe) {
             request.input('quotedSe', sql.NVarChar, effectiveQuotedSe);
         }
@@ -778,25 +781,8 @@ router.get('/summary', async (req, res) => {
             }
         }
 
-        /**
-         * PreparedBy + enquiry scope for Probability rows (Won / Lost / snapshot).
-         * Lost / Follow-up rows sometimes have NULL PreparedBy (no quote attribution recorded).
-         * Fall back to Master_ConcernedSE.Department = P.OwnJobName so the row attributes to the
-         * division's SE without double-counting across sibling SEs on the same enquiry.
-         */
-        const wonPreparedByClause = effectiveQuotedSe
-            ? ` AND (
-                    LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
-                    OR (
-                        LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
-                        AND EXISTS (
-                            SELECT 1 FROM Master_ConcernedSE msFb
-                            WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))
-                              AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
-                        )
-                    )
-                )`
-            : '';
+        /** SE scope on enquiry (ConcernedSE) is in quotedFilterClause — not Probability.PreparedBy. */
+        const wonPreparedByClause = '';
         const probDivisionScopeClause = safeDivision
             ? ` AND (
                     UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
@@ -995,7 +981,6 @@ WITH LatestProbByUpdate AS (
                     COALESCE(EQ.UpdatedAt, EQ.QuoteDate) AS QuoteDate
                 FROM EnquiryQuotes EQ
                 WHERE 1=1
-                  ${effectiveQuotedSe ? `AND LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))` : ''}
                   ${safeDivision ? `AND EXISTS (
                         SELECT 1
                         FROM Master_EnquiryFor mefQ
@@ -1514,9 +1499,7 @@ router.get('/top-job-booked', async (req, res) => {
         const topJobProbWhere = getTopJobProbStatusWhere(req.query.topJobStatus, req);
         const topJobValueExpr = getTopJobProbValueExpr(req.query.topJobStatus);
         const topJobDateExpr = `COALESCE(P.BookedDate, P.ExpectedDate, P.UpdatedDateTime, ${SQL_LATEST_QUOTE_DATE_PER_ENQUIRY}, E.EnquiryDate)`;
-        const effectiveQuotedSe =
-            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
-            || (safeRole && safeRole !== 'All' ? safeRole : null);
+        const effectiveQuotedSe = getSalesReportAssignedSe(req, safeRole);
         if (safeCompany && safeCompany !== 'All') {
             bindInputIfMissing(request, 'company', sql.NVarChar, safeCompany);
         }
@@ -1748,20 +1731,7 @@ router.get('/top-job-booked', async (req, res) => {
             `);
             } else if (isWonTopJob) {
                 const wonProbWhere = getProbWonMetricsSql(req);
-                /** Allow NULL PreparedBy when the SE owns the row's OwnJobName via Master_ConcernedSE.Department. */
-                const wonPreparedByClause = effectiveQuotedSe
-                    ? ` AND (
-                            LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@wonSe, '')))
-                            OR (
-                                LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
-                                AND EXISTS (
-                                    SELECT 1 FROM Master_ConcernedSE msFb
-                                    WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@wonSe, '')))
-                                      AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
-                                )
-                            )
-                        )`
-                    : '';
+                const wonPreparedByClause = '';
                 const wonOwnJobClause = safeDivision && safeDivision !== 'All'
                     ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
                     : '';
@@ -1832,24 +1802,7 @@ router.get('/top-job-booked', async (req, res) => {
             `);
             } else if (isLostTopJob || isFollowUpTopJob) {
                 const followUpStatusWhere = `(LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) LIKE '%follow%')`;
-                /**
-                 * Lost / Follow-up rows often have NULL PreparedBy. Fall back to
-                 * Master_ConcernedSE.Department = P.OwnJobName so attribution still works
-                 * (e.g. Arun Venkatesh / BMS Project gets Lost rows where OwnJobName = 'BMS Project').
-                 */
-                const statusPreparedByClause = effectiveQuotedSe
-                    ? ` AND (
-                            LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@statusSe, '')))
-                            OR (
-                                LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = ''
-                                AND EXISTS (
-                                    SELECT 1 FROM Master_ConcernedSE msFb
-                                    WHERE LTRIM(RTRIM(ISNULL(msFb.FullName, ''))) = LTRIM(RTRIM(ISNULL(@statusSe, '')))
-                                      AND UPPER(LTRIM(RTRIM(ISNULL(msFb.Department, '')))) = UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, ''))))
-                                )
-                            )
-                        )`
-                    : '';
+                const statusPreparedByClause = '';
                 const statusOwnJobClause = safeDivision && safeDivision !== 'All'
                     ? ` AND UPPER(LTRIM(RTRIM(ISNULL(P.OwnJobName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))`
                     : '';
@@ -1930,20 +1883,8 @@ router.get('/top-job-booked', async (req, res) => {
             ORDER BY x.JobValue DESC
             `);
             } else if (isPendingTopJob) {
-                if (effectiveQuotedSe) {
-                    bindInputIfMissing(request, 'pendingSe', sql.NVarChar, effectiveQuotedSe);
-                }
-                const pendingPreparedByClause = effectiveQuotedSe
-                    ? ` AND LTRIM(RTRIM(ISNULL(P.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@pendingSe, '')))`
-                    : '';
-                const pendingNoProbQuoteSeClause = effectiveQuotedSe
-                    ? ` AND EXISTS (
-                            SELECT 1
-                            FROM EnquiryQuotes EQ2
-                            WHERE EQ2.RequestNo = E.RequestNo
-                              AND LTRIM(RTRIM(ISNULL(EQ2.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@pendingSe, '')))
-                        )`
-                    : '';
+                const pendingPreparedByClause = '';
+                const pendingNoProbQuoteSeClause = '';
                 topJobBookedRes = await request.query(`
             WITH LatestProbPendingScope AS (
                 SELECT * FROM (
@@ -2769,12 +2710,7 @@ router.get('/quoted-enquiry-values', async (req, res) => {
         if (!ctx) return res.status(400).json({ error: 'Year is required' });
 
         const { request, safeQuarter, safeCompany, safeDivision, nonCcBlock } = ctx;
-        const effectiveQuotedSe =
-            (req.salesReportForceSeName && String(req.salesReportForceSeName).trim())
-            || (ctx.safeRole && ctx.safeRole !== 'All' ? ctx.safeRole : null);
-        const quotePreparedByClause = effectiveQuotedSe
-            ? ` WHERE LTRIM(RTRIM(ISNULL(EQ.PreparedBy, ''))) = LTRIM(RTRIM(ISNULL(@quotedSe, '')))`
-            : '';
+        const effectiveQuotedSe = getSalesReportAssignedSe(req, ctx.safeRole);
         if (effectiveQuotedSe) {
             request.input('quotedSe', sql.NVarChar, effectiveQuotedSe);
         }
@@ -2827,7 +2763,6 @@ router.get('/quoted-enquiry-values', async (req, res) => {
                         0
                     ) AS Amount
                 FROM EnquiryQuotes EQ
-                ${quotePreparedByClause}
             ),
             LatestQuote AS (
                 SELECT *

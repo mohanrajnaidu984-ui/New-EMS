@@ -7,22 +7,113 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const express = require('express');
 const { applyQuotePdfRestrictions, isQuotePdfRestrictEnabled } = require('../lib/restrictQuotePdf');
+const { resolvePuppeteerChromeExecutable } = require('../lib/resolvePuppeteerChrome');
 
 const router = express.Router();
 
+function puppeteerLaunchTimeoutMs() {
+    const n = Number(process.env.PUPPETEER_LAUNCH_TIMEOUT_MS);
+    return Number.isFinite(n) && n > 0 ? n : 120000;
+}
+
+function quotePdfPageTimeoutMs() {
+    const n = Number(process.env.QUOTE_PDF_PAGE_TIMEOUT_MS);
+    return Number.isFinite(n) && n > 0 ? n : 120000;
+}
+
+function useSingleProcessChrome() {
+    const raw = String(process.env.QUOTE_PDF_SINGLE_PROCESS ?? '1').trim().toLowerCase();
+    return raw !== '0' && raw !== 'false' && raw !== 'no';
+}
+
+/**
+ * Shared launch options for /health probe and /generate (IIS/PM2 service accounts).
+ * Hardened for Windows Server session isolation — see PUPPETEER_* / QUOTE_PDF_* in server/.env.
+ */
+function buildChromeLaunchOptions(executablePath, userDataDir) {
+    const args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-extensions',
+        '--no-zygote',
+        /** file:// or sandboxed doc → private localhost; logos live on API :5002 */
+        '--disable-features=BlockInsecurePrivateNetworkRequests',
+    ];
+    if (useSingleProcessChrome()) {
+        args.push('--single-process');
+    }
+    return {
+        headless: true,
+        executablePath,
+        timeout: puppeteerLaunchTimeoutMs(),
+        userDataDir,
+        args,
+    };
+}
+
 /** Quick reachability check for Quote tab PDF download (Vite proxies /api → Express). */
-router.get('/health', (_req, res) => {
+router.get('/health', async (req, res) => {
     let puppeteerOk = false;
+    let chromePath = null;
+    let chromeReady = false;
+    let chromeHint = '';
+    let launchProbe;
     try {
         require.resolve('puppeteer');
         puppeteerOk = true;
+        const puppeteer = require('puppeteer');
+        const resolved = resolvePuppeteerChromeExecutable(puppeteer);
+        chromePath = resolved.executablePath;
+        chromeReady = !!chromePath;
+        if (!chromeReady) chromeHint = resolved.reason || '';
+
+        if (String(req.query.launch || '').trim() === '1' && chromePath) {
+            const probeDir = path.join(os.tmpdir(), `ems-puppeteer-probe-${process.pid}-${Date.now()}`);
+            const t0 = Date.now();
+            let probeBrowser;
+            try {
+                probeBrowser = await puppeteer.launch(buildChromeLaunchOptions(chromePath, probeDir));
+                const probePage = await probeBrowser.newPage();
+                await probePage.goto('about:blank', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: quotePdfPageTimeoutMs(),
+                });
+                launchProbe = { ok: true, ms: Date.now() - t0 };
+            } catch (probeErr) {
+                launchProbe = {
+                    ok: false,
+                    ms: Date.now() - t0,
+                    error: probeErr && probeErr.message ? String(probeErr.message) : String(probeErr),
+                };
+            } finally {
+                if (probeBrowser) await probeBrowser.close().catch(() => {});
+                try {
+                    fs.rmSync(probeDir, { recursive: true, force: true });
+                } catch {
+                    /* ignore */
+                }
+            }
+        }
     } catch {
         puppeteerOk = false;
+        chromeHint = 'Install: cd server && npm install puppeteer';
     }
     return res.json({
         ok: true,
         port: serverListenPort(),
         puppeteer: puppeteerOk,
+        chromeReady,
+        chromePath: chromePath || undefined,
+        chromeHint: chromeHint || undefined,
+        launchProbe,
+        quotePdfAssetOrigin: (process.env.QUOTE_PDF_ASSET_ORIGIN || `http://127.0.0.1:${serverListenPort()}`).replace(
+            /\/$/,
+            ''
+        ),
     });
 });
 
@@ -50,13 +141,20 @@ html[data-preview-pdf="1"] #quote-preview {
     -moz-osx-font-smoothing: grayscale !important;
     text-rendering: auto !important;
 }
-html[data-preview-pdf="1"] #quote-preview * {
+html[data-preview-pdf="1"] #quote-preview *:not(.quote-digital-signature-stamp):not(.quote-signature-stamp-caption):not(.quote-signature-stamp-body) {
     -webkit-font-smoothing: antialiased !important;
     -moz-osx-font-smoothing: grayscale !important;
     text-rendering: auto !important;
     transform: none !important;
     filter: none !important;
     backdrop-filter: none !important;
+}
+html[data-preview-pdf="1"] .quote-a4-sheet {
+    position: relative !important;
+}
+html[data-preview-pdf="1"] .quote-digital-signature-stamp {
+    position: absolute !important;
+    /* left/top: inline calc(xPct/yPct) — never override for preview/PDF parity */
 }
 html[data-preview-pdf="1"] .quote-a4-sheet,
 html[data-preview-pdf="1"] .quote-preview-panel-shell,
@@ -107,6 +205,11 @@ function rewriteHtmlAssetHostsForPuppeteer(html) {
         /https?:\/\/(?:localhost|127\.0\.0\.1|[\w.-]+):\s*(?:5173|5174|5175|5176|5177|5178|5179)\/uploads/gi,
         `${local}/uploads`
     );
+    /** IIS proxy (:5173) or LAN API host — Puppeteer must use loopback, not the server’s public IP. */
+    out = out.replace(
+        new RegExp(`https?:\\/\\/(?:localhost|127\\.0\\.0\\.1|[\\w.-]+):\\s*${port}\\/uploads`, 'gi'),
+        `${local}/uploads`
+    );
     return out;
 }
 
@@ -121,19 +224,23 @@ function extractBaseHrefFromHtml(html) {
 async function waitForImagesLoaded(page) {
     await page.evaluate(() => {
         const imgs = Array.from(document.images || []);
-        return Promise.all(
-            imgs.map(
-                (img) =>
-                    img.complete
-                        ? Promise.resolve()
-                        : new Promise((resolve) => {
-                              const done = () => resolve();
-                              img.addEventListener('load', done, { once: true });
-                              img.addEventListener('error', done, { once: true });
-                              setTimeout(done, 15000);
-                          })
-            )
-        );
+        const perImgMs = 8000;
+        return Promise.race([
+            Promise.all(
+                imgs.map(
+                    (img) =>
+                        img.complete
+                            ? Promise.resolve()
+                            : new Promise((resolve) => {
+                                  const done = () => resolve();
+                                  img.addEventListener('load', done, { once: true });
+                                  img.addEventListener('error', done, { once: true });
+                                  setTimeout(done, perImgMs);
+                              })
+                )
+            ),
+            new Promise((resolve) => setTimeout(resolve, 20000)),
+        ]);
     });
 }
 
@@ -141,9 +248,9 @@ async function waitForImagesLoaded(page) {
 async function loadHtmlInPage(page, html) {
     const baseURL = extractBaseHrefFromHtml(html);
     const setOpts = {
-        /** Wait for self-hosted Inter @font-face so PDF embeds vector text, not blurry fallback glyphs. */
-        waitUntil: 'networkidle0',
-        timeout: 180000,
+        /** Use domcontentloaded to prevent hanging on offline servers/intranets with no internet access. */
+        waitUntil: 'domcontentloaded',
+        timeout: quotePdfPageTimeoutMs(),
         ...(baseURL ? { baseURL } : {}),
     };
     if (html.length <= SETCONTENT_SAFE_MAX) {
@@ -155,7 +262,10 @@ async function loadHtmlInPage(page, html) {
         `ems-quote-pdf-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 10)}.html`
     );
     fs.writeFileSync(tmpPath, html, 'utf8');
-    await page.goto(pathToFileURL(tmpPath).href, { waitUntil: 'domcontentloaded', timeout: 180000 });
+    await page.goto(pathToFileURL(tmpPath).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: quotePdfPageTimeoutMs(),
+    });
     return tmpPath;
 }
 
@@ -216,27 +326,28 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
 
     let browser;
     let tmpHtmlPath = null;
+    let puppeteerUserDataDir = null;
     try {
-        const bundledChrome =
-            typeof puppeteer.executablePath === 'function' ? puppeteer.executablePath() : null;
-        const launchOpts = {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                /** file:// or sandboxed doc → private localhost; logos live on API :5002 */
-                '--disable-features=BlockInsecurePrivateNetworkRequests',
-            ],
-        };
-        if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-            launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-        } else if (bundledChrome && fs.existsSync(bundledChrome)) {
-            launchOpts.executablePath = bundledChrome;
+        const { executablePath: chromeExe, checked, reason } = resolvePuppeteerChromeExecutable(puppeteer);
+        if (!chromeExe) {
+            return res.status(503).json({
+                error: 'chrome_not_configured',
+                message: reason || 'Chrome/Chromium is not installed on this API server.',
+                hint:
+                    'On the server (not your PC): cd server && npx puppeteer browsers install chrome. ' +
+                    'Or set PUPPETEER_EXECUTABLE_PATH in server/.env to chrome.exe (e.g. C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe).',
+                checkedPaths: checked.slice(0, 8),
+            });
         }
-        browser = await puppeteer.launch(launchOpts);
+        puppeteerUserDataDir = path.join(
+            os.tmpdir(),
+            `ems-puppeteer-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+        );
+        browser = await puppeteer.launch(buildChromeLaunchOptions(chromeExe, puppeteerUserDataDir));
         const page = await browser.newPage();
-        page.setDefaultNavigationTimeout(180000);
+        const pageTimeoutMs = quotePdfPageTimeoutMs();
+        page.setDefaultTimeout(pageTimeoutMs);
+        page.setDefaultNavigationTimeout(pageTimeoutMs);
         // screen = same cascade as Quote preview (embedded fragment styles target screen; @media print ignored).
         await page.emulateMediaType(useScreenMedia ? 'screen' : 'print');
         /** A4 @ 96dpi; 1× = true vector PDF (2× rasterizes and softens text when scaled into A4). */
@@ -250,7 +361,7 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         try {
             await page.evaluate(async () => {
                 if (document.fonts && document.fonts.ready) {
-                    await document.fonts.ready;
+                    await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 5000))]);
                 }
                 const root = document.getElementById('quote-print-root');
                 if (!root) return;
@@ -296,6 +407,18 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
                 'Chrome for Puppeteer is missing or blocked. From the server folder run: npx puppeteer browsers install chrome. ' +
                 'On locked-down PCs set PUPPETEER_EXECUTABLE_PATH to a Chrome/Chromium exe.';
         }
+        if (/spawn EFTYPE|EFTYPE|exec format error/i.test(raw)) {
+            hint =
+                'The Chrome path on this server is invalid (wrong file or copied from another machine). ' +
+                'On the API server run: cd server && npx puppeteer browsers install chrome. ' +
+                'Or set PUPPETEER_EXECUTABLE_PATH in server/.env to a real chrome.exe on this server.';
+        }
+        if (/Timed out after waiting \d+ms/i.test(raw)) {
+            hint =
+                'Chrome did not start or load the quote in time (common on IIS/PM2). Run GET /api/quote-pdf/health?launch=1. ' +
+                'Set PUPPETEER_EXECUTABLE_PATH, QUOTE_PDF_ASSET_ORIGIN=http://127.0.0.1:5002, grant the PM2 user write access to %TEMP%, ' +
+                'or use Print → Save as PDF from the quote tab. To disable --single-process set QUOTE_PDF_SINGLE_PROCESS=0 and restart PM2.';
+        }
         console.error('[quote-pdf]', err && err.stack ? err.stack : err);
         if (!res.headersSent) {
             return res.status(500).json({
@@ -312,6 +435,13 @@ router.post('/generate', express.json({ limit: '50mb' }), async (req, res) => {
         if (tmpHtmlPath) {
             try {
                 fs.unlinkSync(tmpHtmlPath);
+            } catch {
+                /* ignore */
+            }
+        }
+        if (puppeteerUserDataDir) {
+            try {
+                fs.rmSync(puppeteerUserDataDir, { recursive: true, force: true });
             } catch {
                 /* ignore */
             }

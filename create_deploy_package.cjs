@@ -29,21 +29,30 @@ try {
     process.exit(1);
 }
 
-// 3. Clear existing dist and copy new Frontend Files
+// 3. Clear existing frontend files and copy built Frontend Files directly to both the root and the nested dist folder
 console.log('Copying Frontend...');
-if (fs.existsSync(FRONTEND_DIST_DIR)) {
-    fs.rmSync(FRONTEND_DIST_DIR, { recursive: true, force: true });
+if (fs.existsSync(FRONTEND_DIR)) {
+    fs.rmSync(FRONTEND_DIR, { recursive: true, force: true });
 }
+fs.mkdirSync(FRONTEND_DIR, { recursive: true });
+fs.mkdirSync(FRONTEND_DIST_DIR, { recursive: true });
+
 const distDir = path.join(PROJECT_ROOT, 'dist');
 if (fs.existsSync(distDir)) {
+    // Copy to the flat root folder
+    fs.cpSync(distDir, FRONTEND_DIR, { recursive: true });
+    // Copy to the nested dist/ folder (for backward compatibility with existing IIS configurations)
     fs.cpSync(distDir, FRONTEND_DIST_DIR, { recursive: true });
 } else {
     console.error('Dist directory not found!');
     process.exit(1);
 }
 
-// Copy proxy-server.cjs to frontend
+// Copy proxy-server.cjs to both locations
 fs.copyFileSync(path.join(PROJECT_ROOT, 'proxy-server.cjs'), path.join(FRONTEND_DIR, 'proxy-server.cjs'));
+fs.copyFileSync(path.join(PROJECT_ROOT, 'proxy-server.cjs'), path.join(FRONTEND_DIST_DIR, 'proxy-server.cjs'));
+
+
 
 // 4. Clear existing backend and Copy new Backend Files
 console.log('Copying Backend...');

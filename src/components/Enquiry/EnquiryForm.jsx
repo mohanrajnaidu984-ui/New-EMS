@@ -1222,7 +1222,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                         });
                         if (!internalResult.ok) {
                             alert(
-                                `Enquiry saved, but the internal notification email could not be sent.\n\n${internalResult.error || 'Unknown error'}\n\nEnsure EMS/server is running on this PC and classic Outlook is installed.`
+                                `Enquiry saved, but the internal notification email could not be sent.\n\n${internalResult.error || 'Unknown error'}\n\n` +
+                                    'For your own From address: run node scripts/quote-outlook-local-helper.js (classic Outlook open) on this PC. ' +
+                                    'On IIS only (no helper): set EMS_ENQUIRY_NOTIFY_VIA_SMTP=1 in server .env — mail sends from the shared SMTP account.'
                             );
                         }
 
@@ -1238,7 +1240,9 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                             });
                             if (!ackResult.ok) {
                                 alert(
-                                    `Enquiry saved, but the customer acknowledgement draft(s) could not be opened.\n\n${ackResult.error || 'Unknown error'}`
+                                    `Enquiry saved, but the customer acknowledgement draft(s) could not be opened.\n\n${ackResult.error || 'Unknown error'}\n\n` +
+                                        'Customer mail must use your desktop Outlook (From = your email; Reply-To = concerned engineer). ' +
+                                        'Start: node scripts/quote-outlook-local-helper.js'
                                 );
                             } else if (ackResult.draftCount > 1) {
                                 alert(

@@ -39,6 +39,7 @@ const SearchEnquiry = ({ onOpen }) => {
     const [resetKey, setResetKey] = useState(0);
 
     const [results, setResults] = useState([]);
+    const [displayRows, setDisplayRows] = useState([]);
     const [filteredEnquiries, setFilteredEnquiries] = useState([]);
     const searchInputRef = useRef(null);
     /** After Clear, keep the table empty until the user runs a search again (text and/or both dates). */
@@ -206,8 +207,11 @@ const SearchEnquiry = ({ onOpen }) => {
         setResults([]);
     };
 
+    const rowsForExport = displayRows.length > 0 ? displayRows : sortedResults;
+
     const handleExport = () => {
-        if (sortedResults.length === 0) {
+        const exportList = rowsForExport;
+        if (exportList.length === 0) {
             alert("No data to export");
             return;
         }
@@ -216,7 +220,7 @@ const SearchEnquiry = ({ onOpen }) => {
 
         const csvContent = [
             headers.join(","),
-            ...sortedResults.map(r => {
+            ...exportList.map(r => {
                 const row = [
                     r.RequestNo,
                     formatEnquiryResultDate(r.EnquiryDate),
@@ -433,11 +437,14 @@ const SearchEnquiry = ({ onOpen }) => {
 
             <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                 <EnquiryResultsTable
+                    key={`enquiry-results-${resetKey}`}
                     sortedRows={sortedResults}
                     sortConfig={sortConfig}
                     onSort={handleSort}
                     masters={masters}
                     onRowOpen={onOpen}
+                    enableHeaderFilters
+                    onDisplayRowsChange={setDisplayRows}
                 />
             </div>
         </div>
