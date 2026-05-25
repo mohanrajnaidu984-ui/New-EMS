@@ -25,19 +25,47 @@ router.post('/ingest/incremental', async (req, res) => {
     }
 });
 
+const { handleLocalQuery } = require('../services/localAi');
+
 // Chat Route
 router.post('/chat', async (req, res) => {
     try {
-        const { message } = req.body;
+        const { message, user } = req.body;
         if (!message) return res.status(400).json({ error: 'Message is required' });
 
-        console.log('Received chat message:', message);
+        console.log('Received chat message:', message, 'User:', user?.email || user?.EmailId);
+
+        // Check for API Key
+        if (!process.env.GEMINI_API_KEY) {
+            console.warn('GEMINI_API_KEY missing. Switching to Local AI.');
+            const localResponse = await handleLocalQuery(message);
+            return res.json(localResponse);
+        }
 
         // 1. Generate Embedding for User Query
+        console.log('Generating embedding...');
         const queryVector = await getEmbedding(message);
 
         // 2. Search Vector DB
-        const searchResults = await search(queryVector, 5, 0.4); // Top 5, 0.4 threshold
+        console.log('Searching vector DB...');
+        let filter = null;
+        if (user) {
+            const roleString = user.role || user.Roles || '';
+            const userRoles = typeof roleString === 'string'
+                ? roleString.split(',').map(r => r.trim().toLowerCase())
+                : (Array.isArray(roleString) ? roleString.map(r => r.trim().toLowerCase()) : []);
+            const isAdmin = userRoles.includes('admin') || userRoles.includes('system');
+
+            if (!isAdmin) {
+                filter = {
+                    role: 'User',
+                    email: (user.email || user.EmailId || '').trim().toLowerCase(),
+                    division: (user.DivisionName || '').trim().toLowerCase()
+                };
+            }
+        }
+
+        const searchResults = await search(queryVector, 5, 0.4, filter); // Top 5, 0.4 threshold
 
         console.log(`Found ${searchResults.length} relevant chunks`);
 
@@ -76,15 +104,14 @@ ${context}`;
 
         // Handle Google Gemini 429 Rate Limiting
         if (error.status === 429 ||
-            (error.message && error.message.includes('Too Many Requests')) ||
-            (error.message && error.message.includes('quota'))) {
+            (error && error.message && (error.message.includes('Too Many Requests') || error.message.includes('quota')))) {
             return res.json({
                 answer: "I am currently overloaded (Rate Limit Exceeded). Please try again in 1 minute.",
                 sources: []
             });
         }
 
-        res.status(500).json({ error: 'Internal Server Error' });
+        res.status(500).json({ error: `Internal Server Error: ${error.message}` });
     }
 });
 

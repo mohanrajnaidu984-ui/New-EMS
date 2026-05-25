@@ -1,42 +1,34 @@
 const { sql, connectDB } = require('./dbConfig');
 
-async function checkEnquiryStatus() {
+async function checkEnquiry45() {
     await connectDB();
     try {
-        console.log('Checking EnquiryStatus column and latest data...');
+        // Check Enquiry Status
+        const enqRes = await sql.query`SELECT RequestNo, ProjectName, Status FROM EnquiryMaster WHERE RequestNo = '45'`;
+        const enq = enqRes.recordset[0];
 
-        // 1. Check if column exists
-        const colResult = await sql.query`
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'EnquiryMaster' AND COLUMN_NAME = 'EnquiryStatus'
-        `;
-
-        if (colResult.recordset.length > 0) {
-            console.log('✅ Column "EnquiryStatus" EXISTS in EnquiryMaster table.');
-        } else {
-            console.log('❌ Column "EnquiryStatus" DOES NOT EXIST in EnquiryMaster table.');
+        if (!enq) {
+            console.log('ERROR: Enquiry 45 not found!');
+            process.exit(1);
         }
 
-        // 2. Check latest 5 records
-        const dataResult = await sql.query`
-            SELECT TOP 5 RequestNo, EnquiryStatus, Status, AcknowledgementSE 
-            FROM EnquiryMaster 
-            ORDER BY ID DESC
-        `;
+        console.log('Enquiry 45 Status:', enq.Status);
 
-        if (dataResult.recordset.length > 0) {
-            console.log('\nLatest 5 Enquiries:');
-            console.table(dataResult.recordset);
-        } else {
-            console.log('No enquiries found.');
+        // Check if status is in the allowed list
+        const allowedStatuses = ['Open', 'Enquiry', null, ''];
+        const isAllowed = allowedStatuses.includes(enq.Status);
+        console.log('Is Status Allowed for Pending List?', isAllowed);
+
+        if (!isAllowed) {
+            console.log('\nPROBLEM: Enquiry 45 has status "' + enq.Status + '" which is NOT in the pending filter.');
+            console.log('The pricing list only shows enquiries with status: Open, Enquiry, or NULL/empty');
         }
 
     } catch (err) {
-        console.error('Error:', err);
+        console.error(err);
     } finally {
         process.exit(0);
     }
 }
 
-checkEnquiryStatus();
+checkEnquiry45();

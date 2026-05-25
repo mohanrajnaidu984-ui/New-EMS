@@ -88,7 +88,7 @@ PM2 ensures the app restarts if it crashes or the server reboots.
 
 ## Step 5: Configure Reverse Proxy (URL Rewrite)
 
-We need to tell IIS: "If a request starts with /api, send it to the Node app running on port 5000."
+We need to tell IIS: "If a request starts with /api, send it to the Node app running on port 5002."
 
 1.  **Check URL Rewrite & ARR**:
     *   Open IIS Manager -> Click Server Name -> **Application Request Routing Cache**.
@@ -105,7 +105,7 @@ We need to tell IIS: "If a request starts with /api, send it to the Node app run
     *   **Conditions**: None needed.
     *   **Action**:
         *   **Action type**: Rewrite
-        *   **Rewrite URL**: `http://localhost:5000/api/{R:1}`
+        *   **Rewrite URL**: `http://localhost:5002/api/{R:1}`
         *   Check **Append query string**.
         *   Click **Apply**.
 

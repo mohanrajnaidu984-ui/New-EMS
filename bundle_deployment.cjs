@@ -3,79 +3,176 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const PROJECT_ROOT = __dirname;
-const DEPLOY_DIR = path.join(PROJECT_ROOT, 'deployment_package'); // matching user's folder name preference
-const FRONTEND_DIR = path.join(DEPLOY_DIR, 'ems-frontend');
-const BACKEND_DIR = path.join(DEPLOY_DIR, 'ems-backend');
+const DEPLOY_DIR = path.join(PROJECT_ROOT, 'deployment_package');
+const CLIENT_DIR = path.join(DEPLOY_DIR, 'client');
+const SERVER_DIR = path.join(DEPLOY_DIR, 'server');
+const DB_DIR = path.join(DEPLOY_DIR, 'database');
 
-console.log('Starting Deployment Bundle Process...');
+console.log('========================================================');
+console.log('      Starting Complete IIS Deployment Package Builder  ');
+console.log('========================================================');
 
-// 1. Clean previous deployment package
-if (fs.existsSync(DEPLOY_DIR)) {
-    console.log('Cleaning exisiting deployment_package...');
-    fs.rmSync(DEPLOY_DIR, { recursive: true, force: true });
+// 1. Ensure the root deployment package directory exists
+if (!fs.existsSync(DEPLOY_DIR)) {
+    fs.mkdirSync(DEPLOY_DIR, { recursive: true });
 }
-fs.mkdirSync(DEPLOY_DIR);
-fs.mkdirSync(FRONTEND_DIR);
-fs.mkdirSync(BACKEND_DIR);
 
-// 2. Build Frontend
-console.log('Building Frontend...');
+// 2. Clean client and server target directories to start fresh
+console.log('\n🧹 Cleaning previous client and server bundle directories...');
+if (fs.existsSync(CLIENT_DIR)) {
+    fs.rmSync(CLIENT_DIR, { recursive: true, force: true });
+}
+if (fs.existsSync(SERVER_DIR)) {
+    fs.rmSync(SERVER_DIR, { recursive: true, force: true });
+}
+fs.mkdirSync(CLIENT_DIR, { recursive: true });
+fs.mkdirSync(SERVER_DIR, { recursive: true });
+
+// 3. Compile frontend React app
+console.log('\n📦 Building Frontend React Application...');
 try {
     execSync('npm run build', { cwd: PROJECT_ROOT, stdio: 'inherit' });
+    console.log('✅ Frontend compiled successfully.');
 } catch (err) {
-    console.error('Frontend build failed:', err);
+    console.error('❌ Frontend build failed:', err.message);
     process.exit(1);
 }
 
-// 3. Copy Frontend Files
-console.log('Copying Frontend...');
+// 4. Copy Frontend static files to client/
+console.log('\n📂 Copying Frontend distribution files...');
 const distDir = path.join(PROJECT_ROOT, 'dist');
 if (fs.existsSync(distDir)) {
-    fs.cpSync(distDir, FRONTEND_DIR, { recursive: true });
+    fs.cpSync(distDir, CLIENT_DIR, { recursive: true });
+    console.log('✅ Frontend assets copied to deployment_package/client/.');
 } else {
-    console.error('Dist directory not found!');
+    console.error('❌ Dist directory not found! Ensure build succeeded.');
     process.exit(1);
 }
 
-// 4. Copy Backend Files
-console.log('Copying Backend...');
-const serverDir = path.join(PROJECT_ROOT, 'server');
-fs.cpSync(serverDir, BACKEND_DIR, {
+// 5. Copy Backend server files
+console.log('\n📂 Copying Backend Server API files...');
+const sourceServerDir = path.join(PROJECT_ROOT, 'server');
+fs.cpSync(sourceServerDir, SERVER_DIR, {
     recursive: true,
-    filter: (src) => !src.includes('node_modules') && !src.includes('.env') // Exclude node_modules and .env for safety
+    filter: (src) => {
+        const basename = path.basename(src);
+        // Exclude node_modules, local secrets, logs, and massive temp dumps
+        if (basename === 'node_modules') return false;
+        if (src.includes('node_modules')) return false;
+        if (basename === '.env') return false;
+        if (basename.endsWith('.log')) return false;
+        // Keep files, directories, and configuration assets
+        return true;
+    }
+});
+console.log('✅ Backend server files copied to deployment_package/server/.');
+
+// 6. Create clean .env.example template for the user
+console.log('\n📝 Generating .env.example configuration file...');
+const envExampleContent = `# EMS Backend Environment Variables Configuration Template
+# Duplicate this file as '.env' and fill in your actual production values.
+
+# Database Connectivity
+DB_USER=your_db_username
+DB_PASSWORD="your_db_password"
+DB_SERVER=your_mssql_server_ip
+DB_DATABASE=EMS_DB
+
+# Express Application Configuration
+PORT=5002
+
+# SMTP Configuration for Internal System Notifications
+SMTP_HOST=your_smtp_server_address
+SMTP_PORT=25
+SMTP_USER=your_notification_email@domain.com
+SMTP_PASS="your_smtp_password"
+SMTP_ENCRYPTION=STARTTLS
+SMTP_TEST_TO=your_admin_email@domain.com
+SMTP_IPV4=1
+
+# Enquiry Module: Attachment Storage Root (Network Shared UNC Path is supported)
+# Ensure the Node process / IIS App Pool user has read/write permissions to this path
+ENQUIRY_ATTACHMENTS_ROOT=\\\\your_file_server\\ems_attachments
+
+# Notification settings
+EMS_ENQUIRY_NOTIFY_VIA_SMTP=1
+EMS_ENQUIRY_NOTIFY_SMTP_FALLBACK=1
+
+# Quote PDF Generation (Puppeteer Configuration)
+QUOTE_PDF_ASSET_ORIGIN=http://127.0.0.1:5002
+PUPPETEER_EXECUTABLE_PATH=C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
+PUPPETEER_LAUNCH_TIMEOUT_MS=120000
+QUOTE_PDF_PAGE_TIMEOUT_MS=120000
+QUOTE_PDF_SINGLE_PROCESS=1
+`;
+fs.writeFileSync(path.join(SERVER_DIR, '.env.example'), envExampleContent);
+console.log('✅ Generated server/.env.example template.');
+
+// 7. Ensure Database setup folder exists and has SQL schemas
+console.log('\n🗄️ Packaging Database schemas...');
+if (!fs.existsSync(DB_DIR)) {
+    fs.mkdirSync(DB_DIR, { recursive: true });
+}
+
+// Copy primary SQL script files from root to deployment database folder
+const rootSqlFiles = ['EMS_DB.sql', 'EMS_DB_FULL_STRUCTURE.sql'];
+rootSqlFiles.forEach(file => {
+    const srcPath = path.join(PROJECT_ROOT, file);
+    if (fs.existsSync(srcPath)) {
+        fs.copyFileSync(srcPath, path.join(DB_DIR, file));
+        console.log(`✅ Copied database schema: ${file}`);
+    }
 });
 
-// 5. Create Instructions
-const readMeContent = `
-========================================
-EMS DEPLOYMENT PACKAGE
-========================================
+// Copy database directory contents (except JS run scripts)
+const sourceDbDir = path.join(PROJECT_ROOT, 'database');
+if (fs.existsSync(sourceDbDir)) {
+    fs.cpSync(sourceDbDir, DB_DIR, {
+        recursive: true,
+        filter: (src) => {
+            const basename = path.basename(src);
+            return !basename.endsWith('.js') && !basename.endsWith('.cjs');
+        }
+    });
+    console.log('✅ Additional SQL scripts copied to database/.');
+}
 
-1. Database:
-   - Ensure MSSQL is running.
-   - Run the SQL scripts provided in the root folder if setting up a fresh DB.
-
-2. Backend (ems-backend):
-   - Copy the 'ems-backend' folder to your server (e.g., C:\\ems-backend).
-   - Create a .env file in the folder with your secrets (DB credentials, SMTP, etc.).
-   - Open PowerShell/CMD in that folder.
-   - Run: npm install --production
-   - Run: npm install -g pm2
-   - Run: pm2 start index.js --name "ems-api"
-   - Run: pm2 save
-
-3. Frontend (ems-frontend):
-   - Ensure IIS is installed with URL Rewrite module.
-   - Copy the contents of 'ems-frontend' to C:\\inetpub\\wwwroot\\ems-frontend (or your site path).
-   - In IIS Manager, point your Website to this folder.
-   - Go to URL Rewrite module in IIS to verify rules (ReverseProxyAPI, ReverseProxyUploads, React Routes) are present.
-   - Ensure the backend is running on port 5000.
-
-4. Troubleshooting:
-   - If API fails, check http://localhost:5000/api in browser on server.
-   - Check PM2 logs: pm2 logs ems-api
+// 8. Generate automated Batch Helpers for easy environment setup and manual startup
+console.log('\n⚙️ Generating helper scripts...');
+const startServerBat = `@echo off
+title EMS API Server Startup
+cd server
+echo ===================================================
+echo   EMS Backend Express API Server Manual Startup    
+echo ===================================================
+echo Checking configuration...
+if not exist .env (
+    echo [WARNING] No '.env' file found! 
+    echo Please configure your database credentials in 'server/.env' first.
+    echo Creating temporary '.env' from '.env.example'...
+    copy .env.example .env
+)
+echo Starting Express Server on port 5002...
+node index.js
+pause
 `;
+fs.writeFileSync(path.join(DEPLOY_DIR, 'start_server.bat'), startServerBat);
 
-fs.writeFileSync(path.join(DEPLOY_DIR, 'READ_THIS_FIRST.txt'), readMeContent);
+const installDepsBat = `@echo off
+title EMS Production Dependencies Installer
+cd server
+echo ===================================================
+echo   EMS Backend Node.js Production Dependencies      
+echo ===================================================
+echo Installing production node_modules...
+npm install --production
+echo Done!
+pause
+`;
+fs.writeFileSync(path.join(DEPLOY_DIR, 'install_dependencies.bat'), installDepsBat);
+console.log('✅ Created manual utility scripts start_server.bat and install_dependencies.bat.');
 
-console.log('✅ Deployment Package Created Successfully at:', DEPLOY_DIR);
+console.log('\n========================================================');
+console.log('🎉 SUCCESS: Complete IIS Deployment Package created at:');
+console.log(`📂 ${DEPLOY_DIR}`);
+console.log('========================================================\n');

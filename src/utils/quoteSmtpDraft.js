@@ -12,30 +12,7 @@ const LOCAL_EML_OPEN_URLS = [
     'http://localhost:39281/open-eml-draft',
 ];
 
-export const QUOTE_EML_DRAFT_NAME = 'EMS_QuoteDraft.eml';
-
-async function postJson(url, payload, timeoutMs = 120000) {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'omit',
-            body: JSON.stringify(payload),
-            signal: controller.signal,
-        });
-        if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            return { ok: false, error: data.error || data.details || res.statusText };
-        }
-        return { ok: true, data: await res.json().catch(() => ({})) };
-    } catch (e) {
-        return { ok: false, error: e?.message || String(e) };
-    } finally {
-        window.clearTimeout(timer);
-    }
-}
+export const QUOTE_EML_DRAFT_NAME = () => `EMS_QuoteDraft_${Date.now()}.eml`;
 
 export async function fetchQuoteOutlookEmailFields(apiBase, params) {
     try {
@@ -56,27 +33,6 @@ export async function fetchQuoteOutlookEmailFields(apiBase, params) {
     }
 }
 
-function tryOpenEmlBlobInBrowser(bytes) {
-    try {
-        const blob = new Blob([bytes], { type: 'message/rfc822' });
-        const url = URL.createObjectURL(blob);
-        const opened = window.open(url, '_blank');
-        window.setTimeout(() => {
-            try {
-                URL.revokeObjectURL(url);
-            } catch {
-                /* ignore */
-            }
-        }, 120000);
-        return !!opened;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Open quote email draft in Outlook (popup). Falls back to .eml download only if needed.
- */
 export async function openQuoteSmtpDraft({
     apiBase,
     pdfBlob,
@@ -87,87 +43,79 @@ export async function openQuoteSmtpDraft({
     triggerBlobDownload,
     blobToBase64,
 }) {
-    const pdfBase64 = await blobToBase64(pdfBlob);
-    const payload = {
-        userEmail: userEmail || '',
-        userDisplayName: userDisplayName || '',
-        to: emailFields.to || '',
-        cc: emailFields.cc || '',
-        bcc: emailFields.bcc || '',
-        subject: emailFields.subject || '',
-        body: emailFields.body || '',
-        attachmentName: displayFileName || 'EMS_QuoteDraft.pdf',
-        pdfBase64,
-        extraAttachments: emailFields.extraAttachments || [],
-    };
-
-    for (const url of LOCAL_OUTLOOK_URLS) {
-        const local = await postJson(url, payload, 15000);
-        if (local.ok) {
-            return { ok: true, method: 'local-outlook', openedInOutlook: true };
+    try {
+        let pdfBase64 = '';
+        if (pdfBlob) {
+            const raw = await blobToBase64(pdfBlob);
+            pdfBase64 = raw.includes(',') ? raw.split(',')[1] : raw;
         }
+        
+        const helperPayload = {
+            pdfBase64,
+            attachmentName: displayFileName || 'EMS_QuoteDraft.pdf',
+            to: emailFields.to,
+            cc: emailFields.cc,
+            bcc: emailFields.bcc,
+            subject: emailFields.subject,
+            body: emailFields.body,
+            fromEmail: userEmail,
+            fromDisplayName: userDisplayName,
+            extraAttachments: emailFields.extraAttachments || []
+        };
+
+        const helperRes = await fetch('http://127.0.0.1:39281/outlook-draft', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(helperPayload),
+        });
+        
+        if (helperRes.ok) {
+            return {
+                ok: true,
+                openedInOutlook: true,
+                fileName: displayFileName || 'EMS_QuoteDraft.pdf',
+            };
+        }
+    } catch (helperErr) {
+        console.warn('[openQuoteSmtpDraft] Local helper not running or failed, falling back to server EML generation:', helperErr);
     }
 
     try {
-        const res = await fetch(`${apiBase}/api/quotes/outlook-draft`, {
+        // Fallback: Generate EML on server and download it
+        const res = await fetch(`${apiBase}/api/quotes/email-draft`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify(payload),
+            body: JSON.stringify({
+                userEmail,
+                userDisplayName,
+                emailFields,
+            }),
         });
-        if (res.ok) {
-            return { ok: true, method: 'server-outlook', openedInOutlook: true };
+
+        if (!res.ok) {
+            let errorText = 'Draft creation failed';
+            try {
+                const errJson = await res.json();
+                errorText = errJson.error || errorText;
+            } catch {
+                errorText = await res.text();
+            }
+            throw new Error(`Server returned ${res.status}: ${errorText}`);
         }
-    } catch {
-        /* try eml path */
-    }
 
-    const res = await fetch(`${apiBase}/api/quotes/smtp-draft`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ ...payload, openInOutlook: true }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-        return {
-            ok: false,
-            error: data.error || data.details || res.statusText || String(res.status),
-        };
-    }
-
-    if (data.openedInOutlook) {
+        const blob = await res.blob();
+        const fileName = QUOTE_EML_DRAFT_NAME();
+        triggerBlobDownload(blob, fileName);
+        
         return {
             ok: true,
-            method: data.method || 'shell-eml',
-            openedInOutlook: true,
-            fileName: data.fileName || QUOTE_EML_DRAFT_NAME,
+            openedInOutlook: false,
+            fileName: fileName,
+        };
+    } catch (e) {
+        return {
+            ok: false,
+            error: e.message || String(e),
         };
     }
-
-    const b64 = data.emlBase64;
-    if (!b64) {
-        return { ok: false, error: 'Server did not return draft content' };
-    }
-
-    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-    for (const url of LOCAL_EML_OPEN_URLS) {
-        const emlOpen = await postJson(url, { emlBase64: b64, fileName: QUOTE_EML_DRAFT_NAME }, 10000);
-        if (emlOpen.ok) {
-            return { ok: true, method: 'local-eml', openedInOutlook: true };
-        }
-    }
-
-    if (tryOpenEmlBlobInBrowser(bytes)) {
-        return { ok: true, method: 'browser-eml', openedInOutlook: true };
-    }
-
-    triggerBlobDownload(new Blob([bytes], { type: 'message/rfc822' }), QUOTE_EML_DRAFT_NAME);
-    return {
-        ok: true,
-        method: 'eml-download',
-        openedInOutlook: false,
-        fileName: QUOTE_EML_DRAFT_NAME,
-    };
 }

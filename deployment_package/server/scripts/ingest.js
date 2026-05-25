@@ -21,9 +21,12 @@ async function fetchEnquiries(since = null) {
                 EM.Status,
                 EM.ReceivedFrom,
                 EM.CreatedAt,
-                (SELECT STRING_AGG(ItemName, '; ') FROM EnquiryFor WHERE RequestNo = EM.RequestNo) as EnquiryItems,
-                (SELECT STRING_AGG(NoteContent + ' (' + COALESCE(UserName, 'Unknown') + ')', ' | ') FROM EnquiryNotes WHERE EnquiryID = EM.RequestNo) as Notes,
-                (SELECT STRING_AGG(FileName, '; ') FROM Attachments WHERE RequestNo = EM.RequestNo) as AttachmentFiles
+                EM.CreatedBy,
+                (SELECT STUFF((SELECT '; ' + ItemName FROM EnquiryFor WHERE RequestNo = EM.RequestNo FOR XML PATH('')), 1, 2, '')) as EnquiryItems,
+                (SELECT STUFF((SELECT ',' + ItemName FROM EnquiryFor WHERE RequestNo = EM.RequestNo FOR XML PATH('')), 1, 1, '')) as DivisionsRaw,
+                (SELECT STUFF((SELECT ',' + SEName FROM ConcernedSE WHERE RequestNo = EM.RequestNo FOR XML PATH('')), 1, 1, '')) as ConcernedSERaw,
+                (SELECT STUFF((SELECT ' | ' + NoteContent + ' (' + COALESCE(UserName, 'Unknown') + ')' FROM EnquiryNotes WHERE EnquiryID = EM.RequestNo FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 3, '')) as Notes,
+                (SELECT STUFF((SELECT '; ' + FileName FROM Attachments WHERE RequestNo = EM.RequestNo FOR XML PATH('')), 1, 2, '')) as AttachmentFiles
             FROM EnquiryMaster EM
         `;
 
@@ -96,7 +99,10 @@ async function runIngestion(since = null) {
                 metadata: {
                     project: record.ProjectName,
                     customer: record.CustomerName,
-                    status: record.Status
+                    status: record.Status,
+                    created_by: record.CreatedBy,
+                    concerned_ses: record.ConcernedSERaw ? record.ConcernedSERaw.split(',') : [],
+                    divisions: record.DivisionsRaw ? record.DivisionsRaw.split(',') : []
                 }
             }
         }));

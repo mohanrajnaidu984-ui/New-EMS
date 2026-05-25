@@ -1215,41 +1215,50 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                     resetForm();
 
                     if (savedRequestNo) {
-                        const internalResult = await sendEnquiryInternalNotification({
-                            apiBase: EMS_API_BASE,
-                            requestNo: savedRequestNo,
-                            concernedSEs: concernedSEsForMail,
-                        });
-                        if (!internalResult.ok) {
-                            alert(
-                                `Enquiry saved, but the internal notification email could not be sent.\n\n${internalResult.error || 'Unknown error'}\n\n` +
-                                    'For your own From address: run node scripts/quote-outlook-local-helper.js (classic Outlook open) on this PC. ' +
-                                    'On IIS only (no helper): set EMS_ENQUIRY_NOTIFY_VIA_SMTP=1 in server .env — mail sends from the shared SMTP account.'
-                            );
-                        }
+                        // Run email triggers in the background so they don't block the UI and enquiry number generation
+                        (async () => {
+                            try {
+                                const internalResult = await sendEnquiryInternalNotification({
+                                    apiBase: EMS_API_BASE,
+                                    requestNo: savedRequestNo,
+                                    concernedSEs: concernedSEsForMail,
+                                    userEmail: currentUser?.EmailId || currentUser?.email || '',
+                                    userDisplayName: currentUser?.FullName || currentUser?.name || 'System',
+                                });
+                                if (!internalResult.ok) {
+                                    alert(
+                                        `Enquiry saved, but the internal notification email could not be sent.\n\n${internalResult.error || 'Unknown error'}\n\n` +
+                                            'For your own From address: run node scripts/quote-outlook-local-helper.js (classic Outlook open) on this PC. ' +
+                                            'On IIS only (no helper): set EMS_ENQUIRY_NOTIFY_VIA_SMTP=1 in server .env — mail sends from the shared SMTP account.'
+                                    );
+                                }
 
-                        if (shouldSendCustomerAck) {
-                            const ackResult = await openCustomerAcknowledgementDraft({
-                                apiBase: EMS_API_BASE,
-                                requestNo: savedRequestNo,
-                                acknowledgementSE: ackSeName,
-                                createdBy: createdByName,
-                                createdByEmail,
-                                concernedSEs: concernedSEsForMail,
-                                customerAckTargets,
-                            });
-                            if (!ackResult.ok) {
-                                alert(
-                                    `Enquiry saved, but the customer acknowledgement draft(s) could not be opened.\n\n${ackResult.error || 'Unknown error'}\n\n` +
-                                        'Customer mail must use your desktop Outlook (From = your email; Reply-To = concerned engineer). ' +
-                                        'Start: node scripts/quote-outlook-local-helper.js'
-                                );
-                            } else if (ackResult.draftCount > 1) {
-                                alert(
-                                    `Opened ${ackResult.draftCount} customer acknowledgement draft(s) in Outlook (one per customer).`
-                                );
+                                if (shouldSendCustomerAck) {
+                                    const ackResult = await openCustomerAcknowledgementDraft({
+                                        apiBase: EMS_API_BASE,
+                                        requestNo: savedRequestNo,
+                                        acknowledgementSE: ackSeName,
+                                        createdBy: createdByName,
+                                        createdByEmail,
+                                        concernedSEs: concernedSEsForMail,
+                                        customerAckTargets,
+                                    });
+                                    if (!ackResult.ok) {
+                                        alert(
+                                            `Enquiry saved, but the customer acknowledgement draft(s) could not be opened.\n\n${ackResult.error || 'Unknown error'}\n\n` +
+                                                'Customer mail must use your desktop Outlook (From = your email; Reply-To = concerned engineer). ' +
+                                                'Start: node scripts/quote-outlook-local-helper.js'
+                                        );
+                                    } else if (ackResult.draftCount > 1) {
+                                        alert(
+                                            `Opened ${ackResult.draftCount} customer acknowledgement draft(s) in Outlook (one per customer).`
+                                        );
+                                    }
+                                }
+                            } catch (emailErr) {
+                                console.error('Background email trigger failed:', emailErr);
                             }
-                        }
+                        })();
                     }
                 }
             }
@@ -1267,7 +1276,11 @@ const EnquiryForm = ({ requestNoToOpen }) => {
             const res = await fetch('/api/enquiries/notify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ requestNo })
+                body: JSON.stringify({
+                    requestNo,
+                    userEmail: currentUser?.EmailId || currentUser?.email || '',
+                    userDisplayName: currentUser?.FullName || currentUser?.name || 'System'
+                })
             });
             if (!res.ok) {
                 // notification failed

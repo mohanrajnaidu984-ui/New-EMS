@@ -86,8 +86,7 @@ import {
 import {
     buildClauseSegmentsForPagination,
     mergeSegmentsIntoSheetBlocks,
-    packSegmentIndicesByMergedHeight,
-    rebalanceSegmentPageGroups,
+    packClauseSegmentsForContinuationPages,
     segmentPageGroupsEqual,
 } from './quoteClausePagination';
 import {
@@ -646,12 +645,10 @@ function separateClauseSubNumberLines(html) {
     return s;
 }
 
-/** Preview/PDF body: remap 3.x → N.x when this clause is the Nth active clause; stack sub-clauses vertically. */
+/** Preview/PDF body: only renumber clause majors for order; HTML structure mirrors the editor. */
 function getClauseDisplayBodyHtml(html, listKey, displayMajor) {
     const canon = CLAUSE_MAJOR_BY_LIST_KEY[listKey];
-    let out = renumberClauseMajorInHtml(html, canon, displayMajor);
-    out = separateClauseSubNumberLines(out);
-    return normalizeClauseListHtmlInString(out);
+    return renumberClauseMajorInHtml(html, canon, displayMajor);
 }
 
 /** Stable id on the auto-built pricing summary table so `calculateSummary` can replace it without wiping user HTML. */
@@ -1904,26 +1901,42 @@ const tableStyles = `
     .clause-content table {
         width: 100% !important;
         border-collapse: collapse !important;
+        table-layout: fixed !important;
         margin-bottom: 4px !important;
         margin-top: 4px !important;
-        font-size: 12px !important;
+        font-size: 13px !important;
+        line-height: 1.45 !important;
         page-break-inside: auto !important;
     }
+    /* Row-level pagination may emit stacked mini-tables — collapse gaps if rejoin did not run */
+    .clause-content > table + table,
+    .clause-content table[data-ems-table-split] + table[data-ems-table-split] {
+        margin-top: 0 !important;
+        border-top: none !important;
+    }
+    .clause-content table[data-ems-table-split] + table[data-ems-table-split] thead {
+        display: none !important;
+    }
     .clause-content tr {
-        page-break-inside: auto !important;
-        break-inside: auto !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+    .clause-content td,
+    .clause-content th {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
     }
     .clause-content thead {
         display: table-header-group !important;
     }
     .clause-content table th, .clause-content table td {
         border: 1px solid #64748b !important;
-        text-align: left !important;
-        /* Compact, Word-typical default. NO !important so source inline padding (e.g. Word's
-           padding: 1.5pt 5.4pt) wins and pasted tables keep their original spacing. */
-        padding: 2px 6px;
-        line-height: 1.25;
-        vertical-align: middle;
+        /* Do not set text-align here — mirror editor/Word inline styles and align attributes. */
+        padding: 4px 6px;
+        line-height: 1.45;
+        vertical-align: top;
+        word-wrap: break-word;
+        overflow-wrap: anywhere;
     }
     .clause-content table th {
         background-color: #f8fafc !important;
@@ -2014,6 +2027,9 @@ const tableStyles = `
     /* Sub-clause stack spacing: 60% tighter than prior 4px → 40% of 4px */
     .clause-content > * + * {
         margin-top: 1.6px !important;
+    }
+    .clause-content > table + table {
+        margin-top: 0 !important;
     }
     .clause-content p + p {
         margin-top: 1.6px !important;
@@ -3050,6 +3066,34 @@ const QuoteForm = ({ openContext = null }) => {
     const [savedTemplateName, setSavedTemplateName] = useState('');
     const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
+    // Feature Flag: EMS_QUOTE_PDF_SERVER_ENABLED (queried from health API, fallback to build env)
+    const [serverPdfEnabled, setServerPdfEnabled] = useState(!QUOTE_PDF_BROWSER_DOWNLOAD);
+
+    useEffect(() => {
+        let active = true;
+        const checkHealth = async () => {
+            try {
+                const res = await fetchQuotePdfApi('/api/quote-pdf/health', {
+                    method: 'GET',
+                    cache: 'no-store',
+                });
+                if (res.ok && active) {
+                    const data = await res.json();
+                    if (data && typeof data.emsQuotePdfServerEnabled !== 'undefined') {
+                        setServerPdfEnabled(!!data.emsQuotePdfServerEnabled);
+                    }
+                }
+            } catch (err) {
+                console.warn('[QuoteForm] failed to fetch quote-pdf health:', err);
+            }
+        };
+        checkHealth();
+        return () => {
+            active = false;
+        };
+    }, []);
+
+
     // Ordered Clauses (Standard + Custom)
     const [orderedClauses, setOrderedClauses] = useState([
         'showScopeOfWork', 'showBasisOfOffer', 'showExclusions', 'showPricingTerms',
@@ -3547,6 +3591,7 @@ const QuoteForm = ({ openContext = null }) => {
     const quoteCoverLetterRef = useRef(null);
     const clauseMeasureHostRef = useRef(null);
     const lastClausePackSigRef = useRef('');
+    const clausePackMeasureRetryRef = useRef(0);
     /** Continuation sheets (index 0 = cover); each entry is segment indices packed for that sheet. */
     const [clauseSegmentPageGroups, setClauseSegmentPageGroups] = useState([]);
     const [coverLetterExtraPadPx, setCoverLetterExtraPadPx] = useState(0);
@@ -3622,6 +3667,7 @@ const QuoteForm = ({ openContext = null }) => {
         if (!preview || !host) return;
 
         lastClausePackSigRef.current = '';
+        clausePackMeasureRetryRef.current = 0;
 
         if (clauseSegmentsForPagination.length === 0) {
             setClauseSegmentPageGroups((prev) => (prev.length ? [] : prev));
@@ -3646,35 +3692,58 @@ const QuoteForm = ({ openContext = null }) => {
 
         const applyPack = () => {
             const heights = measureHeights();
-            const allSegIdx = clauseSegmentsForPagination.map((_, i) => i);
-            const fallback = [allSegIdx];
+            /* Wait for per-segment measure DOM; never dump all segments onto one sheet (causes overflow). */
             if (heights.some((h) => !h)) {
-                const sigFb = JSON.stringify(fallback);
-                if (lastClausePackSigRef.current === sigFb) return;
-                lastClausePackSigRef.current = sigFb;
-                setClauseSegmentPageGroups((prev) =>
-                    segmentPageGroupsEqual(prev, fallback) ? prev : fallback
-                );
+                if (clausePackMeasureRetryRef.current < 12) {
+                    clausePackMeasureRetryRef.current += 1;
+                    requestAnimationFrame(() => applyPack());
+                } else {
+                    const fallback = clauseSegmentsForPagination.map((_, i) => [i]);
+                    setClauseSegmentPageGroups((prev) =>
+                        segmentPageGroupsEqual(prev, fallback) ? prev : fallback
+                    );
+                }
                 return;
             }
-            const sheetInnerMm = 297 - 15 * 2;
-            /** Logo row + footer block + print safety (mm). Header/footer grid positions unchanged. */
-            const continuationChromeMm = 80;
-            const contUsablePx = quoteMmToPx(Math.max(sheetInnerMm - continuationChromeMm, 118));
-
+            clausePackMeasureRetryRef.current = 0;
             let mergeMeasureEl = host.querySelector('[data-pack-merge-measure]');
             if (!mergeMeasureEl) {
                 mergeMeasureEl = document.createElement('div');
                 mergeMeasureEl.setAttribute('data-pack-merge-measure', '1');
                 mergeMeasureEl.style.width = `${Math.max(280, innerW)}px`;
                 mergeMeasureEl.style.boxSizing = 'border-box';
+                mergeMeasureEl.style.position = 'absolute';
+                mergeMeasureEl.style.left = '-9999px';
+                mergeMeasureEl.style.top = '0';
+                mergeMeasureEl.style.visibility = 'hidden';
+                mergeMeasureEl.style.pointerEvents = 'none';
                 host.appendChild(mergeMeasureEl);
             }
 
-            const measureMergedGroupPx = (groupIndices) => {
-                if (!groupIndices?.length) return 0;
-                const blocks = mergeSegmentsIntoSheetBlocks(groupIndices, clauseSegmentsForPagination);
-                const html = blocks
+            /** Measure at full content height — never inside overflow:hidden / 297mm grid (scrollHeight was capped → one page + clipped rows). */
+            mergeMeasureEl.innerHTML = `<div data-pack-measure-shell style="width:${Math.max(280, innerW)}px;box-sizing:border-box;overflow:visible">
+                <div class="quote-sheet-logo-row" aria-hidden="true" style="width:100%;min-height:68px;margin-bottom:${EMS_QUOTE_LOGO_ROW_MARGIN_BOTTOM}"></div>
+                <div data-pack-measure-content class="content-section" style="width:100%;box-sizing:border-box;overflow:visible;height:auto;max-height:none"></div>
+                <div class="footer-section" style="width:100%;min-height:${EMS_QUOTE_PRINT_FOOTER_MIN_HEIGHT};box-sizing:border-box;margin-top:3px"></div>
+            </div>`;
+
+            const measureLogo = mergeMeasureEl.querySelector('.quote-sheet-logo-row');
+            const measureFooter = mergeMeasureEl.querySelector('.footer-section');
+            const measureContent = mergeMeasureEl.querySelector('[data-pack-measure-content]');
+            const gridInnerPx = quoteMmToPx(297 - 15 * 2);
+            const contUsablePx = Math.max(
+                gridInnerPx -
+                    (measureLogo?.offsetHeight || 0) -
+                    (measureFooter?.offsetHeight || 0),
+                200
+            );
+
+            const renderBlocksHtml = (groupIndices) => {
+                const blocks = mergeSegmentsIntoSheetBlocks(
+                    groupIndices,
+                    clauseSegmentsForPagination
+                );
+                return blocks
                     .map((block) => {
                         const heading = block.showHeading
                             ? `<div class="quote-clause-heading-panel quote-cover-body-panel quote-preview-panel-shell"><h3>${block.displayMajor}. ${block.clause.title}</h3></div>`
@@ -3682,26 +3751,25 @@ const QuoteForm = ({ openContext = null }) => {
                         return `<div class="quote-clause-block quote-clause-block--continuation">${heading}<div class="clause-content" style="font-size:13px">${block.bodyHtml}</div></div>`;
                     })
                     .join('');
-                mergeMeasureEl.innerHTML = html;
-                const rect = mergeMeasureEl.getBoundingClientRect();
-                const cs = window.getComputedStyle(mergeMeasureEl);
-                const marginY =
-                    (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
-                const h = Math.round(rect.height + marginY);
-                if (h > 0) return h;
+            };
+
+            const measureMergedGroupPx = (groupIndices) => {
+                if (!groupIndices?.length || !measureContent) return 0;
+                measureContent.innerHTML = renderBlocksHtml(groupIndices);
+                const contentH = Math.max(
+                    Math.round(measureContent.scrollHeight),
+                    Math.round(measureContent.getBoundingClientRect().height)
+                );
+                if (contentH > 0) return contentH;
                 return groupIndices.reduce((s, gi) => s + Math.max(heights[gi] || 0, 1), 0);
             };
 
             const remaining = clauseSegmentsForPagination.map((_, i) => i);
-            const contPacked = packSegmentIndicesByMergedHeight(
+            const continuation = packClauseSegmentsForContinuationPages(
                 remaining,
                 measureMergedGroupPx,
-                contUsablePx
-            );
-            const continuation = rebalanceSegmentPageGroups(
-                contPacked,
-                measureMergedGroupPx,
-                contUsablePx
+                contUsablePx,
+                clauseSegmentsForPagination
             );
             const sig = JSON.stringify(continuation);
             if (lastClausePackSigRef.current === sig) return;
@@ -3711,16 +3779,20 @@ const QuoteForm = ({ openContext = null }) => {
             );
         };
 
-        /* Two rAFs: let segment measure DOM settle before merged-height pack (pricing table + 4.x prose). */
+        /* Three rAFs: segment measure DOM must exist before row-level table pack. */
         let raf2 = 0;
+        let raf3 = 0;
         const id = requestAnimationFrame(() => {
             raf2 = requestAnimationFrame(() => {
-                applyPack();
+                raf3 = requestAnimationFrame(() => {
+                    applyPack();
+                });
             });
         });
         return () => {
             cancelAnimationFrame(id);
             cancelAnimationFrame(raf2);
+            cancelAnimationFrame(raf3);
         };
     }, [clausePaginationLayoutKey, clauseSegmentsForPagination, isQuotePreviewVisible]);
 
@@ -3734,7 +3806,7 @@ const QuoteForm = ({ openContext = null }) => {
             )
             .filter((g) => g.length > 0);
         if (filtered.length) return filtered;
-        return [clauseSegmentsForPagination.map((_, i) => i)];
+        return [];
     }, [clauseSegmentPageGroups, clauseSegmentsForPagination]);
 
     const sheets = React.useMemo(() => {
@@ -11697,7 +11769,7 @@ const QuoteForm = ({ openContext = null }) => {
      * Dev / VITE_QUOTE_PDF_SERVER_DOWNLOAD=1 uses server vector PDF.
      */
     const downloadPDF = async () => {
-        if (QUOTE_PDF_BROWSER_DOWNLOAD) {
+        if (!serverPdfEnabled || QUOTE_PDF_BROWSER_DOWNLOAD) {
             syncCoverLetterGapBeforePdfCapture(quoteCoverLetterRef.current);
             openQuotePrintWindow({ browserSavePdf: true });
             return;
@@ -11992,7 +12064,10 @@ const QuoteForm = ({ openContext = null }) => {
             }
         } catch (err) {
             console.error('Email quote flow error:', err);
-            alert(`Could not prepare the quote PDF for email: ${err.message || err}`);
+            alert(
+                `Could not prepare the quote PDF: ${err.message || err}\n\n` +
+                'Please click the main "Download PDF" (Save as PDF) button to download the PDF using your browser, and download other attachments manually from the Attachments panel.'
+            );
         } finally {
             setIsUploading(false);
         }
@@ -12028,9 +12103,26 @@ const QuoteForm = ({ openContext = null }) => {
         setIsUploading(true);
         try {
             const payload = buildQuoteEmailDraftPayload();
-            if (!payload) return;
+            if (!payload) {
+                setIsUploading(false);
+                return;
+            }
 
-            const { blob, fileName } = await fetchQuotePdfBlob();
+            let blob = null;
+            let fileName = null;
+            let pdfSkippedReason = null;
+            if (serverPdfEnabled) {
+                try {
+                    const pdfRes = await fetchQuotePdfBlob();
+                    blob = pdfRes.blob;
+                    fileName = pdfRes.fileName;
+                } catch (pdfErr) {
+                    console.warn('[startQuoteEmailFlow] Server-side PDF generation failed, falling back:', pdfErr);
+                    pdfSkippedReason = 'server-fail';
+                }
+            } else {
+                pdfSkippedReason = 'disabled';
+            }
 
             const isInternal = isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName);
             const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
@@ -12049,7 +12141,6 @@ const QuoteForm = ({ openContext = null }) => {
             if (!toAddr) {
                 toAddr = (toEmail || '').trim();
             }
-            // No To email: still open Outlook draft with blank To for manual entry.
 
             const salutation = quoteEmailSalutationFromAttention(toAttention);
             const initialBody = `${salutation}\n\nPlease find the attached quotation regarding Enquiry Ref: ${enquiryData?.enquiry?.RequestNo || 'N/A'} for the ${quotePreviewProjectName || enquiryData?.enquiry?.ProjectName || 'N/A'}.\n\nWe have detailed the pricing, scope, and terms for your review. Should you have any questions or require further techno-commercial clarification regarding this proposal, please do not hesitate to contact us.\n\nWe look forward to the possibility of working with you on this project.`;
@@ -12098,12 +12189,18 @@ const QuoteForm = ({ openContext = null }) => {
                 throw new Error(result.error || 'Could not create email draft');
             }
 
+            const pdfNote = pdfSkippedReason
+                ? '\n\nNote: The PDF could not be attached automatically.\nPlease click "Download PDF" on the Quote tab to save it, then attach it to the Outlook draft.'
+                : '';
+
             if (!result.openedInOutlook) {
                 alert(
-                    'Outlook did not open automatically.\n\n' +
-                        `Open ${result.fileName || 'EMS_QuoteDraft.eml'} from your Downloads folder (double-click) to open the draft in Outlook.\n\n` +
-                        'Tip: run `node scripts/quote-outlook-local-helper.js` at login for one-click Outlook drafts.'
+                    `The draft has been saved. Please open ${result.fileName || 'EMS_QuoteDraft.eml'} from your Downloads folder (double-click) to open the draft in Outlook.` +
+                        pdfNote +
+                        '\n\nTip: For automatic 1-click Outlook drafts, run the `quote-outlook-local-helper.cjs` script on your computer.'
                 );
+            } else if (pdfSkippedReason) {
+                alert('Email draft opened.' + pdfNote);
             }
         } catch (err) {
             console.error('Email preparation failed:', err);
@@ -12157,7 +12254,7 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     const handleOpenInOutlook = async () => {
-        if (!emailDetails.pdfBlob) {
+        if (!emailDetails.pdfBlob && serverPdfEnabled) {
             alert('The quote PDF is not available. Close this dialog and try again.');
             return;
         }
@@ -15941,10 +16038,13 @@ const QuoteForm = ({ openContext = null }) => {
                                     /* Continuation: clause stack may shrink; main column stays height:100% so footer margin-top:auto pins to A4 bottom when content is short. */
                                     .quote-a4-sheet--continuation .quote-sheet-main-flex {
                                         min-height: 0 !important;
+                                        height: auto !important;
+                                        max-height: none !important;
                                         overflow: visible;
                                     }
                                     .quote-a4-sheet--continuation .content-section {
                                         flex: 0 1 auto !important;
+                                        max-height: none !important;
                                         overflow: visible;
                                     }
                                     .quote-sheet-main-flex {
@@ -16475,6 +16575,30 @@ const QuoteForm = ({ openContext = null }) => {
                                     #quote-preview .clause-content table {
                                         margin-top: 4px !important;
                                         margin-bottom: 4px !important;
+                                        border-collapse: collapse !important;
+                                        table-layout: fixed !important;
+                                        width: 100% !important;
+                                    }
+                                    #quote-preview .clause-content > table + table,
+                                    #quote-preview .clause-content table[data-ems-table-split] + table[data-ems-table-split] {
+                                        margin-top: 0 !important;
+                                        border-top: none !important;
+                                    }
+                                    #quote-preview .clause-content table[data-ems-table-split] + table[data-ems-table-split] thead {
+                                        display: none !important;
+                                    }
+                                    #quote-preview .clause-content > table + table {
+                                        margin-top: 0 !important;
+                                    }
+                                    #quote-preview .clause-content table th,
+                                    #quote-preview .clause-content table td {
+                                        vertical-align: top !important;
+                                        word-wrap: break-word !important;
+                                        overflow-wrap: anywhere !important;
+                                    }
+                                    #quote-preview .quote-clause-block--continuation .clause-content table th,
+                                    #quote-preview .quote-clause-block--continuation .clause-content table td {
+                                        border: 1px solid #64748b !important;
                                     }
                                     #quote-preview .quote-clause-heading-panel + .clause-content > table#ems-auto-price-summary-table:first-child,
                                     #quote-preview .clause-content > table#ems-auto-price-summary-table:first-child {

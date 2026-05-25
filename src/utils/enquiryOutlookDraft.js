@@ -76,10 +76,12 @@ export async function isOutlookLocalHelperAvailable() {
 }
 
 /** Internal enquiry notification — direct send (no draft window). */
-export async function sendEnquiryInternalNotification({ apiBase, requestNo, concernedSEs }) {
+export async function sendEnquiryInternalNotification({ apiBase, requestNo, concernedSEs, userEmail, userDisplayName }) {
     const payload = {
         requestNo: String(requestNo || '').trim(),
         concernedSEs: Array.isArray(concernedSEs) ? concernedSEs.filter(Boolean) : [],
+        userEmail: userEmail || '',
+        userDisplayName: userDisplayName || '',
     };
 
     const localTry = await tryUrls(LOCAL_INTERNAL_URLS, payload, 15000);

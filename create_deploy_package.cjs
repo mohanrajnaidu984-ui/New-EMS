@@ -7,7 +7,7 @@ const dateStamp = new Date().toISOString().slice(0, 10);
 const DEPLOY_DIR = path.join(PROJECT_ROOT, `EMS_Deploy_${dateStamp}`);
 const FRONTEND_DIR = path.join(DEPLOY_DIR, 'frontend');
 const FRONTEND_DIST_DIR = path.join(FRONTEND_DIR, 'dist');
-const BACKEND_DIR = path.join(DEPLOY_DIR, 'server'); // Using 'server' instead of 'backend' to match standard
+const BACKEND_DIR = path.join(DEPLOY_DIR, 'backend'); // Renamed to backend to match user reference exactly
 
 console.log('Starting Deployment Bundle Process...');
 console.log(`Target Directory: ${DEPLOY_DIR}`);

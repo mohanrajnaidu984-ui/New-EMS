@@ -1449,6 +1449,228 @@ function registerEditorScrollCleanup(jodit, getEditorBody) {
     bind();
 }
 
+function isRowInThead(tr) {
+    return Boolean(tr?.closest?.('thead'));
+}
+
+function getTableBodyRows(table) {
+    const tbody = table.querySelector('tbody');
+    if (tbody) return [...tbody.querySelectorAll(':scope > tr')];
+    return [...table.querySelectorAll('tr')].filter((tr) => !tr.closest('thead'));
+}
+
+function ensureTableSections(table) {
+    const doc = table.ownerDocument || document;
+    let thead = table.querySelector('thead');
+    let tbody = table.querySelector('tbody');
+
+    const looseRows = [...table.children].filter((el) => el.tagName === 'TR');
+
+    if (!tbody) {
+        tbody = doc.createElement('tbody');
+        table.appendChild(tbody);
+    }
+
+    looseRows.forEach((tr) => {
+        if (!tr.closest('thead') && !tr.closest('tbody')) {
+            tbody.appendChild(tr);
+        }
+    });
+
+    if (!thead) {
+        thead = doc.createElement('thead');
+        table.insertBefore(thead, tbody);
+    }
+
+    return { thead, tbody };
+}
+
+function convertCellToTh(cell) {
+    if (!cell || cell.tagName === 'TH') return cell;
+    const th = cell.ownerDocument.createElement('th');
+    [...cell.attributes].forEach((a) => th.setAttribute(a.name, a.value));
+    th.innerHTML = cell.innerHTML;
+    cell.replaceWith(th);
+    return th;
+}
+
+function convertCellToTd(cell) {
+    if (!cell || cell.tagName === 'TD') return cell;
+    const td = cell.ownerDocument.createElement('td');
+    [...cell.attributes].forEach((a) => td.setAttribute(a.name, a.value));
+    td.innerHTML = cell.innerHTML;
+    cell.replaceWith(td);
+    return td;
+}
+
+function convertRowCellsToHeader(tr) {
+    [...tr.cells].forEach(convertCellToTh);
+}
+
+function convertRowCellsToBody(tr) {
+    [...tr.cells].forEach(convertCellToTd);
+}
+
+function getSelectedTableRows(jodit, getEditorBody) {
+    const cells = getSelectedTableCells(jodit);
+  /** @type {HTMLTableRowElement[]} */
+    const rows = [];
+    const seen = new Set();
+
+    if (cells.length) {
+        cells.forEach((cell) => {
+            const tr = cell.closest('tr');
+            if (tr && !seen.has(tr)) {
+                seen.add(tr);
+                rows.push(tr);
+            }
+        });
+    } else {
+        const cell = getActiveTableCell(jodit, getEditorBody);
+        const tr = cell?.closest('tr');
+        if (tr) rows.push(tr);
+    }
+
+    const table = rows[0]?.closest('table');
+    if (!table) return rows;
+
+    const order = getTableRows(table);
+    return rows.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+}
+
+function canToggleRepeatHeaderRows(jodit, getEditorBody) {
+    return getSelectedTableRows(jodit, getEditorBody).length > 0;
+}
+
+function isRepeatHeaderSelectionActive(jodit, getEditorBody) {
+    const rows = getSelectedTableRows(jodit, getEditorBody);
+    if (!rows.length) return false;
+  /** Active when every selected row is already in thead (Word-style toggle). */
+    return rows.every(isRowInThead);
+}
+
+function syncRepeatHeaderAttribute(table) {
+    if (!table) return;
+    if (table.querySelector('thead tr')) {
+        table.setAttribute('data-ems-repeat-header', '1');
+    } else {
+        table.removeAttribute('data-ems-repeat-header');
+    }
+}
+
+/** Move selected top row(s) into <thead> for print/PDF repeat — like Word “Repeat header rows”. */
+export function toggleRepeatHeaderRows(jodit, getEditorBody) {
+    const rows = getSelectedTableRows(jodit, getEditorBody);
+    if (!rows.length) return false;
+
+    const table = rows[0].closest('table');
+    if (!table) return false;
+
+    const root =
+        (typeof getEditorBody === 'function' && getEditorBody()) ||
+        jodit.editor ||
+        null;
+    if (root && !root.contains(table)) return false;
+
+    const { thead, tbody } = ensureTableSections(table);
+    const allSelectedInThead = rows.every(isRowInThead);
+
+    if (allSelectedInThead) {
+        [...rows].forEach((tr) => {
+            convertRowCellsToBody(tr);
+            tbody.insertBefore(tr, tbody.firstChild);
+        });
+        if (!thead.querySelector('tr')) {
+            thead.remove();
+        }
+        syncRepeatHeaderAttribute(table);
+    } else {
+        const bodyRows = getTableBodyRows(table);
+        const indices = rows.map((r) => bodyRows.indexOf(r));
+        if (indices.some((i) => i < 0)) {
+            window.alert('Select row(s) at the top of the table body to repeat as header.');
+            return false;
+        }
+        indices.sort((a, b) => a - b);
+        if (indices[0] !== 0) {
+            window.alert('Header rows must start at the first row below any existing header.');
+            return false;
+        }
+        for (let i = 1; i < indices.length; i += 1) {
+            if (indices[i] !== indices[i - 1] + 1) {
+                window.alert('Select consecutive rows at the top of the table.');
+                return false;
+            }
+        }
+        rows.forEach((tr) => {
+            convertRowCellsToHeader(tr);
+            thead.appendChild(tr);
+        });
+        syncRepeatHeaderAttribute(table);
+    }
+
+    harmonizeInsertedTableCells(root || table.parentElement);
+    if (typeof jodit.synchronizeValues === 'function') {
+        jodit.synchronizeValues();
+    }
+    return true;
+}
+
+export const EMS_TABLE_REPEAT_HEADER_CONTROL = {
+    name: 'emsRepeatHeader',
+    icon: 'th-list',
+    tooltip: 'Repeat header row at top of each page',
+    exec: (editor) => {
+        const getBody =
+            typeof editor.__emsClauseEditorBody === 'function'
+                ? editor.__emsClauseEditorBody
+                : () => editor.editor || null;
+        toggleRepeatHeaderRows(editor, getBody);
+        editor.e?.fire('hidePopup');
+        return false;
+    },
+    isActive: (editor) => {
+        const getBody =
+            typeof editor.__emsClauseEditorBody === 'function'
+                ? editor.__emsClauseEditorBody
+                : () => editor.editor || null;
+        return isRepeatHeaderSelectionActive(editor, getBody);
+    },
+    isDisabled: (editor) => {
+        const getBody =
+            typeof editor.__emsClauseEditorBody === 'function'
+                ? editor.__emsClauseEditorBody
+                : () => editor.editor || null;
+        return !canToggleRepeatHeaderRows(editor, getBody);
+    },
+};
+
+function registerTableRepeatHeaderControl(jodit, getEditorBody) {
+    if (!jodit || jodit.__emsRepeatHeaderControl) return;
+    jodit.__emsRepeatHeaderControl = true;
+
+    jodit.registerCommand('emsTableRepeatHeader', () => {
+        toggleRepeatHeaderRows(jodit, getEditorBody);
+        return false;
+    });
+
+    if (!jodit.o.controls.emsRepeatHeader) {
+        jodit.o.controls.emsRepeatHeader = EMS_TABLE_REPEAT_HEADER_CONTROL;
+    }
+
+    const cellsPopup = jodit.o.popup?.cells;
+    if (
+        Array.isArray(cellsPopup) &&
+        !cellsPopup.some((item) => (typeof item === 'string' ? item : item?.name) === 'emsRepeatHeader')
+    ) {
+        const deleteIdx = cellsPopup.findIndex(
+            (item) => typeof item === 'object' && item?.name === 'deleteTable'
+        );
+        const insertAt = deleteIdx >= 0 ? deleteIdx : cellsPopup.length;
+        cellsPopup.splice(insertAt, 0, '\n', 'emsRepeatHeader');
+    }
+}
+
 export function registerClauseEditorTableHooks(jodit, getEditorBody) {
     if (!jodit || jodit.__emsTableHooks) return;
     jodit.__emsTableHooks = true;
@@ -1467,6 +1689,7 @@ export function registerClauseEditorTableHooks(jodit, getEditorBody) {
     registerTableMultiCellFormatting(jodit);
     registerConditionalTableSelection(jodit, getEditorBody);
     registerEditorScrollCleanup(jodit, getEditorBody);
+    registerTableRepeatHeaderControl(jodit, getEditorBody);
     registerTablePopupContextMenuOnly(jodit, getEditorBody);
     registerTableArrowNavigation(jodit, getEditorBody);
     registerTableRowResize(jodit, getEditorBody);

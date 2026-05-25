@@ -1,32 +1,27 @@
-const { connectDB, sql } = require('./dbConfig');
 
-async function checkSchema() {
+const { connectDB, sql } = require('./dbConfig');
+require('dotenv').config();
+
+async function run() {
     try {
         await connectDB();
-        console.log('Connected to DB');
 
-        console.log('--- EnquiryMaster Columns ---');
-        const emCols = await sql.query`
+        console.log('--- Fetching Column Info ---');
+        const res = await sql.query`
             SELECT COLUMN_NAME 
             FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'EnquiryMaster'
+            WHERE TABLE_NAME = 'EnquiryFor'
         `;
-        emCols.recordset.forEach(row => console.log(row.COLUMN_NAME));
+        console.log(res.recordset.map(r => r.COLUMN_NAME));
 
-        console.log('\n--- Attachments Columns ---');
-        const attCols = await sql.query`
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'Attachments'
-        `;
-        attCols.recordset.forEach(row => console.log(row.COLUMN_NAME));
+        console.log('--- Fetching Data Sample ---');
+        const sample = await sql.query`SELECT TOP 1 * FROM EnquiryFor`;
+        console.log(sample.recordset[0]);
 
+        process.exit(0);
     } catch (err) {
         console.error('Error:', err);
-    } finally {
-        // sql.close(); // Keep open or exit
-        process.exit(0);
+        process.exit(1);
     }
 }
-
-checkSchema();
+run();

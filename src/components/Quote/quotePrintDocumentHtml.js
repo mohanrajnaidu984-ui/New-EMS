@@ -819,7 +819,8 @@ html[data-preview-pdf="1"] .quote-clause-block {
     text-align: left !important;
 }
 html[data-preview-pdf="1"] .quote-clause-block .clause-content {
-    text-align: left !important;
+    /* Block flow default; table cell alignment comes from editor HTML. */
+    text-align: left;
 }
 html[data-preview-pdf="1"] .quote-a4-sheet {
     box-sizing: border-box !important;
@@ -855,11 +856,32 @@ html[data-preview-pdf="1"] .quote-a4-sheet:last-child {
 }
 html[data-preview-pdf="1"] .quote-a4-sheet--continuation .quote-sheet-main-flex {
     min-height: 0 !important;
+    height: auto !important;
+    max-height: none !important;
     overflow: visible !important;
 }
 html[data-preview-pdf="1"] .quote-a4-sheet--continuation .content-section {
     flex: 0 1 auto !important;
+    max-height: none !important;
     overflow: visible !important;
+}
+html[data-preview-pdf="1"] .clause-content table {
+    table-layout: fixed !important;
+    border-collapse: collapse !important;
+}
+html[data-preview-pdf="1"] .clause-content > table + table,
+html[data-preview-pdf="1"] .clause-content table[data-ems-table-split] + table[data-ems-table-split] {
+    margin-top: 0 !important;
+    border-top: none !important;
+}
+html[data-preview-pdf="1"] .clause-content table[data-ems-table-split] + table[data-ems-table-split] thead {
+    display: none !important;
+}
+html[data-preview-pdf="1"] .clause-content table th,
+html[data-preview-pdf="1"] .clause-content table td {
+    vertical-align: top !important;
+    word-wrap: break-word !important;
+    overflow-wrap: anywhere !important;
 }
 html[data-preview-pdf="1"] .quote-sheet-main-flex {
     grid-row: 2 !important;
@@ -1006,9 +1028,11 @@ html[data-preview-pdf="1"] .footer-section .quote-print-footer-company > div {
     }
     html[data-preview-pdf="1"] .quote-a4-sheet--continuation .quote-sheet-main-flex {
         min-height: 0 !important;
+        overflow: visible !important;
     }
     html[data-preview-pdf="1"] .quote-a4-sheet--continuation .content-section {
         flex: 0 1 auto !important;
+        overflow: visible !important;
     }
     html[data-preview-pdf="1"] .quote-sheet-logo-row {
         grid-row: 1 !important;

@@ -1,21 +1,30 @@
-const { sql, connectDB } = require('./dbConfig');
+const { connectDB, sql } = require('./dbConfig');
 
 async function checkSchema() {
     try {
+        console.log('Connecting...');
         await connectDB();
-        console.log("Checking schema for Master_ConcernedSE...");
 
-        const result = await new sql.Request().query(`
+        console.log('\n--- Master_EnquiryFor Columns ---');
+        const mCols = await sql.query`
             SELECT COLUMN_NAME 
             FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_NAME = 'Master_ConcernedSE'
-        `);
+            WHERE TABLE_NAME = 'Master_EnquiryFor'
+        `;
+        console.log(mCols.recordset.map(c => c.COLUMN_NAME).join(', '));
 
-        console.log("Columns:", result.recordset.map(r => r.COLUMN_NAME));
+        console.log('\n--- EnquiryFor Columns ---');
+        const eCols = await sql.query`
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = 'EnquiryFor'
+        `;
+        console.log(eCols.recordset.map(c => c.COLUMN_NAME).join(', '));
 
-        await sql.close();
     } catch (err) {
-        console.error("Error checking schema:", err);
+        console.error('Error:', err);
+    } finally {
+        process.exit();
     }
 }
 

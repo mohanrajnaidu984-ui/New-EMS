@@ -12,6 +12,7 @@ import {
     harmonizeInsertedTableCells,
     isTableStructureResizeActive,
     registerClauseEditorTableHooks,
+    EMS_TABLE_REPEAT_HEADER_CONTROL,
 } from './clauseEditorTable';
 
 /**
@@ -326,13 +327,14 @@ const ClauseEditor = ({ html, onChange, style }) => {
             'bold', 'italic', 'underline', 'strikethrough', '|',
             'brush', 'font', 'fontsize', 'paragraph', '|',
             'ul', 'ol', 'indent', 'outdent', '|',
-            'image', 'table', 'link', '|',
+            'image', 'table', 'emsRepeatHeader', 'link', '|',
             'left', 'center', 'right', 'justify', '|',
             'hr', 'eraser', 'fullsize'
         ],
         controls: {
             ul: EMS_UL_TOOLBAR_CONTROL,
             ol: EMS_OL_TOOLBAR_CONTROL,
+            emsRepeatHeader: EMS_TABLE_REPEAT_HEADER_CONTROL,
         },
         showCharsCounter: false,
         showWordsCounter: false,
@@ -486,6 +488,35 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     font-size: 10px !important;
                     line-height: 1 !important;
                 }
+                /* Split buttons need room for the dropdown chevron (22px width was clipping it). */
+                .clause-editor-wrapper .jodit-toolbar-button_with-trigger_true {
+                    width: auto !important;
+                    min-width: 28px !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button_with-trigger_true .jodit-toolbar-button__button {
+                    width: 18px !important;
+                    min-width: 18px !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-select {
+                    height: 22px !important;
+                    min-width: auto !important;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button__trigger,
+                .clause-editor-wrapper .jodit-toolbar-select__trigger {
+                    opacity: 0.9 !important;
+                    flex-shrink: 0;
+                    width: 10px !important;
+                    min-width: 10px !important;
+                    color: #334155;
+                }
+                .clause-editor-wrapper .jodit-toolbar-button__trigger svg,
+                .clause-editor-wrapper .jodit-toolbar-select__trigger svg {
+                    width: 8px !important;
+                    height: 8px !important;
+                    fill: #334155 !important;
+                    stroke: #334155 !important;
+                    opacity: 1 !important;
+                }
                 .clause-editor-wrapper .jodit-workplace {
                     overflow: auto !important;
                     flex: 1 1 auto !important;
@@ -600,6 +631,11 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg th {
                     border: 1px solid #64748b !important;
                     border-collapse: collapse !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table thead th,
+                .clause-editor-wrapper .jodit-wysiwyg table thead td {
+                    background-color: #f1f5f9 !important;
+                    font-weight: 600 !important;
                 }
                 .clause-editor-wrapper .jodit-wysiwyg table {
                     border-collapse: collapse !important;
