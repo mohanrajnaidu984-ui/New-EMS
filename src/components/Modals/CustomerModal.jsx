@@ -110,10 +110,8 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
 
         if (!formData.CompanyName) newErrors.CompanyName = 'Company Name is required';
         if (!formData.Address1) newErrors.Address1 = 'Address 1 is required';
-        if (!formData.Phone1) newErrors.Phone1 = 'Phone 1 is required';
-        if (!formData.EmailId) {
-            newErrors.EmailId = 'E-Mail ID is required';
-        } else if (!emailRegex.test(formData.EmailId.trim())) {
+        // Phone 1 and Email ID are optional in CCC details.
+        if (formData.EmailId && !emailRegex.test(String(formData.EmailId).trim())) {
             newErrors.EmailId = 'Please enter a valid email address (e.g., user@example.com)';
         }
 
@@ -226,7 +224,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                 </div>
                 <div className="row mb-2">
                     <div className="col-md-6" style={{ position: 'relative' }}>
-                        <label className="form-label">Phone 1<span className="text-danger">*</span></label>
+                        <label className="form-label">Phone 1</label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.Phone1} onChange={(e) => handleChange('Phone1', e.target.value)} />
                         {errors.Phone1 && <ValidationTooltip message={errors.Phone1} />}
@@ -239,7 +237,7 @@ const CustomerModal = ({ show, onClose, mode = 'Add', initialData = null, onSubm
                 </div>
                 <div className="row mb-2">
                     <div className="col-md-6" style={{ position: 'relative' }}>
-                        <label className="form-label">E-Mail ID<span className="text-danger">*</span></label>
+                        <label className="form-label">E-Mail ID</label>
                         <input type="text" className="form-control" style={{ fontSize: '13px' }}
                             value={formData.EmailId} onChange={(e) => handleChange('EmailId', e.target.value)} />
                         {errors.EmailId && <ValidationTooltip message={errors.EmailId} />}

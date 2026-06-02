@@ -44,6 +44,31 @@ function getSelectedTableCells(jodit) {
     return [...(tableModule?.getAllSelectedCells?.() || [])];
 }
 
+function clearAllTableCellSelection(jodit) {
+    const tableModule = getJoditTableModule(jodit);
+    tableModule?.getAllSelectedCells?.().forEach((td) => tableModule.removeSelection(td));
+}
+
+/** EMS drag-select (replaces disabled Jodit selectCells plugin). */
+function selectTableCellRange(jodit, table, cellA, cellB) {
+    const tableModule = getJoditTableModule(jodit);
+    if (!tableModule || !table || !cellA || !cellB) return [];
+    clearAllTableCellSelection(jodit);
+    const bound = tableModule.getSelectedBound(table, [cellA, cellB]);
+    const box = tableModule.formalMatrix(table);
+    const picked = [];
+    for (let i = bound[0][0]; i <= bound[1][0]; i += 1) {
+        for (let j = bound[0][1]; j <= bound[1][1]; j += 1) {
+            const cell = box[i]?.[j];
+            if (cell) {
+                tableModule.addSelection(cell);
+                picked.push(cell);
+            }
+        }
+    }
+    return picked;
+}
+
 function getSelectedCellsBounds(cells) {
     if (!cells?.length) return null;
     let left = Infinity;
@@ -88,32 +113,16 @@ function syncTableSelectionVisual(jodit, getEditorBody) {
     const cells = getSelectedTableCells(jodit);
     if (cells.length <= 1) {
         tableModule.getAllSelectedCells().forEach((td) => tableModule.removeSelection(td));
-
         const cell = cells[0] || anchorCell;
-        if (!cell || (root && !root.contains(cell))) {
+        if (cell && (!root || root.contains(cell))) {
+            jodit.__emsActiveTableCell = cell;
+        } else {
             jodit.__emsActiveTableCell = null;
             jodit.__emsFormatTableCells = null;
-            return;
         }
-
-        const caretInCell = anchor && cell.contains(anchor);
-        if (!caretInCell) {
-            if (!cells.length) {
-                /* Plain text / list — never hijack with a stale table cell. */
-                jodit.__emsActiveTableCell = null;
-                return;
-            }
-            if (cells.length === 1) {
-                jodit.__emsActiveTableCell = cell;
-                focusTableCell(cell, jodit, false);
-            }
-            return;
-        }
-
-        jodit.__emsActiveTableCell = cell;
-    } else {
-        jodit.__emsActiveTableCell = cells[0];
+        return;
     }
+    jodit.__emsActiveTableCell = cells[0];
 }
 
 function scheduleTableSelectionSync(jodit, getEditorBody) {
@@ -126,18 +135,43 @@ function scheduleTableSelectionSync(jodit, getEditorBody) {
     }, 0);
 }
 
+/** True when the user highlighted characters (toolbar should use Jodit inline formatting). */
+function hasActiveTextRangeSelection(jodit, getEditorBody) {
+    const root =
+        (typeof getEditorBody === 'function' && getEditorBody()) ||
+        jodit?.editor ||
+        null;
+    const sel = root?.ownerDocument?.getSelection?.();
+    if (!sel || sel.isCollapsed) return false;
+    if (!String(sel).trim()) return false;
+    const anchor = sel.anchorNode;
+    return Boolean(anchor && root?.contains(anchor));
+}
+
 /** Multi-cell table selection clears the text range — toolbar formatting needs a target. */
-function getCellsForTableFormatting(jodit) {
+function getCellsForTableFormatting(jodit, getEditorBody) {
+    if (hasActiveTextRangeSelection(jodit, getEditorBody)) {
+        jodit.__emsFormatTableCells = null;
+        jodit.__emsToolbarCellFormat = false;
+        return [];
+    }
     const live = getSelectedTableCells(jodit);
     if (live.length >= 2) {
         jodit.__emsFormatTableCells = live;
         return live;
     }
+    // Stash is only valid right after a toolbar click while 2+ cells were selected.
     const stashed = jodit.__emsFormatTableCells;
-    if (stashed?.length >= 2 && stashed.every((c) => c?.isConnected)) {
+    if (
+        jodit.__emsToolbarCellFormat &&
+        stashed?.length >= 2 &&
+        stashed.every((c) => c?.isConnected)
+    ) {
         return stashed;
     }
-    return live;
+    jodit.__emsFormatTableCells = null;
+    jodit.__emsToolbarCellFormat = false;
+    return [];
 }
 
 function restoreTableCellSelection(jodit, cells) {
@@ -179,6 +213,10 @@ function applyTextAlignToCells(cells, command) {
     if (!align) return;
     cells.forEach((cell) => {
         cell.style.textAlign = align;
+        cell.setAttribute('align', align);
+        cell.querySelectorAll('p, div, span, li').forEach((el) => {
+            el.style.textAlign = align;
+        });
     });
 }
 
@@ -192,8 +230,8 @@ function applyInlineStyleToCells(cells, styleProp, value) {
     });
 }
 
-function tryApplyFormatToMultiSelectedCells(jodit, command, value) {
-    const cells = getCellsForTableFormatting(jodit);
+function tryApplyFormatToMultiSelectedCells(jodit, getEditorBody, command, value) {
+    const cells = getCellsForTableFormatting(jodit, getEditorBody);
     if (cells.length < 2) return false;
 
     const cmd = String(command || '').toLowerCase();
@@ -263,6 +301,7 @@ function tryApplyFormatToMultiSelectedCells(jodit, command, value) {
     } finally {
         restoreTableCellSelection(jodit, cells);
         jodit.__emsSkipTableSelSync = false;
+        jodit.__emsToolbarCellFormat = false;
     }
 
     if (typeof jodit.synchronizeValues === 'function') {
@@ -272,7 +311,7 @@ function tryApplyFormatToMultiSelectedCells(jodit, command, value) {
 }
 
 /** Toolbar commands while multiple table cells are selected (bold, colors, align, etc.). */
-function registerTableMultiCellFormatting(jodit) {
+function registerTableMultiCellFormatting(jodit, getEditorBody) {
     if (!jodit || jodit.__emsTableMultiFormat) return;
     jodit.__emsTableMultiFormat = true;
 
@@ -280,7 +319,7 @@ function registerTableMultiCellFormatting(jodit) {
         if (TABLE_STRUCTURE_CMD_RE.test(String(command || ''))) {
             return;
         }
-        if (tryApplyFormatToMultiSelectedCells(jodit, command, value)) {
+        if (tryApplyFormatToMultiSelectedCells(jodit, getEditorBody, command, value)) {
             return false;
         }
     });
@@ -292,13 +331,50 @@ function registerTableMultiCellFormatting(jodit) {
             if (!target?.closest) return;
             if (
                 target.closest('.jodit-toolbar, .jodit-toolbar__box, .jodit-popup') &&
-                getSelectedTableCells(jodit).length >= 2
+                getSelectedTableCells(jodit).length >= 2 &&
+                !hasActiveTextRangeSelection(jodit, getEditorBody)
             ) {
+                jodit.__emsToolbarCellFormat = true;
                 jodit.__emsFormatTableCells = getSelectedTableCells(jodit);
             }
         },
         true
     );
+}
+
+/** When the user selects text inside a cell, drop multi-cell stash so forecolor/background work. */
+function registerTableTextSelectionGuard(jodit, getEditorBody) {
+    if (!jodit || jodit.__emsTableTextSelGuard) return;
+    jodit.__emsTableTextSelGuard = true;
+
+    const onSelectionChange = () => {
+        if (jodit.__emsToolbarCellFormat) return;
+        if (hasActiveTextRangeSelection(jodit, getEditorBody)) {
+            jodit.__emsFormatTableCells = null;
+            clearAllTableCellSelection(jodit);
+            return;
+        }
+        if (getSelectedTableCells(jodit).length < 2) {
+            jodit.__emsFormatTableCells = null;
+        }
+    };
+
+    const attach = () => {
+        const root =
+            (typeof getEditorBody === 'function' && getEditorBody()) ||
+            jodit.editor ||
+            null;
+        if (!root || root.__emsTableTextSelGuardBound) return;
+        root.__emsTableTextSelGuardBound = true;
+        const doc = root.ownerDocument || document;
+        doc.addEventListener('selectionchange', onSelectionChange);
+        jodit.e.on('beforeDestruct', () => {
+            doc.removeEventListener('selectionchange', onSelectionChange);
+        });
+    };
+
+    jodit.e.on('afterInit', attach);
+    attach();
 }
 
 const JODIT_TABLE_COMMANDS = [
@@ -455,7 +531,137 @@ function getColumnCount(rows) {
     return Math.max(0, ...rows.map((r) => r.cells?.length || 0));
 }
 
+/** Account for colspan when Excel merges header cells. */
+function getLogicalColumnCount(rows) {
+    let max = 0;
+    rows.forEach((row) => {
+        let cols = 0;
+        [...row.cells].forEach((cell) => {
+            cols += Math.max(1, Number(cell.colSpan) || 1);
+        });
+        max = Math.max(max, cols);
+    });
+    return max;
+}
+
+/** Measure rendered column widths once after an Excel/Word paste (before EMS col model exists). */
+function readOfficeTableColumnWidthsPx(table, rows, colCount) {
+    const widths = new Array(colCount).fill(0);
+
+    // 1. Try colgroup <col> inline widths (set by our iframe inlineComputedOfficeTableStyles).
+    const cg = table.querySelector('colgroup');
+    if (cg) {
+        const cols = [...cg.querySelectorAll('col')];
+        cols.forEach((col, j) => {
+            if (j >= colCount || widths[j] > 0) return;
+            const w = parseCssPx(col.style.width) ||
+                parseFloat(col.getAttribute('width') || '0');
+            if (w > 0) widths[j] = Math.max(MIN_TABLE_COLUMN_WIDTH, Math.round(w));
+        });
+    }
+
+    // 2. Try inline style.width on the first row's cells.
+    const firstRow = rows[0];
+    if (firstRow) {
+        for (let j = 0; j < colCount; j += 1) {
+            if (widths[j] > 0) continue;
+            for (const row of rows) {
+                const cell = row.cells[j];
+                if (!cell) continue;
+                const w = parseCssPx(cell.style.width);
+                if (w > 0) {
+                    const span = Math.max(1, Number(cell.colSpan) || 1);
+                    const slice = Math.max(MIN_TABLE_COLUMN_WIDTH, Math.round(w / span));
+                    for (let k = 0; k < span && j + k < colCount; k += 1) {
+                        if (widths[j + k] <= 0) widths[j + k] = slice;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Fall back to table.style.width split evenly across columns if still missing.
+    const tableStyleW = parseCssPx(table.style.width);
+    for (let j = 0; j < colCount; j += 1) {
+        if (widths[j] <= 0) {
+            widths[j] = tableStyleW > 0
+                ? Math.max(MIN_TABLE_COLUMN_WIDTH, Math.round(tableStyleW / colCount))
+                : DEFAULT_TABLE_COLUMN_WIDTH;
+        }
+    }
+
+    // 4. Fit-to-container: scale to A4 inner width so editor + preview match.
+    const availableW = getA4InnerContentWidthPx(table.ownerDocument) || 0;
+    const totalW = widths.reduce((s, w) => s + (w || 0), 0);
+    if (availableW > 0 && totalW > availableW * 1.02) {
+        const ratio = availableW / totalW;
+        let newTotal = 0;
+        for (let j = 0; j < colCount; j += 1) {
+            widths[j] = Math.max(MIN_TABLE_COLUMN_WIDTH, Math.round((widths[j] || 0) * ratio));
+            newTotal += widths[j];
+        }
+        // Correct rounding drift so sum ~= availableW.
+        const drift = Math.round(availableW - newTotal);
+        if (drift !== 0 && colCount) {
+            widths[colCount - 1] = Math.max(
+                MIN_TABLE_COLUMN_WIDTH,
+                Math.round((widths[colCount - 1] || 0) + drift)
+            );
+        }
+    }
+
+    return widths;
+}
+
+/** Enable EMS column drag-resize on Excel/Word pasted tables without stripping their colors. */
+export function initializeOfficePastedTableColumns(table) {
+    if (!table || !isOfficePasteTable(table)) return;
+    if (isTableStructureResizeActiveForTable(table)) return;
+
+    const rows = getTableRows(table);
+    if (!rows.length) return;
+    const colCount = getLogicalColumnCount(rows) || getColumnCount(rows);
+    if (!colCount) return;
+
+    if (table.getAttribute('data-ems-col-widths')) {
+        applyTableLayoutDefaults(table);
+        return;
+    }
+
+    const widths = readOfficeTableColumnWidthsPx(table, rows, colCount);
+    applyColumnWidths(table, rows, widths);
+}
+
+export function initializeAllOfficePastedTableColumns(root) {
+    if (!root?.querySelectorAll) return;
+    root.querySelectorAll('table[data-ems-paste-source="office"], table.ems-office-paste-table').forEach((table) => {
+        initializeOfficePastedTableColumns(table);
+    });
+}
+
 const DEFAULT_TABLE_COLUMN_WIDTH = 96;
+let EMS_A4_INNER_WIDTH_PX_CACHE = null;
+
+function getA4InnerContentWidthPx(doc) {
+    if (EMS_A4_INNER_WIDTH_PX_CACHE != null) return EMS_A4_INNER_WIDTH_PX_CACHE;
+    try {
+        const d = doc || (typeof document !== 'undefined' ? document : null);
+        if (!d?.createElement) return null;
+        const el = d.createElement('div');
+        // A4 is 210mm wide; preview uses 15mm padding both sides → 180mm inner width.
+        el.style.cssText =
+            'position:fixed;left:-99999px;top:0;width:180mm;height:1px;opacity:0;pointer-events:none';
+        d.body?.appendChild?.(el);
+        const w = Math.round(el.getBoundingClientRect().width || 0);
+        el.remove();
+        EMS_A4_INNER_WIDTH_PX_CACHE = w > 0 ? w : null;
+        return EMS_A4_INNER_WIDTH_PX_CACHE;
+    } catch {
+        EMS_A4_INNER_WIDTH_PX_CACHE = null;
+        return null;
+    }
+}
 
 function parseCssPx(value) {
     if (!value) return 0;
@@ -592,6 +798,7 @@ function applyColumnWidths(table, rows, widths) {
 
     applyTableLayoutDefaults(table);
     const { cols } = getOrSyncColgroup(table, colCount);
+    const { grid } = buildTableCellGrid(table);
     let sum = 0;
 
     for (let j = 0; j < colCount; j += 1) {
@@ -602,8 +809,25 @@ function applyColumnWidths(table, rows, widths) {
             cols[j].style.width = `${px}px`;
             cols[j].setAttribute('width', String(px));
         }
+
+        const seen = new Set();
+        for (let r = 0; r < grid.length; r += 1) {
+            const cell = grid[r]?.[j];
+            if (!cell || seen.has(cell)) continue;
+            seen.add(cell);
+            const pos = findCellGridPosition(grid, cell);
+            const span = Math.max(1, Number(cell.colSpan) || 1);
+            if (pos && pos.col === j && span === 1) {
+                lockCellColumnWidth(cell, px);
+            } else if (pos && pos.col === j && span > 1) {
+                let total = 0;
+                for (let k = j; k < j + span && k < colCount; k += 1) total += widths[k] || 0;
+                lockCellColumnWidth(cell, total);
+            }
+        }
         rows.forEach((row) => {
-            lockCellColumnWidth(row.cells[j], px);
+            const cell = row.cells[j];
+            if (cell && !seen.has(cell)) lockCellColumnWidth(cell, px);
         });
     }
 
@@ -643,6 +867,10 @@ export function harmonizeInsertedTableCells(root) {
     if (isTableStructureResizeActive(root)) return;
 
     root.querySelectorAll('table').forEach((table) => {
+        if (isOfficePasteTable(table)) {
+            initializeOfficePastedTableColumns(table);
+            return;
+        }
         if (isTableStructureResizeActiveForTable(table)) return;
 
         applyTableLayoutDefaults(table);
@@ -739,12 +967,88 @@ function findCellGridPosition(grid, cell) {
     return null;
 }
 
+/** Find a cell whose right edge aligns with logical column `colIndex` (handles merged Excel headers). */
+function findCellAtColumnRightEdge(table, colIndex) {
+    const { grid } = buildTableCellGrid(table);
+    for (let r = 0; r < grid.length; r += 1) {
+        const cell = grid[r]?.[colIndex];
+        if (!cell) continue;
+        const pos = findCellGridPosition(grid, cell);
+        if (!pos) continue;
+        const span = Math.max(1, Number(cell.colSpan) || 1);
+        if (pos.col + span - 1 === colIndex) return cell;
+    }
+    return getTableRows(table).find((row) => row.cells[colIndex])?.cells[colIndex] || null;
+}
+
+function getColumnRightEdgeX(table, colIndex) {
+    const rows = getTableRows(table);
+    const colCount = getLogicalColumnCount(rows) || getColumnCount(rows);
+    if (!colCount || colIndex < 0 || colIndex >= colCount) return null;
+
+    const tableRect = table.getBoundingClientRect();
+    const stored = table.getAttribute('data-ems-col-widths');
+    if (stored) {
+        const widths = stored.split(',').map((s) => parseFloat(s.trim()) || 0);
+        if (widths.length >= colCount) {
+            let offset = 0;
+            for (let j = 0; j <= colIndex; j += 1) offset += widths[j] || 0;
+            return tableRect.left + offset;
+        }
+    }
+
+    const cell = findCellAtColumnRightEdge(table, colIndex);
+    return cell ? cell.getBoundingClientRect().right : null;
+}
+
+function isOfficePasteTable(table) {
+    return (
+        table?.getAttribute?.('data-ems-paste-source') === 'office' ||
+        table?.classList?.contains?.('ems-office-paste-table')
+    );
+}
+
 function focusTableCell(cell, jodit, atEnd = false) {
     if (!cell) return false;
     const doc = cell.ownerDocument;
     const range = doc.createRange();
-    range.selectNodeContents(cell);
-    range.collapse(!atEnd);
+
+    const placeInElement = (el, collapseEnd) => {
+        if (!el) return false;
+        const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let firstText = null;
+        let lastText = null;
+        let n;
+        while ((n = walker.nextNode())) {
+            if (!firstText) firstText = n;
+            lastText = n;
+        }
+        if (collapseEnd && lastText) {
+            range.setStart(lastText, lastText.length);
+            range.collapse(true);
+            return true;
+        }
+        if (!collapseEnd && firstText) {
+            range.setStart(firstText, 0);
+            range.collapse(true);
+            return true;
+        }
+        if (el.tagName === 'P' || el.tagName === 'DIV') {
+            if (!el.firstChild) {
+                el.innerHTML = '<br>';
+            }
+            range.setStart(el, 0);
+            range.collapse(true);
+            return true;
+        }
+        return false;
+    };
+
+    if (!placeInElement(cell.querySelector('p, div') || cell, atEnd)) {
+        range.selectNodeContents(cell);
+        range.collapse(!atEnd);
+    }
+
     try {
         if (jodit?.s?.selectRange) {
             jodit.s.selectRange(range);
@@ -937,7 +1241,7 @@ const FLOATING_CHROME_SELECTOR =
 
 const TABLE_EDGE_NEAR = 8;
 /** Hit zone at cell left/right edge for column resize (px). */
-const TABLE_COL_EDGE_NEAR = 12;
+const TABLE_COL_EDGE_NEAR = 18;
 const TABLE_ROW_EDGE_NEAR = 10;
 
 function getEditorWorkplace(jodit) {
@@ -956,12 +1260,18 @@ function hideTableResizeHandles(jodit) {
 
 function detectColumnResizeIndex(cell, clientX) {
     if (!cell || clientX == null) return -1;
+    const table = cell.closest('table');
+    if (!table) return -1;
+    const { grid } = buildTableCellGrid(table);
+    const pos = findCellGridPosition(grid, cell);
+    if (!pos) return -1;
     const rect = cell.getBoundingClientRect();
     const x = clientX - rect.left;
     const w = rect.width;
     if (w <= 0) return -1;
-    if (x >= w - TABLE_COL_EDGE_NEAR) return cell.cellIndex;
-    if (x <= TABLE_COL_EDGE_NEAR && cell.cellIndex > 0) return cell.cellIndex - 1;
+    const span = Math.max(1, Number(cell.colSpan) || 1);
+    if (x >= w - TABLE_COL_EDGE_NEAR) return pos.col + span - 1;
+    if (x <= TABLE_COL_EDGE_NEAR && pos.col > 0) return pos.col - 1;
     return -1;
 }
 
@@ -988,18 +1298,14 @@ function registerEmsTableColumnResize(jodit, getEditorBody) {
         }
     };
 
-    const clearColResizeCursor = () => {
-        if (hoverCell) {
-            hoverCell.classList.remove('ems-col-resize-hover');
-            hoverCell.style.removeProperty('cursor');
-            hoverCell = null;
-        }
+    const clearColResizeHover = () => {
+        hoverCell = null;
     };
 
     const hideHandle = () => {
         if (drag) return;
         clearHideTimeout();
-        clearColResizeCursor();
+        clearColResizeHover();
         hideTimeout = window.setTimeout(() => handle?.remove(), jodit.defaultTimeout || 80);
     };
 
@@ -1014,17 +1320,17 @@ function registerEmsTableColumnResize(jodit, getEditorBody) {
     };
 
     const positionHandle = (table, colIndex) => {
-        const rows = getTableRows(table);
-        const cell = rows[0]?.cells[colIndex];
         const parent = getHandleParent();
-        if (!parent || !cell) return;
+        if (!parent || !table || colIndex < 0) return;
+        const edgeX = getColumnRightEdgeX(table, colIndex);
+        const anchorCell = findCellAtColumnRightEdge(table, colIndex);
+        if (edgeX == null && !anchorCell) return;
         ensureHandle();
-        const cellRect = cell.getBoundingClientRect();
         const tableRect = table.getBoundingClientRect();
         handle.style.position = 'fixed';
-        handle.style.left = `${Math.round(cellRect.right - 4)}px`;
+        handle.style.left = `${Math.round((edgeX ?? anchorCell.getBoundingClientRect().right) - 4)}px`;
         handle.style.top = `${Math.round(tableRect.top)}px`;
-        handle.style.height = `${Math.max(tableRect.height, cellRect.height)}px`;
+        handle.style.height = `${Math.max(tableRect.height, anchorCell?.getBoundingClientRect().height || 0)}px`;
         handle.style.display = 'block';
         clearHideTimeout();
         parent.appendChild(handle);
@@ -1061,7 +1367,11 @@ function registerEmsTableColumnResize(jodit, getEditorBody) {
         e.stopPropagation();
         e.stopImmediatePropagation();
         const rows = getTableRows(workTable);
-        startWidths = readColumnWidthsPx(workTable, rows, getColumnCount(rows));
+        startWidths = readColumnWidthsPx(
+            workTable,
+            rows,
+            getLogicalColumnCount(rows) || getColumnCount(rows)
+        );
         startX = e.clientX;
         drag = true;
         setColResizingFlag(workTable, true);
@@ -1077,6 +1387,8 @@ function registerEmsTableColumnResize(jodit, getEditorBody) {
             jodit.e?.off(jodit.ew, 'mousemove.emsColResize touchmove.emsColResize', onMove);
             jodit.e?.off(jodit.ow, 'mouseup.emsColResize touchend.emsColResize', onUp);
             startWidths = null;
+            document.body.style.removeProperty('cursor');
+            document.body.style.removeProperty('user-select');
             if (typeof jodit.synchronizeValues === 'function') jodit.synchronizeValues();
             jodit.s?.focus?.();
         };
@@ -1107,9 +1419,7 @@ function registerEmsTableColumnResize(jodit, getEditorBody) {
             return;
         }
         if (hoverCell !== cell) {
-            clearColResizeCursor();
             hoverCell = cell;
-            hoverCell.classList.add('ems-col-resize-hover');
         }
         positionHandle(table, colIndex);
     };
@@ -1168,18 +1478,14 @@ function registerTableRowResize(jodit, getEditorBody) {
         }
     };
 
-    const clearRowResizeCursor = () => {
-        if (hoverCell) {
-            hoverCell.classList.remove('ems-row-resize-hover');
-            hoverCell.style.removeProperty('cursor');
-            hoverCell = null;
-        }
+    const clearRowResizeHover = () => {
+        hoverCell = null;
     };
 
     const hideHandle = () => {
         if (drag) return;
         clearHideTimeout();
-        clearRowResizeCursor();
+        clearRowResizeHover();
         hideTimeout = window.setTimeout(() => handle?.remove(), 80);
     };
 
@@ -1258,6 +1564,8 @@ function registerTableRowResize(jodit, getEditorBody) {
             jodit.e?.off(jodit.ew, 'mousemove.emsRowResize touchmove.emsRowResize', onMove);
             jodit.e?.off(jodit.ow, 'mouseup.emsRowResize touchend.emsRowResize', onUp);
             startHeights = null;
+            document.body.style.removeProperty('cursor');
+            document.body.style.removeProperty('user-select');
             if (typeof jodit.synchronizeValues === 'function') jodit.synchronizeValues();
             jodit.s?.focus?.();
         };
@@ -1288,9 +1596,7 @@ function registerTableRowResize(jodit, getEditorBody) {
             return;
         }
         if (hoverCell !== cell) {
-            clearRowResizeCursor();
             hoverCell = cell;
-            hoverCell.classList.add('ems-row-resize-hover');
         }
         positionHandleForRow(table, rowIndex);
     };
@@ -1353,19 +1659,27 @@ function registerConditionalTableSelection(jodit, getEditorBody) {
                     }
                     return;
                 }
-                const cell = getTableCellFromNode(e.target);
+                const target = e.target;
+                const cell = getTableCellFromNode(target);
                 if (cell && root.contains(cell)) {
+                    // Always record the start cell so we can detect cross-cell drag.
+                    // Do NOT prevent the default or stop propagation here — the browser
+                    // must be free to start a text selection within this cell.
                     setActiveTableCell(jodit, cell);
-                    jodit.__emsTableDragActive = true;
+                    clearAllTableCellSelection(jodit);
+                    jodit.__emsFormatTableCells = null;
+                    jodit.__emsTableDragStartCell = cell;
+                    jodit.__emsTableDragActive = true;   // tentative — confirmed only on cross-cell move
                     jodit.__emsTableDragMoved = false;
+                    jodit.__emsTableDragCrossedCell = false;
                     jodit.__emsTableDragStartX = e.clientX;
                     jodit.__emsTableDragStartY = e.clientY;
                 } else {
                     jodit.__emsTableDragActive = false;
+                    jodit.__emsTableDragStartCell = null;
                     jodit.__emsActiveTableCell = null;
                     jodit.__emsFormatTableCells = null;
-                    const tm = getJoditTableModule(jodit);
-                    tm?.getAllSelectedCells?.().forEach((td) => tm.removeSelection(td));
+                    clearAllTableCellSelection(jodit);
                 }
             },
             true
@@ -1379,6 +1693,16 @@ function registerConditionalTableSelection(jodit, getEditorBody) {
                 const dy = Math.abs(e.clientY - (jodit.__emsTableDragStartY || 0));
                 if (dx > 3 || dy > 3) {
                     jodit.__emsTableDragMoved = true;
+                }
+                // Only enter multi-cell mode when the mouse actually enters a DIFFERENT cell.
+                const startCell = jodit.__emsTableDragStartCell;
+                if (startCell && !jodit.__emsTableDragCrossedCell) {
+                    const overCell = getTableCellFromNode(e.target);
+                    if (overCell && overCell !== startCell && startCell.closest('table') === overCell.closest('table')) {
+                        jodit.__emsTableDragCrossedCell = true;
+                        // Cancel browser text selection — we are doing cell selection now.
+                        jodit.s?.sel?.removeAllRanges?.();
+                    }
                 }
             },
             true
@@ -1394,17 +1718,32 @@ function registerConditionalTableSelection(jodit, getEditorBody) {
                 }
                 jodit.__emsTableDragActive = false;
                 const clickCell = getTableCellFromNode(e.target);
+                const startCell = jodit.__emsTableDragStartCell;
+                jodit.__emsTableDragStartCell = null;
                 if (!clickCell || !root.contains(clickCell)) {
                     jodit.__emsActiveTableCell = null;
                     jodit.__emsFormatTableCells = null;
+                    clearAllTableCellSelection(jodit);
                     return;
                 }
-                /* Let Jodit finish drag-select before we strip single-cell blue. */
-                window.setTimeout(() => {
-                    if (!jodit.__emsSkipTableSelSync) {
-                        scheduleTableSelectionSync(jodit, getEditorBody);
+                if (jodit.__emsTableDragCrossedCell && startCell) {
+                    // Cross-cell drag completed — select the cell range.
+                    const table = startCell.closest('table');
+                    const picked =
+                        table && selectTableCellRange(jodit, table, startCell, clickCell);
+                    if (picked?.length >= 2) {
+                        jodit.__emsFormatTableCells = picked;
+                        jodit.s?.sel?.removeAllRanges?.();
+                    } else {
+                        jodit.__emsFormatTableCells = null;
+                        clearAllTableCellSelection(jodit);
                     }
-                }, jodit.__emsTableDragMoved ? 20 : 0);
+                    return;
+                }
+                // Same-cell drag: normal text selection — don't interfere.
+                jodit.__emsTableDragMoved = false;
+                jodit.__emsFormatTableCells = null;
+                clearAllTableCellSelection(jodit);
             },
             true
         );
@@ -1686,7 +2025,8 @@ export function registerClauseEditorTableHooks(jodit, getEditorBody) {
     });
 
     registerTableStructureCommands(jodit, getEditorBody);
-    registerTableMultiCellFormatting(jodit);
+    registerTableMultiCellFormatting(jodit, getEditorBody);
+    registerTableTextSelectionGuard(jodit, getEditorBody);
     registerConditionalTableSelection(jodit, getEditorBody);
     registerEditorScrollCleanup(jodit, getEditorBody);
     registerTableRepeatHeaderControl(jodit, getEditorBody);

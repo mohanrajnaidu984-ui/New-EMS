@@ -122,6 +122,23 @@ const API_BASE = String(import.meta.env?.VITE_API_BASE ?? '').replace(/\/+$/, ''
 /** Production IIS: Download PDF → browser Print / Save as PDF. Email still uses server Puppeteer. */
 const QUOTE_PDF_BROWSER_DOWNLOAD = isQuotePdfBrowserDownload();
 
+function getApiOriginFromBase(apiBase) {
+    const raw = String(apiBase || '').trim();
+    if (!raw) return '';
+    try {
+        return new URL(raw).origin;
+    } catch {
+        return '';
+    }
+}
+
+function withApiBaseForUploads(pathFromRoot) {
+    const p = String(pathFromRoot || '').trim();
+    if (!p || !p.startsWith('/uploads/')) return p;
+    const origin = getApiOriginFromBase(API_BASE);
+    return origin ? `${origin}${p}` : p;
+}
+
 /** Must match `PORT` in server/.env and `VITE_API_PORT` in vite.config.js / .env.development (default 5002). */
 function getEmsDevApiPort() {
     return String(import.meta.env?.VITE_API_PORT || import.meta.env?.VITE_DEV_API_PORT || '5002').trim() || '5002';
@@ -134,6 +151,8 @@ function getEmsDevApiPort() {
 function getQuotePdfServerOrigin() {
     const envOrigin = typeof import.meta !== 'undefined' && import.meta.env?.VITE_SERVER_ORIGIN;
     if (envOrigin) return String(envOrigin).replace(/\/$/, '');
+    const apiOrigin = getApiOriginFromBase(API_BASE);
+    if (apiOrigin) return apiOrigin;
     const apiPort = getEmsDevApiPort();
     if (typeof window === 'undefined') return `http://127.0.0.1:${apiPort}`;
     return `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
@@ -1282,20 +1301,20 @@ function resolveQuoteLogoSrc(logo) {
     const absUploads = lower.indexOf(uploadsMarker);
     if (absUploads >= 0) {
         const tail = s.slice(absUploads);
-        return encodeAppStaticPath(tail);
+        return withApiBaseForUploads(encodeAppStaticPath(tail));
     }
     const relUploads = lower.indexOf('uploads/');
     if (relUploads === 0 || (relUploads === 1 && s[0] === '/')) {
         const i = lower.indexOf('uploads/');
         const tail = s[i] === '/' ? s.slice(i) : `/${s.slice(i)}`;
-        return encodeAppStaticPath(tail);
+        return withApiBaseForUploads(encodeAppStaticPath(tail));
     }
     // Filename only under server/uploads/logos (multer default)
     if (!lower.includes('uploads') && /^[^/\\]+\.(png|jpe?g|gif|webp|svg)$/i.test(s)) {
-        return encodeAppStaticPath(`/uploads/logos/${s}`);
+        return withApiBaseForUploads(encodeAppStaticPath(`/uploads/logos/${s}`));
     }
-    if (s.startsWith('/')) return encodeAppStaticPath(s);
-    return encodeAppStaticPath(`/${s}`);
+    if (s.startsWith('/')) return withApiBaseForUploads(encodeAppStaticPath(s));
+    return withApiBaseForUploads(encodeAppStaticPath(`/${s}`));
 }
 
 /** Server-built map: internal division → Master_ConcernedSE names + default assigned SE for this enquiry. */
@@ -1898,7 +1917,8 @@ const collectDirectChildJobIdsFromPools = (parentId, pricingPool, hierarchyPool)
 };
 
 const tableStyles = `
-    .clause-content table {
+    /* EMS-built / manual tables fill the preview column; Excel/Word pastes keep editor px widths. */
+    .clause-content table:not([data-ems-paste-source="office"]):not([data-ems-col-widths]) {
         width: 100% !important;
         border-collapse: collapse !important;
         table-layout: fixed !important;
@@ -1906,6 +1926,20 @@ const tableStyles = `
         margin-top: 4px !important;
         font-size: 13px !important;
         line-height: 1.45 !important;
+        page-break-inside: auto !important;
+    }
+    .clause-content table[data-ems-paste-source="office"],
+    .clause-content table[data-ems-col-widths] {
+        border-collapse: collapse !important;
+        border-spacing: 0 !important;
+        table-layout: fixed !important;
+        /* Let inline px width from editor paste/resize win. */
+        width: auto;
+        max-width: none !important;
+        margin-top: 4px !important;
+        margin-bottom: 4px !important;
+        font-size: 13px !important;
+        line-height: 1.25 !important;
         page-break-inside: auto !important;
     }
     /* Row-level pagination may emit stacked mini-tables — collapse gaps if rejoin did not run */
@@ -1929,7 +1963,8 @@ const tableStyles = `
     .clause-content thead {
         display: table-header-group !important;
     }
-    .clause-content table th, .clause-content table td {
+    .clause-content table:not([data-ems-paste-source="office"]) th,
+    .clause-content table:not([data-ems-paste-source="office"]) td {
         border: 1px solid #64748b !important;
         /* Do not set text-align here — mirror editor/Word inline styles and align attributes. */
         padding: 4px 6px;
@@ -1938,9 +1973,37 @@ const tableStyles = `
         word-wrap: break-word;
         overflow-wrap: anywhere;
     }
-    .clause-content table th {
+    .clause-content table:not([data-ems-paste-source="office"]) th {
         background-color: #f8fafc !important;
         font-weight: 600 !important;
+    }
+    .clause-content table[data-ems-paste-source="office"] th,
+    .clause-content table[data-ems-paste-source="office"] td,
+    .clause-content table[data-ems-col-widths] th,
+    .clause-content table[data-ems-col-widths] td {
+        box-sizing: border-box !important;
+        line-height: 1.25 !important;
+        vertical-align: top !important;
+        white-space: normal !important;
+        overflow: hidden !important;
+        word-wrap: break-word;
+        overflow-wrap: anywhere;
+    }
+    .clause-content table[data-ems-paste-source="office"] td *,
+    .clause-content table[data-ems-paste-source="office"] th *,
+    .clause-content table[data-ems-col-widths] td *,
+    .clause-content table[data-ems-col-widths] th * {
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+    }
+    .clause-content table[data-ems-paste-source="office"] td p,
+    .clause-content table[data-ems-paste-source="office"] th p,
+    .clause-content table[data-ems-col-widths] td p,
+    .clause-content table[data-ems-col-widths] th p {
+        text-align: inherit;
+        margin-left: 0 !important;
+        text-indent: 0 !important;
     }
     /* EMS auto pricing summary — visible outer border, navy header (overrides generic clause table + inline). */
     .clause-content table#ems-auto-price-summary-table {
@@ -1992,8 +2055,8 @@ const tableStyles = `
     .clause-content table th > * + * {
         margin-top: 0 !important;
     }
-    .clause-content table td > p:empty,
-    .clause-content table th > p:empty {
+    .clause-content table td:not(:focus-within) > p:empty,
+    .clause-content table th:not(:focus-within) > p:empty {
         display: none !important;
     }
     /* EMS auto pricing table: keep the Amount column right-aligned even when the
@@ -2517,7 +2580,20 @@ const QuoteForm = ({ openContext = null }) => {
     );
     const [showEmailModal, setShowEmailModal] = useState(false);
     const [emailSending, setEmailSending] = useState(false);
-    const [emailDetails, setEmailDetails] = useState({ to: '', cc: '', bcc: '', subject: '', body: '', pdfBlob: null, pdfName: '' });
+    const [emailDetails, setEmailDetails] = useState({
+        to: '',
+        cc: '',
+        bcc: '',
+        subject: '',
+        body: '',
+        pdfBlob: null,
+        pdfName: '',
+        extraAttachments: [],
+        extraAttachmentNames: [],
+        isDefault: false,
+        fromEmail: '',
+        fromDisplayName: '',
+    });
     const fileInputRef = useRef(null);
     const [footerDetails, setFooterDetails] = useState(null);
     const [companyProfiles, setCompanyProfiles] = useState([]);
@@ -11084,6 +11160,19 @@ const QuoteForm = ({ openContext = null }) => {
     // Paste Handle
     useEffect(() => {
         const handleGlobalPaste = (e) => {
+            const inClauseEditor = document.activeElement?.closest?.('.clause-editor-wrapper');
+            const clipHtml = e.clipboardData?.getData?.('text/html') || '';
+            const clipPlain = e.clipboardData?.getData?.('text/plain') || '';
+            const hasOfficeTableClip =
+                /<table[\s>]/i.test(clipHtml) ||
+                /schemas-microsoft-com:office|Excel\.Sheet|Word\.Document/i.test(clipHtml) ||
+                clipPlain.includes('\t');
+
+            // Excel/Word table paste in clause editors must stay in the editor, not as attachments/images.
+            if (inClauseEditor && hasOfficeTableClip) {
+                return;
+            }
+
             // Check for files in clipboard
             const items = e.clipboardData?.items;
             const filesToUpload = [];
@@ -11091,6 +11180,7 @@ const QuoteForm = ({ openContext = null }) => {
             if (items) {
                 for (let i = 0; i < items.length; i++) {
                     if (items[i].kind === 'file') {
+                        if (hasOfficeTableClip) continue;
                         const file = items[i].getAsFile();
                         if (file) filesToUpload.push(file);
                     }
@@ -11614,10 +11704,30 @@ const QuoteForm = ({ openContext = null }) => {
             printWindow.document.close();
             printWindow.document.title = docTitle;
             printWindow.focus();
-            setTimeout(() => {
-                printWindow.print();
-                printWindow.close();
-            }, 900);
+            const waitForImagesThenPrint = () => {
+                const doc = printWindow.document;
+                const imgs = [...doc.images];
+                const start = Date.now();
+                const done = () => {
+                    try {
+                        printWindow.print();
+                    } finally {
+                        printWindow.close();
+                    }
+                };
+                const tick = () => {
+                    const allDone = imgs.every((img) => img.complete);
+                    const timedOut = Date.now() - start > 3500;
+                    if (allDone || timedOut) {
+                        done();
+                    } else {
+                        setTimeout(tick, 120);
+                    }
+                };
+                tick();
+            };
+            // Ensure DOM is ready before we query images.
+            setTimeout(waitForImagesThenPrint, 250);
             return true;
         },
         [printWithHeader, quoteNumber, quoteId, tableStyles]
@@ -12166,41 +12276,48 @@ const QuoteForm = ({ openContext = null }) => {
             }
 
             const displayName = String(currentUser?.FullName || currentUser?.name || '').trim();
-
-            const result = await openQuoteSmtpDraft({
-                apiBase: API_BASE,
-                pdfBlob: blob,
-                displayFileName: fileName,
-                userEmail,
-                userDisplayName: displayName,
-                emailFields: {
-                    to: toAddr,
-                    cc: (outlookFields.cc || '').trim(),
-                    bcc: '',
-                    subject: payload.subjectLine || `Quotation - ${enquiryData?.enquiry?.ProjectName || ''}`,
-                    body: initialBody,
-                    extraAttachments: extraAttachmentsBase64,
-                },
-                triggerBlobDownload,
-                blobToBase64,
-            });
-
-            if (!result.ok) {
-                throw new Error(result.error || 'Could not create email draft');
-            }
+            const signatureMobile = String(
+                currentUser?.MobileNumber ||
+                    currentUser?.MobileNo ||
+                    currentUser?.Mobile ||
+                    currentUser?.Phone ||
+                    currentUser?.Phone1 ||
+                    ''
+            ).trim();
+            const signatureEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
+            const signatureLines = [
+                'Regards,',
+                displayName || '',
+                signatureMobile || '',
+                signatureEmail || '',
+            ].filter((s) => String(s || '').trim() !== '');
+            const withSignature =
+                signatureLines.length >= 2
+                    ? `${initialBody}\n\n${signatureLines.join('\n')}`
+                    : initialBody;
 
             const pdfNote = pdfSkippedReason
                 ? '\n\nNote: The PDF could not be attached automatically.\nPlease click "Download PDF" on the Quote tab to save it, then attach it to the Outlook draft.'
                 : '';
 
-            if (!result.openedInOutlook) {
-                alert(
-                    `The draft has been saved. Please open ${result.fileName || 'EMS_QuoteDraft.eml'} from your Downloads folder (double-click) to open the draft in Outlook.` +
-                        pdfNote +
-                        '\n\nTip: For automatic 1-click Outlook drafts, run the `quote-outlook-local-helper.cjs` script on your computer.'
-                );
-            } else if (pdfSkippedReason) {
-                alert('Email draft opened.' + pdfNote);
+            // Web-only draft: open in-app popup with attachments and Send button (IIS-safe).
+            setEmailDetails({
+                to: toAddr,
+                cc: (outlookFields.cc || '').trim(),
+                bcc: '',
+                subject: payload.subjectLine || `Quotation - ${enquiryData?.enquiry?.ProjectName || ''}`,
+                body: withSignature,
+                pdfBlob: blob,
+                pdfName: fileName || 'EMS_QuoteDraft.pdf',
+                extraAttachments: extraAttachmentsBase64,
+                extraAttachmentNames: extraAttachmentFileNames,
+                isDefault: false,
+                fromEmail: userEmail,
+                fromDisplayName: displayName,
+            });
+            setShowEmailModal(true);
+            if (pdfSkippedReason) {
+                alert('Draft opened. Note: PDF could not be attached automatically — please Download PDF and attach manually if needed.');
             }
         } catch (err) {
             console.error('Email preparation failed:', err);
@@ -12211,14 +12328,14 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     const handleSendEmailViaApi = async () => {
-        if (!emailDetails.to || !emailDetails.pdfBlob) {
-            alert('Recipients and PDF attachment are missing.');
+        if (!emailDetails.to) {
+            alert('Recipients are missing.');
             return;
         }
 
         setEmailSending(true);
         try {
-            const pdfBase64 = await blobToBase64(emailDetails.pdfBlob);
+            const pdfBase64 = emailDetails.pdfBlob ? await blobToBase64(emailDetails.pdfBlob) : '';
             
             const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
             const res = await fetch(`${API_BASE}/api/quotes/send-email`, {
@@ -12234,6 +12351,7 @@ const QuoteForm = ({ openContext = null }) => {
                     body: emailDetails.body.replace(/\n/g, '<br>'), // Convert newlines to HTML
                     attachmentName: emailDetails.pdfName,
                     pdfBase64,
+                    extraAttachments: emailDetails.extraAttachments || [],
                     reqNo: enquiryData?.enquiry?.RequestNo
                 })
             });
@@ -12254,57 +12372,11 @@ const QuoteForm = ({ openContext = null }) => {
     };
 
     const handleOpenInOutlook = async () => {
-        if (!emailDetails.pdfBlob && serverPdfEnabled) {
-            alert('The quote PDF is not available. Close this dialog and try again.');
-            return;
-        }
-        setEmailSending(true);
-        try {
-            const isInternal = isQuoteInternalCustomer(enquiryData, pricingData?.jobs, toName);
-            const userEmail = (currentUser?.EmailId || currentUser?.email || '').trim();
-            const outlookFields = await fetchQuoteOutlookEmailFields(API_BASE, {
-                userEmail,
-                toName: toName || '',
-                toAttention: toAttention || '',
-                requestNo: enquiryData?.enquiry?.RequestNo || '',
-                isInternal,
-            });
-            let toAddr = (emailDetails.to || outlookFields.to || '').trim();
-            if (!toAddr) toAddr = resolveAttentionPersonEmailClient(isInternal);
-            const bodyNoSig = String(emailDetails.body || '')
-                .replace(/\n*Best Regards,?\s*\n[\s\S]*$/i, '')
-                .trimEnd();
-
-            const result = await openQuoteSmtpDraft({
-                apiBase: API_BASE,
-                pdfBlob: emailDetails.pdfBlob,
-                displayFileName: emailDetails.pdfName,
-                userEmail,
-                userDisplayName: String(currentUser?.FullName || currentUser?.name || '').trim(),
-                emailFields: {
-                    to: toAddr,
-                    cc: (emailDetails.cc || outlookFields.cc || '').trim(),
-                    bcc: emailDetails.bcc || '',
-                    subject: emailDetails.subject || '',
-                    body: bodyNoSig,
-                },
-                triggerBlobDownload,
-                blobToBase64,
-            });
-            if (!result.ok) {
-                throw new Error(result.error || 'Could not create email draft');
-            }
-            if (!result.openedInOutlook) {
-                alert(
-                    `Open ${result.fileName || 'EMS_QuoteDraft.eml'} from Downloads to open the draft in Outlook (From: ${userEmail}).`
-                );
-            }
-            setShowEmailModal(false);
-        } catch (e) {
-            alert(`Could not create email draft: ${e.message || e}`);
-        } finally {
-            setEmailSending(false);
-        }
+        const href = buildMailtoHrefFromEmailModal();
+        if (!href) return;
+        openMailtoFromUserClick(href);
+        // Let user attach files manually; websites cannot attach via mailto.
+        void runQuoteEmailDownloads();
     };
 
     const blobToBase64 = (blob) => {
@@ -17389,6 +17461,28 @@ const QuoteForm = ({ openContext = null }) => {
                                                 />
                                             </div>
                                 </div>
+                                <div className="row mb-4">
+                                    <div className="col-md-6">
+                                        <label className="form-label fw-bold text-muted small text-uppercase">CC</label>
+                                        <input
+                                            type="text"
+                                            className="form-control"
+                                            placeholder="cc@example.com"
+                                            value={emailDetails.cc}
+                                            onChange={(e) => setEmailDetails({ ...emailDetails, cc: e.target.value })}
+                                        />
+                                    </div>
+                                    <div className="col-md-6">
+                                        <label className="form-label fw-bold text-muted small text-uppercase">BCC</label>
+                                        <input
+                                            type="text"
+                                            className="form-control"
+                                            placeholder="bcc@example.com"
+                                            value={emailDetails.bcc}
+                                            onChange={(e) => setEmailDetails({ ...emailDetails, bcc: e.target.value })}
+                                        />
+                                    </div>
+                                </div>
                                 <div className="mb-4">
                                     <label className="form-label fw-bold text-muted small text-uppercase">Subject</label>
                                     <div className="input-group">
@@ -17427,6 +17521,12 @@ const QuoteForm = ({ openContext = null }) => {
                                                 {emailDetails.pdfName}
                                             </div>
                                         ) : null}
+                                        {Array.isArray(emailDetails.extraAttachmentNames) &&
+                                        emailDetails.extraAttachmentNames.length ? (
+                                            <div className="text-muted small">
+                                                + {emailDetails.extraAttachmentNames.length} attachment(s)
+                                            </div>
+                                        ) : null}
                                     </div>
                                     <button
                                         type="button"
@@ -17440,17 +17540,6 @@ const QuoteForm = ({ openContext = null }) => {
                                 </div>
                             </div>
                             <div className="modal-footer bg-light border-0 px-4 pb-4">
-                                <button
-                                    type="button"
-                                    className="btn btn-outline-secondary me-auto"
-                                    onClick={handleOpenInOutlook}
-                                    disabled={emailSending}
-                                    title="Download .eml draft (From = your login email) and open in Outlook — PDF attached."
-                                >
-                                    <i className="bi bi-microsoft me-2"></i>
-                                    Open draft in Outlook
-                                </button>
-                                
                                 <button
                                     type="button"
                                     className="btn btn-light"
