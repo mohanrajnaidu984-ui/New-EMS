@@ -15,7 +15,17 @@ import {
     isTableStructureResizeActive,
     registerClauseEditorTableHooks,
     EMS_TABLE_REPEAT_HEADER_CONTROL,
+    EMS_TABLE_VALIGN_CONTROL,
 } from './clauseEditorTable';
+import {
+    EMS_FORECOLOR_CONTROL,
+    EMS_BACKGROUND_CONTROL,
+    EMS_BRUSH_CONTROL_HIDDEN,
+} from './clauseEditorColorControls';
+import {
+    EMS_CLAUSE_EDITOR_FONT_STACK,
+    EMS_CLAUSE_EDITOR_FONT_LIST,
+} from './clauseEditorFontPresets';
 
 /**
  * Excel / Word pastes inflate table row heights because they ship:
@@ -689,16 +699,24 @@ const ClauseEditor = ({ html, onChange, style }) => {
         buttons: [
             'undo', 'redo', '|',
             'bold', 'italic', 'underline', 'strikethrough', '|',
-            'brush', 'font', 'fontsize', 'paragraph', '|',
+            'emsForeColor', 'emsBackground', 'font', 'fontsize', 'paragraph', '|',
             'ul', 'ol', 'indent', 'outdent', '|',
             'image', 'table', 'emsRepeatHeader', 'link', '|',
-            'left', 'center', 'right', 'justify', '|',
+            'left', 'center', 'right', 'justify', 'emsValign', '|',
             'hr', 'eraser', 'fullsize'
         ],
         controls: {
             ul: EMS_UL_TOOLBAR_CONTROL,
             ol: EMS_OL_TOOLBAR_CONTROL,
             emsRepeatHeader: EMS_TABLE_REPEAT_HEADER_CONTROL,
+            emsValign: EMS_TABLE_VALIGN_CONTROL,
+            emsForeColor: EMS_FORECOLOR_CONTROL,
+            emsBackground: EMS_BACKGROUND_CONTROL,
+            brush: EMS_BRUSH_CONTROL_HIDDEN,
+            font: {
+                list: EMS_CLAUSE_EDITOR_FONT_LIST,
+                tooltip: 'Font family',
+            },
         },
         showCharsCounter: false,
         showWordsCounter: false,
@@ -807,7 +825,7 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 jodit.e.on('afterCommand.emsClausePreview', (command) => {
                     const cmd = String(command || '').toLowerCase();
                     if (
-                        /^(forecolor|background|bold|italic|underline|strikethrough|brush|justify)/.test(
+                        /^(forecolor|background|bold|italic|underline|strikethrough|brush|justify|emstablevalign)/.test(
                             cmd
                         )
                     ) {
@@ -917,55 +935,124 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     gap: 0 !important;
                     margin: 0 !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button {
+                /* Compact sizing — main toolbar only (not popups / dropdown lists). */
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button {
                     width: 22px !important;
                     height: 22px !important;
                     min-width: 22px !important;
                     margin: 0 1px !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button__button {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__button {
                     width: 22px !important;
                     height: 22px !important;
                     min-height: 22px !important;
                     padding: 0 !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button__icon,
-                .clause-editor-wrapper .jodit-toolbar-button__icon svg {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__icon,
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__icon svg {
                     width: 13px !important;
                     height: 13px !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button__text {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__text {
                     font-size: 10px !important;
                     line-height: 1 !important;
                 }
+                /* Text color toolbar icon (A + underline). */
+                .clause-editor-wrapper .ems-toolbar-forecolor-icon {
+                    display: inline-block;
+                    font-weight: 700;
+                    font-size: 13px;
+                    line-height: 1;
+                    position: relative;
+                    width: 12px;
+                    text-align: center;
+                    color: #334155;
+                    padding-bottom: 4px;
+                }
+                .clause-editor-wrapper .ems-toolbar-forecolor-icon::after {
+                    content: '';
+                    position: absolute;
+                    left: -1px;
+                    right: -1px;
+                    bottom: 0;
+                    height: 3px;
+                    background: #dc2626;
+                    border-radius: 1px;
+                }
                 /* Split buttons need room for the dropdown chevron (22px width was clipping it). */
-                .clause-editor-wrapper .jodit-toolbar-button_with-trigger_true {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button_with-trigger_true {
                     width: auto !important;
                     min-width: 28px !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button_with-trigger_true .jodit-toolbar-button__button {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button_with-trigger_true .jodit-toolbar-button__button {
                     width: 18px !important;
                     min-width: 18px !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-select {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-select {
                     height: 22px !important;
                     min-width: auto !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button__trigger,
-                .clause-editor-wrapper .jodit-toolbar-select__trigger {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__trigger,
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-select__trigger {
                     opacity: 0.9 !important;
                     flex-shrink: 0;
                     width: 10px !important;
                     min-width: 10px !important;
                     color: #334155;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button__trigger svg,
-                .clause-editor-wrapper .jodit-toolbar-select__trigger svg {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__trigger svg,
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-select__trigger svg {
                     width: 8px !important;
                     height: 8px !important;
                     fill: #334155 !important;
                     stroke: #334155 !important;
                     opacity: 1 !important;
+                }
+                /* Table right-click popup, toolbar dropdowns (delete row, valign, colors, etc.). */
+                .clause-editor-wrapper .jodit-popup__content {
+                    min-width: 168px;
+                    padding: 4px 0 !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button,
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button__button,
+                .clause-editor-wrapper .jodit-popup .jodit-ui-button,
+                .clause-editor-wrapper .jodit-popup .jodit-ui-button button {
+                    width: auto !important;
+                    min-width: 0 !important;
+                    max-width: none !important;
+                    height: auto !important;
+                    min-height: 30px !important;
+                    margin: 0 !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button__text,
+                .clause-editor-wrapper .jodit-popup .jodit-ui-button-icon-text__text {
+                    display: inline-flex !important;
+                    font-size: 13px !important;
+                    line-height: 1.35 !important;
+                    white-space: nowrap !important;
+                    overflow: visible !important;
+                    text-overflow: clip !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button_with-trigger_true {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button_with-trigger_true .jodit-toolbar-button__button {
+                    width: auto !important;
+                    min-width: 0 !important;
+                    flex: 1 1 auto !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-editor-collection_mode_vertical,
+                .clause-editor-wrapper .jodit-popup .jodit-ui-group_line_true {
+                    flex-direction: column !important;
+                    align-items: stretch !important;
+                    width: 100% !important;
+                    min-width: 168px !important;
+                }
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-editor-collection_mode_vertical .jodit-toolbar-button,
+                .clause-editor-wrapper .jodit-popup .jodit-ui-group_line_true .jodit-ui-button {
+                    width: 100% !important;
+                    justify-content: flex-start !important;
                 }
                 .clause-editor-wrapper .jodit-workplace {
                     overflow: auto !important;
@@ -985,9 +1072,9 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     pointer-events: none !important;
                 }
                 /* Column resize cursor only on the drag handle — not the whole cell. */
-                .clause-editor-wrapper .ems-table-col-resizer {
+                .ems-table-col-resizer {
                     position: fixed;
-                    z-index: 10000;
+                    z-index: 10000006;
                     width: 10px;
                     margin-left: -5px;
                     cursor: col-resize !important;
@@ -995,14 +1082,14 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     display: block !important;
                     background: rgba(30, 136, 229, 0.12);
                 }
-                .clause-editor-wrapper .ems-table-col-resizer:hover,
-                .clause-editor-wrapper .ems-table-col-resizer_moved {
+                .ems-table-col-resizer:hover,
+                .ems-table-col-resizer_moved {
                     background-color: rgba(30, 136, 229, 0.35);
                 }
                 /* Row resize (EMS) — horizontal grab at bottom of row. */
-                .clause-editor-wrapper .ems-table-row-resizer {
+                .ems-table-row-resizer {
                     position: fixed;
-                    z-index: 10000;
+                    z-index: 10000006;
                     height: 8px;
                     margin-top: -4px;
                     cursor: row-resize !important;
@@ -1010,8 +1097,8 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     display: block !important;
                     background: rgba(30, 136, 229, 0.12);
                 }
-                .clause-editor-wrapper .ems-table-row-resizer:hover,
-                .clause-editor-wrapper .ems-table-row-resizer_moved {
+                .ems-table-row-resizer:hover,
+                .ems-table-row-resizer_moved {
                     background-color: rgba(30, 136, 229, 0.35);
                 }
                 .clause-editor-wrapper .jodit-workplace {
@@ -1028,6 +1115,16 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg td,
                 .clause-editor-wrapper .jodit-wysiwyg th {
                     outline: none;
+                }
+                /* Block cell selection (Word-style) — avoid fighting text highlight while dragging. */
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-cell-selecting="1"] {
+                    user-select: none;
+                    -webkit-user-select: none;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-cell-selecting="1"] td.jodit-table__selected-cell,
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-cell-selecting="1"] th.jodit-table__selected-cell {
+                    user-select: none;
+                    -webkit-user-select: none;
                 }
                 /* Visible text caret while typing (including dark header cells). */
                 .clause-editor-wrapper .jodit-wysiwyg,
@@ -1050,6 +1147,7 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 }
                 /* Left editor only: tight rhythm (~half cursor between paragraphs). */
                 .clause-editor-wrapper .jodit-wysiwyg {
+                    font-family: ${EMS_CLAUSE_EDITOR_FONT_STACK} !important;
                     line-height: 1.25 !important;
                     padding: 6px 8px !important;
                     box-sizing: border-box !important;
@@ -1068,8 +1166,10 @@ const ClauseEditor = ({ html, onChange, style }) => {
                 .clause-editor-wrapper .jodit-wysiwyg th {
                     cursor: auto !important;
                 }
-                .clause-editor-wrapper .jodit-toolbar-button,
-                .clause-editor-wrapper .jodit-toolbar-button__button {
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button,
+                .clause-editor-wrapper .jodit-toolbar__box .jodit-toolbar-button__button,
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button,
+                .clause-editor-wrapper .jodit-popup .jodit-toolbar-button__button {
                     cursor: pointer !important;
                 }
                 /* Top-level blocks share the same left edge as typed text (not flush to the box border). */
@@ -1178,15 +1278,27 @@ const ClauseEditor = ({ html, onChange, style }) => {
                     margin-top: 4px !important;
                     margin-bottom: 4px !important;
                 }
+                .clause-editor-wrapper .jodit-wysiwyg table td[data-ems-valign="top"],
+                .clause-editor-wrapper .jodit-wysiwyg table th[data-ems-valign="top"] {
+                    vertical-align: top !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table td[data-ems-valign="middle"],
+                .clause-editor-wrapper .jodit-wysiwyg table th[data-ems-valign="middle"] {
+                    vertical-align: middle !important;
+                }
+                .clause-editor-wrapper .jodit-wysiwyg table td[data-ems-valign="bottom"],
+                .clause-editor-wrapper .jodit-wysiwyg table th[data-ems-valign="bottom"] {
+                    vertical-align: bottom !important;
+                }
                 .clause-editor-wrapper .jodit-wysiwyg table:not([data-ems-paste-source="office"]) tr,
-                .clause-editor-wrapper .jodit-wysiwyg table:not([data-ems-paste-source="office"]) td,
-                .clause-editor-wrapper .jodit-wysiwyg table:not([data-ems-paste-source="office"]) th {
+                .clause-editor-wrapper .jodit-wysiwyg table:not([data-ems-paste-source="office"]) td:not([data-ems-valign]),
+                .clause-editor-wrapper .jodit-wysiwyg table:not([data-ems-paste-source="office"]) th:not([data-ems-valign]) {
                     line-height: 1.25 !important;
                     vertical-align: middle !important;
                     box-sizing: border-box !important;
                 }
-                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-paste-source="office"] td,
-                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-paste-source="office"] th {
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-paste-source="office"] td:not([data-ems-valign]),
+                .clause-editor-wrapper .jodit-wysiwyg table[data-ems-paste-source="office"] th:not([data-ems-valign]) {
                     box-sizing: border-box !important;
                     vertical-align: top !important;
                     white-space: normal !important;

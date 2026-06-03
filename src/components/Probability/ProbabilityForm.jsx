@@ -351,6 +351,10 @@ const ProbabilityForm = () => {
         }
     };
 
+    /** At least one quote in scope for this enquiry (division-filtered QuoteRefs from API). */
+    const enquiryHasGeneratedQuotes = (item) =>
+        Array.isArray(item?.QuoteRefs) && item.QuoteRefs.length > 0;
+
     /** Label next to project name: from WonCustomerName or the selected row in QuoteRefs (ToName). */
     const customerNameForQuoteRef = (item) => {
         const ref = String(item?.WonQuoteRef || '').trim();
@@ -1151,9 +1155,8 @@ const ProbabilityForm = () => {
                                     />
                                 </div>
 
-                                {/* Date Filters (Not for Pending) */}
-                                {listMode !== 'Pending' && listMode !== 'FollowUp' && (
-                                    <>
+                                {/* Date filters — field depends on view mode (quote date for Pending, P.* for others) */}
+                                <>
                                         <div style={{ width: '142px', flex: '0 0 auto' }} className="d-flex flex-column">
                                             <label className="small text-muted fw-normal mb-0 d-block">From</label>
                                             <div className="prob-date-picker-wrap">
@@ -1194,6 +1197,7 @@ const ProbabilityForm = () => {
                                                 <span className="prob-date-input-icon" aria-hidden="true" />
                                             </div>
                                         </div>
+                                        {listMode !== 'Pending' && listMode !== 'FollowUp' && (
                                         <div
                                             className="align-self-end"
                                             style={{
@@ -1261,8 +1265,8 @@ const ProbabilityForm = () => {
                                                 </span>
                                             </div>
                                         </div>
-                                    </>
-                                )}
+                                        )}
+                                </>
 
                                 {/* FollowUp Probability Filter */}
                                 {listMode === 'FollowUp' && (
@@ -1333,7 +1337,7 @@ const ProbabilityForm = () => {
                                         </tr>
                                         <tr className="prob-thead-labels">
                                             <th className="px-2 py-1 align-bottom fw-normal" style={{ width: '50px', textAlign: 'left' }}>SL</th>
-                                            <th className="px-2 py-1 align-bottom fw-normal" style={{ width: '72px', textAlign: 'left' }}>Update</th>
+                                            <th className="px-2 py-1 align-bottom fw-normal" style={{ minWidth: '108px', textAlign: 'left' }}>Update</th>
                                             <th
                                                 ref={(el) => {
                                                     filterHeaderRefs.current.enquiry = el;
@@ -1511,7 +1515,22 @@ const ProbabilityForm = () => {
                                                         {index + 1}
                                                     </td>
                                                     <td className="px-2 py-1 prob-td text-center">
-                                                        {(() => {
+                                                        <div className="d-flex flex-column align-items-center gap-1">
+                                                            {item.UpdatedDateTime ? (
+                                                                <span
+                                                                    className="text-muted"
+                                                                    style={{
+                                                                        fontSize: '9px',
+                                                                        lineHeight: 1.15,
+                                                                        whiteSpace: 'nowrap',
+                                                                        fontWeight: 500,
+                                                                    }}
+                                                                    title="Latest probability update"
+                                                                >
+                                                                    {formatHistoryDateTime(item.UpdatedDateTime)}
+                                                                </span>
+                                                            ) : null}
+                                                            {(() => {
                                                             const isUpdating = updatingReqNo === item.RequestNo;
                                                             const isSaved = !!updatedItems[item.RequestNo];
                                                             const hasChanges = hasItemChanges(item);
@@ -1551,6 +1570,7 @@ const ProbabilityForm = () => {
                                                             // No changes and not just-saved: hide the button entirely so it only appears on edit.
                                                             return <span className="text-muted" style={{ fontSize: '11px' }}>—</span>;
                                                         })()}
+                                                        </div>
                                                     </td>
                                                     <td className="px-2 pt-1 pb-2 font-medium text-primary prob-td">
                                                         <div className="d-flex align-items-center gap-2">
@@ -1591,7 +1611,9 @@ const ProbabilityForm = () => {
                                                             onChange={(e) => handleStatusChange(item, e.target.value)}
                                                             onClick={(e) => e.stopPropagation()}
                                                         >
-                                                            <option value="Pending">Pending</option>
+                                                            {enquiryHasGeneratedQuotes(item) ? (
+                                                                <option value="Pending">Pending</option>
+                                                            ) : null}
                                                             <option value="FollowUp">Follow Up</option>
                                                             <option value="Won">Won</option>
                                                             <option value="Lost">Lost</option>

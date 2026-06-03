@@ -122,9 +122,12 @@ export function syncCoverLetterGapBeforePdfCapture(letterEl) {
     }
 }
 
-export function captureQuotePrintRootInnerHtmlForPdf(rootEl) {
+const QUOTE_LOGO_IMG_SELECTOR =
+    '.quote-sheet-logo-row img, .quote-continuation-header img, .quote-print-repeat-strip img';
+
+function cloneQuotePrintRootForExport(rootEl) {
     const root = rootEl || (typeof document !== 'undefined' ? document.getElementById('quote-print-root') : null);
-    if (!root) return '';
+    if (!root) return null;
     const clone = root.cloneNode(true);
     const removeSel = ['.quote-clause-measure-host', '.quote-print-footer-rule'];
     for (const sel of removeSel) {
@@ -132,6 +135,104 @@ export function captureQuotePrintRootInnerHtmlForPdf(rootEl) {
     }
     /** Strip only the duplicate fixed-header strip outside sheets — keep per-sheet logos inside `.quote-a4-sheet`. */
     clone.querySelectorAll(':scope > .quote-print-repeat-strip').forEach((n) => n.remove());
+    return clone;
+}
+
+function imgElementToDataUrl(img) {
+    if (!img || !img.complete || !img.naturalWidth) return null;
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.drawImage(img, 0, 0);
+        return canvas.toDataURL('image/png');
+    } catch {
+        return null;
+    }
+}
+
+async function fetchImageAsDataUrl(url) {
+    const res = await fetch(url, { credentials: 'include', cache: 'force-cache' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function resolveQuoteLogoDataUrl(liveImg, src) {
+    const raw = String(src || '').trim();
+    if (!raw) return null;
+    if (/^data:/i.test(raw)) return raw;
+    const fromCanvas = liveImg ? imgElementToDataUrl(liveImg) : null;
+    if (fromCanvas) return fromCanvas;
+    try {
+        return await fetchImageAsDataUrl(raw);
+    } catch {
+        return null;
+    }
+}
+
+function waitForQuoteLogoImages(root, timeoutMs = 4000) {
+    if (!root) return Promise.resolve();
+    const imgs = [...root.querySelectorAll(QUOTE_LOGO_IMG_SELECTOR)];
+    if (!imgs.length) return Promise.resolve();
+    return Promise.all(
+        imgs.map(
+            (img) =>
+                new Promise((resolve) => {
+                    if (img.complete) {
+                        resolve();
+                        return;
+                    }
+                    const done = () => resolve();
+                    img.addEventListener('load', done, { once: true });
+                    img.addEventListener('error', done, { once: true });
+                    setTimeout(done, timeoutMs);
+                })
+        )
+    );
+}
+
+/** Embed header logos as data URLs so print/PDF match on-screen preview (no broken /uploads across hosts). */
+export async function embedQuoteLogoImagesInClone(cloneRoot, liveRoot) {
+    if (!cloneRoot) return;
+    const liveImgs = liveRoot ? [...liveRoot.querySelectorAll(QUOTE_LOGO_IMG_SELECTOR)] : [];
+    const cloneImgs = [...cloneRoot.querySelectorAll(QUOTE_LOGO_IMG_SELECTOR)];
+    await Promise.all(
+        cloneImgs.map(async (cloneImg, index) => {
+            const liveImg = liveImgs[index];
+            const src = String(
+                liveImg?.currentSrc || liveImg?.src || cloneImg.getAttribute('src') || ''
+            ).trim();
+            if (!src || /^data:/i.test(src)) return;
+            const dataUrl = await resolveQuoteLogoDataUrl(liveImg, src);
+            if (dataUrl) {
+                cloneImg.setAttribute('src', dataUrl);
+                cloneImg.removeAttribute('srcset');
+            }
+        })
+    );
+}
+
+export function captureQuotePrintRootInnerHtmlForPdf(rootEl) {
+    const clone = cloneQuotePrintRootForExport(rootEl);
+    return clone ? clone.innerHTML : '';
+}
+
+/** Preferred capture for print popup and server PDF — inlines logos from the live preview. */
+export async function captureQuotePrintRootInnerHtmlForPdfAsync(rootEl) {
+    const root = rootEl || (typeof document !== 'undefined' ? document.getElementById('quote-print-root') : null);
+    if (!root) return '';
+    await waitForQuoteLogoImages(root);
+    const clone = cloneQuotePrintRootForExport(root);
+    if (!clone) return '';
+    await embedQuoteLogoImagesInClone(clone, root);
     return clone.innerHTML;
 }
 
@@ -156,6 +257,7 @@ function normalizePdfStaticAssets(html, apiOrigin, rewriteFromOrigin) {
         out = out.replace(new RegExp(esc, 'gi'), api);
     }
     out = out.replace(/(\ssrc=["'])(\/uploads\/[^"']+)(["'])/gi, (_, q1, path, q2) => `${q1}${api}${path}${q2}`);
+    out = out.replace(/(\ssrc=["'])uploads\/([^"']+)(["'])/gi, (_, q1, rest, q2) => `${q1}${api}/uploads/${rest}${q2}`);
     out = out.replace(/(url\(["']?)(\/uploads\/[^)"']+)(["']?\))/gi, (_, a, path, b) => `${a}${api}${path}${b}`);
     return out;
 }
@@ -877,8 +979,20 @@ html[data-preview-pdf="1"] .clause-content table[data-ems-table-split] + table[d
 html[data-preview-pdf="1"] .clause-content table[data-ems-table-split] + table[data-ems-table-split] thead {
     display: none !important;
 }
-html[data-preview-pdf="1"] .clause-content table th,
-html[data-preview-pdf="1"] .clause-content table td {
+html[data-preview-pdf="1"] .clause-content table td[data-ems-valign="top"],
+html[data-preview-pdf="1"] .clause-content table th[data-ems-valign="top"] {
+    vertical-align: top !important;
+}
+html[data-preview-pdf="1"] .clause-content table td[data-ems-valign="middle"],
+html[data-preview-pdf="1"] .clause-content table th[data-ems-valign="middle"] {
+    vertical-align: middle !important;
+}
+html[data-preview-pdf="1"] .clause-content table td[data-ems-valign="bottom"],
+html[data-preview-pdf="1"] .clause-content table th[data-ems-valign="bottom"] {
+    vertical-align: bottom !important;
+}
+html[data-preview-pdf="1"] .clause-content table th:not([data-ems-valign]),
+html[data-preview-pdf="1"] .clause-content table td:not([data-ems-valign]) {
     vertical-align: top !important;
     word-wrap: break-word !important;
     overflow-wrap: anywhere !important;

@@ -2997,6 +2997,7 @@ const EnquiryForm = ({ requestNoToOpen }) => {
                                         mode={modalMode}
                                         initialData={editData}
                                         onSubmit={handleContactSubmit}
+                                        companyNameReadOnly
                                     />
                                     <UserModal
                                         show={showUserModal}

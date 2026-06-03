@@ -141,6 +141,51 @@ function quoteYmdFromDetailLine(ln) {
     return parseQuoteYmdFromDetailTextLine(ln?.textLine);
 }
 
+function quoteRawDateToMs(raw) {
+    if (raw == null || raw === '') return NaN;
+    const dt = raw instanceof Date ? raw : new Date(raw);
+    const t = dt.getTime();
+    return Number.isFinite(t) ? t : NaN;
+}
+
+function ymdStringToMs(ymd) {
+    if (!ymd) return NaN;
+    const parts = String(ymd).split('-').map(Number);
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return NaN;
+    const t = new Date(parts[0], parts[1] - 1, parts[2]).getTime();
+    return Number.isFinite(t) ? t : NaN;
+}
+
+function quoteLineToMs(ln) {
+    const direct = quoteRawDateToMs(ln?.quoteDate ?? ln?.QuoteDate);
+    if (Number.isFinite(direct)) return direct;
+    return ymdStringToMs(quoteYmdFromDetailLine(ln));
+}
+
+/** Latest quote date on a row (max of all quote lines shown in the details column). */
+export function getLatestQuoteDateMs(enq) {
+    if (!enq) return NaN;
+    let max = NaN;
+    const bump = (ms) => {
+        if (!Number.isFinite(ms)) return;
+        max = Number.isFinite(max) ? Math.max(max, ms) : ms;
+    };
+    if (Array.isArray(enq.ListQuoteDetailLines) && enq.ListQuoteDetailLines.length > 0) {
+        for (const ln of enq.ListQuoteDetailLines) bump(quoteLineToMs(ln));
+        return max;
+    }
+    if (Array.isArray(enq.ListMultiLeadQuoteRefs) && enq.ListMultiLeadQuoteRefs.length > 0) {
+        for (const line of enq.ListMultiLeadQuoteRefs) {
+            bump(quoteRawDateToMs(line.quoteDate ?? line.QuoteDate));
+        }
+        return max;
+    }
+    if (String(enq.ListQuoteRef || '').trim()) {
+        bump(quoteRawDateToMs(enq.ListQuoteDate));
+    }
+    return max;
+}
+
 function quoteYmdInScope(ymd, scope) {
     if (!ymd || !scope) return false;
     if (scope.day) return ymd === scope.day;
@@ -170,6 +215,8 @@ function countQuoteLinesInRowForScope(enq, scope) {
 /**
  * Quote module summary grid (Quote list + Dashboard quote-date popup).
  */
+const DEFAULT_QUOTE_LIST_SORT = { field: 'DueDate', direction: 'asc' };
+
 export default function DashboardQuoteSummaryTable({
     rows,
     onOpenEnquiry,
@@ -178,13 +225,43 @@ export default function DashboardQuoteSummaryTable({
     calendarAlignedQuoteTotal = null,
     onRegisterClearColumnFilters,
     onFilterStateChange,
+    defaultSortConfig = null,
+    resetSortOnRowsChange = false,
 }) {
-    const [sortConfig, setSortConfig] = useState({ field: 'DueDate', direction: 'asc' });
+    const initialSort = defaultSortConfig || DEFAULT_QUOTE_LIST_SORT;
+    const [sortConfig, setSortConfig] = useState(initialSort);
+
+    useEffect(() => {
+        if (defaultSortConfig) {
+            if (resetSortOnRowsChange) {
+                setSortConfig(defaultSortConfig);
+            }
+        } else {
+            setSortConfig(DEFAULT_QUOTE_LIST_SORT);
+        }
+    }, [
+        rows,
+        resetSortOnRowsChange,
+        defaultSortConfig?.field,
+        defaultSortConfig?.direction,
+    ]);
 
     const sortedRows = useMemo(() => {
         const list = Array.isArray(rows) ? [...rows] : [];
         const { field, direction } = sortConfig;
         list.sort((a, b) => {
+            if (field === 'LatestQuoteDate') {
+                const aMs = getLatestQuoteDateMs(a);
+                const bMs = getLatestQuoteDateMs(b);
+                const aOk = Number.isFinite(aMs);
+                const bOk = Number.isFinite(bMs);
+                if (!aOk && !bOk) return 0;
+                if (!aOk) return 1;
+                if (!bOk) return -1;
+                if (aMs < bMs) return direction === 'asc' ? -1 : 1;
+                if (aMs > bMs) return direction === 'asc' ? 1 : -1;
+                return 0;
+            }
             let aVal = a[field];
             let bVal = b[field];
             if (field === 'DueDate' || field === 'EnquiryDate' || field === 'ListQuoteDate') {
@@ -378,9 +455,10 @@ export default function DashboardQuoteSummaryTable({
                             <TableColumnFilterHeader
                                 colKey="listQuoteDetails"
                                 label="To Customer and Quote details"
-                                sortField="ListQuoteRef"
+                                sortField="LatestQuoteDate"
                                 sortConfig={sortConfig}
                                 onSort={handleSort}
+                                initialDirection="desc"
                                 filterCtx={colFilters}
                                 thStyle={{
                                     ...pricingListThBase,

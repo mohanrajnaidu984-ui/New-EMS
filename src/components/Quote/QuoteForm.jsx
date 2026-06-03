@@ -79,7 +79,7 @@ import { enquiryType as defaultEnquiryTypeOptions } from '../../data/mockData';
 import {
     applyEqualCoverGaps,
     buildQuotePrintDocumentHtml,
-    captureQuotePrintRootInnerHtmlForPdf,
+    captureQuotePrintRootInnerHtmlForPdfAsync,
     COVER_LETTER_PAD_BOTTOM_BASE_PX,
     syncCoverLetterGapBeforePdfCapture,
 } from './quotePrintDocumentHtml';
@@ -1963,8 +1963,20 @@ const tableStyles = `
     .clause-content thead {
         display: table-header-group !important;
     }
-    .clause-content table:not([data-ems-paste-source="office"]) th,
-    .clause-content table:not([data-ems-paste-source="office"]) td {
+    .clause-content table td[data-ems-valign="top"],
+    .clause-content table th[data-ems-valign="top"] {
+        vertical-align: top !important;
+    }
+    .clause-content table td[data-ems-valign="middle"],
+    .clause-content table th[data-ems-valign="middle"] {
+        vertical-align: middle !important;
+    }
+    .clause-content table td[data-ems-valign="bottom"],
+    .clause-content table th[data-ems-valign="bottom"] {
+        vertical-align: bottom !important;
+    }
+    .clause-content table:not([data-ems-paste-source="office"]) th:not([data-ems-valign]),
+    .clause-content table:not([data-ems-paste-source="office"]) td:not([data-ems-valign]) {
         border: 1px solid #64748b !important;
         /* Do not set text-align here — mirror editor/Word inline styles and align attributes. */
         padding: 4px 6px;
@@ -1977,10 +1989,10 @@ const tableStyles = `
         background-color: #f8fafc !important;
         font-weight: 600 !important;
     }
-    .clause-content table[data-ems-paste-source="office"] th,
-    .clause-content table[data-ems-paste-source="office"] td,
-    .clause-content table[data-ems-col-widths] th,
-    .clause-content table[data-ems-col-widths] td {
+    .clause-content table[data-ems-paste-source="office"] th:not([data-ems-valign]),
+    .clause-content table[data-ems-paste-source="office"] td:not([data-ems-valign]),
+    .clause-content table[data-ems-col-widths] th:not([data-ems-valign]),
+    .clause-content table[data-ems-col-widths] td:not([data-ems-valign]) {
         box-sizing: border-box !important;
         line-height: 1.25 !important;
         vertical-align: top !important;
@@ -10030,10 +10042,12 @@ const QuoteForm = ({ openContext = null }) => {
     // NEW: Auto-load latest revision for selected customer and lead job
 
 
-    const handleSelectEnquiry = async (enq) => {
+    const handleSelectEnquiry = async (enq, options = {}) => {
+        const enquiryOnlyFromList = Boolean(options?.enquiryOnlyFromList);
         const loadSeq = ++quoteEnquiryLoadSeqRef.current;
         let enquiryLoadSucceeded = false;
-        setSearchTerm(enq.RequestNo);
+        const requestNo = String(enq?.RequestNo ?? enq ?? '').trim();
+        setSearchTerm(requestNo);
         setSuggestions([]);
         setShowSuggestions(false);
         setLoading(true);
@@ -10082,14 +10096,14 @@ const QuoteForm = ({ openContext = null }) => {
                 ? `&division=${encodeURIComponent(quoteListDivision.trim())}`
                 : '';
             const res = await fetch(
-                `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(enq.RequestNo)}?userEmail=${encodeURIComponent(userEmail)}${divQ}`,
+                `${API_BASE}/api/quotes/enquiry-data/${encodeURIComponent(requestNo)}?userEmail=${encodeURIComponent(userEmail)}${divQ}`,
                 { cache: 'no-store' }
             );
             if (loadSeq !== quoteEnquiryLoadSeqRef.current) return;
             if (res.ok) {
                 const data = await res.json();
                 if (loadSeq !== quoteEnquiryLoadSeqRef.current) return;
-                fetchExistingQuotes(enq.RequestNo);
+                fetchExistingQuotes(requestNo);
 
                 setQuoteNumber(data.quoteNumber);
                 setQuoteId(null); // New quote
@@ -10203,108 +10217,116 @@ const QuoteForm = ({ openContext = null }) => {
                     }
                 }
 
-                // 3a. Auto-Select Lead Job.
-                // STRICT: when Division dropdown is selected, pick the lead branch that contains that division.
-                console.log('[QuoteForm] Auto-Select Lead Job - divisions:', data.divisions);
-                console.log('[QuoteForm] Auto-Select Lead Job - divisionsHierarchy:', data.divisionsHierarchy);
-
+                // 3a. Auto-Select Lead Job (skipped for pending/search list row — user picks lead manually).
                 let firstLeadDivisionFull = '';
-                let availableDivisions = data.divisions || [];
-
-                if (availableDivisions.length === 0 && data.divisionsHierarchy && data.divisionsHierarchy.length > 0) {
-                    availableDivisions = data.divisionsHierarchy.map((r) => r.itemName || r.DivisionName);
-                    console.log('[QuoteForm] Using all divisionsHierarchy nodes for Lead Job selection:', availableDivisions);
-                }
-
-                const leadJobs = availableDivisions.filter((d) => String(d).trim().startsWith('L'));
-                const leadSortKey = (s) => {
-                    const m = String(s).trim().match(/^L(\d+)/i);
-                    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
-                };
-                const sortedLeadJobs = [...leadJobs].sort((a, b) => leadSortKey(a) - leadSortKey(b));
-                console.log('[QuoteForm] Filtered Lead Jobs (sorted):', sortedLeadJobs);
-
-                const selectedDivisionTrim = String(quoteListDivision || '').trim();
-                const selectedDivisionNorm = selectedDivisionTrim
-                    .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
-                    .trim()
-                    .toLowerCase();
-                const hierarchyRows = Array.isArray(data.divisionsHierarchy) ? data.divisionsHierarchy : [];
-                const byId = new Map();
-                hierarchyRows.forEach((n) => {
-                    const id = n?.id ?? n?.ID ?? n?.ItemID;
-                    if (id != null && id !== '') byId.set(String(id), n);
-                });
-                const extractLeadCodeFromNode = (node) => {
-                    const c = String(node?.leadJobCode || node?.LeadJobCode || '').trim().toUpperCase();
-                    const m1 = c.match(/^(L\d+)/i);
-                    if (m1) return m1[1].toUpperCase();
-                    const nm = String(node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
-                    const m2 = nm.match(/^(L\d+)/i);
-                    return m2 ? m2[1].toUpperCase() : '';
-                };
-                const findRootLeadCode = (startNode) => {
-                    let cur = startNode;
-                    const seen = new Set();
-                    let guard = 0;
-                    while (cur && guard < 80) {
-                        const pid = cur.parentId ?? cur.ParentID;
-                        if (pid == null || pid === '' || pid === 0 || pid === '0') break;
-                        const key = String(pid);
-                        if (seen.has(key)) break;
-                        seen.add(key);
-                        const parent = byId.get(key);
-                        if (!parent) break;
-                        cur = parent;
-                        guard += 1;
-                    }
-                    return extractLeadCodeFromNode(cur) || '';
-                };
-                let leadFromDivision = '';
-                if (selectedDivisionNorm && hierarchyRows.length > 0) {
-                    const hit = hierarchyRows.find((n) => {
-                        const nm = String(n?.itemName || n?.ItemName || n?.DivisionName || '')
-                            .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
-                            .trim()
-                            .toLowerCase();
-                        if (!nm) return false;
-                        if (nm === selectedDivisionNorm) return true;
-                        if (selectedDivisionNorm.length > 2 && (nm.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(nm))) return true;
-                        return false;
-                    });
-                    if (hit) leadFromDivision = findRootLeadCode(hit);
-                }
-
-                if (leadFromDivision) {
-                    data.leadJobPrefix = leadFromDivision;
-                    firstLeadDivisionFull =
-                        sortedLeadJobs.find((d) => String(d).trim().toUpperCase().startsWith(leadFromDivision)) ||
-                        leadFromDivision;
-                    console.log('[QuoteForm] Auto-selecting lead from Division dropdown:', data.leadJobPrefix, selectedDivisionTrim);
-                } else if (sortedLeadJobs.length >= 1) {
-                    firstLeadDivisionFull = String(sortedLeadJobs[0]).trim();
-                    data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
-                    console.log('[QuoteForm] Auto-selecting first Lead Job:', data.leadJobPrefix, firstLeadDivisionFull);
+                if (enquiryOnlyFromList) {
+                    data.leadJobPrefix = '';
+                    quoteRowAutoSelectLeadRef.current = false;
+                    quoteRowDivisionLeadLockRef.current = false;
+                    quoteRowFirstLeadDivisionFullRef.current = '';
+                    console.log('[QuoteForm] List row pick: enquiry only — lead job not auto-selected');
                 } else {
-                    const userDeptL = (quoteListDivision || currentUser?.Department || '').toLowerCase();
-                    const bmsMatch = availableDivisions.find((d) => d.toLowerCase().includes('bms'));
-                    const elecMatch = availableDivisions.find((d) => d.toLowerCase().includes('electrical'));
+                    // STRICT: when Division dropdown is selected, pick the lead branch that contains that division.
+                    console.log('[QuoteForm] Auto-Select Lead Job - divisions:', data.divisions);
+                    console.log('[QuoteForm] Auto-Select Lead Job - divisionsHierarchy:', data.divisionsHierarchy);
 
-                    if (userDeptL.includes('bms') && bmsMatch) {
-                        firstLeadDivisionFull = String(bmsMatch).trim();
+                    let availableDivisions = data.divisions || [];
+
+                    if (availableDivisions.length === 0 && data.divisionsHierarchy && data.divisionsHierarchy.length > 0) {
+                        availableDivisions = data.divisionsHierarchy.map((r) => r.itemName || r.DivisionName);
+                        console.log('[QuoteForm] Using all divisionsHierarchy nodes for Lead Job selection:', availableDivisions);
+                    }
+
+                    const leadJobs = availableDivisions.filter((d) => String(d).trim().startsWith('L'));
+                    const leadSortKey = (s) => {
+                        const m = String(s).trim().match(/^L(\d+)/i);
+                        return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+                    };
+                    const sortedLeadJobs = [...leadJobs].sort((a, b) => leadSortKey(a) - leadSortKey(b));
+                    console.log('[QuoteForm] Filtered Lead Jobs (sorted):', sortedLeadJobs);
+
+                    const selectedDivisionTrim = String(quoteListDivision || '').trim();
+                    const selectedDivisionNorm = selectedDivisionTrim
+                        .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                        .trim()
+                        .toLowerCase();
+                    const hierarchyRows = Array.isArray(data.divisionsHierarchy) ? data.divisionsHierarchy : [];
+                    const byId = new Map();
+                    hierarchyRows.forEach((n) => {
+                        const id = n?.id ?? n?.ID ?? n?.ItemID;
+                        if (id != null && id !== '') byId.set(String(id), n);
+                    });
+                    const extractLeadCodeFromNode = (node) => {
+                        const c = String(node?.leadJobCode || node?.LeadJobCode || '').trim().toUpperCase();
+                        const m1 = c.match(/^(L\d+)/i);
+                        if (m1) return m1[1].toUpperCase();
+                        const nm = String(node?.itemName || node?.ItemName || node?.DivisionName || '').trim();
+                        const m2 = nm.match(/^(L\d+)/i);
+                        return m2 ? m2[1].toUpperCase() : '';
+                    };
+                    const findRootLeadCode = (startNode) => {
+                        let cur = startNode;
+                        const seen = new Set();
+                        let guard = 0;
+                        while (cur && guard < 80) {
+                            const pid = cur.parentId ?? cur.ParentID;
+                            if (pid == null || pid === '' || pid === 0 || pid === '0') break;
+                            const key = String(pid);
+                            if (seen.has(key)) break;
+                            seen.add(key);
+                            const parent = byId.get(key);
+                            if (!parent) break;
+                            cur = parent;
+                            guard += 1;
+                        }
+                        return extractLeadCodeFromNode(cur) || '';
+                    };
+                    let leadFromDivision = '';
+                    if (selectedDivisionNorm && hierarchyRows.length > 0) {
+                        const hit = hierarchyRows.find((n) => {
+                            const nm = String(n?.itemName || n?.ItemName || n?.DivisionName || '')
+                                .replace(/^(L\d+|Sub Job)\s*-\s*/i, '')
+                                .trim()
+                                .toLowerCase();
+                            if (!nm) return false;
+                            if (nm === selectedDivisionNorm) return true;
+                            if (selectedDivisionNorm.length > 2 && (nm.includes(selectedDivisionNorm) || selectedDivisionNorm.includes(nm))) return true;
+                            return false;
+                        });
+                        if (hit) leadFromDivision = findRootLeadCode(hit);
+                    }
+
+                    if (leadFromDivision) {
+                        data.leadJobPrefix = leadFromDivision;
+                        firstLeadDivisionFull =
+                            sortedLeadJobs.find((d) => String(d).trim().toUpperCase().startsWith(leadFromDivision)) ||
+                            leadFromDivision;
+                        console.log('[QuoteForm] Auto-selecting lead from Division dropdown:', data.leadJobPrefix, selectedDivisionTrim);
+                    } else if (sortedLeadJobs.length >= 1) {
+                        firstLeadDivisionFull = String(sortedLeadJobs[0]).trim();
                         data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
-                        console.log('[QuoteForm] Auto-selecting BMS for BMS user:', data.leadJobPrefix);
-                    } else if (userDeptL.includes('electrical') && elecMatch) {
-                        firstLeadDivisionFull = String(elecMatch).trim();
-                        data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
-                        console.log('[QuoteForm] Auto-selecting Electrical for Electrical user:', data.leadJobPrefix);
-                    } else if (availableDivisions.length > 0) {
-                        firstLeadDivisionFull = String(availableDivisions[0]).trim();
-                        data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
-                        console.log('[QuoteForm] Using first available division:', data.leadJobPrefix);
+                        console.log('[QuoteForm] Auto-selecting first Lead Job:', data.leadJobPrefix, firstLeadDivisionFull);
                     } else {
-                        data.leadJobPrefix = '';
-                        console.log('[QuoteForm] No divisions available at all');
+                        const userDeptL = (quoteListDivision || currentUser?.Department || '').toLowerCase();
+                        const bmsMatch = availableDivisions.find((d) => d.toLowerCase().includes('bms'));
+                        const elecMatch = availableDivisions.find((d) => d.toLowerCase().includes('electrical'));
+
+                        if (userDeptL.includes('bms') && bmsMatch) {
+                            firstLeadDivisionFull = String(bmsMatch).trim();
+                            data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                            console.log('[QuoteForm] Auto-selecting BMS for BMS user:', data.leadJobPrefix);
+                        } else if (userDeptL.includes('electrical') && elecMatch) {
+                            firstLeadDivisionFull = String(elecMatch).trim();
+                            data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                            console.log('[QuoteForm] Auto-selecting Electrical for Electrical user:', data.leadJobPrefix);
+                        } else if (availableDivisions.length > 0) {
+                            firstLeadDivisionFull = String(availableDivisions[0]).trim();
+                            data.leadJobPrefix = firstLeadDivisionFull.split('-')[0].trim();
+                            console.log('[QuoteForm] Using first available division:', data.leadJobPrefix);
+                        } else {
+                            data.leadJobPrefix = '';
+                            console.log('[QuoteForm] No divisions available at all');
+                        }
                     }
                 }
 
@@ -10345,12 +10367,16 @@ const QuoteForm = ({ openContext = null }) => {
                     setQuoteEnquiryTypeSelect('');
                 }
 
-                quoteRowFirstLeadDivisionFullRef.current = firstLeadDivisionFull;
-                quoteRowAutoSelectLeadRef.current = Boolean(data.leadJobPrefix);
-                quoteRowDivisionLeadLockRef.current = Boolean(data.leadJobPrefix);
+                if (!enquiryOnlyFromList) {
+                    quoteRowFirstLeadDivisionFullRef.current = firstLeadDivisionFull;
+                    quoteRowAutoSelectLeadRef.current = Boolean(data.leadJobPrefix);
+                    quoteRowDivisionLeadLockRef.current = Boolean(data.leadJobPrefix);
+                }
 
                 const pendingListCustomerHint =
-                    String(enq.ListQuoteDetailToName ?? enq.ListPendingCustomerName ?? '').trim();
+                    enquiryOnlyFromList
+                        ? ''
+                        : String(enq.ListQuoteDetailToName ?? enq.ListPendingCustomerName ?? '').trim();
                 if (pendingListCustomerHint) {
                     const internalNamesNorm = new Set(
                         (data?.divisionsHierarchy || [])
@@ -10430,6 +10456,9 @@ const QuoteForm = ({ openContext = null }) => {
                             setToFax(details.FaxNo || '');
                         }
                     }
+                    quoteRowSyncDropdownCustomerRef.current = false;
+                    quoteRowAwaitingLeadForCustomerRef.current = false;
+                } else if (enquiryOnlyFromList) {
                     quoteRowSyncDropdownCustomerRef.current = false;
                     quoteRowAwaitingLeadForCustomerRef.current = false;
                 } else {
@@ -10531,19 +10560,25 @@ const QuoteForm = ({ openContext = null }) => {
                     }}
                 >
                     {quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-                        ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
+                        ? 'No results for this search. Try different text or quote dates (both required when search text is empty).'
                         : 'No pending updates found. Start by entering an enquiry number above.'}
                 </div>
             );
         }
         const emptyLabel = quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
-            ? 'No results for this search. Try different text or enquiry dates (both required when search text is empty).'
+            ? 'No results for this search. Try different text or quote dates (both required when search text is empty).'
             : 'No pending updates found. Start by entering an enquiry number above.';
         return (
             <DashboardQuoteSummaryTable
                 rows={quoteListDisplayRows}
-                onOpenEnquiry={handleSelectEnquiry}
+                onOpenEnquiry={(enq) => handleSelectEnquiry(enq, { enquiryOnlyFromList: true })}
                 emptyLabel={emptyLabel}
+                defaultSortConfig={
+                    quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH
+                        ? { field: 'LatestQuoteDate', direction: 'desc' }
+                        : null
+                }
+                resetSortOnRowsChange={quoteListCategory === QUOTE_LIST_CATEGORY.SEARCH}
                 onRegisterClearColumnFilters={(fn) => {
                     quoteSummaryClearColFiltersRef.current = fn;
                 }}
@@ -11671,12 +11706,12 @@ const QuoteForm = ({ openContext = null }) => {
 
     /** Browser print window — shared by Print button and Download PDF (IIS production). */
     const openQuotePrintWindow = useCallback(
-        (options = {}) => {
+        async (options = {}) => {
             const { browserSavePdf = false } = options;
             const printRoot = document.getElementById('quote-print-root');
             const printContent = document.getElementById('quote-preview');
             const fragmentHtml = printRoot
-                ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
+                ? await captureQuotePrintRootInnerHtmlForPdfAsync(printRoot)
                 : printContent
                   ? printContent.innerHTML
                   : '';
@@ -11733,8 +11768,8 @@ const QuoteForm = ({ openContext = null }) => {
         [printWithHeader, quoteNumber, quoteId, tableStyles]
     );
 
-    const printQuote = useCallback(() => {
-        openQuotePrintWindow({ browserSavePdf: false });
+    const printQuote = useCallback(async () => {
+        await openQuotePrintWindow({ browserSavePdf: false });
     }, [openQuotePrintWindow]);
 
     /** Browser Ctrl+P prints the whole flex layout (narrow quote column). Route to the same window as the Print button. */
@@ -11745,13 +11780,17 @@ const QuoteForm = ({ openContext = null }) => {
             if (!hasUserPricing) return;
             const printRoot = document.getElementById('quote-print-root');
             const printContent = document.getElementById('quote-preview');
-            const fragmentHtml = (
-                printRoot ? captureQuotePrintRootInnerHtmlForPdf(printRoot) : printContent?.innerHTML || ''
-            ).trim();
-            if (!fragmentHtml) return;
             e.preventDefault();
             e.stopPropagation();
-            printQuote();
+            void (async () => {
+                const fragmentHtml = (
+                    printRoot
+                        ? await captureQuotePrintRootInnerHtmlForPdfAsync(printRoot)
+                        : printContent?.innerHTML || ''
+                ).trim();
+                if (!fragmentHtml) return;
+                await printQuote();
+            })();
         };
         window.addEventListener('keydown', onKeyDown, true);
         return () => window.removeEventListener('keydown', onKeyDown, true);
@@ -11815,7 +11854,7 @@ const QuoteForm = ({ openContext = null }) => {
         const printRoot = document.getElementById('quote-print-root');
         const printContent = document.getElementById('quote-preview');
         const fragmentHtml = printRoot
-            ? captureQuotePrintRootInnerHtmlForPdf(printRoot)
+            ? await captureQuotePrintRootInnerHtmlForPdfAsync(printRoot)
             : printContent
               ? printContent.innerHTML
               : '';
@@ -11881,7 +11920,7 @@ const QuoteForm = ({ openContext = null }) => {
     const downloadPDF = async () => {
         if (!serverPdfEnabled || QUOTE_PDF_BROWSER_DOWNLOAD) {
             syncCoverLetterGapBeforePdfCapture(quoteCoverLetterRef.current);
-            openQuotePrintWindow({ browserSavePdf: true });
+            await openQuotePrintWindow({ browserSavePdf: true });
             return;
         }
         setIsUploading(true);
@@ -12976,9 +13015,10 @@ const QuoteForm = ({ openContext = null }) => {
                 <div style={{ padding: '8px 4px', borderBottom: '1px solid #e2e8f0', position: 'relative', zIndex: 2000 }}>
                     <div style={{ position: 'relative' }} ref={searchRef}>
                         {/* Row 1: Enquiry No. and Lead Job */}
-                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center', marginBottom: '5px' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'flex-end', marginBottom: '5px' }}>
                             {/* 1. Enquiry Input */}
-                            <div style={{ flex: '0 0 50%', position: 'relative' }}>
+                            <div style={{ flex: '0 0 50%', position: 'relative', display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                                <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Enquiry No</span>
                                 <input
                                     type="text"
                                     placeholder="Enq. no / project / customer"
@@ -13028,7 +13068,8 @@ const QuoteForm = ({ openContext = null }) => {
                             </div>
 
                             {/* Lead Job Dropdown + code pill (match Pricing module) */}
-                            <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                                <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Lead Job Name</span>
                                     {(() => {
                                         if (!enquiryData) {
                                             return (
@@ -13276,8 +13317,9 @@ const QuoteForm = ({ openContext = null }) => {
                         </div>
 
                         {/* Row 2: Customer Dropdown and Search Button */}
-                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-                            <div style={{ flex: 1, position: 'relative' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'flex-end' }}>
+                            <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', gap: '1px', minWidth: 0 }}>
+                                <span style={{ fontSize: '10.8px', fontWeight: 600, color: '#374151', lineHeight: 1.15 }}>Customer Name</span>
                                 <CreatableSelect
                                     isDisabled={!enquiryData}
                                     options={quoteCustomerDropdownOptions}

@@ -634,9 +634,19 @@ function maxUpdatedMsInJobForest(nodes) {
  */
 function getLatestIndividualSubjobBasePriceUpdatedMs(enq) {
     const structured = tryParsePricingListDisplay(enq);
-    if (structured?.jobForest?.length) {
-        return maxUpdatedMsInJobForest(structured.jobForest);
+    let max = NaN;
+    if (structured?.customerTotals?.length) {
+        for (const c of structured.customerTotals) {
+            if (!c?.updatedAt) continue;
+            const t = new Date(c.updatedAt).getTime();
+            if (Number.isFinite(t)) max = Number.isFinite(max) ? Math.max(max, t) : t;
+        }
     }
+    if (structured?.jobForest?.length) {
+        const forestMs = maxUpdatedMsInJobForest(structured.jobForest);
+        if (Number.isFinite(forestMs)) max = Number.isFinite(max) ? Math.max(max, forestMs) : forestMs;
+    }
+    if (Number.isFinite(max)) return max;
     const split = splitSubJobPricesForListColumns(enq?.SubJobPrices);
     let max = NaN;
     for (const row of split.individualRows) {
@@ -1072,7 +1082,7 @@ const PricingForm = ({ openContext = null }) => {
     }, [currentUser?.EmailId, currentUser?.email, currentUser?.MailId]);
 
 
-    // Search / list state (aligned with Quote list: category, criteria, enquiry date range)
+    // Search / list state (aligned with Quote list: category, criteria, price-update date range)
     const [pricingListCategory, setPricingListCategory] = useState(PRICING_LIST_CATEGORY.PENDING);
     /** Do not hydrate from localStorage while default category is Pending — stale text looked like an active filter. */
     const [pricingListSearchCriteria, setPricingListSearchCriteria] = useState('');
@@ -1090,6 +1100,10 @@ const PricingForm = ({ openContext = null }) => {
     /** Shown when GET /api/pricing/:id fails (e.g. 500) — replaces broken `setError` reference. */
     const [pricingLoadError, setPricingLoadError] = useState(null);
     const [pendingSortConfig, setPendingSortConfig] = useState({
+        field: 'LatestPriceUpdated',
+        direction: 'desc',
+    });
+    const [searchSortConfig, setSearchSortConfig] = useState({
         field: 'LatestPriceUpdated',
         direction: 'desc',
     });
@@ -1421,6 +1435,7 @@ const PricingForm = ({ openContext = null }) => {
             const res = await fetch(`${API_BASE}/api/pricing/list?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
+                setSearchSortConfig({ field: 'LatestPriceUpdated', direction: 'desc' });
                 setSearchResults(Array.isArray(data) ? data : []);
                 setSuggestions([]);
             } else {
@@ -4115,8 +4130,8 @@ const PricingForm = ({ openContext = null }) => {
             (pricingListCategory === PRICING_LIST_CATEGORY.PENDING && pendingRequests.length > 0));
 
     const pricingListSortedSearch = React.useMemo(
-        () => sortPricingEnquiryListRows(searchResults, pendingSortConfig),
-        [searchResults, pendingSortConfig]
+        () => sortPricingEnquiryListRows(searchResults, searchSortConfig),
+        [searchResults, searchSortConfig]
     );
 
     const pricingListSortedPending = React.useMemo(
@@ -4145,7 +4160,15 @@ const PricingForm = ({ openContext = null }) => {
     const sortedSearchResultsForTable = pricingSearchColFilters.filteredRows;
     const sortedPendingForTable = pricingPendingColFilters.filteredRows;
 
-    const handlePricingListSort = (field, initialDirection = 'asc') => {
+    const handlePricingSearchListSort = (field, initialDirection = 'asc') => {
+        setSearchSortConfig((prev) =>
+            prev.field === field
+                ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                : { field, direction: initialDirection }
+        );
+    };
+
+    const handlePricingPendingListSort = (field, initialDirection = 'asc') => {
         setPendingSortConfig((prev) =>
             prev.field === field
                 ? { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
@@ -4199,7 +4222,7 @@ const PricingForm = ({ openContext = null }) => {
                     ...(listFillsViewport ? { flexShrink: 0 } : {}),
                 }}
             >
-            {/* List filters (same pattern as Quote: category, criteria, enquiry dates, Search / Clear) */}
+            {/* List filters (same pattern as Quote: category, criteria, price-update dates, Search / Clear) */}
             <div
                 style={{
                     background: 'linear-gradient(180deg, #dce5f2 0%, #cfdced 55%, #c2d2e6 100%)',
@@ -4370,7 +4393,7 @@ const PricingForm = ({ openContext = null }) => {
                                 disabled={pricingListCategory !== PRICING_LIST_CATEGORY.SEARCH}
                                 placeholder={
                                     pricingListCategory === PRICING_LIST_CATEGORY.SEARCH
-                                        ? 'Enquiry no., project, customer, client, consultant, updated by… (use From/To for enquiry date)'
+                                        ? 'Enquiry no., project, customer, client, consultant, updated by… (use From/To for latest price update date)'
                                         : 'Select "Search Price" to enable'
                                 }
                                 style={{
@@ -4986,8 +5009,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="requestNo"
                                             label="Enquiry No."
                                             sortField="RequestNo"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={{ ...pricingListThBase, borderTopLeftRadius: '8px' }}
                                         />
@@ -4995,8 +5018,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="projectName"
                                             label="Project Name"
                                             sortField="ProjectName"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={pricingListThBase}
                                         />
@@ -5004,8 +5027,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="customerName"
                                             label="Customer Name & Total Price"
                                             sortField="CustomerName"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={{
                                                 ...pricingListThBase,
@@ -5017,8 +5040,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="latestPriceUpdated"
                                             label="Individual & Subjob Base prices"
                                             sortField="LatestPriceUpdated"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             initialDirection="desc"
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={pricingListThBase}
@@ -5027,8 +5050,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="clientName"
                                             label="Client Name"
                                             sortField="ClientName"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={pricingListThBase}
                                         />
@@ -5036,8 +5059,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="consultantName"
                                             label="Consultant Name"
                                             sortField="ConsultantName"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={pricingListThBase}
                                         />
@@ -5045,8 +5068,8 @@ const PricingForm = ({ openContext = null }) => {
                                             colKey="enquiryDateCol"
                                             label="Enquiry Date"
                                             sortField="EnquiryDate"
-                                            sortConfig={pendingSortConfig}
-                                            onSort={handlePricingListSort}
+                                            sortConfig={searchSortConfig}
+                                            onSort={handlePricingSearchListSort}
                                             filterCtx={pricingSearchColFilters}
                                             thStyle={{ ...pricingListThBase, borderTopRightRadius: '8px' }}
                                         />
@@ -5280,7 +5303,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Enquiry No."
                                                 sortField="RequestNo"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
                                             />
@@ -5289,7 +5312,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Project Name"
                                                 sortField="ProjectName"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
                                             />
@@ -5298,7 +5321,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Customer Name & Total Price"
                                                 sortField="CustomerName"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={{ ...pricingListThBase, minWidth: 'min(560px, 92vw)', width: 'auto' }}
                                             />
@@ -5307,7 +5330,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Individual & Subjob Base prices"
                                                 sortField="LatestPriceUpdated"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 initialDirection="desc"
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
@@ -5317,7 +5340,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Client Name"
                                                 sortField="ClientName"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
                                             />
@@ -5326,7 +5349,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Consultant Name"
                                                 sortField="ConsultantName"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
                                             />
@@ -5335,7 +5358,7 @@ const PricingForm = ({ openContext = null }) => {
                                                 label="Due Date"
                                                 sortField="DueDate"
                                                 sortConfig={pendingSortConfig}
-                                                onSort={handlePricingListSort}
+                                                onSort={handlePricingPendingListSort}
                                                 filterCtx={pricingPendingColFilters}
                                                 thStyle={pricingListThBase}
                                             />
@@ -5473,7 +5496,7 @@ const PricingForm = ({ openContext = null }) => {
                 && !showSuggestions
                 && (
                     <div style={{ background: 'white', padding: '40px', borderRadius: '8px', textAlign: 'center', color: '#64748b' }}>
-                        No results. Enter search text and/or choose From and To enquiry dates, then click Search.
+                        No results. Enter search text and/or choose From and To price update dates, then click Search.
                     </div>
                 )
             }

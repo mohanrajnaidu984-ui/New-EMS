@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
 import ValidationTooltip from '../Common/ValidationTooltip';
 
-const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit }) => {
+const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmit, companyNameReadOnly = false }) => {
     const defaultState = {
         Category: 'Contractor',
         CompanyName: '',
@@ -33,6 +33,7 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
     }, [initialData, show]);
 
     const handleChange = (field, value) => {
+        if (companyNameReadOnly && field === 'CompanyName') return;
         setFormData(prev => ({ ...prev, [field]: value }));
         if (errors[field]) {
             setErrors(prev => ({ ...prev, [field]: null }));
@@ -59,10 +60,11 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                 // Merge OCR fields; keep Company Name when already set (enquiry context).
                 setFormData(prev => {
                     const hadCompany = Boolean(prev.CompanyName && prev.CompanyName.trim());
+                    const keepCompany = companyNameReadOnly || hadCompany;
                     return {
                         ...prev,
                         ContactName: extracted.ContactName || prev.ContactName,
-                        CompanyName: hadCompany ? prev.CompanyName : (extracted.CompanyName || prev.CompanyName),
+                        CompanyName: keepCompany ? prev.CompanyName : (extracted.CompanyName || prev.CompanyName),
                         Mobile1: extracted.Mobile1 || prev.Mobile1,
                         EmailId: extracted.EmailId || prev.EmailId,
                         Designation: extracted.Designation || prev.Designation,
@@ -182,8 +184,19 @@ const ContactModal = ({ show, onClose, mode = 'Add', initialData = null, onSubmi
                     </div>
                     <div className="col-md-6" style={{ position: 'relative' }}>
                         <label className="form-label">Company Name<span className="text-danger">*</span></label>
-                        <input type="text" className="form-control" style={{ fontSize: '13px' }}
-                            value={formData.CompanyName} onChange={(e) => handleChange('CompanyName', e.target.value)} />
+                        <input
+                            type="text"
+                            className="form-control"
+                            style={{
+                                fontSize: '13px',
+                                ...(companyNameReadOnly
+                                    ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' }
+                                    : {}),
+                            }}
+                            value={formData.CompanyName}
+                            readOnly={companyNameReadOnly}
+                            onChange={(e) => handleChange('CompanyName', e.target.value)}
+                        />
                         {errors.CompanyName && <ValidationTooltip message={errors.CompanyName} />}
                     </div>
                 </div>

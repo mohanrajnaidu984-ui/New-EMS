@@ -2,11 +2,13 @@
 
 /**
  * Builds optional SQL fragments for /list/search (applied to EnquiryMaster E).
- * Valid when: non-empty search text, OR both enquiry date bounds are provided.
+ * Valid when: non-empty search text, OR both quote date bounds are provided.
  *
  * Text search (case-insensitive substring) matches any of:
  * quote ref (EnquiryQuotes.QuoteNumber), project name, enquiry no., customer name,
  * client name, consultant name, prepared by (EnquiryQuotes.PreparedBy).
+ *
+ * Date range filters on EnquiryQuotes.QuoteDate (not EnquiryMaster.EnquiryDate).
  */
 function buildQuoteListSearchExtraWhere(qRaw, dateFrom, dateTo) {
     const q = (qRaw || '').trim();
@@ -42,12 +44,15 @@ function buildQuoteListSearchExtraWhere(qRaw, dateFrom, dateTo) {
     }
 
     let dateSql = '';
-    if (d1 && d2) {
-        dateSql = `AND CAST(E.EnquiryDate AS DATE) >= '${lit(d1)}' AND CAST(E.EnquiryDate AS DATE) <= '${lit(d2)}'`;
-    } else if (d1) {
-        dateSql = `AND CAST(E.EnquiryDate AS DATE) >= '${lit(d1)}'`;
-    } else if (d2) {
-        dateSql = `AND CAST(E.EnquiryDate AS DATE) <= '${lit(d2)}'`;
+    if (d1 || d2) {
+        const datePredicates = ['qtDtSrch.QuoteDate IS NOT NULL'];
+        if (d1) datePredicates.push(`CAST(qtDtSrch.QuoteDate AS DATE) >= '${lit(d1)}'`);
+        if (d2) datePredicates.push(`CAST(qtDtSrch.QuoteDate AS DATE) <= '${lit(d2)}'`);
+        dateSql = `AND EXISTS (
+      SELECT 1 FROM EnquiryQuotes qtDtSrch
+      WHERE LTRIM(RTRIM(qtDtSrch.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+        AND ${datePredicates.join('\n        AND ')}
+    )`;
     }
 
     const sql = `${textSql} ${dateSql}`.trim();

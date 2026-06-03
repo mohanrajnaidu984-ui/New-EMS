@@ -170,7 +170,7 @@ const {
     departmentMatchesItemName,
 } = require('../lib/pendingPricingSummarySpec');
 
-/** `yyyy-MM-dd` only — used for EnquiryDate bounds on non-pending list searches */
+/** `yyyy-MM-dd` only — used for latest price-update bounds on non-pending list searches */
 function parsePricingListYmd(s) {
     if (!s || typeof s !== 'string') return null;
     const t = s.trim();
@@ -397,20 +397,44 @@ async function getEnquiryPricingList(userEmail, search = null, pendingOnly = tru
         }
     }
 
-    // Enquiry date range (Search Pricing list only — matches Quote list / EnquiryDate semantics)
+    // Latest price update (MAX EnquiryPricingValues.UpdatedAt per enquiry) — Search Pricing list only
     if (!pendingOnly) {
         const df = parsePricingListYmd((opts && opts.dateFrom) || '');
         const dt = parsePricingListYmd((opts && opts.dateTo) || '');
         if (df && dt) {
             request.input('pricingListDateFrom', sql.Date, df);
             request.input('pricingListDateTo', sql.Date, dt);
-            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) BETWEEN @pricingListDateFrom AND @pricingListDateTo `;
+            baseQuery += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.EnquiryPricingValues vDt
+                    WHERE vDt.RequestNo = E.RequestNo
+                    GROUP BY vDt.RequestNo
+                    HAVING MAX(vDt.UpdatedAt) IS NOT NULL
+                      AND CAST(MAX(vDt.UpdatedAt) AS DATE) BETWEEN @pricingListDateFrom AND @pricingListDateTo
+                ) `;
         } else if (df) {
             request.input('pricingListDateFrom', sql.Date, df);
-            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) >= @pricingListDateFrom `;
+            baseQuery += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.EnquiryPricingValues vDt
+                    WHERE vDt.RequestNo = E.RequestNo
+                    GROUP BY vDt.RequestNo
+                    HAVING MAX(vDt.UpdatedAt) IS NOT NULL
+                      AND CAST(MAX(vDt.UpdatedAt) AS DATE) >= @pricingListDateFrom
+                ) `;
         } else if (dt) {
             request.input('pricingListDateTo', sql.Date, dt);
-            baseQuery += ` AND CAST(E.EnquiryDate AS DATE) <= @pricingListDateTo `;
+            baseQuery += `
+                AND EXISTS (
+                    SELECT 1
+                    FROM dbo.EnquiryPricingValues vDt
+                    WHERE vDt.RequestNo = E.RequestNo
+                    GROUP BY vDt.RequestNo
+                    HAVING MAX(vDt.UpdatedAt) IS NOT NULL
+                      AND CAST(MAX(vDt.UpdatedAt) AS DATE) <= @pricingListDateTo
+                ) `;
         }
     }
 

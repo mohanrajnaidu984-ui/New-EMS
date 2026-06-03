@@ -368,8 +368,135 @@ const hasProbabilityAccess = async (requestNo, userEmail) => {
     return (accessRes.recordset?.length || 0) > 0;
 };
 
+/** At least one saved quote for this enquiry in the selected division (quote number carries division code). */
+function probabilityDivisionQuoteExistsSql() {
+    return `
+        EXISTS (
+            SELECT 1
+            FROM EnquiryQuotes Q
+            JOIN Master_EnquiryFor mefQ
+              ON (
+                UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+                OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
+              )
+            WHERE LTRIM(RTRIM(ISNULL(Q.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
+              AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
+              AND (
+                    CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                    OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+                    OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
+              )
+        )`;
+}
+
+/** Row displays as pending probability update (no terminal status on latest P row). */
+function probabilityPendingLikeStatusSql() {
+    return `(
+        P.ID IS NULL
+        OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) IN ('', 'pending')
+        OR P.Status IN ('Enquiry', 'Priced', 'Estimated', 'Quote', 'Quoted')
+    )`;
+}
+
+/** Pending update rows only when a division quote exists (ALL view + consistent with Pending Update mode). */
+function appendExcludePendingLikeWithoutQuote(query) {
+    query += `
+        AND NOT (
+            ${probabilityPendingLikeStatusSql()}
+            AND NOT ${probabilityDivisionQuoteExistsSql()}
+        ) `;
+    return query;
+}
+
+/** Latest quote date for the enquiry (EnquiryQuotes.QuoteDate). */
+function probabilityLatestQuoteDateSql() {
+    return `(
+        SELECT MAX(qEv.QuoteDate)
+        FROM EnquiryQuotes qEv
+        WHERE LTRIM(RTRIM(qEv.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+          AND qEv.QuoteDate IS NOT NULL
+    )`;
+}
+
+/**
+ * Event date for list date-range filter (latest division-scoped P row), by status — used in ALL mode.
+ */
+function probabilityStatusEventDateSql() {
+    const quoteDt = probabilityLatestQuoteDateSql();
+    return `(
+        CASE
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'won' THEN P.BookedDate
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'lost' THEN P.LostDate
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) IN ('onhold', 'on hold') THEN P.UpdatedDateTime
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'cancelled' THEN P.UpdatedDateTime
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) = 'retendered' THEN P.UpdatedDateTime
+            WHEN LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) IN ('followup', 'follow-up', 'follow up') THEN P.UpdatedDateTime
+            WHEN P.ID IS NULL
+                OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) IN ('', 'pending')
+                OR LOWER(LTRIM(RTRIM(ISNULL(P.Status, '')))) IN ('enquiry', 'priced', 'estimated', 'quote', 'quoted')
+                THEN ${quoteDt}
+            ELSE NULL
+        END
+    )`;
+}
+
+function appendProbabilityQuoteDateFilter(query, fromDate, toDate) {
+    if (!fromDate && !toDate) return query;
+    const preds = ['qPd.QuoteDate IS NOT NULL'];
+    if (fromDate) preds.push('CAST(MAX(qPd.QuoteDate) AS DATE) >= @fromDate');
+    if (toDate) preds.push('CAST(MAX(qPd.QuoteDate) AS DATE) <= @toDate');
+    query += `
+        AND EXISTS (
+            SELECT 1
+            FROM EnquiryQuotes qPd
+            WHERE LTRIM(RTRIM(qPd.RequestNo)) = LTRIM(RTRIM(E.RequestNo))
+            GROUP BY qPd.RequestNo
+            HAVING ${preds.join(' AND ')}
+        ) `;
+    return query;
+}
+
+/** Append From/To filter — column depends on view mode / row status (ALL uses status-aware CASE). */
+function appendProbabilityListDateFilter(query, mode, fromDate, toDate) {
+    const m = String(mode || '').trim();
+    if (!fromDate && !toDate) return query;
+
+    if (m === 'All') {
+        const eventDate = probabilityStatusEventDateSql();
+        if (fromDate) {
+            query += ` AND ${eventDate} IS NOT NULL AND CAST(${eventDate} AS DATE) >= @fromDate `;
+        }
+        if (toDate) {
+            query += ` AND ${eventDate} IS NOT NULL AND CAST(${eventDate} AS DATE) <= @toDate `;
+        }
+        return query;
+    }
+
+    if (m === 'Pending') {
+        return appendProbabilityQuoteDateFilter(query, fromDate, toDate);
+    }
+
+    let dateCol = null;
+    if (m === 'Won') dateCol = 'P.BookedDate';
+    else if (m === 'Lost') dateCol = 'P.LostDate';
+    else if (m === 'OnHold') dateCol = 'P.UpdatedDateTime';
+    else if (m === 'Cancelled') dateCol = 'P.UpdatedDateTime';
+    else if (m === 'Retendered') dateCol = 'P.UpdatedDateTime';
+    else if (m === 'FollowUp') dateCol = 'P.UpdatedDateTime';
+
+    if (!dateCol) return query;
+
+    if (fromDate) {
+        query += ` AND ${dateCol} IS NOT NULL AND CAST(${dateCol} AS DATE) >= @fromDate `;
+    }
+    if (toDate) {
+        query += ` AND ${dateCol} IS NOT NULL AND CAST(${dateCol} AS DATE) <= @toDate `;
+    }
+    return query;
+}
+
 // GET /api/probability/list
-// Supports ?mode=[Pending|Won|Lost|OnHold|Cancelled|FollowUp|Retendered]
+// Supports ?mode=[Pending|Won|Lost|OnHold|Cancelled|FollowUp|Retendered|All]
 // &fromDate=... &toDate=... &probability=...
 router.get('/list', async (req, res) => {
     try {
@@ -417,6 +544,7 @@ router.get('/list', async (req, res) => {
                 NULLIF(LTRIM(RTRIM(ISNULL(P.ReasonForLoosing, ''))), '') as LostReason,
                 NULLIF(LTRIM(RTRIM(ISNULL(P.CompetitorPrice, ''))), '') as LostCompetitorPrice,
                 P.LostDate as LostDate,
+                P.UpdatedDateTime as UpdatedDateTime,
                 (SELECT TOP 1 QuoteDate FROM EnquiryQuotes Q WHERE LTRIM(RTRIM(Q.RequestNo)) = LTRIM(RTRIM(E.RequestNo)) ORDER BY QuoteDate DESC) as LastQuoteDate,
                 (
                     SELECT 
@@ -704,22 +832,7 @@ router.get('/list', async (req, res) => {
                     OR (P.Status IN('FollowUp', 'Follow-up') AND (P.ProbabilityChance IS NULL OR LTRIM(RTRIM(P.ProbabilityChance)) = ''))
                 )
                 AND (P.Status NOT IN('Won', 'Lost', 'Cancelled', 'OnHold', 'On Hold', 'Retendered') OR P.Status IS NULL OR LTRIM(RTRIM(P.Status)) = '')
-                AND EXISTS(
-                    SELECT 1
-                    FROM EnquiryQuotes Q
-                    JOIN Master_EnquiryFor mefQ
-                      ON (
-                        UPPER(LTRIM(RTRIM(ISNULL(mefQ.DepartmentName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                        OR UPPER(LTRIM(RTRIM(ISNULL(mefQ.ItemName, '')))) = UPPER(LTRIM(RTRIM(ISNULL(@division, ''))))
-                      )
-                    WHERE LTRIM(RTRIM(ISNULL(Q.RequestNo, ''))) = LTRIM(RTRIM(ISNULL(E.RequestNo, '')))
-                      AND LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, ''))) <> ''
-                      AND (
-                            CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
-                            OR CHARINDEX('-' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '/', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
-                            OR CHARINDEX('/' + UPPER(LTRIM(RTRIM(ISNULL(mefQ.DivisionCode, '')))) + '-', UPPER(ISNULL(Q.QuoteNumber, ''))) > 0
-                      )
-                )
+                AND ${probabilityDivisionQuoteExistsSql()}
             `;
         } else if (mode === 'Won') {
             query += ` AND P.Status = 'Won'`;
@@ -739,39 +852,14 @@ router.get('/list', async (req, res) => {
             query += ` AND(P.Status = 'Retendered' OR E.RetenderDate IS NOT NULL)`;
         }
 
-        // Date Range Filters (Applies to all except maybe Pending if strict)
-        if (fromDate) {
-            // Field to filter depends on mode. 
-            // Won -> WonDate (we don't have explicit WonDate, maybe use UpdatedAt or specific date column if exists? 
-            // We added RetenderDate, OnHoldDate, CancelDate. 
-            // For Won/Lost, normally we check CreatedAt or a StatusChanged Date. 
-            // The schema update added ExpectedOrderDate, but for "Won details from date", usually means WHEN it was won.
-            // Let's use EnquiryDate as fallback or the specific date fields we added if they align.
-            // Actually, for "Won", usually report based on 'ExpectedOrderDate' (Order Date) or simply when it was marked won.
-            // Let's assume generic date filter applies to EnquiryDate OR the specific event date if obvious.
-
-            // REFINEMENT based on User Request "Won details with from date... Lost details from date..."
-            // Let's filter on the relevant date column for the mode.
-
-            let dateCol = 'E.EnquiryDate';
-            if (mode === 'Won') dateCol = 'P.ExpectedDate'; // division-scoped probability row date
-            if (mode === 'Retendered') dateCol = 'E.RetenderDate';
-            if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
-            if (mode === 'Cancelled') dateCol = 'E.CancelDate';
-            if (mode === 'Lost') dateCol = 'P.LostDate';
-
-            query += ` AND ${dateCol} >= @fromDate`;
+        // Pending / default status only when at least one division quote exists (ALL and other non-Pending modes)
+        const m = String(mode || '').trim();
+        if (m !== 'Pending') {
+            query = appendExcludePendingLikeWithoutQuote(query);
         }
-        if (toDate) {
-            let dateCol = 'E.EnquiryDate';
-            if (mode === 'Won') dateCol = 'P.ExpectedDate';
-            if (mode === 'Retendered') dateCol = 'E.RetenderDate';
-            if (mode === 'OnHold') dateCol = 'E.OnHoldDate';
-            if (mode === 'Cancelled') dateCol = 'E.CancelDate';
-            if (mode === 'Lost') dateCol = 'P.LostDate';
 
-            query += ` AND ${dateCol} <= @toDate`;
-        }
+        // Date range: latest P row per status — BookedDate (Won), LostDate, UpdatedDateTime (On Hold / Cancelled / Retendered)
+        query = appendProbabilityListDateFilter(query, mode, fromDate, toDate);
 
         // Probability Filter (for FollowUp mainly)
         if (probability && mode === 'FollowUp') {

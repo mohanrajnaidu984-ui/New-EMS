@@ -16,6 +16,6 @@ export function isQuotePdfBrowserDownload() {
     const serverDl = String(import.meta.env?.VITE_QUOTE_PDF_SERVER_DOWNLOAD ?? '').trim().toLowerCase();
     if (serverDl === '1' || serverDl === 'true' || serverDl === 'yes') return false;
 
-    /** Production IIS builds: browser Save as PDF; dev keeps server download unless overridden. */
-    return import.meta.env?.PROD === true;
+    /** Default to server-side PDF download (since Puppeteer is hardened and fully active). */
+    return false;
 }
